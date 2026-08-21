@@ -2,14 +2,14 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import type {
   ApiClient,
-  CodeExecutionConfigInfo,
-  CodeExecutionCredentialReadiness,
-  CodeExecutionProviderKind,
+  ExecConfigInfo,
+  ExecCredentialReadiness,
+  ExecProviderKind,
 } from "../api";
 import {
   MANAGED_EXECUTION_DISCLOSURE,
   requiresManagedExecutionDisclosure,
-} from "../CodeExecutionDisclosure";
+} from "../ExecDisclosure";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,23 +29,23 @@ const MIN_CODE_EXECUTION_TIMEOUT_SECONDS = 1;
 const MAX_CODE_EXECUTION_TIMEOUT_SECONDS = 120;
 
 /** The local sandbox needs no credential, so it never appears in the key list. */
-const LOCAL_PROVIDER: CodeExecutionProviderKind = "local";
+const LOCAL_PROVIDER: ExecProviderKind = "local";
 
-export function CodeExecutionPanel({ client }: { client: ApiClient }) {
-  const [config, setConfig] = useState<CodeExecutionConfigInfo | null>(null);
+export function ExecPanel({ client }: { client: ApiClient }) {
+  const [config, setConfig] = useState<ExecConfigInfo | null>(null);
   const [credentials, setCredentials] = useState<
-    CodeExecutionCredentialReadiness[]
+    ExecCredentialReadiness[]
   >([]);
-  const [provider, setProvider] = useState<CodeExecutionProviderKind | "">("");
+  const [provider, setProvider] = useState<ExecProviderKind | "">("");
   const [timeoutSeconds, setTimeoutSeconds] = useState("");
   // One draft key per managed provider, so E2B and Daytona can be configured
   // together and switching the active provider discards neither.
   const [apiKeys, setApiKeys] = useState<
-    Partial<Record<CodeExecutionProviderKind, string>>
+    Partial<Record<ExecProviderKind, string>>
   >({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [removing, setRemoving] = useState<CodeExecutionProviderKind | null>(
+  const [removing, setRemoving] = useState<ExecProviderKind | null>(
     null,
   );
   const [error, setError] = useState<string | null>(null);
@@ -57,8 +57,8 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
     void (async () => {
       try {
         const [nextConfig, nextCredentials] = await Promise.all([
-          client.getCodeExecutionConfig(),
-          client.listCodeExecutionCredentials(),
+          client.getExecConfig(),
+          client.listExecCredentials(),
         ]);
         if (cancelled) return;
         setConfig(nextConfig);
@@ -98,14 +98,14 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
       for (const credential of credentials) {
         const key = apiKeys[credential.provider]?.trim();
         if (!key) continue;
-        await client.putCodeExecutionCredential(credential.provider, key);
+        await client.putExecCredential(credential.provider, key);
         setApiKeys((current) => ({ ...current, [credential.provider]: "" }));
       }
-      const nextConfig = await client.putCodeExecutionConfig({
+      const nextConfig = await client.putExecConfig({
         provider: provider || null,
         timeout_ms: timeout.timeoutMs,
       });
-      const nextCredentials = await client.listCodeExecutionCredentials();
+      const nextCredentials = await client.listExecCredentials();
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
       setProvider(nextConfig.provider ?? "");
@@ -118,14 +118,14 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
     }
   }
 
-  async function removeCredential(target: CodeExecutionProviderKind) {
+  async function removeCredential(target: ExecProviderKind) {
     setRemoving(target);
     setError(null);
     try {
-      await client.deleteCodeExecutionCredential(target);
+      await client.deleteExecCredential(target);
       const [nextConfig, nextCredentials] = await Promise.all([
-        client.getCodeExecutionConfig(),
-        client.listCodeExecutionCredentials(),
+        client.getExecConfig(),
+        client.listExecCredentials(),
       ]);
       setConfig(nextConfig);
       setCredentials(nextCredentials.credentials);
@@ -257,10 +257,10 @@ export function CodeExecutionPanel({ client }: { client: ApiClient }) {
 }
 
 type EgressEnforcementRow =
-  CodeExecutionConfigInfo["egress"]["enforcement"][number];
+  ExecConfigInfo["egress"]["enforcement"][number];
 
 type DetachedAdmissionRow =
-  CodeExecutionConfigInfo["detached_admission"][number];
+  ExecConfigInfo["detached_admission"][number];
 
 const PROVIDER_SANDBOX_LABEL: Record<
   DetachedAdmissionRow["provider"],
@@ -272,7 +272,7 @@ const PROVIDER_SANDBOX_LABEL: Record<
   docker: "Docker container",
 };
 
-type ProviderAvailabilityRow = CodeExecutionConfigInfo["providers"][number];
+type ProviderAvailabilityRow = ExecConfigInfo["providers"][number];
 type ProviderUnavailableReason = NonNullable<
   ProviderAvailabilityRow["unavailable_reason"]
 >;
@@ -304,7 +304,7 @@ const PROVIDER_UNAVAILABLE_SENTENCES: Record<ProviderUnavailableReason, string> 
 function ProviderAvailabilityDisclosure({
   rows,
 }: {
-  rows: CodeExecutionConfigInfo["providers"];
+  rows: ExecConfigInfo["providers"];
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -378,7 +378,7 @@ const EGRESS_STATUS_PRESENTATION: Record<
 function EgressEnforcementDisclosure({
   enforcement,
 }: {
-  enforcement: CodeExecutionConfigInfo["egress"]["enforcement"];
+  enforcement: ExecConfigInfo["egress"]["enforcement"];
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -410,7 +410,7 @@ function EgressEnforcementDisclosure({
   );
 }
 
-function codeExecutionState(config: CodeExecutionConfigInfo | null): {
+function codeExecutionState(config: ExecConfigInfo | null): {
   kind: "disabled" | "ready" | "not-configured";
   label: string;
   description: string;
@@ -450,7 +450,7 @@ function codeExecutionState(config: CodeExecutionConfigInfo | null): {
 }
 
 function codeExecutionProviderLabel(
-  provider: CodeExecutionProviderKind,
+  provider: ExecProviderKind,
 ): string {
   switch (provider) {
     case "local":

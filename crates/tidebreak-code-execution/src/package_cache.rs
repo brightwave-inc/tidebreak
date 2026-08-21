@@ -39,7 +39,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::CodeExecutionError;
+use crate::ExecError;
 
 /// Dotted sibling of the per-chat workspaces at the scratch root, like the
 /// receipt and env-home directories: file tools and provider sync never see it.
@@ -93,8 +93,8 @@ struct ManifestEntry {
     promoted_at: u64,
 }
 
-fn cache_error(message: impl Into<String>) -> CodeExecutionError {
-    CodeExecutionError::Sandbox(message.into())
+fn cache_error(message: impl Into<String>) -> ExecError {
+    ExecError::Sandbox(message.into())
 }
 
 /// Whether `key` is a well-formed runtime key: bounded, lowercase
@@ -127,7 +127,7 @@ fn is_valid_artifact_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
 }
 
-fn secure_dir(path: &Path) -> Result<(), CodeExecutionError> {
+fn secure_dir(path: &Path) -> Result<(), ExecError> {
     fs::create_dir_all(path)
         .map_err(|_| cache_error("could not create the shared package cache"))?;
     let metadata = fs::symlink_metadata(path)
@@ -174,7 +174,7 @@ fn unix_now() -> u64 {
 impl SharedPackageCache {
     /// Open (creating if needed) the cache keyspace for one runtime key under
     /// `cache_root`. The root and keyspace are host-owned `0o700` directories.
-    pub fn open(cache_root: &Path, runtime_key: &str) -> Result<Self, CodeExecutionError> {
+    pub fn open(cache_root: &Path, runtime_key: &str) -> Result<Self, ExecError> {
         if !is_valid_runtime_key(runtime_key) {
             return Err(cache_error("shared package cache runtime key is invalid"));
         }
@@ -274,7 +274,7 @@ impl SharedPackageCache {
             .collect()
     }
 
-    fn store_populated_pins(&self, sets: &[Vec<String>]) -> Result<(), CodeExecutionError> {
+    fn store_populated_pins(&self, sets: &[Vec<String>]) -> Result<(), ExecError> {
         let bytes = serde_json::to_vec_pretty(sets)
             .map_err(|_| cache_error("could not encode populated package cache pins"))?;
         let temporary = self.runtime_dir.join(format!(".{POPULATED_PINS_FILE}.tmp"));
@@ -283,7 +283,7 @@ impl SharedPackageCache {
             .map_err(|_| cache_error("could not persist populated package cache pins"))
     }
 
-    fn store_manifest(&self, manifest: &Manifest) -> Result<(), CodeExecutionError> {
+    fn store_manifest(&self, manifest: &Manifest) -> Result<(), ExecError> {
         let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|_| cache_error("could not encode the package cache manifest"))?;
         let temporary = self.runtime_dir.join(format!(".{MANIFEST_FILE}.tmp"));
@@ -294,15 +294,12 @@ impl SharedPackageCache {
 
     /// Verify the cached artifacts against the manifest and promote staged
     /// ones, then evict down to the size bound. See [`promote_with_limits`].
-    pub fn verify_and_promote(
-        &self,
-        staging: &Path,
-    ) -> Result<PromotionReport, CodeExecutionError> {
+    pub fn verify_and_promote(&self, staging: &Path) -> Result<PromotionReport, ExecError> {
         self.promote_with_limits(Some(staging), MAX_ARTIFACT_BYTES, MAX_TOTAL_BYTES)
     }
 
     /// Re-verify every cached artifact without promoting anything.
-    pub fn verify(&self) -> Result<PromotionReport, CodeExecutionError> {
+    pub fn verify(&self) -> Result<PromotionReport, ExecError> {
         self.promote_with_limits(None, MAX_ARTIFACT_BYTES, MAX_TOTAL_BYTES)
     }
 
@@ -311,7 +308,7 @@ impl SharedPackageCache {
         staging: Option<&Path>,
         max_artifact_bytes: u64,
         max_total_bytes: u64,
-    ) -> Result<PromotionReport, CodeExecutionError> {
+    ) -> Result<PromotionReport, ExecError> {
         let wheels = self.wheels_dir();
         let mut report = PromotionReport::default();
         // Integrity-unknown manifests rebuild from empty: every unrecorded
@@ -473,7 +470,7 @@ impl SharedPackageCache {
         &self,
         python: &Path,
         pins: &[String],
-    ) -> Result<PromotionReport, CodeExecutionError> {
+    ) -> Result<PromotionReport, ExecError> {
         if pins.is_empty() || self.has_populated_pins(pins) {
             return Ok(PromotionReport::default());
         }
@@ -510,7 +507,7 @@ impl SharedPackageCache {
         pins: &[String],
         staging: &Path,
         offline: bool,
-    ) -> Result<(), CodeExecutionError> {
+    ) -> Result<(), ExecError> {
         let mut download = tokio::process::Command::new(python);
         download.args([
             "-m",

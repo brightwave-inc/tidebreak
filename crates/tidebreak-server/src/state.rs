@@ -241,7 +241,7 @@ pub struct AppState {
     /// management routes read it — they list what is installed, which is the
     /// provider's own load — so an embedding without one (tests, headless)
     /// simply has nothing to manage.
-    pub(crate) code_execution: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
+    pub(crate) code_execution: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     /// The host-folder surface for local-app folder bindings, when this
     /// embedding has one (docs/folder-bindings.md).
     ///

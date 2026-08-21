@@ -8,13 +8,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use tidebreak_code_execution::{
-    sync, CodeExecutionError, CodeExecutionProvider, CodeExecutionProviderKind,
-    CodeExecutionRequest, CodeExecutionResponse, DaytonaCredential, E2BCredential,
-    ExecFolderAccess, ExecFolderGrant, ExecutionId, ExecutionWorkspaceId, LocalExecutionProvider,
-    MaterializationPrecondition, MaterializedChangeKind, OutputArtifactEntry, OutputArtifactScan,
-    OutputArtifactStatus, PreviewScan, RejectedChangeReason, RemoteSessionPool, SharedPackageCache,
-    StagedUpload, WorkspaceFilePath, WorkspaceLifecycle, WorkspaceListing, WriteOverlay,
-    WriteSnapshotSink, PACKAGE_CACHE_DIR,
+    sync, DaytonaCredential, E2BCredential, ExecError, ExecFolderAccess, ExecFolderGrant,
+    ExecProvider, ExecProviderKind, ExecRequest, ExecResponse, ExecutionId, ExecutionWorkspaceId,
+    LocalExecutionProvider, MaterializationPrecondition, MaterializedChangeKind,
+    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan,
+    RejectedChangeReason, RemoteSessionPool, SharedPackageCache, StagedUpload, WorkspaceFilePath,
+    WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink, PACKAGE_CACHE_DIR,
 };
 use tidebreak_core::{
     BlobStore, CallId, Chat, ChatId, ExecFileRejectionReason, ExecFileRejectionRecord, HostRootId,
@@ -30,7 +29,7 @@ use super::staging::{
     required_host_deps, staged_set_note, StagedFolders, StagedTurn,
 };
 
-pub struct ConfiguredCodeExecutionProvider {
+pub struct ConfiguredExecProvider {
     pub(super) store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     blobs: Option<Arc<dyn BlobStore>>,
@@ -136,7 +135,7 @@ impl tidebreak_code_execution::SandboxPreparationSink for SandboxPreparationNoti
 }
 
 #[async_trait]
-impl StagedFolders for ConfiguredCodeExecutionProvider {
+impl StagedFolders for ConfiguredExecProvider {
     fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf> {
         self.write_overlays
             .lock()
@@ -205,7 +204,7 @@ impl StagedFolders for ConfiguredCodeExecutionProvider {
     }
 }
 
-impl ConfiguredCodeExecutionProvider {
+impl ConfiguredExecProvider {
     #[must_use]
     pub fn new(
         store: Arc<dyn Store>,
@@ -728,7 +727,7 @@ impl ConfiguredCodeExecutionProvider {
             .await
             .ok()
             .and_then(|c| c.provider);
-        if !matches!(provider, None | Some(CodeExecutionProviderKind::Local)) {
+        if !matches!(provider, None | Some(ExecProviderKind::Local)) {
             return Some(tidebreak_code_execution::HostToolStatus::Available);
         }
         let Some(broker) = self.host_tool_broker.as_deref() else {
@@ -775,7 +774,7 @@ impl ConfiguredCodeExecutionProvider {
         let Ok(config) = read_config(&*self.store).await else {
             return false;
         };
-        if config.provider != Some(CodeExecutionProviderKind::Local) {
+        if config.provider != Some(ExecProviderKind::Local) {
             return false;
         }
         match self.shared_package_cache().await {
@@ -853,7 +852,7 @@ impl ConfiguredCodeExecutionProvider {
         let Ok(config) = read_config(&*self.store).await else {
             return;
         };
-        if config.provider != Some(CodeExecutionProviderKind::Local) {
+        if config.provider != Some(ExecProviderKind::Local) {
             return;
         }
         let Some(cache) = self.shared_package_cache().await else {
@@ -946,11 +945,11 @@ impl ConfiguredCodeExecutionProvider {
         &self,
         chat: &Chat,
         turn: TurnId,
-    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, CodeExecutionError> {
-        let config = read_config(&*self.store).await.map_err(|_| {
-            CodeExecutionError::Unavailable("configuration storage is unavailable".into())
-        })?;
-        if config.provider != Some(CodeExecutionProviderKind::Local) || !cfg!(target_os = "macos") {
+    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, ExecError> {
+        let config = read_config(&*self.store)
+            .await
+            .map_err(|_| ExecError::Unavailable("configuration storage is unavailable".into()))?;
+        if config.provider != Some(ExecProviderKind::Local) || !cfg!(target_os = "macos") {
             return Ok(Vec::new());
         }
         let mut grants = self.resolve_chat_folder_grants(chat).await?;
@@ -1147,7 +1146,7 @@ impl ConfiguredCodeExecutionProvider {
     pub(super) async fn resolve_chat_folder_grants(
         &self,
         chat: &Chat,
-    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, CodeExecutionError> {
+    ) -> std::result::Result<Vec<ResolvedExecFolderGrant>, ExecError> {
         let Some(resolver) = self.folder_grant_resolver.as_ref() else {
             return Ok(Vec::new());
         };
@@ -1167,16 +1166,16 @@ impl ConfiguredCodeExecutionProvider {
                 root_ids: root_ids.clone(),
             })
             .await
-            .map_err(CodeExecutionError::Sandbox)?;
+            .map_err(ExecError::Sandbox)?;
         if resolved.len() > root_ids.len() {
-            return Err(CodeExecutionError::Sandbox(
+            return Err(ExecError::Sandbox(
                 "host returned too many execution folder grants".into(),
             ));
         }
         let mut by_id = HashMap::new();
         for grant in resolved {
             if !allowed.contains(&grant.root_id) || by_id.insert(grant.root_id, grant).is_some() {
-                return Err(CodeExecutionError::Sandbox(
+                return Err(ExecError::Sandbox(
                     "host returned an invalid execution folder grant".into(),
                 ));
             }
@@ -1222,18 +1221,15 @@ impl ConfiguredCodeExecutionProvider {
     async fn resolve(
         &self,
         network_policy: Option<&NetworkPolicy>,
-    ) -> std::result::Result<
-        (CodeExecutionProviderKind, Box<dyn CodeExecutionProvider>),
-        CodeExecutionError,
-    > {
-        let config = read_config(&*self.store).await.map_err(|_| {
-            CodeExecutionError::Unavailable("configuration storage is unavailable".into())
-        })?;
+    ) -> std::result::Result<(ExecProviderKind, Box<dyn ExecProvider>), ExecError> {
+        let config = read_config(&*self.store)
+            .await
+            .map_err(|_| ExecError::Unavailable("configuration storage is unavailable".into()))?;
         let Some(provider) = config.provider else {
-            return Err(CodeExecutionError::NotConfigured);
+            return Err(ExecError::NotConfigured);
         };
-        let resolved: Box<dyn CodeExecutionProvider> = match provider {
-            CodeExecutionProviderKind::Local => {
+        let resolved: Box<dyn ExecProvider> = match provider {
+            ExecProviderKind::Local => {
                 // Mounted only once verified artifacts exist; an empty or
                 // unusable cache leaves execution exactly as it was.
                 let package_cache = match self.shared_package_cache().await {
@@ -1251,10 +1247,10 @@ impl ConfiguredCodeExecutionProvider {
                     .with_managed_node(self.managed_node_dir().await),
                 )
             }
-            CodeExecutionProviderKind::E2b => {
+            ExecProviderKind::E2b => {
                 let credential = E2BCredential::load(&*self.secrets)
                     .await?
-                    .ok_or(CodeExecutionError::NotConfigured)?;
+                    .ok_or(ExecError::NotConfigured)?;
                 let egress = network_policy
                     .map(network_egress_config)
                     .unwrap_or_else(|| config.egress.clone());
@@ -1266,10 +1262,10 @@ impl ConfiguredCodeExecutionProvider {
                     config.e2b_template.as_deref(),
                 )?)
             }
-            CodeExecutionProviderKind::Daytona => {
+            ExecProviderKind::Daytona => {
                 let credential = DaytonaCredential::load(&*self.secrets)
                     .await?
-                    .ok_or(CodeExecutionError::NotConfigured)?;
+                    .ok_or(ExecError::NotConfigured)?;
                 let egress = network_policy
                     .map(network_egress_config)
                     .unwrap_or_else(|| config.egress.clone());
@@ -1282,7 +1278,7 @@ impl ConfiguredCodeExecutionProvider {
                     self.preparation_sink(),
                 )?)
             }
-            CodeExecutionProviderKind::Docker => {
+            ExecProviderKind::Docker => {
                 // The chat's policy reaches container creation, but only its
                 // strictest class is enforced there: "no network" creates the
                 // container with no network at all, and an allowlist runs on
@@ -1298,7 +1294,7 @@ impl ConfiguredCodeExecutionProvider {
                 )?)
             }
             _ => {
-                return Err(CodeExecutionError::Unavailable(
+                return Err(ExecError::Unavailable(
                     "selected provider is not supported by this build".into(),
                 ))
             }
@@ -1312,12 +1308,10 @@ impl ConfiguredCodeExecutionProvider {
     /// configured, or the selected backend has no workspace lifecycle, so host
     /// callers degrade instead of failing. This is a host-internal API; no
     /// model-facing tool is registered over it.
-    pub async fn workspace(
-        &self,
-    ) -> std::result::Result<Option<ConfiguredWorkspace>, CodeExecutionError> {
+    pub async fn workspace(&self) -> std::result::Result<Option<ConfiguredWorkspace>, ExecError> {
         let provider = match self.resolve(None).await {
             Ok((_, provider)) => provider,
-            Err(CodeExecutionError::NotConfigured) => return Ok(None),
+            Err(ExecError::NotConfigured) => return Ok(None),
             Err(error) => return Err(error),
         };
         if provider.workspace_lifecycle().is_none() {
@@ -1338,10 +1332,10 @@ impl ConfiguredCodeExecutionProvider {
     pub async fn execute_for_agent_run(
         &self,
         chat_id: ChatId,
-        request: CodeExecutionRequest,
-    ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+        request: ExecRequest,
+    ) -> std::result::Result<ExecResponse, ExecError> {
         if !request.folder_grants.is_empty() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "a background run's execution carries no folder authority".into(),
             ));
         }
@@ -1349,11 +1343,9 @@ impl ConfiguredCodeExecutionProvider {
             .store
             .get_chat(chat_id)
             .await
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("conversation storage is unavailable".into())
-            })?
+            .map_err(|_| ExecError::Unavailable("conversation storage is unavailable".into()))?
             .ok_or_else(|| {
-                CodeExecutionError::InvalidRequest("execution conversation does not exist".into())
+                ExecError::InvalidRequest("execution conversation does not exist".into())
             })?;
         let (kind, provider) = self.resolve(Some(&chat.network_policy)).await?;
         self.execute_prepared(kind, provider, request, None, chat_id)
@@ -1372,17 +1364,17 @@ impl ConfiguredCodeExecutionProvider {
     /// against.
     async fn execute_prepared(
         &self,
-        kind: CodeExecutionProviderKind,
-        provider: Box<dyn CodeExecutionProvider>,
-        request: CodeExecutionRequest,
+        kind: ExecProviderKind,
+        provider: Box<dyn ExecProvider>,
+        request: ExecRequest,
         chat: Option<ChatId>,
         degradation_chat: ChatId,
-    ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+    ) -> std::result::Result<ExecResponse, ExecError> {
         let host_dir = self.scratch_root.join(request.workspace_id.as_str());
         let skills = self.current_skills().await;
         prepare_execution_directories(
             &host_dir,
-            kind != CodeExecutionProviderKind::Local,
+            kind != ExecProviderKind::Local,
             self.document_scripts_source.as_deref(),
             &skills,
         )
@@ -1399,7 +1391,7 @@ impl ConfiguredCodeExecutionProvider {
         // there, but the listed paths are validated identically so a bad path
         // fails the same way on every provider.
         let lifecycle = match kind {
-            CodeExecutionProviderKind::Local => None,
+            ExecProviderKind::Local => None,
             _ => provider.workspace_lifecycle(),
         };
         let Some(lifecycle) = lifecycle else {
@@ -1490,7 +1482,7 @@ impl ConfiguredCodeExecutionProvider {
         chat_id: ChatId,
         call_id: CallId,
         run_id: tidebreak_core::AgentRunId,
-    ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
+    ) -> std::result::Result<OutputArtifactScan, ExecError> {
         self.publish_output_directory(workspace, chat_id, call_id, RevisionProducer::Run(run_id))
             .await
     }
@@ -1501,15 +1493,15 @@ impl ConfiguredCodeExecutionProvider {
     async fn open_scratch_directory(
         &self,
         name: &str,
-    ) -> std::result::Result<cap_std::fs::Dir, CodeExecutionError> {
+    ) -> std::result::Result<cap_std::fs::Dir, ExecError> {
         let path = self.scratch_root.join(name);
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&path)?;
             cap_std::fs::Dir::open_ambient_dir(&path, cap_std::ambient_authority())
         })
         .await
-        .map_err(|_| CodeExecutionError::Sandbox("output scan task failed".into()))?
-        .map_err(|_| CodeExecutionError::Sandbox("the private workspace is unavailable".into()))
+        .map_err(|_| ExecError::Sandbox("output scan task failed".into()))?
+        .map_err(|_| ExecError::Sandbox("the private workspace is unavailable".into()))
     }
 
     /// Scan one workspace's `output/` and record what changed as revisions.
@@ -1525,12 +1517,12 @@ impl ConfiguredCodeExecutionProvider {
         chat_id: ChatId,
         call_id: CallId,
         producer: RevisionProducer,
-    ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
+    ) -> std::result::Result<OutputArtifactScan, ExecError> {
         let workspace_dir = self.open_scratch_directory(workspace.as_str()).await?;
         let publication_dir = if workspace.as_str() == chat_id.to_string() {
-            workspace_dir.try_clone().map_err(|_| {
-                CodeExecutionError::Sandbox("the private workspace is unavailable".into())
-            })?
+            workspace_dir
+                .try_clone()
+                .map_err(|_| ExecError::Sandbox("the private workspace is unavailable".into()))?
         } else {
             self.open_scratch_directory(&chat_id.to_string()).await?
         };
@@ -1546,7 +1538,7 @@ impl ConfiguredCodeExecutionProvider {
         )
         .await
         .map_err(|error| {
-            CodeExecutionError::Unavailable(format!("outputs could not be recorded: {error}"))
+            ExecError::Unavailable(format!("outputs could not be recorded: {error}"))
         })?;
         Ok(OutputArtifactScan {
             entries: sync
@@ -1672,7 +1664,7 @@ pub(super) fn finish_package_cache_population(
     }
 }
 
-pub(super) fn deterministic_package_cache_failure(error: &CodeExecutionError) -> bool {
+pub(super) fn deterministic_package_cache_failure(error: &ExecError) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("could not find a version that satisfies the requirement")
         || message.contains("no matching distribution found")
@@ -1780,7 +1772,7 @@ async fn populate_one_pin_set(
 pub(super) fn exec_folder_grant_for_turn(
     grant: ResolvedExecFolderGrant,
     staged: &HashMap<PathBuf, PathBuf>,
-) -> std::result::Result<ExecFolderGrant, CodeExecutionError> {
+) -> std::result::Result<ExecFolderGrant, ExecError> {
     let overlay = grant
         .writable
         .then(|| staged.get(&grant.path))
@@ -1805,13 +1797,13 @@ pub(super) fn exec_folder_grant_for_turn(
 }
 
 #[async_trait]
-impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
+impl ExecProvider for ConfiguredExecProvider {
     async fn execute(
         &self,
-        mut request: CodeExecutionRequest,
-    ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+        mut request: ExecRequest,
+    ) -> std::result::Result<ExecResponse, ExecError> {
         if !request.folder_grants.is_empty() {
-            return Err(CodeExecutionError::InvalidRequest(
+            return Err(ExecError::InvalidRequest(
                 "execution folder grants are host-resolved state".into(),
             ));
         }
@@ -1820,7 +1812,7 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             .as_str()
             .parse::<ChatId>()
             .map_err(|_| {
-                CodeExecutionError::InvalidRequest(
+                ExecError::InvalidRequest(
                     "execution workspace does not identify a conversation".into(),
                 )
             })?;
@@ -1828,16 +1820,12 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
             .store
             .get_chat(chat_id)
             .await
-            .map_err(|_| {
-                CodeExecutionError::Unavailable("conversation storage is unavailable".into())
-            })?
+            .map_err(|_| ExecError::Unavailable("conversation storage is unavailable".into()))?
             .ok_or_else(|| {
-                CodeExecutionError::InvalidRequest("execution conversation does not exist".into())
+                ExecError::InvalidRequest("execution conversation does not exist".into())
             })?;
         let (kind, provider) = self.resolve(Some(&chat.network_policy)).await?;
-        if kind == CodeExecutionProviderKind::Local
-            && permits_package_installs(&chat.network_policy)
-        {
+        if kind == ExecProviderKind::Local && permits_package_installs(&chat.network_policy) {
             // A networked local exec is the signal that installs are wanted:
             // the same pins a conversation installs under its per-chat HOME
             // are acquired host-side into the shared cache, so a later
@@ -1846,7 +1834,7 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
                 self.spawn_package_cache_population(cache);
             }
         }
-        if kind == CodeExecutionProviderKind::Local && cfg!(target_os = "macos") {
+        if kind == ExecProviderKind::Local && cfg!(target_os = "macos") {
             // Authority is resolved again here rather than reused from the
             // turn's prompt snapshot, so a revocation mid-turn fails closed.
             // Staging is looked up rather than re-established: the overlay
@@ -1868,41 +1856,41 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     async fn collect_preview_images(
         &self,
         workspace: &ExecutionWorkspaceId,
-    ) -> std::result::Result<PreviewScan, CodeExecutionError> {
+    ) -> std::result::Result<PreviewScan, ExecError> {
         let preview_dir = self.scratch_root.join(workspace.as_str()).join("preview");
         tokio::task::spawn_blocking(move || {
             tidebreak_code_execution::scan_preview_directory(&preview_dir)
         })
         .await
-        .map_err(|_| CodeExecutionError::Sandbox("preview scan task failed".into()))
+        .map_err(|_| ExecError::Sandbox("preview scan task failed".into()))
     }
 
     async fn collect_output_artifacts(
         &self,
         workspace: &ExecutionWorkspaceId,
         execution: &ExecutionId,
-    ) -> std::result::Result<OutputArtifactScan, CodeExecutionError> {
+    ) -> std::result::Result<OutputArtifactScan, ExecError> {
         let chat_id = workspace.as_str().parse::<ChatId>().map_err(|_| {
-            CodeExecutionError::InvalidRequest(
-                "execution workspace does not identify a conversation".into(),
-            )
+            ExecError::InvalidRequest("execution workspace does not identify a conversation".into())
         })?;
         let call_id = execution.as_str().parse::<CallId>().map_err(|_| {
-            CodeExecutionError::InvalidRequest(
+            ExecError::InvalidRequest(
                 "execution does not carry a canonical tool-call identity".into(),
             )
         })?;
         // The revision's producer is the turn that owns this exec call, read
         // from the durable call record rather than anything the model asserts.
-        let calls = self.store.list_tool_calls(chat_id).await.map_err(|_| {
-            CodeExecutionError::Unavailable("tool-call storage is unavailable".into())
-        })?;
+        let calls = self
+            .store
+            .list_tool_calls(chat_id)
+            .await
+            .map_err(|_| ExecError::Unavailable("tool-call storage is unavailable".into()))?;
         let turn_id = calls
             .into_iter()
             .find(|call| call.id == call_id)
             .map(|call| call.turn_id)
             .ok_or_else(|| {
-                CodeExecutionError::InvalidRequest(
+                ExecError::InvalidRequest(
                     "execution identity is not owned by this conversation".into(),
                 )
             })?;
@@ -1913,20 +1901,20 @@ impl CodeExecutionProvider for ConfiguredCodeExecutionProvider {
     // `workspace_lifecycle` stays `None` here on purpose: the capability of
     // this late-binding wrapper depends on the configuration read at call
     // time, which the synchronous trait flag cannot express. Host callers use
-    // [`ConfiguredCodeExecutionProvider::workspace`] instead.
+    // [`ConfiguredExecProvider::workspace`] instead.
 }
 
 /// A resolved workspace-lifecycle handle over the currently selected provider.
 pub struct ConfiguredWorkspace {
-    provider: Box<dyn CodeExecutionProvider>,
+    provider: Box<dyn ExecProvider>,
 }
 
 impl ConfiguredWorkspace {
-    fn lifecycle(&self) -> std::result::Result<&dyn WorkspaceLifecycle, CodeExecutionError> {
+    fn lifecycle(&self) -> std::result::Result<&dyn WorkspaceLifecycle, ExecError> {
         // Checked when this handle was constructed; re-checked instead of
         // unwrapped so a defect degrades into an error, not a panic.
         self.provider.workspace_lifecycle().ok_or_else(|| {
-            CodeExecutionError::Unavailable("selected provider lost its workspace surface".into())
+            ExecError::Unavailable("selected provider lost its workspace surface".into())
         })
     }
 }
@@ -1936,21 +1924,21 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
     async fn create_workspace(
         &self,
         workspace: &ExecutionWorkspaceId,
-    ) -> std::result::Result<(), CodeExecutionError> {
+    ) -> std::result::Result<(), ExecError> {
         self.lifecycle()?.create_workspace(workspace).await
     }
 
     async fn connect_workspace(
         &self,
         workspace: &ExecutionWorkspaceId,
-    ) -> std::result::Result<bool, CodeExecutionError> {
+    ) -> std::result::Result<bool, ExecError> {
         self.lifecycle()?.connect_workspace(workspace).await
     }
 
     async fn destroy_workspace(
         &self,
         workspace: &ExecutionWorkspaceId,
-    ) -> std::result::Result<(), CodeExecutionError> {
+    ) -> std::result::Result<(), ExecError> {
         self.lifecycle()?.destroy_workspace(workspace).await
     }
 
@@ -1959,7 +1947,7 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> std::result::Result<(), CodeExecutionError> {
+    ) -> std::result::Result<(), ExecError> {
         self.lifecycle()?
             .put_workspace_file(workspace, path, content)
             .await
@@ -1970,7 +1958,7 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
         content: &[u8],
-    ) -> std::result::Result<StagedUpload, CodeExecutionError> {
+    ) -> std::result::Result<StagedUpload, ExecError> {
         // Delegated rather than left to the trait default so the selected
         // backend's session memory is not bypassed by the wrapper.
         self.lifecycle()?
@@ -1982,7 +1970,7 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: &WorkspaceFilePath,
-    ) -> std::result::Result<Vec<u8>, CodeExecutionError> {
+    ) -> std::result::Result<Vec<u8>, ExecError> {
         self.lifecycle()?.get_workspace_file(workspace, path).await
     }
 
@@ -1990,7 +1978,7 @@ impl WorkspaceLifecycle for ConfiguredWorkspace {
         &self,
         workspace: &ExecutionWorkspaceId,
         path: Option<&WorkspaceFilePath>,
-    ) -> std::result::Result<WorkspaceListing, CodeExecutionError> {
+    ) -> std::result::Result<WorkspaceListing, ExecError> {
         self.lifecycle()?
             .list_workspace_files(workspace, path)
             .await

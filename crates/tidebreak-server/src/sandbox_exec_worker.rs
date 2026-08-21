@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tidebreak_code_execution::{
-    CodeExecutionError, CodeExecutionRequest, CodeExecutionResponse, ExecutionId,
-    ExecutionWorkspaceId, OutputArtifactScan, OutputArtifactStatus,
+    ExecError, ExecRequest, ExecResponse, ExecutionId, ExecutionWorkspaceId, OutputArtifactScan,
+    OutputArtifactStatus,
 };
 use tidebreak_core::{
     AgentError, AgentRunId, CallId, ChatId, ClaimSandboxToolCallOutcome, Result, SandboxExecArgs,
@@ -22,7 +22,7 @@ use tidebreak_core::{
 };
 use tokio::sync::Notify;
 
-use crate::code_execution::ConfiguredCodeExecutionProvider;
+use crate::code_execution::ConfiguredExecProvider;
 use crate::retry::LaneBackoff;
 use crate::state::SandboxAttemptGuard;
 
@@ -65,12 +65,12 @@ pub(crate) trait SandboxExecRunner: Send + Sync {
     async fn run(
         &self,
         job: SandboxExecJob,
-    ) -> std::result::Result<(CodeExecutionResponse, OutputArtifactScan), SandboxExecFailure>;
+    ) -> std::result::Result<(ExecResponse, OutputArtifactScan), SandboxExecFailure>;
 }
 
 /// The configured host provider, confined to one background run's workspace.
 struct HostSandboxExec {
-    provider: Arc<ConfiguredCodeExecutionProvider>,
+    provider: Arc<ConfiguredExecProvider>,
 }
 
 #[async_trait]
@@ -78,12 +78,12 @@ impl SandboxExecRunner for HostSandboxExec {
     async fn run(
         &self,
         job: SandboxExecJob,
-    ) -> std::result::Result<(CodeExecutionResponse, OutputArtifactScan), SandboxExecFailure> {
+    ) -> std::result::Result<(ExecResponse, OutputArtifactScan), SandboxExecFailure> {
         let workspace = agent_run_workspace(job.run_id).map_err(classify)?;
         let execution = ExecutionId::parse(job.call_id.to_string()).map_err(classify)?;
         // `files` and `folder_grants` stay empty: the run's workspace is the
         // only filesystem it has, and nothing outside it may be staged in.
-        let request = CodeExecutionRequest::new(
+        let request = ExecRequest::new(
             execution,
             workspace.clone(),
             job.arguments.command,
@@ -128,19 +128,17 @@ impl SandboxExecRunner for HostSandboxExec {
 /// message execute concurrently and must not share a filesystem. They do share
 /// the conversation's outputs catalog, so two runs that write `report.md`
 /// produce two versions of one output.
-fn agent_run_workspace(
-    run_id: AgentRunId,
-) -> std::result::Result<ExecutionWorkspaceId, CodeExecutionError> {
+fn agent_run_workspace(run_id: AgentRunId) -> std::result::Result<ExecutionWorkspaceId, ExecError> {
     ExecutionWorkspaceId::parse(format!("agent-run-{run_id}"))
 }
 
-fn classify(error: CodeExecutionError) -> SandboxExecFailure {
+fn classify(error: ExecError) -> SandboxExecFailure {
     match error {
-        CodeExecutionError::NotConfigured => SandboxExecFailure::Rejected {
+        ExecError::NotConfigured => SandboxExecFailure::Rejected {
             code: "exec_not_configured",
             message: "Code execution is not configured for this host.".into(),
         },
-        CodeExecutionError::InvalidRequest(_) => SandboxExecFailure::Rejected {
+        ExecError::InvalidRequest(_) => SandboxExecFailure::Rejected {
             code: "invalid_exec_arguments",
             message: "The command could not be run as requested.".into(),
         },
@@ -200,7 +198,7 @@ pub(crate) struct SandboxExecWorker {
 impl SandboxExecWorker {
     pub(crate) fn with_attempts(
         store: Arc<dyn Store>,
-        provider: Arc<ConfiguredCodeExecutionProvider>,
+        provider: Arc<ConfiguredExecProvider>,
         wake: Arc<Notify>,
         attempts: Arc<SandboxAttemptGuard>,
         config: SandboxExecWorkerConfig,
@@ -472,10 +470,7 @@ fn parse_exec_job(
 /// finishes by naming them. A nonzero exit is not a lane failure — the model
 /// asked for a command and is owed its exit code — but it is marked as an error
 /// receipt so the model does not read a failed build as a success.
-fn exec_resolution(
-    response: &CodeExecutionResponse,
-    outputs: &OutputArtifactScan,
-) -> ToolCallResolution {
+fn exec_resolution(response: &ExecResponse, outputs: &OutputArtifactScan) -> ToolCallResolution {
     let exit = response
         .exit_code
         .map_or_else(|| "signal".into(), |code| code.to_string());
@@ -572,9 +567,7 @@ mod tests {
     use std::sync::Mutex;
 
     use chrono::Utc;
-    use tidebreak_code_execution::{
-        CodeExecutionProviderKind, OutputArtifactEntry, OutputArtifactStatus,
-    };
+    use tidebreak_code_execution::{ExecProviderKind, OutputArtifactEntry, OutputArtifactStatus};
     use tidebreak_core::{
         Chat, DbStore, ParkSandboxToolCallOutcome, SandboxToolCallRequest, SandboxToolCallStatus,
     };
@@ -585,14 +578,8 @@ mod tests {
     /// rather than inferred.
     struct ScriptedExec {
         attempts: AtomicUsize,
-        results: Mutex<
-            Vec<
-                std::result::Result<
-                    (CodeExecutionResponse, OutputArtifactScan),
-                    SandboxExecFailure,
-                >,
-            >,
-        >,
+        results:
+            Mutex<Vec<std::result::Result<(ExecResponse, OutputArtifactScan), SandboxExecFailure>>>,
     }
 
     #[async_trait]
@@ -600,17 +587,14 @@ mod tests {
         async fn run(
             &self,
             _job: SandboxExecJob,
-        ) -> std::result::Result<(CodeExecutionResponse, OutputArtifactScan), SandboxExecFailure>
-        {
+        ) -> std::result::Result<(ExecResponse, OutputArtifactScan), SandboxExecFailure> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             self.results.lock().unwrap().remove(0)
         }
     }
 
     fn scripted(
-        results: Vec<
-            std::result::Result<(CodeExecutionResponse, OutputArtifactScan), SandboxExecFailure>,
-        >,
+        results: Vec<std::result::Result<(ExecResponse, OutputArtifactScan), SandboxExecFailure>>,
     ) -> Arc<ScriptedExec> {
         Arc::new(ScriptedExec {
             attempts: AtomicUsize::new(0),
@@ -618,9 +602,9 @@ mod tests {
         })
     }
 
-    fn response(stdout: &str) -> CodeExecutionResponse {
-        CodeExecutionResponse {
-            provider: CodeExecutionProviderKind::Local,
+    fn response(stdout: &str) -> ExecResponse {
+        ExecResponse {
+            provider: ExecProviderKind::Local,
             exit_code: Some(0),
             stdout: stdout.into(),
             stderr: String::new(),

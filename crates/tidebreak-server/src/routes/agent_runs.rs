@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use tidebreak_code_execution::CodeExecutionProviderKind;
+use tidebreak_code_execution::ExecProviderKind;
 use tidebreak_core::{
     AgentRun, AgentRunExecutionLocation, AgentRunStatus, AgentRunTier, CallId, ChatId,
     RequestAgentRunCancellationOutcome, SandboxToolCall, SandboxToolCallStatus, TurnId,
@@ -27,7 +27,7 @@ use crate::state::{AppState, SandboxSteerRefusal};
 /// disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeExecutionProviderSnapshot {
+pub enum ExecProviderSnapshot {
     Local,
     E2b,
     Daytona,
@@ -35,14 +35,14 @@ pub enum CodeExecutionProviderSnapshot {
     Off,
 }
 
-impl CodeExecutionProviderSnapshot {
-    fn from_config(provider: Option<CodeExecutionProviderKind>) -> Self {
+impl ExecProviderSnapshot {
+    fn from_config(provider: Option<ExecProviderKind>) -> Self {
         match provider {
-            Some(CodeExecutionProviderKind::Local) => Self::Local,
-            Some(CodeExecutionProviderKind::E2b) => Self::E2b,
-            Some(CodeExecutionProviderKind::Daytona) => Self::Daytona,
-            Some(CodeExecutionProviderKind::Docker) => Self::Docker,
-            // `CodeExecutionProviderKind` is non-exhaustive; an unknown future
+            Some(ExecProviderKind::Local) => Self::Local,
+            Some(ExecProviderKind::E2b) => Self::E2b,
+            Some(ExecProviderKind::Daytona) => Self::Daytona,
+            Some(ExecProviderKind::Docker) => Self::Docker,
+            // `ExecProviderKind` is non-exhaustive; an unknown future
             // variant is not something a renderer can name yet.
             Some(_) | None => Self::Off,
         }
@@ -61,9 +61,9 @@ pub struct AgentRunSnapshot {
     pub execution_location: AgentRunExecutionLocation,
     /// Active host code-execution backend for `exec`, not the run-loop seat.
     ///
-    /// See [`CodeExecutionProviderSnapshot`]. Read from the current host
+    /// See [`ExecProviderSnapshot`]. Read from the current host
     /// setting at list time — the same selection the next `exec` would use.
-    pub code_execution_provider: CodeExecutionProviderSnapshot,
+    pub code_execution_provider: ExecProviderSnapshot,
     pub status: AgentRunStatus,
     /// Completed provider calls accumulated across every attempt.
     pub model_steps: i32,
@@ -116,7 +116,7 @@ impl AgentRunSnapshot {
         terminal_text: Option<String>,
         submitted_outputs: Vec<SubmittedOutputSnapshot>,
         task_plan: Option<AgentRunTaskPlanProgress>,
-        code_execution_provider: CodeExecutionProviderSnapshot,
+        code_execution_provider: ExecProviderSnapshot,
     ) -> Self {
         Self {
             id: run.id,
@@ -413,7 +413,7 @@ pub async fn list_agent_runs(
     // Host code-exec selection is independent of where the run loop sits.
     // One read covers every snapshot in the response: the next `exec` uses
     // the same setting, whether the child is foreground or background.
-    let code_execution_provider = CodeExecutionProviderSnapshot::from_config(
+    let code_execution_provider = ExecProviderSnapshot::from_config(
         code_execution::read_config(&*state.store).await?.provider,
     );
     let mut snapshots = Vec::with_capacity(runs.len());

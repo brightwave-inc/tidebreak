@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use tidebreak_code_execution::{
-    resolve_scratch_directory, CodeExecutionError, MaterializationPrecondition,
-    MaterializedChangeKind, RejectedChangeReason, WorkspaceFilePath, WriteOverlay,
-    DOCUMENT_SCRIPTS_DIR, DOCUMENT_SCRIPT_FILES,
+    resolve_scratch_directory, ExecError, MaterializationPrecondition, MaterializedChangeKind,
+    RejectedChangeReason, WorkspaceFilePath, WriteOverlay, DOCUMENT_SCRIPTS_DIR,
+    DOCUMENT_SCRIPT_FILES,
 };
 use tidebreak_core::{
     exec_attachment_file_name, BlobStore, ChatId, HostRootId, MessageDocumentAttachment, Store,
@@ -124,11 +124,11 @@ pub(super) async fn materialize_chat_attachments(
     blobs: &dyn BlobStore,
     chat_id: ChatId,
     host_dir: &std::path::Path,
-) -> std::result::Result<(), CodeExecutionError> {
+) -> std::result::Result<(), ExecError> {
     let attachments = store
         .list_message_document_attachments(chat_id)
         .await
-        .map_err(|_| CodeExecutionError::Unavailable("attachment storage is unavailable".into()))?;
+        .map_err(|_| ExecError::Unavailable("attachment storage is unavailable".into()))?;
     materialize_attachments(&attachments, blobs, host_dir).await
 }
 
@@ -136,13 +136,13 @@ pub(super) async fn materialize_attachments(
     attachments: &[MessageDocumentAttachment],
     blobs: &dyn BlobStore,
     host_dir: &std::path::Path,
-) -> std::result::Result<(), CodeExecutionError> {
+) -> std::result::Result<(), ExecError> {
     let documents_dir = host_dir.join("documents");
     let metadata = tokio::fs::symlink_metadata(&documents_dir)
         .await
-        .map_err(|_| CodeExecutionError::Sandbox("documents/ is unavailable".into()))?;
+        .map_err(|_| ExecError::Sandbox("documents/ is unavailable".into()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CodeExecutionError::Sandbox(
+        return Err(ExecError::Sandbox(
             "documents/ is not a private workspace directory".into(),
         ));
     }
@@ -161,24 +161,24 @@ pub(super) async fn materialize_attachments(
             continue;
         }
         let bytes = blobs.get(source_blob.id).await.map_err(|_| {
-            CodeExecutionError::Unavailable("attached document bytes are unavailable".into())
+            ExecError::Unavailable("attached document bytes are unavailable".into())
         })?;
         let Some(bytes) = bytes else {
-            return Err(CodeExecutionError::Unavailable(
+            return Err(ExecError::Unavailable(
                 "attached document bytes are unavailable".into(),
             ));
         };
         if bytes.len() > MAX_EXEC_WORKSPACE_FILE_BYTES
             || tidebreak_core::DocumentBlob::from_bytes(&bytes) != *source_blob
         {
-            return Err(CodeExecutionError::Unavailable(
+            return Err(ExecError::Unavailable(
                 "attached document bytes do not match their stored descriptor".into(),
             ));
         }
         let destination = documents_dir.join(&file_name);
         match tokio::fs::symlink_metadata(&destination).await {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(CodeExecutionError::Sandbox(format!(
+                return Err(ExecError::Sandbox(format!(
                     "documents/{file_name} is not a regular workspace file"
                 )));
             }
@@ -192,13 +192,13 @@ pub(super) async fn materialize_attachments(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
-                return Err(CodeExecutionError::Sandbox(format!(
+                return Err(ExecError::Sandbox(format!(
                     "documents/{file_name} is unavailable"
                 )));
             }
         }
         tokio::fs::write(&destination, bytes).await.map_err(|_| {
-            CodeExecutionError::Sandbox(format!(
+            ExecError::Sandbox(format!(
                 "attached document documents/{file_name} could not be materialized"
             ))
         })?;
@@ -235,7 +235,7 @@ pub(super) async fn prepare_execution_directories(
     mirrored: bool,
     document_scripts_source: Option<&std::path::Path>,
     skills: &[tidebreak_code_execution::LoadedSkill],
-) -> std::result::Result<(), CodeExecutionError> {
+) -> std::result::Result<(), ExecError> {
     // The scratch directory itself is host-owned and named after the chat, but
     // everything inside it is writable by local exec, which can plant
     // `<scratch>/output -> /any/dir` between two runs. `create_dir_all` and a
@@ -243,12 +243,12 @@ pub(super) async fn prepare_execution_directories(
     // directory is resolved a component at a time into an open descriptor and
     // the marker is written relative to that descriptor, without following a
     // link at the final component either.
-    tokio::fs::create_dir_all(host_dir).await.map_err(|_| {
-        CodeExecutionError::Sandbox("the private workspace directory is unavailable".into())
-    })?;
+    tokio::fs::create_dir_all(host_dir)
+        .await
+        .map_err(|_| ExecError::Sandbox("the private workspace directory is unavailable".into()))?;
     for name in ["output", "preview", "documents"] {
         let unavailable = || {
-            CodeExecutionError::Sandbox(format!(
+            ExecError::Sandbox(format!(
                 "private workspace directory '{name}/' is unavailable"
             ))
         };
@@ -284,12 +284,10 @@ pub(super) async fn prepare_execution_directories(
 pub(super) async fn install_skills(
     skills: &[tidebreak_code_execution::LoadedSkill],
     host_dir: &std::path::Path,
-) -> std::result::Result<(), CodeExecutionError> {
+) -> std::result::Result<(), ExecError> {
     let root = resolve_scratch_directory(host_dir, tidebreak_code_execution::SKILLS_DIR, true)
         .await
-        .ok_or_else(|| {
-            CodeExecutionError::Sandbox("the staged skills directory is unavailable".into())
-        })?;
+        .ok_or_else(|| ExecError::Sandbox("the staged skills directory is unavailable".into()))?;
     // Staging is the whole set, not an accumulation. A skill the install has
     // switched off — or one the user deleted — must leave a workspace that
     // staged it on an earlier turn, or the model could still `read_file`
@@ -320,18 +318,14 @@ pub(super) async fn install_skills(
             true,
         )
         .await
-        .ok_or_else(|| {
-            CodeExecutionError::Sandbox(format!("skill directory '{name}' is unavailable"))
-        })?;
+        .ok_or_else(|| ExecError::Sandbox(format!("skill directory '{name}' is unavailable")))?;
         destination
             .write_file(
                 tidebreak_code_execution::SKILL_MANIFEST_FILE,
                 skill.manifest.as_bytes(),
             )
             .await
-            .map_err(|_| {
-                CodeExecutionError::Sandbox(format!("skill '{name}' could not be installed"))
-            })?;
+            .map_err(|_| ExecError::Sandbox(format!("skill '{name}' could not be installed")))?;
         if skill.scripts.is_empty() {
             continue;
         }
@@ -346,14 +340,14 @@ pub(super) async fn install_skills(
         )
         .await
         .ok_or_else(|| {
-            CodeExecutionError::Sandbox(format!("skill '{name}' scripts directory is unavailable"))
+            ExecError::Sandbox(format!("skill '{name}' scripts directory is unavailable"))
         })?;
         for script in &skill.scripts {
             scripts
                 .write_file(&script.name, &script.content)
                 .await
                 .map_err(|_| {
-                    CodeExecutionError::Sandbox(format!(
+                    ExecError::Sandbox(format!(
                         "skill '{name}' script '{}' could not be installed",
                         script.name
                     ))
@@ -366,7 +360,7 @@ pub(super) async fn install_skills(
 pub(super) async fn install_document_scripts(
     source: &std::path::Path,
     host_dir: &std::path::Path,
-) -> std::result::Result<(), CodeExecutionError> {
+) -> std::result::Result<(), ExecError> {
     // `.tidebreak/` sits inside the scratch directory local exec writes to, so
     // a planted `.tidebreak -> /elsewhere` would relocate the helper install
     // and truncate known filenames there. Resolve it a component at a time and
@@ -374,35 +368,31 @@ pub(super) async fn install_document_scripts(
     // rather than whatever the name points at by the time we write.
     let destination = resolve_scratch_directory(host_dir, DOCUMENT_SCRIPTS_DIR, true)
         .await
-        .ok_or_else(|| {
-            CodeExecutionError::Sandbox("document helper directory is unavailable".into())
-        })?;
+        .ok_or_else(|| ExecError::Sandbox("document helper directory is unavailable".into()))?;
     for name in DOCUMENT_SCRIPT_FILES {
         let source_file = source.join(name);
         let metadata = tokio::fs::symlink_metadata(&source_file)
             .await
             .map_err(|_| {
-                CodeExecutionError::Sandbox(format!(
-                    "bundled document helper '{name}' is unavailable"
-                ))
+                ExecError::Sandbox(format!("bundled document helper '{name}' is unavailable"))
             })?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(CodeExecutionError::Sandbox(format!(
+            return Err(ExecError::Sandbox(format!(
                 "bundled document helper '{name}' is not a regular file"
             )));
         }
         let content = tokio::fs::read(&source_file).await.map_err(|_| {
-            CodeExecutionError::Sandbox(format!(
+            ExecError::Sandbox(format!(
                 "bundled document helper '{name}' could not be read"
             ))
         })?;
         if content.len() > tidebreak_code_execution::MAX_WORKSPACE_FILE_BYTES {
-            return Err(CodeExecutionError::Sandbox(format!(
+            return Err(ExecError::Sandbox(format!(
                 "bundled document helper '{name}' exceeds the workspace file limit"
             )));
         }
         destination.write_file(name, &content).await.map_err(|_| {
-            CodeExecutionError::Sandbox(format!(
+            ExecError::Sandbox(format!(
                 "bundled document helper '{name}' could not be installed"
             ))
         })?;

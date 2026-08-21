@@ -10,20 +10,20 @@ use tidebreak_core::{
 };
 
 use crate::{
-    CodeExecutionProvider, CodeExecutionRequest, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS,
-    MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_STAGED_PATHS,
+    ExecProvider, ExecRequest, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS, MAX_COMMAND_BYTES,
+    MAX_CWD_BYTES, MAX_STAGED_PATHS,
 };
 
 pub const EXEC_TOOL_NAME: &str = "exec";
 
 /// Model-facing command execution backed by a host-selected provider.
 pub struct ExecTool {
-    provider: Arc<dyn CodeExecutionProvider>,
+    provider: Arc<dyn ExecProvider>,
 }
 
 impl ExecTool {
     #[must_use]
-    pub fn new(provider: Arc<dyn CodeExecutionProvider>) -> Self {
+    pub fn new(provider: Arc<dyn ExecProvider>) -> Self {
         Self { provider }
     }
 }
@@ -171,7 +171,7 @@ impl Tool for ExecTool {
             Ok(id) => id,
             Err(error) => return Ok(ToolOutput::error(error.to_string())),
         };
-        let request = match CodeExecutionRequest::new(
+        let request = match ExecRequest::new(
             execution_id.clone(),
             workspace_id.clone(),
             arguments.command,
@@ -333,7 +333,7 @@ impl Tool for ExecTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodeExecutionError, CodeExecutionProviderKind, CodeExecutionResponse};
+    use crate::{ExecError, ExecProviderKind, ExecResponse};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -341,18 +341,18 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingProvider {
-        request: Mutex<Option<CodeExecutionRequest>>,
+        request: Mutex<Option<ExecRequest>>,
     }
 
     #[async_trait]
-    impl CodeExecutionProvider for RecordingProvider {
+    impl ExecProvider for RecordingProvider {
         async fn execute(
             &self,
-            request: CodeExecutionRequest,
-        ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
+            request: ExecRequest,
+        ) -> std::result::Result<ExecResponse, ExecError> {
             *self.request.lock().unwrap() = Some(request);
-            Ok(CodeExecutionResponse {
-                provider: CodeExecutionProviderKind::Local,
+            Ok(ExecResponse {
+                provider: ExecProviderKind::Local,
                 exit_code: Some(0),
                 stdout: "ok\n".into(),
                 stderr: String::new(),
@@ -432,13 +432,13 @@ mod tests {
     struct TimedOutProvider;
 
     #[async_trait]
-    impl CodeExecutionProvider for TimedOutProvider {
+    impl ExecProvider for TimedOutProvider {
         async fn execute(
             &self,
-            _request: CodeExecutionRequest,
-        ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
-            Ok(CodeExecutionResponse {
-                provider: CodeExecutionProviderKind::Local,
+            _request: ExecRequest,
+        ) -> std::result::Result<ExecResponse, ExecError> {
+            Ok(ExecResponse {
+                provider: ExecProviderKind::Local,
                 exit_code: None,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -484,13 +484,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl CodeExecutionProvider for PreviewProvider {
+    impl ExecProvider for PreviewProvider {
         async fn execute(
             &self,
-            _request: CodeExecutionRequest,
-        ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
-            Ok(CodeExecutionResponse {
-                provider: CodeExecutionProviderKind::Local,
+            _request: ExecRequest,
+        ) -> std::result::Result<ExecResponse, ExecError> {
+            Ok(ExecResponse {
+                provider: ExecProviderKind::Local,
                 exit_code: Some(self.exit_code),
                 stdout: String::new(),
                 stderr: String::new(),
@@ -505,7 +505,7 @@ mod tests {
         async fn collect_preview_images(
             &self,
             _workspace: &ExecutionWorkspaceId,
-        ) -> std::result::Result<crate::PreviewScan, CodeExecutionError> {
+        ) -> std::result::Result<crate::PreviewScan, ExecError> {
             self.scans.fetch_add(1, Ordering::SeqCst);
             let bytes = vec![1, 2, 3];
             let image = tidebreak_core::ImageRef {
@@ -531,13 +531,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl CodeExecutionProvider for ArtifactProvider {
+    impl ExecProvider for ArtifactProvider {
         async fn execute(
             &self,
-            _request: CodeExecutionRequest,
-        ) -> std::result::Result<CodeExecutionResponse, CodeExecutionError> {
-            Ok(CodeExecutionResponse {
-                provider: CodeExecutionProviderKind::Local,
+            _request: ExecRequest,
+        ) -> std::result::Result<ExecResponse, ExecError> {
+            Ok(ExecResponse {
+                provider: ExecProviderKind::Local,
                 exit_code: Some(self.exit_code),
                 stdout: String::new(),
                 stderr: String::new(),
@@ -553,7 +553,7 @@ mod tests {
             &self,
             _workspace: &ExecutionWorkspaceId,
             _execution: &ExecutionId,
-        ) -> std::result::Result<crate::OutputArtifactScan, CodeExecutionError> {
+        ) -> std::result::Result<crate::OutputArtifactScan, ExecError> {
             self.scans.fetch_add(1, Ordering::SeqCst);
             Ok(crate::OutputArtifactScan {
                 entries: vec![

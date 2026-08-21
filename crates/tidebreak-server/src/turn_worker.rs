@@ -110,7 +110,7 @@ pub(crate) struct TurnWorker {
     wake: Arc<Notify>,
     sandbox_agent_wake: Arc<Notify>,
     agent_config: AgentConfig,
-    exec_folder_context: Option<Arc<crate::code_execution::ConfiguredCodeExecutionProvider>>,
+    exec_folder_context: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     private_scratch_root: Option<PathBuf>,
     config: TurnWorkerConfig,
     #[cfg(test)]
@@ -477,7 +477,7 @@ impl TurnWorker {
     /// authority.
     pub(crate) fn with_exec_folder_context(
         mut self,
-        provider: Arc<crate::code_execution::ConfiguredCodeExecutionProvider>,
+        provider: Arc<crate::code_execution::ConfiguredExecProvider>,
     ) -> Self {
         self.exec_folder_context = Some(provider);
         self

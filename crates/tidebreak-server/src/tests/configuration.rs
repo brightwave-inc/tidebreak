@@ -3907,7 +3907,7 @@ fn plugin_app_with_broker(
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     state.code_execution = Some(Arc::new(
-        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+        crate::code_execution::ConfiguredExecProvider::new(
             store,
             secrets,
             data_dir.join("scratch"),
@@ -4005,7 +4005,7 @@ fn plugin_install_app(
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     state.code_execution = Some(Arc::new(
-        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+        crate::code_execution::ConfiguredExecProvider::new(
             store,
             secrets,
             data_dir.join("scratch"),
@@ -4587,7 +4587,7 @@ async fn imported_plugin_mcp_does_not_start_until_enabled() {
         },
     );
     let exec = Arc::new(
-        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+        crate::code_execution::ConfiguredExecProvider::new(
             store.clone(),
             secrets,
             dir.path().join("scratch"),
@@ -4994,7 +4994,7 @@ async fn user_plugins_load_from_the_data_directory_and_keep_their_flags() {
             },
         );
         state.code_execution = Some(Arc::new(
-            crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            crate::code_execution::ConfiguredExecProvider::new(
                 store.clone(),
                 secrets,
                 dir.path().join("scratch"),
@@ -5134,7 +5134,7 @@ async fn the_catalog_lists_prompts_and_serves_their_bodies() {
         },
     );
     state.code_execution = Some(Arc::new(
-        crate::code_execution::ConfiguredCodeExecutionProvider::new(
+        crate::code_execution::ConfiguredExecProvider::new(
             store,
             secrets,
             dir.path().join("scratch"),
@@ -5516,7 +5516,7 @@ async fn a_plugins_bundled_mcp_server_mounts_only_while_the_plugin_is_enabled() 
             },
         );
         let exec = Arc::new(
-            crate::code_execution::ConfiguredCodeExecutionProvider::new(
+            crate::code_execution::ConfiguredExecProvider::new(
                 store.clone(),
                 secrets,
                 dir.path().join("scratch"),

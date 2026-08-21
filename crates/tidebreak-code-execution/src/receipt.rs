@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{CodeExecutionError, CodeExecutionRequest, CodeExecutionResponse};
+use crate::{ExecError, ExecRequest, ExecResponse};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -11,7 +11,7 @@ pub(crate) enum ExecutionReceipt {
     },
     Completed {
         fingerprint: String,
-        response: CodeExecutionResponse,
+        response: ExecResponse,
     },
     Failed {
         fingerprint: String,
@@ -21,7 +21,7 @@ pub(crate) enum ExecutionReceipt {
 
 pub(crate) enum BeginExecution {
     Started,
-    Cached(CodeExecutionResponse),
+    Cached(ExecResponse),
 }
 
 impl ExecutionReceipt {
@@ -33,7 +33,7 @@ impl ExecutionReceipt {
 
     pub(crate) fn from_outcome(
         fingerprint: String,
-        outcome: &Result<CodeExecutionResponse, CodeExecutionError>,
+        outcome: &Result<ExecResponse, ExecError>,
     ) -> Self {
         match outcome {
             Ok(response) => Self::Completed {
@@ -50,14 +50,14 @@ impl ExecutionReceipt {
     pub(crate) fn replay(
         &self,
         fingerprint: &str,
-        failed_error: fn(String) -> CodeExecutionError,
-    ) -> Result<BeginExecution, CodeExecutionError> {
+        failed_error: fn(String) -> ExecError,
+    ) -> Result<BeginExecution, ExecError> {
         match self {
             Self::Running {
                 fingerprint: existing,
             } => {
                 ensure_same_fingerprint(existing, fingerprint)?;
-                Err(CodeExecutionError::AmbiguousExecution)
+                Err(ExecError::AmbiguousExecution)
             }
             Self::Completed {
                 fingerprint: existing,
@@ -77,19 +77,17 @@ impl ExecutionReceipt {
     }
 }
 
-pub(crate) fn request_fingerprint(
-    request: &CodeExecutionRequest,
-) -> Result<String, CodeExecutionError> {
+pub(crate) fn request_fingerprint(request: &ExecRequest) -> Result<String, ExecError> {
     let bytes = serde_json::to_vec(request)
-        .map_err(|_| CodeExecutionError::InvalidRequest("request is not serializable".into()))?;
+        .map_err(|_| ExecError::InvalidRequest("request is not serializable".into()))?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn ensure_same_fingerprint(existing: &str, expected: &str) -> Result<(), CodeExecutionError> {
+fn ensure_same_fingerprint(existing: &str, expected: &str) -> Result<(), ExecError> {
     if existing == expected {
         Ok(())
     } else {
-        Err(CodeExecutionError::IdentityConflict)
+        Err(ExecError::IdentityConflict)
     }
 }

@@ -10,19 +10,19 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApiClient,
-  CodeExecutionConfigInfo,
+  ExecConfigInfo,
 } from "./api";
 import { WelcomeState } from "./WelcomeState";
 
 afterEach(cleanup);
 
 function executionClient(
-  providers: CodeExecutionConfigInfo["providers"],
-): Pick<ApiClient, "getCodeExecutionConfig"> {
+  providers: ExecConfigInfo["providers"],
+): Pick<ApiClient, "getExecConfig"> {
   return {
-    getCodeExecutionConfig: vi.fn().mockResolvedValue({
+    getExecConfig: vi.fn().mockResolvedValue({
       providers,
-    } as CodeExecutionConfigInfo),
+    } as ExecConfigInfo),
   };
 }
 
@@ -119,7 +119,7 @@ describe("WelcomeState", () => {
     render(<WelcomeState executionConfigClient={client} />);
 
     await waitFor(() =>
-      expect(client.getCodeExecutionConfig).toHaveBeenCalled(),
+      expect(client.getExecConfig).toHaveBeenCalled(),
     );
     expect(
       screen.queryByText(/Files staged for a run leave this machine/i),

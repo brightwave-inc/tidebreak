@@ -15,9 +15,9 @@ import {
   type Chat,
   type ChatFrame,
   type ChatTranscript,
-  type CodeExecutionConfigInfo,
-  type CodeExecutionCredentialReadiness,
-  type CodeExecutionProviderKind,
+  type ExecConfigInfo,
+  type ExecCredentialReadiness,
+  type ExecProviderKind,
   type CompactionRun,
   type ConnectedAppsInfo,
   type ConsentStatementSnapshot,
@@ -485,15 +485,15 @@ export class ApiClient {
     });
   }
 
-  getCodeExecutionConfig(): Promise<CodeExecutionConfigInfo> {
+  getExecConfig(): Promise<ExecConfigInfo> {
     return this.json("/code-execution", { headers: this.headers() });
   }
 
-  putCodeExecutionConfig(body: {
-    provider?: CodeExecutionProviderKind | null;
+  putExecConfig(body: {
+    provider?: ExecProviderKind | null;
     timeout_ms?: number;
     egress?: EgressConfig;
-  }): Promise<CodeExecutionConfigInfo> {
+  }): Promise<ExecConfigInfo> {
     return this.json("/code-execution", {
       method: "PUT",
       headers: this.headers(true),
@@ -501,18 +501,18 @@ export class ApiClient {
     });
   }
 
-  listCodeExecutionCredentials(): Promise<{
-    credentials: CodeExecutionCredentialReadiness[];
+  listExecCredentials(): Promise<{
+    credentials: ExecCredentialReadiness[];
   }> {
     return this.json("/code-execution/credentials", {
       headers: this.headers(),
     });
   }
 
-  putCodeExecutionCredential(
-    provider: CodeExecutionProviderKind,
+  putExecCredential(
+    provider: ExecProviderKind,
     apiKey: string,
-  ): Promise<CodeExecutionCredentialReadiness> {
+  ): Promise<ExecCredentialReadiness> {
     return this.json(`/code-execution/credentials/${provider}`, {
       method: "PUT",
       headers: this.headers(true),
@@ -520,9 +520,9 @@ export class ApiClient {
     });
   }
 
-  deleteCodeExecutionCredential(
-    provider: CodeExecutionProviderKind,
-  ): Promise<CodeExecutionCredentialReadiness> {
+  deleteExecCredential(
+    provider: ExecProviderKind,
+  ): Promise<ExecCredentialReadiness> {
     return this.json(`/code-execution/credentials/${provider}`, {
       method: "DELETE",
       headers: this.headers(),

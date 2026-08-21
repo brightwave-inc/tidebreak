@@ -14,8 +14,7 @@ use tidebreak_core::{
 };
 
 use crate::code_execution::{
-    self, CodeExecutionConfigInfo, CodeExecutionConfigUpdate, CodeExecutionCredentialReadiness,
-    CodeExecutionCredentialsInfo,
+    self, ExecConfigInfo, ExecConfigUpdate, ExecCredentialReadiness, ExecCredentialsInfo,
 };
 use crate::error::ServerError;
 use crate::exec_write_snapshot::{
@@ -596,7 +595,7 @@ pub async fn put_web_search_config(
 /// and readiness. No executable or provider endpoint is accepted here.
 pub async fn get_code_execution_config(
     State(state): State<AppState>,
-) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
+) -> Result<Json<ExecConfigInfo>, ServerError> {
     Ok(Json(
         code_execution::config_info(&state.config, &*state.store, &*state.secrets).await?,
     ))
@@ -605,8 +604,8 @@ pub async fn get_code_execution_config(
 /// `PUT /code-execution` — select a fixed provider and bounded host timeout.
 pub async fn put_code_execution_config(
     State(state): State<AppState>,
-    Json(body): Json<CodeExecutionConfigUpdate>,
-) -> Result<Json<CodeExecutionConfigInfo>, ServerError> {
+    Json(body): Json<ExecConfigUpdate>,
+) -> Result<Json<ExecConfigInfo>, ServerError> {
     Ok(Json(
         code_execution::update_config(&state.config, &*state.store, &*state.secrets, body).await?,
     ))
@@ -616,7 +615,7 @@ pub async fn put_code_execution_config(
 /// credential slots. Local execution needs no credential and is absent here.
 pub async fn get_code_execution_credentials(
     State(state): State<AppState>,
-) -> Json<CodeExecutionCredentialsInfo> {
+) -> Json<ExecCredentialsInfo> {
     Json(code_execution::credentials_info(&*state.secrets).await)
 }
 
@@ -626,14 +625,14 @@ const MAX_CODE_EXECUTION_CREDENTIAL_BYTES: usize = 8 * 1024;
 /// redacts the credential.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CodeExecutionCredentialUpdate {
+pub struct ExecCredentialUpdate {
     pub api_key: String,
 }
 
-impl std::fmt::Debug for CodeExecutionCredentialUpdate {
+impl std::fmt::Debug for ExecCredentialUpdate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("CodeExecutionCredentialUpdate")
+            .debug_struct("ExecCredentialUpdate")
             .field("api_key", &"***")
             .finish()
     }
@@ -643,8 +642,8 @@ impl std::fmt::Debug for CodeExecutionCredentialUpdate {
 pub async fn put_code_execution_credential(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-    Json(body): Json<CodeExecutionCredentialUpdate>,
-) -> Result<Json<CodeExecutionCredentialReadiness>, ServerError> {
+    Json(body): Json<ExecCredentialUpdate>,
+) -> Result<Json<ExecCredentialReadiness>, ServerError> {
     let provider = code_execution::credential_provider(&provider)?;
     if body.api_key.len() > MAX_CODE_EXECUTION_CREDENTIAL_BYTES {
         return Err(ServerError::bad_request(format!(
@@ -666,7 +665,7 @@ pub async fn put_code_execution_credential(
 pub async fn delete_code_execution_credential(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-) -> Result<Json<CodeExecutionCredentialReadiness>, ServerError> {
+) -> Result<Json<ExecCredentialReadiness>, ServerError> {
     let provider = code_execution::credential_provider(&provider)?;
     Ok(Json(
         code_execution::delete_credential(&*state.secrets, provider).await?,

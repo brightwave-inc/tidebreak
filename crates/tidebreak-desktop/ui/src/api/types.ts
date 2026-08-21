@@ -20,15 +20,15 @@ import {
   type AgentRunTaskPlan as WireAgentRunTaskPlan,
   type Chat as WireChat,
   type ChatTranscript as WireChatTranscript,
-  type CodeExecutionConfigInfo as WireCodeExecutionConfigInfo,
+  type ExecConfigInfo as WireExecConfigInfo,
   type ConnectedAppInfo as WireConnectedAppInfo,
   type ConnectedAppsInfo as WireConnectedAppsInfo,
   type CredentialPlacement as WireCredentialPlacement,
   type RestCredentialStatus as WireRestCredentialStatus,
   type SpecPreviewInfo as WireSpecPreviewInfo,
   type SpecPreviewOperation as WireSpecPreviewOperation,
-  type CodeExecutionCredentialReadiness as WireCodeExecutionCredentialReadiness,
-  type CodeExecutionProviderKind as WireCodeExecutionProviderKind,
+  type ExecCredentialReadiness as WireExecCredentialReadiness,
+  type ExecProviderKind as WireExecProviderKind,
   type CodeDeliveryActionResult as WireCodeDeliveryActionResult,
   type CodeDeliveryCheck as WireCodeDeliveryCheck,
   type CodeDeliveryDeploymentStatus as WireCodeDeliveryDeploymentStatus,
@@ -439,14 +439,14 @@ export type WebSearchConfigInfo = WireWebSearchConfigInfo;
 export type WebSearchCredentialReadiness = WireWebSearchCredentialReadiness;
 
 /** The fixed, host-owned code-execution providers supported by this build. */
-export type CodeExecutionProviderKind = WireCodeExecutionProviderKind;
+export type ExecProviderKind = WireExecProviderKind;
 
 /** Non-secret code-execution selection, timeout policy, and host readiness. */
-export type CodeExecutionConfigInfo = WireCodeExecutionConfigInfo;
+export type ExecConfigInfo = WireExecConfigInfo;
 
 /** Readiness only: the API never returns a saved managed-provider key. */
-export type CodeExecutionCredentialReadiness =
-  WireCodeExecutionCredentialReadiness;
+export type ExecCredentialReadiness =
+  WireExecCredentialReadiness;
 
 /**
  * Host-owned egress policy for the managed sandboxes. Never a secret: only

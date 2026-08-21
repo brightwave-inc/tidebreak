@@ -1049,7 +1049,7 @@ describe("code-execution configuration API", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
-    await client.putCodeExecutionConfig({
+    await client.putExecConfig({
       provider: "local",
       timeout_ms: 30_000,
     });

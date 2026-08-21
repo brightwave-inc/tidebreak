@@ -18,7 +18,7 @@ use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
-use crate::{CodeExecutionError, PACKAGE_MANAGER_DOMAINS};
+use crate::{ExecError, PACKAGE_MANAGER_DOMAINS};
 
 const MAX_CONNECT_HEADERS: usize = 16 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 32;
@@ -34,15 +34,13 @@ pub(crate) struct LocalEgressBroker {
 }
 
 impl LocalEgressBroker {
-    pub(crate) async fn start(policy: NetworkPolicy) -> Result<Self, CodeExecutionError> {
+    pub(crate) async fn start(policy: NetworkPolicy) -> Result<Self, ExecError> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .map_err(|_| {
-                CodeExecutionError::Sandbox("could not bind the local egress broker".into())
-            })?;
-        let address = listener.local_addr().map_err(|_| {
-            CodeExecutionError::Sandbox("could not inspect the local egress broker".into())
-        })?;
+            .map_err(|_| ExecError::Sandbox("could not bind the local egress broker".into()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|_| ExecError::Sandbox("could not inspect the local egress broker".into()))?;
         let task = tokio::spawn(serve(listener, policy));
         Ok(Self { address, task })
     }
