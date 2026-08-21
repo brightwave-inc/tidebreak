@@ -197,12 +197,17 @@ pub struct SequencedCodeEventFrame {
     #[ts(optional)]
     pub replayed: Option<bool>,
     /// Set on a live-only event the journal does not hold: assistant deltas,
-    /// and the catch-up delta a mid-turn reader gets on connect. Apply it,
-    /// but do not advance the resume cursor past it and do not expect it
-    /// again on reconnect (record 57).
+    /// and the catch-up delta a mid-turn reader gets on connect. Apply it but
+    /// do not advance the resume cursor. A reconnect may receive the complete
+    /// current tail with `replacement` set (record 57).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub transient: Option<bool>,
+    /// Set on a transient assistant delta that contains the complete live
+    /// tail. Replace the current assistant buffer instead of appending it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub replacement: Option<bool>,
     /// Set on the first replayed frame of a capped window: older events above
     /// the requested cursor were dropped, and the history in front of this
     /// frame is not coming.

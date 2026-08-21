@@ -57,12 +57,14 @@ discipline: journaled first, published second, under the spawn-epoch fence,
 with `(session_id, seq)` monotonic and gap-free.
 
 **The frame says which kind it is.** `SequencedCodeEventFrame` gains
-`transient: Option<bool>`. A transient frame carries the journal cursor it
-streamed behind rather than a position of its own; a client applies it, does
-not advance its resume cursor past it, and does not expect it back on
-reconnect. This is the chat socket's existing shape for out-of-band frames
-(`RendererChatFrame::Metadata`) rather than a new idiom — one socket, two
-frame classes, one cursor.
+`transient: Option<bool>` and `replacement: Option<bool>`. A transient frame
+carries the journal cursor it streamed behind rather than a position of its
+own, so a client applies it without advancing its resume cursor. On connect,
+the server sends the complete current tail with `replacement: true`. The
+desktop replaces its assistant buffer, while the CLI prints only the suffix
+that it has not already emitted. This is the chat socket's existing shape for
+out-of-band frames (`RendererChatFrame::Metadata`) rather than a new idiom —
+one socket, two frame classes, one cursor.
 
 **The bus holds the tail, so mid-turn reconnect is still correct.** Between
 the first delta and the message that states the whole answer, the only copy of
@@ -70,9 +72,11 @@ that text is in memory. The bus keeps it per session, bounded by
 `MAX_EVENT_TEXT_CHARS` — the same bound the message carrying it will get — and
 retires it on any journaled event that ends the run: the message, a
 parent-level tool call, a turn boundary. A connecting socket takes the tail
-and subscribes under one lock, so no delta is counted twice, and it forwards
-the tail only when its replay did not read past the journal position the tail
-was captured at.
+and subscribes under one lock, so no delta lands between those operations. It
+forwards the tail only when replay did not read past the journal position
+where the tail was captured. Replacement semantics cover both a fresh reader
+with an empty buffer and a reconnect that holds a prefix but missed later
+deltas while its socket was down.
 
 **A turn that ends mid-sentence gets the message the engine owed it.** When a
 turn reaches a terminal event with text still buffered, the server journals it
@@ -176,8 +180,9 @@ the same treatment becomes available to it.
 - A socket that connects after some deltas have streamed and before the
   message lands assembles the same text as one that was connected the whole
   time.
-- A socket that reconnects from the transient tail's journal cursor keeps its
-  existing text and receives only later deltas.
+- A socket that reconnects after missing deltas receives the complete tail as
+  a replacement. The desktop shows the tail once, and the CLI prints only its
+  missing suffix.
 - A turn interrupted mid-sentence leaves the streamed text in the journal.
 - A journal written before this change — delta rows and all — still replays in
   order.

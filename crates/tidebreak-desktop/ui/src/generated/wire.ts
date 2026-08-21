@@ -3594,11 +3594,16 @@ export type SequencedCodeEventFrame = {
 seq: number, event: CodeEvent, replayed?: boolean, 
 /**
  * Set on a live-only event the journal does not hold: assistant deltas,
- * and the catch-up delta a mid-turn reader gets on connect. Apply it,
- * but do not advance the resume cursor past it and do not expect it
- * again on reconnect (record 57).
+ * and the catch-up delta a mid-turn reader gets on connect. Apply it but
+ * do not advance the resume cursor. A reconnect may receive the complete
+ * current tail with `replacement` set (record 57).
  */
 transient?: boolean, 
+/**
+ * Set on a transient assistant delta that contains the complete live
+ * tail. Replace the current assistant buffer instead of appending it.
+ */
+replacement?: boolean, 
 /**
  * Set on the first replayed frame of a capped window: older events above
  * the requested cursor were dropped, and the history in front of this

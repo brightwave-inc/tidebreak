@@ -111,6 +111,46 @@ describe("seq cursor", () => {
     expect(second.state.lastSeq).toBe(state.lastSeq);
   });
 
+  it("replaces streamed text with a catch-up tail after reconnect", () => {
+    const clock = deps();
+    const { state } = play(
+      [{ type: "turn_started", turn_id: "t1" }],
+      initialCodeSessionState(),
+      clock,
+    );
+    const streamed = reduceCodeSessionEvent(
+      state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "first second " },
+        transient: true,
+      },
+      clock,
+    );
+    const caughtUp = reduceCodeSessionEvent(
+      streamed.state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "first second third" },
+        transient: true,
+        replacement: true,
+      },
+      clock,
+    );
+    const continued = reduceCodeSessionEvent(
+      caughtUp.state,
+      {
+        seq: state.lastSeq,
+        event: { type: "assistant_delta", text: "." },
+        transient: true,
+      },
+      clock,
+    );
+
+    expect(continued.state.assistantBuffer).toBe("first second third.");
+    expect(continued.state.lastSeq).toBe(state.lastSeq);
+  });
+
   it("says so when the replay started partway through", () => {
     const clock = deps();
     const first = reduceCodeSessionEvent(

@@ -3894,10 +3894,10 @@ async fn connecting_mid_answer_replays_the_text_that_already_streamed() {
     let _ = turn.await;
 }
 
-/// A reconnect keeps the transient text it already applied. The server must
-/// not send the full live tail again from the same journal cursor.
+/// A reconnect may keep a prefix and miss later deltas while the socket is
+/// down. The server sends the complete tail as a replacement.
 #[tokio::test(flavor = "multi_thread")]
-async fn reconnecting_mid_answer_does_not_repeat_the_live_tail() {
+async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
@@ -4005,6 +4005,13 @@ async fn reconnecting_mid_answer_does_not_repeat_the_live_tail() {
     assert_eq!(assembled, "first second ");
     drop(socket);
 
+    runtime.bus.publish_transient(
+        parsed,
+        CodeEvent::AssistantDelta {
+            text: "third".into(),
+        },
+    );
+
     let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after={cursor}")
         .into_client_request()
         .unwrap();
@@ -4013,17 +4020,26 @@ async fn reconnecting_mid_answer_does_not_repeat_the_live_tail() {
         .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     let (mut resumed, _) = connect_async(request).await.unwrap();
 
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), resumed.next())
-            .await
-            .is_err(),
-        "the reconnect repeated text the client already applied"
-    );
+    let frame = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+        .await
+        .expect("the replacement tail timed out")
+        .expect("the resumed socket closed")
+        .unwrap();
+    let WsMessage::Text(text) = frame else {
+        panic!("expected a text frame");
+    };
+    let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(value["seq"], cursor);
+    assert_eq!(value["event"]["type"], "assistant_delta");
+    assert_eq!(value["event"]["text"], "first second third");
+    assert_eq!(value["transient"], true);
+    assert_eq!(value["replacement"], true);
+    assembled = value["event"]["text"].as_str().unwrap().to_owned();
 
     runtime.bus.publish_transient(
         parsed,
         CodeEvent::AssistantDelta {
-            text: "third".into(),
+            text: " fourth".into(),
         },
     );
     let frame = tokio::time::timeout(Duration::from_secs(5), resumed.next())
@@ -4036,9 +4052,10 @@ async fn reconnecting_mid_answer_does_not_repeat_the_live_tail() {
     };
     let value: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
     assert_eq!(value["event"]["type"], "assistant_delta");
-    assert_eq!(value["event"]["text"], "third");
+    assert_eq!(value["event"]["text"], " fourth");
+    assert!(value.get("replacement").is_none());
     assembled.push_str(value["event"]["text"].as_str().unwrap());
-    assert_eq!(assembled, "first second third");
+    assert_eq!(assembled, "first second third fourth");
 }
 
 #[tokio::test]

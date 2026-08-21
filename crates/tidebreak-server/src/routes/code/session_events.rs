@@ -70,10 +70,7 @@ async fn stream_events(
     {
         return;
     }
-    if send_live_tail(&mut socket, &tail, after, last_seq)
-        .await
-        .is_err()
-    {
+    if send_live_tail(&mut socket, &tail, last_seq).await.is_err() {
         return;
     }
     loop {
@@ -112,6 +109,7 @@ async fn stream_events(
                                 event: event.event,
                                 replayed: None,
                                 transient: Some(true),
+                                replacement: None,
                                 truncated: None,
                             },
                         )
@@ -142,6 +140,7 @@ async fn stream_events(
                             event: event.event,
                             replayed: None,
                             transient: None,
+                            replacement: None,
                             truncated: None,
                         },
                     )
@@ -169,18 +168,17 @@ async fn stream_events(
 /// written down.
 ///
 /// Without this, a client that connects mid-answer sees the sentence from
-/// wherever it happened to arrive. A reconnect from the tail's cursor has
-/// already applied its transient text, so sending the tail again would append
-/// the same words twice. The tail is also only trustworthy while replay stays
+/// wherever it happened to arrive. The frame is a replacement because a
+/// reconnect may already hold a prefix while also missing text that streamed
+/// during the disconnect. The tail is only trustworthy while replay stays
 /// behind the position it was captured at: a replay that reads further has
 /// already picked up the event that retired it.
 async fn send_live_tail(
     socket: &mut WebSocket,
     tail: &LiveTail,
-    requested_after: i64,
     last_seq: i64,
 ) -> Result<(), axum::Error> {
-    if tail.assistant.is_empty() || requested_after >= tail.cursor || last_seq > tail.cursor {
+    if tail.assistant.is_empty() || last_seq > tail.cursor {
         return Ok(());
     }
     send_frame(
@@ -192,6 +190,7 @@ async fn send_live_tail(
             },
             replayed: None,
             transient: Some(true),
+            replacement: Some(true),
             truncated: None,
         },
     )
@@ -218,6 +217,7 @@ async fn replay_after(
                 event: event.event,
                 replayed: Some(true),
                 transient: None,
+                replacement: None,
                 // Only the first frame of a capped window carries the flag:
                 // it is the one the dropped history sits in front of.
                 truncated: truncated.then(|| {

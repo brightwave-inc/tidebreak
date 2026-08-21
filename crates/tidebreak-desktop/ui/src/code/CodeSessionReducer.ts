@@ -324,7 +324,8 @@ export function reduceCodeSessionEvent(
   // A transient frame is live-only: no row holds it, so its `seq` is the
   // cursor it streamed behind rather than a position of its own. Applying it
   // must not move the cursor, and the duplicate check does not apply — the
-  // journal will never hand it back.
+  // journal will never hand it back. A replacement frame contains the whole
+  // current assistant tail, so it replaces the buffer instead of appending.
   const transient = framed.transient === true;
   if (!transient && framed.seq <= state.lastSeq) return { state, effects: [] };
   state = {
@@ -367,7 +368,10 @@ export function reduceCodeSessionEvent(
     }
 
     case "assistant_delta": {
-      const assistantBuffer = state.assistantBuffer + event.text;
+      const assistantBuffer =
+        framed.replacement === true
+          ? event.text
+          : state.assistantBuffer + event.text;
       return {
         state: {
           ...state,

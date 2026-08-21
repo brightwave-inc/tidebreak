@@ -120,6 +120,7 @@ pub async fn get_session_debug(
                 event: item.event,
                 replayed: None,
                 transient: None,
+                replacement: None,
                 truncated: None,
             })
             .collect(),

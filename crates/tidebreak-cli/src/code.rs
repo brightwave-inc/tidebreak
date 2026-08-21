@@ -989,7 +989,7 @@ async fn drain_checkpoint(
     turn_id: CodeTurnId,
     format: OutputFormat,
     mut dangling: bool,
-    streamed_text: &mut bool,
+    streamed_text: &mut String,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + CHECKPOINT_TAIL_WAIT;
     loop {
@@ -1008,7 +1008,12 @@ async fn drain_checkpoint(
         if format == OutputFormat::Json {
             emit_line(&raw);
         } else {
-            dangling = render_event(&decoded.event, dangling, streamed_text);
+            dangling = render_event(
+                &decoded.event,
+                decoded.replacement == Some(true),
+                dangling,
+                streamed_text,
+            );
         }
         if done {
             return dangling;
@@ -1063,7 +1068,7 @@ async fn run_turn(
     let deadline =
         timeout.map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
     let mut dangling = false;
-    let mut streamed_text = false;
+    let mut streamed_text = String::new();
 
     let outcome = loop {
         let frame = tokio::select! {
@@ -1117,7 +1122,12 @@ async fn run_turn(
                 if format == OutputFormat::Json {
                     emit_line(&raw);
                 } else {
-                    dangling = render_event(&decoded.event, dangling, &mut streamed_text);
+                    dangling = render_event(
+                        &decoded.event,
+                        decoded.replacement == Some(true),
+                        dangling,
+                        &mut streamed_text,
+                    );
                 }
                 // The checkpoint is journaled just after the turn's terminal
                 // event, so breaking here dropped it every time: the turn's
@@ -1144,7 +1154,12 @@ async fn run_turn(
         if format == OutputFormat::Json {
             emit_line(&raw);
         } else {
-            dangling = render_event(&decoded.event, dangling, &mut streamed_text);
+            dangling = render_event(
+                &decoded.event,
+                decoded.replacement == Some(true),
+                dangling,
+                &mut streamed_text,
+            );
         }
         if let CodeEvent::ApprovalRequested { approval_id } = &decoded.event {
             print_approval_prompt(*approval_id);
@@ -1202,19 +1217,32 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> bool {
+fn render_event(
+    event: &CodeEvent,
+    replacement: bool,
+    dangling: bool,
+    streamed_text: &mut String,
+) -> bool {
     match event {
         CodeEvent::AssistantDelta { text } => {
-            *streamed_text = true;
+            let text = if replacement {
+                reconcile_assistant_text(streamed_text, text)
+            } else {
+                streamed_text.push_str(text);
+                text.clone()
+            };
+            if text.is_empty() {
+                return dangling;
+            }
             let mut stdout = std::io::stdout().lock();
             let _ = write!(stdout, "{text}");
             let _ = stdout.flush();
             return !text.ends_with('\n');
         }
         CodeEvent::AssistantMessage { text, .. } => {
-            // Deltas already painted the same words; reprinting them as
-            // `pingping` is the usual stream+final pair.
-            if *streamed_text {
+            let text = reconcile_assistant_text(streamed_text, text);
+            streamed_text.clear();
+            if text.is_empty() {
                 return dangling;
             }
             let mut stdout = std::io::stdout().lock();
@@ -1227,7 +1255,15 @@ fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> 
                 eprint!("{text}");
             }
         }
-        CodeEvent::ToolStarted { name, detail, .. } => {
+        CodeEvent::ToolStarted {
+            name,
+            detail,
+            parent_call_id,
+            ..
+        } => {
+            if parent_call_id.is_none() {
+                streamed_text.clear();
+            }
             finish_line(dangling);
             eprintln!("tidebreak: tool {name}  {}", tool_detail(detail));
             return false;
@@ -1255,11 +1291,13 @@ fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> 
             return false;
         }
         CodeEvent::TurnFailed { error } => {
+            streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn failed: {}", error.message);
             return false;
         }
         CodeEvent::TurnInterrupted => {
+            streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn interrupted");
             return false;
@@ -1276,9 +1314,9 @@ fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> 
             );
             return false;
         }
-        CodeEvent::TurnCompleted { .. }
-        | CodeEvent::TurnStarted { .. }
-        | CodeEvent::SessionStarted { .. }
+        CodeEvent::TurnStarted { .. } => streamed_text.clear(),
+        CodeEvent::TurnCompleted { .. } => streamed_text.clear(),
+        CodeEvent::SessionStarted { .. }
         | CodeEvent::ApprovalRequested { .. }
         | CodeEvent::ApprovalResolved { .. }
         | CodeEvent::UserSteered { .. }
@@ -1287,6 +1325,22 @@ fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> 
         | _ => {}
     }
     dangling
+}
+
+/// Return the part of a complete assistant tail that has not been printed.
+fn reconcile_assistant_text(streamed: &mut String, complete: &str) -> String {
+    if let Some(suffix) = complete.strip_prefix(streamed.as_str()) {
+        let suffix = suffix.to_owned();
+        streamed.clear();
+        streamed.push_str(complete);
+        return suffix;
+    }
+    if streamed.starts_with(complete) {
+        return String::new();
+    }
+    streamed.clear();
+    streamed.push_str(complete);
+    complete.to_owned()
 }
 
 fn finish_line(dangling: bool) {
@@ -2758,6 +2812,27 @@ mod tests {
             FrameAction::Render
         );
         assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));
+    }
+
+    #[test]
+    fn a_replacement_tail_only_renders_text_not_already_printed() {
+        let mut streamed = "first second ".to_owned();
+        assert_eq!(
+            reconcile_assistant_text(&mut streamed, "first second third"),
+            "third"
+        );
+        assert_eq!(streamed, "first second third");
+        assert_eq!(
+            reconcile_assistant_text(&mut streamed, "first second third"),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_bounded_replacement_does_not_repeat_a_longer_printed_prefix() {
+        let mut streamed = "first second third".to_owned();
+        assert_eq!(reconcile_assistant_text(&mut streamed, "first second "), "");
+        assert_eq!(streamed, "first second third");
     }
 
     #[test]
