@@ -452,11 +452,15 @@ pub(crate) fn compose_app_server_plan(
     argv.extend(extra_argv.iter().cloned());
     if let Some(spec) = browser {
         argv.push("-c".into());
-        let bridge = spec.bridge_command().to_string_lossy();
+        // Use serde_json to escape the bridge path: backslashes, quotes,
+        // and control characters in a Windows or unusual path are turned
+        // into valid JSON string characters. to_string_lossy handles
+        // non-UTF-8 losslessly; serde_json then produces the correct
+        // escaped form for the config string literal.
+        let escaped = serde_json::to_string(&spec.bridge_command().to_string_lossy())
+            .unwrap_or_else(|_| String::from("\"\""));
         argv.push(
-            format!(
-                "mcp_servers.tb-browser={{command=\"{}\",args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}",
-                bridge
+            format!("mcp_servers.tb-browser={{command={escaped},args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}"
             )
             .into(),
         );
@@ -1913,5 +1917,58 @@ done
         assert!(value.contains("command=\"/Applications/Tidebreak.app/Contents/bin/tidebreak\""));
         // args must still be exactly ["browser-mcp"].
         assert!(value.contains(r#"args=["browser-mcp"]"#));
+    }
+
+    #[test]
+    fn bridge_command_with_backslashes_is_escaped() {
+        // A Windows path like C:\bin\tidebreak.exe must have its backslashes
+        // JSON-escaped so the config string remains valid.
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from(r"C:\Program Files\Tidebreak\tidebreak.exe"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
+        let value = &plan.argv[override_idx + 1];
+        // The backslashes must be escaped as \\, not left raw.
+        assert!(value.contains("\\\\"));
+        // The original \t in Tidebreak must not become a tab character.
+        assert!(!value.contains('\t'));
+        // The command must still parse as one value.
+        assert!(value.contains("command=\""));
+        assert!(value.contains(r#"args=["browser-mcp"]"#));
+    }
+
+    #[test]
+    fn bridge_command_with_embedded_quote_is_escaped() {
+        // A path containing a double-quote (unlikely but defensive) must
+        // escape it with a backslash so the config value remains valid.
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/tmp/tidebreak-\"-binary"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
+        let value = &plan.argv[override_idx + 1];
+        // The embedded " must be escaped as \", not raw.
+        assert!(value.contains("\\\""));
+        // The surrounding command="..." delimiter must still close properly.
+        assert!(value.starts_with("mcp_servers.tb-browser="));
+        assert!(value.contains("command=\""));
+        assert!(value.ends_with("]"));
     }
 }
