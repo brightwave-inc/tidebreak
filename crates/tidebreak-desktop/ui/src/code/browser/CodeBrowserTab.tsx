@@ -115,7 +115,6 @@ function CodeBrowserTabSession({
   const persistTimer = useRef<number | null>(null);
   const sessionRef = useRef(session);
   const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
-  const viewportRef = useRef(viewport);
   const viewportSurfaceRef = useRef<HTMLDivElement | null>(null);
   const [renderedViewportWidth, setRenderedViewportWidth] = useState<number | null>(
     null,
@@ -124,7 +123,7 @@ function CodeBrowserTabSession({
   const visibleRef = useRef(visible);
 
   sessionRef.current = session;
-  viewportRef.current = viewport;
+  visibleRef.current = visible;
 
   const updateSession = useCallback(
     (update: (current: BrowserSession) => BrowserSession) => {

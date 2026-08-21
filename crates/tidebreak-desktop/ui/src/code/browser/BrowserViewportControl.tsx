@@ -4,6 +4,8 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent,
+  type RefObject,
 } from "react";
 import {
   MonitorSmartphone,
@@ -32,25 +34,21 @@ import {
   VIEWPORT_PRESET_LABELS,
 } from "./browserViewport";
 
-const PRESET_ORDER: BrowserViewportPreset[] = [
+const PRESET_ORDER = [
   "fit",
   "desktop",
   "tablet",
   "mobile",
-];
+  "custom",
+] as const satisfies readonly BrowserViewportPreset[];
 
-const PRESET_ICONS: Record<
-  Exclude<BrowserViewportPreset, "custom">,
-  typeof MonitorSmartphone
-> = {
+const PRESET_ICONS: Record<BrowserViewportPreset, typeof MonitorSmartphone> = {
   fit: Maximize,
   desktop: MonitorSmartphone,
   tablet: Tablet,
   mobile: Smartphone,
+  custom: SlidersHorizontal,
 };
-
-const PRESET_ICON_FOR = (preset: BrowserViewportPreset) =>
-  preset === "custom" ? SlidersHorizontal : PRESET_ICONS[preset];
 
 export type BrowserViewportControlProps = {
   viewport: BrowserViewport;
@@ -76,6 +74,7 @@ export function BrowserViewportControl({
   disabled = false,
 }: BrowserViewportControlProps) {
   const [open, setOpen] = useState(false);
+  const activeRadioRef = useRef<HTMLButtonElement | null>(null);
   const triggerLabelId = useId();
   const label = viewportLabel(viewport);
   const widthText =
@@ -117,11 +116,15 @@ export function BrowserViewportControl({
       <PopoverContent
         align="end"
         className="w-60 p-2"
-        onOpenAutoFocus={(event) => event.preventDefault()}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          activeRadioRef.current?.focus();
+        }}
       >
         <ViewportPresetList
           viewport={viewport}
           onSelectPreset={selectPreset}
+          activeRadioRef={activeRadioRef}
         />
         <div className="my-1.5 h-px bg-border-subtle" />
         <CustomWidthField
@@ -137,18 +140,56 @@ export function BrowserViewportControl({
 function ViewportPresetList({
   viewport,
   onSelectPreset,
+  activeRadioRef,
 }: {
   viewport: BrowserViewport;
   onSelectPreset: (preset: BrowserViewportPreset) => void;
+  activeRadioRef: RefObject<HTMLButtonElement | null>;
 }) {
+  const refs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function selectAt(index: number) {
+    const preset = PRESET_ORDER[index];
+    if (!preset) return;
+    onSelectPreset(preset);
+    refs.current[index]?.focus();
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const last = PRESET_ORDER.length - 1;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      selectAt(index === last ? 0 : index + 1);
+      return;
+    }
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      selectAt(index === 0 ? last : index - 1);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      selectAt(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      selectAt(last);
+    }
+  }
+
   return (
     <div role="radiogroup" aria-label="Viewport presets">
-      {PRESET_ORDER.map((preset) => {
-        const Icon = PRESET_ICON_FOR(preset);
+      {PRESET_ORDER.map((preset, index) => {
+        const Icon = PRESET_ICONS[preset];
         const active = viewport.preset === preset;
         return (
           <button
             key={preset}
+            ref={(node) => {
+              refs.current[index] = node;
+              if (active) activeRadioRef.current = node;
+            }}
             type="button"
             role="radio"
             aria-checked={active}
@@ -163,6 +204,7 @@ function ViewportPresetList({
                 : "text-muted-foreground hover:text-foreground",
             )}
             onClick={() => onSelectPreset(preset)}
+            onKeyDown={(event) => onKeyDown(event, index)}
           >
             <Icon className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="flex-1 truncate">{VIEWPORT_PRESET_LABELS[preset]}</span>
@@ -211,9 +253,9 @@ function CustomWidthField({
       setError(
         `Width must be between ${MIN_CUSTOM_WIDTH} and ${MAX_CUSTOM_WIDTH}`,
       );
-    } else {
-      setError(null);
+      return;
     }
+    setError(null);
     onViewportChange({ preset: "custom", customWidth: clamped });
     setDraft(String(clamped));
     inputRef.current?.focus();
