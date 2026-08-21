@@ -55,14 +55,8 @@ pub fn merged_mcp_config_json(
         }
         (None, Some(_)) => {
             let mut servers = serde_json::Map::new();
-            servers.insert(
-                BROWSER_MCP_SERVER.into(),
-                browser_mcp_config_entry(),
-            );
-            Some(
-                serde_json::json!({ "mcpServers": servers })
-                    .to_string(),
-            )
+            servers.insert(BROWSER_MCP_SERVER.into(), browser_mcp_config_entry());
+            Some(serde_json::json!({ "mcpServers": servers }).to_string())
         }
         (Some(channel), Some(_)) => {
             // Merge both into one config object.
@@ -79,14 +73,8 @@ pub fn merged_mcp_config_json(
                 }),
             );
             // Browser entry (stdio, inherits env).
-            servers.insert(
-                BROWSER_MCP_SERVER.into(),
-                browser_mcp_config_entry(),
-            );
-            Some(
-                serde_json::json!({ "mcpServers": servers })
-                    .to_string(),
-            )
+            servers.insert(BROWSER_MCP_SERVER.into(), browser_mcp_config_entry());
+            Some(serde_json::json!({ "mcpServers": servers }).to_string())
         }
     }
 }
@@ -167,18 +155,10 @@ mod tests {
         assert_eq!(flags[0], "--mcp-config");
         let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         assert_eq!(config["mcpServers"]["tb-browser"]["type"], "stdio");
-        assert_eq!(
-            config["mcpServers"]["tb-browser"]["command"],
-            "tidebreak"
-        );
-        assert_eq!(
-            config["mcpServers"]["tb-browser"]["args"][0],
-            "browser-mcp"
-        );
+        assert_eq!(config["mcpServers"]["tb-browser"]["command"], "tidebreak");
+        assert_eq!(config["mcpServers"]["tb-browser"]["args"][0], "browser-mcp");
         // No --permission-prompt-tool when approval is absent.
-        assert!(!flags
-            .iter()
-            .any(|f| f == "--permission-prompt-tool"));
+        assert!(!flags.iter().any(|f| f == "--permission-prompt-tool"));
         // No approval server when approval is absent.
         assert!(config["mcpServers"].get("tb-approvals").is_none());
     }
@@ -187,31 +167,18 @@ mod tests {
     fn both_channels_merge_into_one_config() {
         let approval = approval_channel();
         let browser = browser_channel();
-        let flags =
-            launch_args_for_mcp_channels(Some(&approval), Some(&browser)).unwrap();
+        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser)).unwrap();
         // Exactly one --mcp-config flag.
-        assert_eq!(
-            flags.iter().filter(|f| **f == "--mcp-config").count(),
-            1
-        );
-        let config: serde_json::Value =
-            serde_json::from_str(&flags[1]).unwrap();
+        assert_eq!(flags.iter().filter(|f| **f == "--mcp-config").count(), 1);
+        let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         assert!(config["mcpServers"].get("tb-approvals").is_some());
         assert!(config["mcpServers"].get("tb-browser").is_some());
         // Approval is HTTP with bearer.
-        assert_eq!(
-            config["mcpServers"]["tb-approvals"]["type"],
-            "http"
-        );
+        assert_eq!(config["mcpServers"]["tb-approvals"]["type"], "http");
         // Browser is stdio.
-        assert_eq!(
-            config["mcpServers"]["tb-browser"]["type"],
-            "stdio"
-        );
+        assert_eq!(config["mcpServers"]["tb-browser"]["type"], "stdio");
         // --permission-prompt-tool present with approval.
-        assert!(flags
-            .iter()
-            .any(|f| f == "--permission-prompt-tool"));
+        assert!(flags.iter().any(|f| f == "--permission-prompt-tool"));
     }
 
     #[test]
@@ -222,8 +189,7 @@ mod tests {
             launch_args_for_mcp_channels(Some(&approval_channel()), Some(&browser)),
         ] {
             let flags = flags.unwrap();
-            let config: serde_json::Value =
-                serde_json::from_str(&flags[1]).unwrap();
+            let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
             let config_str = config.to_string();
             // No capfile path or env key in the config text.
             assert!(!config_str.contains("/tmp/tidebreak-browser-cap.json"));

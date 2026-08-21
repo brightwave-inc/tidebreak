@@ -422,8 +422,8 @@ mod tests {
     use super::*;
     use crate::ApprovalChannelSpec;
     use crate::HarnessEventSink;
-    use std::path::PathBuf;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     struct Discard;
@@ -454,8 +454,7 @@ mod tests {
             token: "session-token".into(),
             completer: Arc::new(NoopCompleter),
         };
-        let browser =
-            BrowserChannelSpec::new(PathBuf::from("/tmp/session-browser-cap.json"));
+        let browser = BrowserChannelSpec::new(PathBuf::from("/tmp/session-browser-cap.json"));
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
             permission_mode: CodePermissionMode::Plan,
@@ -471,7 +470,10 @@ mod tests {
         });
         let plan = session.compose_plan_for(None, false).unwrap();
         assert_eq!(
-            plan.argv.iter().filter(|arg| *arg == "--mcp-config").count(),
+            plan.argv
+                .iter()
+                .filter(|arg| *arg == "--mcp-config")
+                .count(),
             1,
             "compose must use the merged helper exactly once"
         );
@@ -480,8 +482,7 @@ mod tests {
             .iter()
             .position(|arg| arg == "--mcp-config")
             .unwrap();
-        let config: serde_json::Value =
-            serde_json::from_str(&plan.argv[config_index + 1]).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&plan.argv[config_index + 1]).unwrap();
         assert!(
             config["mcpServers"].get("tb-approvals").is_some(),
             "merged config keeps the approval HTTP server"
