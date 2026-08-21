@@ -93,18 +93,89 @@ function defaultController() {
   };
 }
 
+// ── validation constants (match crates/tidebreak-core/src/browser.rs) ───────
+
+const MAX_BROWSER_ID_CHARS = 80;
+const MAX_BROWSER_URL_CHARS = 8_192;
+const DEFAULT_BROWSER_WAIT_TIMEOUT_MS = 5_000;
+const MAX_BROWSER_WAIT_TIMEOUT_MS = 30_000;
+const MAX_BROWSER_SCREENSHOT_DIMENSION = 4_096;
+const MAX_WAIT_TEXT_CHARS = 512;
+
+const BROWSER_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+
+function validBrowserId(id) {
+  return typeof id === "string" && BROWSER_ID_RE.test(id);
+}
+
+function validWaitCondition(condition) {
+  if (!condition || typeof condition !== "object") return false;
+  const kind = condition.kind;
+  switch (kind) {
+    case "url_changed":
+      return true;
+    case "load_state":
+      // is_well_formed always returns true for LoadState; the state value
+      // validity is a deserialization concern (handled as 400 above).
+      return true;
+    case "text_present":
+    case "text_absent":
+      return (
+        typeof condition.text === "string" &&
+        [...condition.text].length <= MAX_WAIT_TEXT_CHARS
+      );
+    default:
+      return false;
+  }
+}
+
+function validTimeoutMs(timeoutMs) {
+  if (timeoutMs === undefined || timeoutMs === null) return true;
+  return (
+    typeof timeoutMs === "number" &&
+    Number.isInteger(timeoutMs) &&
+    timeoutMs >= 100 &&
+    timeoutMs <= MAX_BROWSER_WAIT_TIMEOUT_MS
+  );
+}
+
+function validScreenshotDimension(value, allowZero) {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "number" || !Number.isInteger(value)) return false;
+  if (allowZero && value === 0) return true;
+  return value >= 1 && value <= MAX_BROWSER_SCREENSHOT_DIMENSION;
+}
+
+// ── deterministic small valid PNG ───────────────────────────────────────────
+
+/**
+ * A deterministic 1×1 transparent PNG, base64-encoded. This is the smallest
+ * valid PNG (67 bytes raw). The screenshot route returns this so the test can
+ * verify the wire shape without depending on a native image capture.
+ */
+const DETERMINISTIC_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
 // ── server ──────────────────────────────────────────────────────────────────
 
 /**
  * Start the mock bridge server.
  *
  * The returned `endpoint` is the full `/code/browser` base URL —
- * callers append just `list`, `navigate`, or `snapshot`. This matches
- * the real capfile `endpoint` field exactly.
+ * callers append just `list`, `navigate`, `snapshot`, `wait`, or `screenshot`.
+ * This matches the real capfile `endpoint` field exactly.
  *
  * Tokens are strings returned by `tokenRegistry.issue()`. The server
  * validates token presence and liveness but does not derive
  * workspace/session identity from the token.
+ *
+ * Options:
+ * - staleSnapshot: if true, snapshot/wait/screenshot return 409 stale_browser_target
+ * - hiddenBrowser: if true, list returns visible=false
+ * - stoppedControl: if true, list returns controller.halted=true, wait returns stopped
+ * - missingRuntime: if true, all routes return 501 after auth+validation
+ * - waitOutcome: "resolved" | "timed_out" | "stopped" — controls wait result status
+ * - staleInstance: if true, wait/screenshot return a 409 with instance-replaced semantics
  */
 export async function startBridgeServer({
   host = "127.0.0.1",
@@ -114,6 +185,8 @@ export async function startBridgeServer({
   hiddenBrowser = false,
   stoppedControl = false,
   missingRuntime = false,
+  waitOutcome = "resolved",
+  staleInstance = false,
 } = {}) {
   if (!fixtureOrigin) {
     throw new Error("fixtureOrigin is required");
@@ -144,6 +217,10 @@ export async function startBridgeServer({
       return entry ? entry.ended : false;
     },
   };
+
+  // The current snapshot/document epoch. Navigate increments it.
+  let currentDocumentEpoch = 2;
+  let currentSnapshotId = `snapshot-${randomUUID().slice(0, 8)}`;
 
   const server = createServer(async (request, response) => {
     try {
@@ -298,11 +375,15 @@ export async function startBridgeServer({
           return;
         }
 
+        // Navigate increments the document epoch and generates a new snapshot id
+        currentDocumentEpoch += 1;
+        currentSnapshotId = `snapshot-${randomUUID().slice(0, 8)}`;
+
         json(response, {
           browserId: "browser-1",
           url: navUrl,
           loadState: "loading",
-          documentEpoch: 3,
+          documentEpoch: currentDocumentEpoch,
         });
         return;
       }
@@ -391,10 +472,13 @@ export async function startBridgeServer({
           return;
         }
 
+        // Refresh the snapshot id on each successful snapshot
+        currentSnapshotId = `snapshot-${randomUUID().slice(0, 8)}`;
+
         json(response, {
           browserId: "browser-1",
-          snapshotId: `snapshot-${randomUUID().slice(0, 8)}`,
-          documentEpoch: 2,
+          snapshotId: currentSnapshotId,
+          documentEpoch: currentDocumentEpoch,
           contentTrust: "untrusted_page",
           url: fixtureOrigin,
           title: "Agent browser fixture",
@@ -442,6 +526,309 @@ export async function startBridgeServer({
           ],
           frames: [],
           truncated: false,
+        });
+        return;
+      }
+
+      // ── POST /wait ──────────────────────────────────────────────────────
+
+      if (route === "wait" && request.method === "POST") {
+        const body = await readBody(request);
+
+        if (!body || typeof body !== "object") {
+          errJson(response, 400, "bad_request", "invalid JSON body");
+          return;
+        }
+
+        // Deny unknown fields (matches #[serde(deny_unknown_fields)])
+        const allowed = new Set([
+          "browser_id",
+          "snapshot_id",
+          "document_epoch",
+          "condition",
+          "timeout_ms",
+        ]);
+        for (const key of Object.keys(body)) {
+          if (!allowed.has(key)) {
+            errJson(
+              response,
+              400,
+              "invalid_browser_arguments",
+              `unknown field \`${key}\``
+            );
+            return;
+          }
+        }
+
+        const { browser_id, snapshot_id, document_epoch, condition, timeout_ms } = body;
+
+        // Missing required fields → 400
+        if (typeof browser_id !== "string") {
+          errJson(response, 400, "bad_request", "missing browser_id");
+          return;
+        }
+        if (typeof snapshot_id !== "string") {
+          errJson(response, 400, "bad_request", "missing snapshot_id");
+          return;
+        }
+        if (typeof document_epoch !== "number" || !Number.isInteger(document_epoch) || document_epoch < 0) {
+          errJson(response, 400, "bad_request", "missing or invalid document_epoch");
+          return;
+        }
+        if (!condition || typeof condition !== "object") {
+          errJson(response, 400, "bad_request", "missing or invalid condition");
+          return;
+        }
+
+        // Validate browser_id format → 422
+        if (!validBrowserId(browser_id)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        // Condition deserialization: missing kind or unknown kind → 400
+        // (matches serde rejection of the tagged enum)
+        const condKind = condition.kind;
+        if (typeof condKind !== "string") {
+          errJson(response, 400, "bad_request", "condition missing kind tag");
+          return;
+        }
+        if (!["url_changed", "load_state", "text_present", "text_absent"].includes(condKind)) {
+          errJson(response, 400, "bad_request", `unknown condition kind: ${condKind}`);
+          return;
+        }
+        // Variant field deserialization: missing required variant fields → 400
+        if (condKind === "load_state") {
+          if (typeof condition.state !== "string") {
+            errJson(response, 400, "bad_request", "load_state condition missing state");
+            return;
+          }
+          // BrowserLoadState is a snake_case enum: idle, loading, ready, failed
+          if (!["idle", "loading", "ready", "failed"].includes(condition.state)) {
+            errJson(response, 400, "bad_request", `unknown load_state: ${condition.state}`);
+            return;
+          }
+        }
+        if ((condKind === "text_present" || condKind === "text_absent") && typeof condition.text !== "string") {
+          errJson(response, 400, "bad_request", `${condKind} condition missing text`);
+          return;
+        }
+
+        // Condition is_well_formed check (post-deserialization) → 422
+        if (!validWaitCondition(condition)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        // Validate timeout_ms bounds → 422
+        if (!validTimeoutMs(timeout_ms)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        if (missingRuntime) {
+          errJson(
+            response,
+            501,
+            "not_implemented",
+            "this server has no in-app browser runtime"
+          );
+          return;
+        }
+
+        // Cross-workspace / unknown browser id → 404
+        if (browser_id !== "browser-1") {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
+          return;
+        }
+
+        // Stale document epoch → 409
+        if (staleSnapshot && document_epoch !== currentDocumentEpoch) {
+          errJson(
+            response,
+            409,
+            "stale_browser_target",
+            "the page changed since that snapshot; take a new browser_snapshot"
+          );
+          return;
+        }
+
+        // Stale instance (session replaced) → 409
+        if (staleInstance) {
+          errJson(
+            response,
+            409,
+            "stale_browser_target",
+            "browser session was replaced while waiting"
+          );
+          return;
+        }
+
+        // Deterministic wait outcome
+        let status;
+        let message;
+        if (stoppedControl) {
+          status = "stopped";
+          message = "Browser control was stopped by the user.";
+        } else if (waitOutcome === "timed_out") {
+          status = "timed_out";
+          const effectiveTimeout = timeout_ms ?? DEFAULT_BROWSER_WAIT_TIMEOUT_MS;
+          message = `Wait timed out after ${effectiveTimeout} ms.`;
+        } else if (waitOutcome === "stopped") {
+          status = "stopped";
+          message = "Browser control was stopped by the user.";
+        } else {
+          status = "resolved";
+          message = "Wait condition satisfied.";
+        }
+
+        json(response, {
+          browserId: "browser-1",
+          status,
+          message,
+          documentEpoch: currentDocumentEpoch,
+          url: fixtureOrigin,
+          title: "Agent browser fixture",
+        });
+        return;
+      }
+
+      // ── POST /screenshot ────────────────────────────────────────────────
+
+      if (route === "screenshot" && request.method === "POST") {
+        const body = await readBody(request);
+
+        if (!body || typeof body !== "object") {
+          errJson(response, 400, "bad_request", "invalid JSON body");
+          return;
+        }
+
+        // Deny unknown fields (matches #[serde(deny_unknown_fields)])
+        const allowed = new Set([
+          "browser_id",
+          "snapshot_id",
+          "document_epoch",
+          "max_width",
+          "max_height",
+        ]);
+        for (const key of Object.keys(body)) {
+          if (!allowed.has(key)) {
+            errJson(
+              response,
+              400,
+              "invalid_browser_arguments",
+              `unknown field \`${key}\``
+            );
+            return;
+          }
+        }
+
+        const { browser_id, snapshot_id, document_epoch, max_width, max_height } = body;
+
+        // Missing required fields → 400
+        if (typeof browser_id !== "string") {
+          errJson(response, 400, "bad_request", "missing browser_id");
+          return;
+        }
+        if (typeof snapshot_id !== "string") {
+          errJson(response, 400, "bad_request", "missing snapshot_id");
+          return;
+        }
+        if (typeof document_epoch !== "number" || !Number.isInteger(document_epoch) || document_epoch < 0) {
+          errJson(response, 400, "bad_request", "missing or invalid document_epoch");
+          return;
+        }
+
+        // Validate browser_id format → 422
+        if (!validBrowserId(browser_id)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        // Validate dimension bounds → 422
+        if (!validScreenshotDimension(max_width, false)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+        if (!validScreenshotDimension(max_height, true)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+
+        if (missingRuntime) {
+          errJson(
+            response,
+            501,
+            "not_implemented",
+            "this server has no in-app browser runtime"
+          );
+          return;
+        }
+
+        // Cross-workspace / unknown browser id → 404
+        if (browser_id !== "browser-1") {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
+          return;
+        }
+
+        // Stale document epoch → 409
+        if (staleSnapshot && document_epoch !== currentDocumentEpoch) {
+          errJson(
+            response,
+            409,
+            "stale_browser_target",
+            "the page changed since that snapshot; take a new browser_snapshot"
+          );
+          return;
+        }
+
+        // Stale instance (session replaced) → 409
+        if (staleInstance) {
+          errJson(
+            response,
+            409,
+            "stale_browser_target",
+            "browser session was replaced while waiting"
+          );
+          return;
+        }
+
+        json(response, {
+          browserId: "browser-1",
+          snapshotId: snapshot_id,
+          documentEpoch: currentDocumentEpoch,
+          imageBase64: DETERMINISTIC_PNG_BASE64,
+          mimeType: "image/png",
         });
         return;
       }
