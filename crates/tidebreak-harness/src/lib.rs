@@ -340,10 +340,7 @@ impl BrowserChannelSpec {
     /// `bridge_command` is absolute before calling this. The desktop
     /// sibling resolver separately checks existence and executability.
     #[must_use]
-    pub fn new(
-        capability_file: std::path::PathBuf,
-        bridge_command: std::path::PathBuf,
-    ) -> Self {
+    pub fn new(capability_file: std::path::PathBuf, bridge_command: std::path::PathBuf) -> Self {
         Self {
             capability_file,
             bridge_command,
