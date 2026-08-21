@@ -535,6 +535,416 @@ fn marker_for_snapshot(snapshot_id: &str) -> String {
     format!("__tidebreak_ref_{}", snapshot_id.replace('-', ""))
 }
 
+
+
+// ── Deterministic waits ─────────────────────────────────────────────
+
+pub(crate) async fn browser_wait(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserWaitArgs,
+) -> Result<tidebreak_core::BrowserWaitResult, String> {
+    use tidebreak_core::{BrowserWaitCondition, BrowserWaitResult, BrowserWaitStatus};
+
+    if !arguments.is_well_formed() {
+        return Err("browser wait request is not valid".to_owned());
+    }
+    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    let origin = host_snapshot
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let workspace_id = host_snapshot.workspace_id;
+    let browser_id = arguments.browser_id.clone();
+    let app = app.clone();
+    let dispatch_registry = registry.clone();
+    registry
+        .dispatch_agent(
+            capability_id,
+            &browser_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+            "wait",
+            None,
+            BrowserDispatchEffect::Observe,
+            None,
+            move || async move {
+                poll_wait_condition(app, dispatch_registry, workspace_id, arguments).await
+            },
+        )
+        .await
+}
+
+async fn poll_wait_condition(
+    app: AppHandle,
+    registry: BrowserRegistry,
+    workspace_id: String,
+    arguments: tidebreak_core::BrowserWaitArgs,
+) -> Result<tidebreak_core::BrowserWaitResult, String> {
+    use tidebreak_core::{BrowserWaitCondition, BrowserWaitResult, BrowserWaitStatus};
+
+    let label = browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+
+    let timeout_ms = arguments.bounded_timeout_ms();
+    let poll_ms = std::cmp::max(80u64, std::cmp::min(timeout_ms / 20, 500u64));
+    let start = std::time::Instant::now();
+
+    // Capture the starting URL for UrlChanged condition
+    let start_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+    let start_url = start_snapshot.url.clone();
+
+    loop {
+        let snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+        let Some(document_epoch) = snapshot.document_epoch else {
+            return Ok(BrowserWaitResult {
+                browser_id: arguments.browser_id.clone(),
+                status: BrowserWaitStatus::TimedOut,
+                message: "browser document epoch is unavailable".to_owned(),
+                document_epoch: 0,
+                url: snapshot.url,
+                title: snapshot.title,
+            });
+        };
+
+        if snapshot.agent_access.as_ref().is_some_and(|a| a.halted) {
+            return Ok(BrowserWaitResult {
+                browser_id: arguments.browser_id.clone(),
+                status: BrowserWaitStatus::Stopped,
+                message: "Browser control was stopped by the user.".to_owned(),
+                document_epoch,
+                url: snapshot.url,
+                title: snapshot.title,
+            });
+        }
+
+        let satisfied = match &arguments.condition {
+            BrowserWaitCondition::LoadState { state } => {
+                snapshot.load_state == Some(*state)
+            }
+            BrowserWaitCondition::UrlChanged => {
+                snapshot.url != start_url
+            }
+            BrowserWaitCondition::TextPresent { text } => {
+                page_contains_text(&webview, text).await.unwrap_or(false)
+            }
+            BrowserWaitCondition::TextAbsent { text } => {
+                !page_contains_text(&webview, text).await.unwrap_or(true)
+            }
+        };
+
+        if satisfied {
+            let final_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+            return Ok(BrowserWaitResult {
+                browser_id: arguments.browser_id.clone(),
+                status: BrowserWaitStatus::Resolved,
+                message: "Wait condition satisfied.".to_owned(),
+                document_epoch: final_snapshot.document_epoch.unwrap_or(0),
+                url: final_snapshot.url,
+                title: final_snapshot.title,
+            });
+        }
+
+        if start.elapsed().as_millis() as u64 >= timeout_ms {
+            let final_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+            return Ok(BrowserWaitResult {
+                browser_id: arguments.browser_id.clone(),
+                status: BrowserWaitStatus::TimedOut,
+                message: format!("Wait timed out after {timeout_ms} ms."),
+                document_epoch: final_snapshot.document_epoch.unwrap_or(0),
+                url: final_snapshot.url,
+                title: final_snapshot.title,
+            });
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+    }
+}
+
+async fn page_contains_text(webview: &Webview, text: &str) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let safe_text = text.replace('\\', "\\\\").replace('\'', "\\'");
+        let script = format!(
+            "JSON.stringify(Boolean(document.body && document.body.innerText.indexOf('{safe_text}') !== -1))"
+        );
+        let raw: String = evaluate_json(webview, &script).await?;
+        Ok(raw == "true")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (webview, text);
+        Err("semantic browser control is not available on this platform yet".to_owned())
+    }
+}
+
+// ── Epoch-bound screenshots ───────────────────────────────────────
+
+pub(crate) async fn browser_screenshot(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserScreenshotArgs,
+) -> Result<tidebreak_core::BrowserScreenshotResult, String> {
+    use tidebreak_core::BrowserScreenshotResult;
+
+    if !arguments.is_well_formed() {
+        return Err("browser screenshot request is not valid".to_owned());
+    }
+    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    let origin = host_snapshot
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let workspace_id = host_snapshot.workspace_id;
+    let browser_id = arguments.browser_id.clone();
+    let app = app.clone();
+    let dispatch_registry = registry.clone();
+    registry
+        .dispatch_agent(
+            capability_id,
+            &browser_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+            "screenshot",
+            None,
+            BrowserDispatchEffect::Observe,
+            None,
+            move || async move {
+                capture_screenshot(app, dispatch_registry, workspace_id, arguments).await
+            },
+        )
+        .await
+}
+
+async fn capture_screenshot(
+    app: AppHandle,
+    registry: BrowserRegistry,
+    workspace_id: String,
+    arguments: tidebreak_core::BrowserScreenshotArgs,
+) -> Result<tidebreak_core::BrowserScreenshotResult, String> {
+    use tidebreak_core::BrowserScreenshotResult;
+
+    let label = browser_label(&arguments.browser_id)?;
+    let host_snapshot = registry.snapshot(&arguments.browser_id, &workspace_id)?;
+    let document_epoch = host_snapshot
+        .document_epoch
+        .ok_or_else(|| "browser document epoch is unavailable".to_owned())?;
+
+    if document_epoch != arguments.document_epoch {
+        return Err("browser document changed since the snapshot was taken".to_owned());
+    }
+
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+
+    let image_base64 = capture_browser_image(&webview).await?;
+    registry
+        .record_screenshot_epoch(&arguments.browser_id, &workspace_id, document_epoch)
+        .map_err(|_| "browser document changed while screenshot was being captured".to_owned())?;
+
+    Ok(BrowserScreenshotResult {
+        browser_id: arguments.browser_id,
+        snapshot_id: arguments.snapshot_id,
+        document_epoch,
+        image_base64,
+        mime_type: "image/png".to_owned(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_browser_image(webview: &Webview) -> Result<String, String> {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_web_kit::WKWebView;
+    use tokio::sync::oneshot;
+
+    extern "C" {
+        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, ...) -> *mut c_void;
+        fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
+    }
+
+    pub struct NSData {
+        _inner: AnyObject,
+    }
+
+    impl NSData {
+        unsafe fn bytes(&self) -> *const u8 {
+            let sel = sel_registerName(
+                b"bytes\0".as_ptr() as *const std::ffi::c_char
+            );
+            objc_msgSend(
+                (&self._inner as *const AnyObject).cast::<c_void>() as *mut c_void,
+                sel,
+            ) as *const u8
+        }
+
+        unsafe fn len(&self) -> usize {
+            let sel = sel_registerName(
+                b"length\0".as_ptr() as *const std::ffi::c_char
+            );
+            objc_msgSend(
+                (&self._inner as *const AnyObject).cast::<c_void>() as *mut c_void,
+                sel,
+            ) as usize
+        }
+    }
+
+    let (sender, receiver) = oneshot::channel();
+    let sender = Mutex::new(Some(sender));
+
+    webview
+        .with_webview(move |platform| unsafe {
+            let view: &WKWebView = &*platform.inner().cast();
+            let handler = RcBlock::new(
+                move |snapshot: *mut AnyObject, error: *mut NSError| {
+                    let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) else {
+                        return;
+                    };
+                    if !error.is_null() {
+                        let msg = (&*error).localizedDescription().to_string();
+                        let _ = sender.send(Err(format!("screenshot failed: {msg}")));
+                        return;
+                    }
+                    if snapshot.is_null() {
+                        let _ = sender.send(Err("screenshot produced no image".to_owned()));
+                        return;
+                    }
+                    // Call TIFFRepresentation on NSImage
+                    let sel = sel_registerName(
+                        b"TIFFRepresentation\0".as_ptr() as *const std::ffi::c_char,
+                    );
+                    let tiff: *mut NSData =
+                        objc_msgSend(snapshot as *mut c_void, sel).cast();
+                    if tiff.is_null() {
+                        let _ = sender.send(Err("screenshot TIFF conversion failed".to_owned()));
+                        return;
+                    }
+                    let bytes = (&*tiff).bytes();
+                    let len = (&*tiff).len();
+                    let buf = std::slice::from_raw_parts(bytes, len);
+                    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                    let b64 = BASE64.encode(buf);
+                    let _ = sender.send(Ok(b64));
+                },
+            );
+            // takeSnapshotWithConfiguration:completionHandler: with nil config
+            let sel = sel_registerName(
+                b"takeSnapshotWithConfiguration:completionHandler:\0"
+                    .as_ptr() as *const std::ffi::c_char,
+            );
+            let nil: *mut c_void = std::ptr::null_mut();
+            objc_msgSend(
+                (view as *const WKWebView).cast::<c_void>() as *mut c_void,
+                sel,
+                nil,
+                &*handler,
+            );
+        })
+        .map_err(|error| format!("browser host: {error}"))?;
+
+    receiver
+        .await
+        .map_err(|_| "screenshot capture was interrupted".to_owned())?
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn capture_browser_image(_webview: &Webview) -> Result<String, String> {
+    Err("screenshot capture is not available on this platform yet".to_owned())
+}
+
+// ── Native semantic act ───────────────────────────────────────────
+
+pub(crate) async fn browser_native_act(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    arguments: tidebreak_core::BrowserActArgs,
+) -> Result<tidebreak_core::BrowserActResult, String> {
+    use tidebreak_core::{BrowserActResult, BrowserActStatus};
+
+    if !arguments.is_well_formed() {
+        return Err("browser action request is not valid".to_owned());
+    }
+    if let Some(value) = arguments.action.value() {
+        if value.chars().count() > MAX_ACTION_VALUE_CHARS {
+            return Err("browser action value is too long".to_owned());
+        }
+    }
+
+    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    if !host_snapshot
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.capabilities.semantic_actions)
+    {
+        return Ok(act_result(
+            &arguments,
+            BrowserActStatus::UnsupportedNative,
+            "Trusted native browser input is not available yet.",
+        ));
+    }
+
+    // Until the native trusted-input adapter is wired, every action returns
+    // UnsupportedNative. This is the correct default: we must never advertise
+    // semantic_actions=true while the adapter still dispatches page-authored
+    // DOM events.
+    let _ = registry.set_agent_action(
+        capability_id,
+        &arguments.browser_id,
+        Some("Trusted native input unavailable"),
+        false,
+    );
+    Ok(act_result(
+        &arguments,
+        BrowserActStatus::UnsupportedNative,
+        "The browser semantic driver can observe and wait, but trusted native input is not available on this engine.",
+    ))
+}
+
+fn act_result(
+    request: &tidebreak_core::BrowserActArgs,
+    status: tidebreak_core::BrowserActStatus,
+    message: &str,
+) -> tidebreak_core::BrowserActResult {
+    use tidebreak_core::BrowserActResult;
+    BrowserActResult {
+        browser_id: request.browser_id.clone(),
+        snapshot_id: request.snapshot_id.clone(),
+        document_epoch: request.document_epoch,
+        target_ref: request.target_ref.clone(),
+        action: request.action.kind().to_owned(),
+        status,
+        message: message.to_owned(),
+        requires_resnapshot: matches!(status, tidebreak_core::BrowserActStatus::StaleTarget),
+        url: None,
+        title: None,
+    }
+}
+
+/// Map a [`BrowserTargetError`] to the corresponding typed status.
+pub(crate) fn act_status_from_target_error(error: BrowserTargetError) -> tidebreak_core::BrowserActStatus {
+    use tidebreak_core::BrowserActStatus;
+    match error {
+        BrowserTargetError::StaleTarget => BrowserActStatus::StaleTarget,
+        BrowserTargetError::BrowserHidden => BrowserActStatus::HiddenTab,
+        BrowserTargetError::UnsupportedFrame => BrowserActStatus::UnsupportedFrame,
+        BrowserTargetError::UnsupportedNative => BrowserActStatus::UnsupportedNative,
+        BrowserTargetError::EngineFailure => BrowserActStatus::EngineFailure,
+        BrowserTargetError::Timeout => BrowserActStatus::Timeout,
+    }
+}
+
 fn snapshot_script(max_nodes: usize, marker: &str) -> String {
     SNAPSHOT_SCRIPT
         .replace("__MAX_NODES__", &max_nodes.to_string())

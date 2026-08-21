@@ -500,6 +500,7 @@ impl BrowserRegistry {
             // A person can change the page while the child view is obscured,
             // and a newly revealed view must never inherit an old target map.
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         }
         record.visible = visible;
         Ok(())
@@ -560,6 +561,7 @@ impl BrowserRegistry {
                 record.paused_origin = None;
                 record.pending_navigation_url = None;
                 record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
             }
         }
         state
@@ -623,6 +625,7 @@ impl BrowserRegistry {
                 record.controller_capability_id = None;
             }
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         }
         let record = state
             .records
@@ -660,6 +663,7 @@ impl BrowserRegistry {
                 record.controller_capability_id = None;
             }
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         }
         let record = state
             .records
@@ -777,6 +781,7 @@ impl BrowserRegistry {
             };
             record.controller_capability_id = Some(capability_id);
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         }
         let record = state
             .records
@@ -834,6 +839,7 @@ impl BrowserRegistry {
                 record.controller.action = None;
                 record.controller.takeover_required = false;
                 record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
             }
             Arc::clone(&record.dispatch.gate)
         };
@@ -861,6 +867,7 @@ impl BrowserRegistry {
             record.paused_origin = None;
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
+            record.screenshot_epoch = None;
             (Arc::clone(&record.dispatch.gate), record.instance_id)
         };
 
@@ -1157,6 +1164,7 @@ impl BrowserRegistry {
             ));
             record.controller.takeover_required = false;
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         }
         let record = state
             .records
@@ -1184,6 +1192,7 @@ impl BrowserRegistry {
             record.paused_origin = None;
             record.pending_navigation_url = None;
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         })
     }
 
@@ -1323,6 +1332,7 @@ impl BrowserRegistry {
                 .is_some_and(|snapshot| snapshot.snapshot_id == snapshot_id)
         {
             record.semantic_snapshot = None;
+                record.screenshot_epoch = None;
         }
     }
 
