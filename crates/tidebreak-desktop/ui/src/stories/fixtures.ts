@@ -390,6 +390,13 @@ export const stalledDigest: CodeSessionDigest = codeDigest({
   attention: attentionStalled,
 });
 
+/** Digest for a finished turn nobody has looked at yet. */
+export const doneDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: attentionDoneUnreviewed,
+  turn_count: 6,
+});
+
 /** A watch-and-fix task riding under the workspace (decision 50). */
 export const watchDigest: CodeSessionDigest = codeDigest({
   session: "sess-watch",

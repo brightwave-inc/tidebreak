@@ -8,6 +8,7 @@ import {
   closedPrDigest,
   codeSession,
   codeWorkspace,
+  doneDigest,
   draftPrDigest,
   mergedPrDigest,
   monitorDigest,
@@ -280,6 +281,47 @@ export const PullRequestTones: Story = {
             pr,
           }}
           commands={workspaceCommands({ hasPr: true, archived: false })}
+        />
+      ))}
+    </div>
+  ),
+};
+
+/**
+ * The status ramp on one screen, which is the only way to catch a tone drawn
+ * at the wrong strength. Read down the glyph rail: working moves, needs-you is
+ * the one red, stalled is amber, done is quiet, and merged is purple rather
+ * than a second shade of green. Check this in both themes.
+ */
+export const StatusTones: Story = {
+  render: (args) => (
+    <div className="flex flex-col gap-0.5">
+      {(
+        [
+          ["Working", runningDigest, undefined],
+          ["Needs you", needsYouDigest, undefined],
+          ["Stalled", stalledDigest, undefined],
+          ["Done, unreviewed", doneDigest, undefined],
+          ["PR merged", undefined, mergedPrDigest],
+          ["Idle", undefined, undefined],
+        ] as const
+      ).map(([label, digest, pr]) => (
+        <WorkspaceCard
+          {...args}
+          key={label}
+          workspace={{
+            ...codeWorkspace,
+            id: `ws-${label}`,
+            title: label,
+            pr,
+          }}
+          digest={digest && { ...digest, title: label }}
+          session={digest ? codeSession : undefined}
+          commands={workspaceCommands({
+            hasPr: Boolean(pr),
+            archived: false,
+            hasSession: Boolean(digest),
+          })}
         />
       ))}
     </div>

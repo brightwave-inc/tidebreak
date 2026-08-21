@@ -3,13 +3,38 @@ import { cn } from "@/lib/utils";
 
 import type { Attention } from "../api/types";
 import { attentionLabel, attentionTooltip } from "./labels";
+import {
+  attentionStatusTone,
+  STATUS_DOT,
+  STATUS_MOTION,
+  type StatusTone,
+} from "./statusTone";
 
 /**
  * Status affordance for a server-computed attention state.
  *
  * NeedsYou is strongest. Stalled and Fenced are distinct warnings.
- * DoneUnreviewed is a quiet mark. Working has no badge.
+ * DoneUnreviewed is a quiet mark.
+ *
+ * Working is a dot but not a pill. The compact dot is often the only state a
+ * row carries, and an agent mid-turn used to draw there as nothing at all —
+ * indistinguishable from an idle one, for the state a reader most wants to
+ * see. The full badge always sits beside text that names the state already, so
+ * a "Working" pill there would only repeat it.
  */
+
+const BADGE_VARIANTS: Record<
+  StatusTone,
+  "outline" | "success" | "warning" | "critical" | "info" | "merged"
+> = {
+  neutral: "outline",
+  running: "info",
+  ready: "success",
+  pending: "info",
+  warning: "warning",
+  critical: "critical",
+  merged: "merged",
+};
 
 export function AttentionBadge({
   attention,
@@ -20,19 +45,18 @@ export function AttentionBadge({
   compact?: boolean;
   className?: string;
 }) {
-  if (!attention || attention.state.type === "working") return null;
+  if (!attention) return null;
+  if (attention.state.type === "working" && !compact) return null;
   const label = attentionLabel(attention);
   const tooltip = attentionTooltip(attention);
-  const tone = attentionTone(attention);
+  const tone = attentionStatusTone(attention);
   if (compact) {
     return (
       <span
         className={cn(
           "inline-block size-2 shrink-0 rounded-full",
-          tone === "critical" && "bg-critical-foreground-muted",
-          tone === "warning" && "bg-warning-foreground-muted",
-          tone === "subtle" && "bg-muted-foreground/60",
-          tone === "info" && "bg-info-foreground-muted",
+          STATUS_DOT[tone],
+          STATUS_MOTION[tone],
           className,
         )}
         // A dot with no text is only a state if something says which one. On a
@@ -47,15 +71,7 @@ export function AttentionBadge({
   }
   return (
     <Badge
-      variant={
-        tone === "critical"
-          ? "critical"
-          : tone === "warning"
-            ? "warning"
-            : tone === "info"
-              ? "info"
-              : "outline"
-      }
+      variant={BADGE_VARIANTS[tone]}
       size="sm"
       className={className}
       aria-label={label}
@@ -65,22 +81,4 @@ export function AttentionBadge({
       {label}
     </Badge>
   );
-}
-
-function attentionTone(
-  attention: Attention,
-): "critical" | "warning" | "subtle" | "info" {
-  switch (attention.state.type) {
-    case "needs_you":
-      return "critical";
-    case "stalled":
-    case "fenced":
-      return "warning";
-    case "manual":
-      return "info";
-    case "done_unreviewed":
-      return "subtle";
-    default:
-      return "subtle";
-  }
 }

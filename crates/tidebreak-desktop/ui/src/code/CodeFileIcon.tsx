@@ -82,6 +82,11 @@ const DATA_EXTENSIONS = new Set(["db", "sqlite", "sqlite3", "sql"]);
  * A quiet file-type glyph shared by file navigation and changed-file trees.
  * The color is an identity cue, never a status cue; callers can override it
  * with `className` when Git state is the more important signal.
+ *
+ * Tones come from the `--icon-*` identity family, which the inbox and tool
+ * glyphs already use, and never from the status ramp — a `.json` file is not a
+ * warning, and a changed-file tree draws Git state in the same view. The
+ * family is theme-aware, which the raw palette classes it replaced were not.
  */
 export function CodeFileIcon({
   path,
@@ -108,7 +113,7 @@ export function fileIconSpec(path: string): FileIconSpec {
   if (name.startsWith("readme")) {
     return {
       icon: BookOpenText,
-      tone: "text-info-foreground",
+      tone: "text-icon-cyan",
       kind: "readme",
     };
   }
@@ -127,7 +132,7 @@ export function fileIconSpec(path: string): FileIconSpec {
   ) {
     return {
       icon: Package,
-      tone: "text-warning-foreground",
+      tone: "text-icon-rose",
       kind: "package",
     };
   }
@@ -141,12 +146,12 @@ export function fileIconSpec(path: string): FileIconSpec {
   if (extension === "json" || extension === "jsonc") {
     return {
       icon: FileJson,
-      tone: "text-warning-foreground",
+      tone: "text-icon-amber",
       kind: "json",
     };
   }
   if (CODE_EXTENSIONS.has(extension)) {
-    return { icon: FileCode2, tone: "text-info-foreground", kind: "code" };
+    return { icon: FileCode2, tone: "text-icon-blue", kind: "code" };
   }
   if (TEXT_EXTENSIONS.has(extension)) {
     return { icon: FileText, tone: "text-muted-foreground", kind: "text" };
@@ -154,24 +159,24 @@ export function fileIconSpec(path: string): FileIconSpec {
   if (CONFIG_EXTENSIONS.has(extension) || name.startsWith(".env")) {
     return {
       icon: FileCog,
-      tone: "text-warning-foreground",
+      tone: "text-icon-amber",
       kind: "config",
     };
   }
   if (IMAGE_EXTENSIONS.has(extension)) {
-    return { icon: FileImage, tone: "text-violet-500", kind: "image" };
+    return { icon: FileImage, tone: "text-icon-violet", kind: "image" };
   }
   if (STYLE_EXTENSIONS.has(extension)) {
-    return { icon: Palette, tone: "text-pink-500", kind: "style" };
+    return { icon: Palette, tone: "text-icon-rose", kind: "style" };
   }
   if (DATA_EXTENSIONS.has(extension)) {
-    return { icon: Database, tone: "text-teal-500", kind: "data" };
+    return { icon: Database, tone: "text-icon-cyan", kind: "data" };
   }
   if (extension === "html" || extension === "xml") {
-    return { icon: Braces, tone: "text-orange-500", kind: "markup" };
+    return { icon: Braces, tone: "text-icon-amber", kind: "markup" };
   }
   if (extension === "woff" || extension === "woff2" || extension === "ttf") {
-    return { icon: FileType2, tone: "text-violet-500", kind: "font" };
+    return { icon: FileType2, tone: "text-icon-violet", kind: "font" };
   }
   return { icon: File, tone: "text-muted-foreground", kind: "file" };
 }

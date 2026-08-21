@@ -5,6 +5,7 @@ import type {
   CodeWorkspaceSnapshot,
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
+import { STATUS_CHIP, STATUS_MARK, type StatusTone } from "./statusTone";
 
 /**
  * Pure presentation logic for workspace cards: grouping by repo, the state
@@ -465,23 +466,43 @@ export function prToneLabel(
   }
 }
 
-/** Icon (text) classes per tone, for the PR mark itself. */
-export const PR_ICON_TONE_CLASSES: Record<PrChipTone, string> = {
-  open: "text-success",
-  draft: "text-muted-foreground",
-  merged: "text-purple-600 dark:text-purple-400",
-  closed: "text-critical",
-  other: "text-muted-foreground",
+/**
+ * The PR vocabulary as a view of the shared status one. A PR chip is a status
+ * chip; keeping its own color table is what let merged drift onto a hardcoded
+ * purple while every other tone rode the theme.
+ */
+const PR_STATUS_TONES: Record<PrChipTone, StatusTone> = {
+  open: "ready",
+  draft: "neutral",
+  merged: "merged",
+  closed: "critical",
+  other: "neutral",
 };
 
-/**
- * Chip classes per tone. Open, draft, and closed ride the semantic theme
- * tokens; merged has no token, so it pins GitHub's purple in both themes.
- */
-export const PR_CHIP_TONE_CLASSES: Record<PrChipTone, string> = {
-  open: "bg-success-background text-success-foreground-muted",
-  draft: "bg-muted text-muted-foreground",
-  merged: "bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-300",
-  closed: "bg-critical-background text-critical-foreground-muted",
-  other: "bg-muted text-muted-foreground",
-};
+/** The status tone a PR carries, for callers painting a surface of their own. */
+export function prStatusTone(pr: {
+  state: string;
+  draft?: boolean;
+}): StatusTone {
+  return PR_STATUS_TONES[prTone(pr)];
+}
+
+function prToneClasses(
+  rungs: Record<StatusTone, string>,
+): Record<PrChipTone, string> {
+  return {
+    open: rungs[PR_STATUS_TONES.open],
+    draft: rungs[PR_STATUS_TONES.draft],
+    merged: rungs[PR_STATUS_TONES.merged],
+    closed: rungs[PR_STATUS_TONES.closed],
+    other: rungs[PR_STATUS_TONES.other],
+  };
+}
+
+/** Icon (text) classes per tone, for the PR mark itself. */
+export const PR_ICON_TONE_CLASSES: Record<PrChipTone, string> =
+  prToneClasses(STATUS_MARK);
+
+/** Chip classes per tone. */
+export const PR_CHIP_TONE_CLASSES: Record<PrChipTone, string> =
+  prToneClasses(STATUS_CHIP);
