@@ -62,7 +62,7 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // not advertise acting until the adapter sends trusted native
             // input to the freshly resolved target.
             semantic_actions: false,
-            screenshot: false,
+            screenshot: cfg!(target_os = "macos"),
             cross_origin_frames: false,
             profile_reset: false,
         },

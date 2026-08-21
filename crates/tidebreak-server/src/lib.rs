@@ -1229,6 +1229,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        false,
     )
     .await
 }
@@ -1250,6 +1251,7 @@ pub async fn bind_configured(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        false,
     )
     .await
 }
@@ -1276,6 +1278,7 @@ pub async fn bind_with_desktop_executor(
         None,
         None,
         None,
+        false,
     )
     .await
 }
@@ -1301,6 +1304,7 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
+        false,
     )
     .await
 }
@@ -1364,6 +1368,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         host_folders,
         browser_runtime,
         None,
+        false,
     )
     .await
 }
@@ -1372,7 +1377,8 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
 /// binding (runtime + bridge executable) that must be available before
 /// code-session recovery starts.
 ///
-/// When `binding` is `None`, no browser tools are advertised or injected.
+/// When `binding` is `None`, no code-session browser tools are advertised or
+/// injected.
 /// When both halves are present (the binding always carries both, by
 /// construction), session creation mints a session-private capability
 /// file and injects the bridge executable path into engine config.
@@ -1401,6 +1407,41 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser
         host_folders,
         browser_runtime,
         browser_bridge_command,
+        false,
+    )
+    .await
+}
+
+/// Desktop binding that also installs the durable foreground browser
+/// executor. This explicit entry point is the only production path that turns
+/// on foreground browser tool registration; a code browser binding alone does
+/// not advertise those tools.
+#[allow(clippy::too_many_arguments)]
+pub async fn bind_configured_with_desktop_foreground_browser_executor(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+    office_converter: Option<Arc<dyn tidebreak_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    binding: Option<BrowserChannelBinding>,
+) -> Result<Server> {
+    let (browser_runtime, browser_bridge_command) = match binding {
+        Some(binding) => (Some(binding.runtime), Some(binding.bridge_command)),
+        None => (None, None),
+    };
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_parts(
+        config,
+        client_executor_id,
+        folder_grant_resolver,
+        office_converter,
+        host_tool_broker,
+        local_voice,
+        host_folders,
+        browser_runtime,
+        browser_bridge_command,
+        true,
     )
     .await
 }
@@ -1416,6 +1457,7 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
+    foreground_browser_executor: bool,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
@@ -1441,6 +1483,7 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
         host_folders,
         browser_runtime,
         browser_bridge_command,
+        foreground_browser_executor,
     )
     .await
 }
@@ -1511,6 +1554,7 @@ async fn bind_inner(
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
     browser_bridge_command: Option<PathBuf>,
+    foreground_browser_executor: bool,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1664,6 +1708,13 @@ async fn bind_inner(
         .unwrap_or(true);
     let computer_use =
         computer_use_enabled && config.profile == Profile::Desktop && cfg!(target_os = "macos");
+    // Foreground browser tools exist only when the native desktop explicitly
+    // installs their durable executor. Supplying the code-session runtime is
+    // not enough, and non-desktop or non-macOS profiles stay fail-closed even
+    // if an embedding passes the flag incorrectly.
+    let foreground_browser = foreground_browser_executor
+        && config.profile == Profile::Desktop
+        && cfg!(target_os = "macos");
     // Tool execution and every sandbox worker must share the same local
     // cancellation handles. The tool registry is assembled before AppState,
     // so create those handles here and install the same Arcs into state after
@@ -1686,9 +1737,7 @@ async fn bind_inner(
         host_folders.clone(),
         gateway.clone(),
         computer_use,
-        /* foreground_browser stays false until a desktop foreground browser
-         * executor opts in — the default fail-closed safe state */
-        false,
+        foreground_browser,
         cancellation_acceleration,
     );
     let tools = Arc::new(tools);
