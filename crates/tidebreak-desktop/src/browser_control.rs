@@ -1272,6 +1272,9 @@ impl BrowserRegistry {
         matches
     }
 
+    /// Store a snapshot against the current document epoch with basic validation.
+    /// Prefer [`complete_semantic_snapshot`] for agent-driven workflows; this
+    /// method skips instance-id, halt, and grant checks needed by the agent path.
     pub(crate) fn record_semantic_snapshot(
         &self,
         browser_id: &str,
@@ -1294,6 +1297,74 @@ impl BrowserRegistry {
         });
         Ok(())
     }
+
+    /// Store a completed semantic snapshot under one registry lock,
+    /// atomically rechecking every authorization that was live when the
+    /// observation started: capability, workspace, visibility, halt latch,
+    /// controller, origin grant, exact instance identity, and document
+    /// epoch/load state.
+    ///
+    /// The caller must capture `instance_id` via [`observation_fence`]
+    /// before the webview JavaScript evaluation and forward it here; a
+    /// replaced or recreated browser view cannot pass its stale result
+    /// into the live registry.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "atomic security fence gathers every authorization dimension"
+    )]
+    pub(crate) fn complete_semantic_snapshot(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        instance_id: u64,
+        document_epoch: u64,
+        snapshot_id: String,
+        targets: HashMap<String, BrowserTargetRecord>,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let capability = active_capability(&state, capability_id)
+            .map_err(|_| "browser capability is unavailable".to_owned())?;
+        let Some(record) = state.records.get_mut(browser_id) else {
+            return Err("browser session is not registered".to_owned());
+        };
+        if record.workspace_id != capability.workspace_id
+            || record.instance_id != instance_id
+            || record.document_epoch != document_epoch
+            || record.load_state != BrowserLoadState::Ready
+        {
+            return Err("browser document changed while it was being inspected".to_owned());
+        }
+        if !record.visible {
+            return Err("browser is hidden".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record.controller.kind != BrowserControllerKind::Agent
+            || record.controller_capability_id != Some(capability_id)
+        {
+            return Err("browser is not controlled by this agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared for this operation".to_owned());
+        }
+        record.semantic_snapshot = Some(StoredSemanticSnapshot {
+            snapshot_id,
+            document_epoch,
+            targets,
+        });
+        Ok(())
+    }
+
+    /// Basic epoch-only recording for tests and non-agent pathways.
+    /// Prefer [`complete_screenshot_recording`] for agent-driven workflows.
     pub(crate) fn record_screenshot_epoch(
         &self,
         browser_id: &str,
@@ -1310,6 +1381,67 @@ impl BrowserRegistry {
             return Err("browser document changed while screenshot was being captured".to_owned());
         }
         record.screenshot_epoch = Some(epoch);
+        Ok(())
+    }
+
+    /// Record screenshot completion under one registry lock, atomically
+    /// rechecking capability, workspace, visibility, halt, controller,
+    /// grant, exact instance, document epoch, and stored snapshot identity
+    /// before marking the epoch as captured.
+    ///
+    /// This replaces the previous three-lock sequence of
+    /// `observation_fence` + `validate_snapshot_id` + `record_screenshot_epoch`
+    /// which had a TOCTOU gap between each lock acquisition.
+    pub(crate) fn complete_screenshot_recording(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        instance_id: u64,
+        document_epoch: u64,
+        snapshot_id: &str,
+    ) -> Result<(), String> {
+        let mut state = self.lock();
+        let capability = active_capability(&state, capability_id)?;
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        if record.workspace_id != capability.workspace_id {
+            return Err("browser session belongs to a different workspace".to_owned());
+        }
+        if record.instance_id != instance_id
+            || record.document_epoch != document_epoch
+        {
+            return Err("browser document changed while screenshot was being captured".to_owned());
+        }
+        if !record.visible {
+            return Err("browser is hidden".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if record.controller.kind != BrowserControllerKind::Agent
+            || record.controller_capability_id != Some(capability_id)
+        {
+            return Err("browser is not controlled by this agent".to_owned());
+        }
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !grants_cover(
+            &state,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared for this operation".to_owned());
+        }
+        let Some(snapshot) = &record.semantic_snapshot else {
+            return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
+        };
+        if snapshot.snapshot_id != snapshot_id || snapshot.document_epoch != document_epoch {
+            return Err("browser snapshot is stale; take a new browser snapshot".to_owned());
+        }
+        record.screenshot_epoch = Some(document_epoch);
         Ok(())
     }
 
@@ -2763,5 +2895,246 @@ mod tests {
             .unwrap();
         assert!(*halt.borrow_and_update());
         assert!(registry.observation_fence(capability, "browser-1").is_err());
+    }
+
+    // ── Atomic completion regression tests ──────────────────────────
+
+    #[tokio::test]
+    async fn complete_semantic_snapshot_rejects_after_stop() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        registry
+            .stop_agent_control("browser-1", "workspace-1")
+            .await
+            .unwrap();
+
+        let error = registry
+            .complete_semantic_snapshot(
+                capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("stopped by the user") || error.contains("capability is unavailable"),
+            "expected Stop to block completion, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_semantic_snapshot_rejects_wrong_instance() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        // The instance was registered as `instance`, but we pass a different value.
+        let error = registry
+            .complete_semantic_snapshot(
+                capability,
+                "browser-1",
+                instance + 1, // intentionally wrong instance
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("document changed while it was being inspected"),
+            "expected instance-id fence to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_semantic_snapshot_rejects_wrong_document_epoch() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        let error = registry
+            .complete_semantic_snapshot(
+                capability,
+                "browser-1",
+                instance,
+                1, // wrong epoch
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("document changed while it was being inspected"),
+            "expected epoch fence to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_semantic_snapshot_rejects_when_hidden() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        registry
+            .set_visible("browser-1", "workspace-1", false)
+            .unwrap();
+
+        let error = registry
+            .complete_semantic_snapshot(
+                capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("hidden"),
+            "expected visibility check to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_semantic_snapshot_rejects_revoked_capability() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        registry.revoke_agent_capability(capability);
+
+        let error = registry
+            .complete_semantic_snapshot(
+                capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("capability is unavailable"),
+            "expected revoked capability to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_semantic_snapshot_rejects_wrong_controller() {
+        let (registry, instance, _origin, _original_capability, _private) = controlled_registry();
+        // Issue a second capability that never began control.
+        let other_capability = registry.issue_agent_capability("workspace-1", "Other agent");
+
+        let error = registry
+            .complete_semantic_snapshot(
+                other_capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("not controlled by this agent"),
+            "expected controller check to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_screenshot_recording_rejects_after_stop() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        // Plant a stored snapshot so screenshot recording has something to validate.
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap();
+
+        registry
+            .stop_agent_control("browser-1", "workspace-1")
+            .await
+            .unwrap();
+
+        let error = registry
+            .complete_screenshot_recording(
+                capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-1",
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("stopped by the user") || error.contains("capability is unavailable"),
+            "expected Stop to block screenshot recording, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_screenshot_recording_rejects_wrong_instance() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let error = registry
+            .complete_screenshot_recording(
+                capability,
+                "browser-1",
+                instance + 1, // intentionally wrong
+                0,
+                "snapshot-1",
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("document changed while screenshot"),
+            "expected instance-id fence to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_screenshot_recording_rejects_forged_snapshot_id() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let error = registry
+            .complete_screenshot_recording(
+                capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-forged",
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("snapshot is stale"),
+            "expected forged snapshot id to reject, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_screenshot_recording_rejects_missing_snapshot() {
+        let (registry, instance, _origin, capability, _private) = controlled_registry();
+        // No record_semantic_snapshot call — there is no stored snapshot.
+
+        let error = registry
+            .complete_screenshot_recording(
+                capability,
+                "browser-1",
+                instance,
+                0,
+                "snapshot-1",
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("snapshot is stale"),
+            "expected missing stored snapshot to reject, got: {error}"
+        );
     }
 }

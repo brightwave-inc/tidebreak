@@ -189,6 +189,7 @@ pub(crate) async fn browser_semantic_snapshot(
                 capture_semantic_snapshot(
                     app,
                     dispatch_registry,
+                    capability_id,
                     workspace_id,
                     capture_browser_id,
                     max_nodes,
@@ -202,18 +203,27 @@ pub(crate) async fn browser_semantic_snapshot(
 async fn capture_semantic_snapshot(
     app: AppHandle,
     registry: BrowserRegistry,
+    capability_id: Uuid,
     workspace_id: String,
     browser_id: String,
     max_nodes: usize,
 ) -> Result<BrowserPageSnapshot, String> {
     let label = browser_label(&browser_id)?;
+
+    // Capture the instance identity and document epoch before the page
+    // JavaScript evaluation so a Stop/replace cannot reuse the stale
+    // result after completion.
+    let start_fence = registry
+        .observation_fence(capability_id, &browser_id)
+        .map_err(|error| format!("snapshot authorization lapsed: {error}"))?;
+    let instance_id = start_fence.instance_id;
+    let document_epoch = start_fence.document_epoch;
+
     let host_snapshot = registry.snapshot(&browser_id, &workspace_id)?;
     if host_snapshot.load_state != Some(BrowserLoadState::Ready) {
         return Err("browser page is still loading".to_owned());
     }
-    let document_epoch = host_snapshot
-        .document_epoch
-        .ok_or_else(|| "browser document epoch is unavailable".to_owned())?;
+
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
@@ -273,15 +283,21 @@ async fn capture_semantic_snapshot(
             bounds: node.bounds,
         });
     }
+
+    // One atomic completion: recheck capability, workspace, visibility,
+    // halt, controller, grant, instance, epoch, and load state before
+    // storing the semantic snapshot. No window for Stop/revoke to
+    // repopulate after a separate record call.
     registry
-        .record_semantic_snapshot(
+        .complete_semantic_snapshot(
+            capability_id,
             &browser_id,
-            &workspace_id,
+            instance_id,
             document_epoch,
             snapshot_id.clone(),
             targets,
         )
-        .map_err(|_| "browser document changed while it was being inspected".to_owned())?;
+        .map_err(|error| format!("browser document changed while it was being inspected: {error}"))?;
 
     Ok(BrowserPageSnapshot {
         browser_id,
@@ -641,12 +657,26 @@ async fn poll_wait_condition(
                 }
                 continue;
             }
-            satisfied = evaluate_wait_condition(
-                &webview,
-                &arguments.condition,
-                &snapshot,
-                start_url.as_deref(),
-            ) => satisfied,
+            satisfied = async {
+                // Race each text probe against the single remaining deadline
+                // budget so a slow JavaScript evaluation cannot overshoot
+                // the advertised hard timeout by up to 10 s.
+                let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(remaining),
+                    evaluate_wait_condition(
+                        &webview,
+                        &arguments.condition,
+                        &snapshot,
+                        start_url.as_deref(),
+                    ),
+                )
+                .await
+                {
+                    Ok(satisfied) => satisfied,
+                    Err(_elapsed) => false,
+                }
+            } => satisfied,
         };
 
         if satisfied {
@@ -713,6 +743,10 @@ async fn poll_wait_condition(
     }
 }
 
+/// Evaluate one wait condition. Text probes are racy against the page
+/// and may take up to 10 s (JavaScript timeout), so the caller must
+/// race them against the *remaining* deadline budget and the halt
+/// latch; they are not invoked directly.
 async fn evaluate_wait_condition(
     webview: &Webview,
     condition: &tidebreak_core::BrowserWaitCondition,
@@ -822,21 +856,27 @@ async fn capture_screenshot(
 
     let label = browser_label(&arguments.browser_id)?;
 
-    // The screenshot is bound to the live stored semantic snapshot; the
-    // snapshot id echoed back to the model is never trusted from the
-    // request alone.
+    // Capture the instance identity and fence before the async screenshot
+    // so a Stop/replace cannot pass a stale image into the live registry.
+    let start_fence = registry
+        .observation_fence(capability_id, &arguments.browser_id)
+        .map_err(|error| format!("screenshot authorization lapsed: {error}"))?;
+    let instance_id = start_fence.instance_id;
+    let document_epoch = start_fence.document_epoch;
+
+    if document_epoch != arguments.document_epoch {
+        return Err("browser document changed since the snapshot was taken".to_owned());
+    }
+
+    // Validate the snapshot id inside the same lock acquisition (before
+    // the async image capture) so a replaced snapshot record is caught
+    // before we spend time on the expensive native screenshot.
     registry.validate_snapshot_id(
         &arguments.browser_id,
         &workspace_id,
         &arguments.snapshot_id,
-        arguments.document_epoch,
+        document_epoch,
     )?;
-
-    let start_fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
-    let document_epoch = start_fence.document_epoch;
-    if document_epoch != arguments.document_epoch {
-        return Err("browser document changed since the snapshot was taken".to_owned());
-    }
 
     let webview = app
         .get_webview(&label)
@@ -845,24 +885,20 @@ async fn capture_screenshot(
     let image_base64 =
         capture_browser_image(&webview, arguments.max_width, arguments.max_height).await?;
 
-    // Completion-time fencing: discard the image unless the capability,
-    // grant, controller, visibility, instance, epoch, and stored snapshot
-    // are all still live after the async capture.
-    let end_fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
-    if end_fence.instance_id != start_fence.instance_id
-        || end_fence.document_epoch != document_epoch
-    {
-        return Err("browser document changed while screenshot was being captured".to_owned());
-    }
-    registry.validate_snapshot_id(
-        &arguments.browser_id,
-        &workspace_id,
-        &arguments.snapshot_id,
-        document_epoch,
-    )?;
+    // One atomic completion: recheck capability, workspace, visibility,
+    // halt, controller, grant, instance, document epoch, and stored
+    // snapshot identity before recording the screenshot. This closes
+    // the three-lock TOCTOU gap that existed between observation_fence,
+    // validate_snapshot_id, and record_screenshot_epoch.
     registry
-        .record_screenshot_epoch(&arguments.browser_id, &workspace_id, document_epoch)
-        .map_err(|_| "browser document changed while screenshot was being captured".to_owned())?;
+        .complete_screenshot_recording(
+            capability_id,
+            &arguments.browser_id,
+            instance_id,
+            document_epoch,
+            &arguments.snapshot_id,
+        )
+        .map_err(|error| format!("screenshot recording failed: {error}"))?;
 
     Ok(BrowserScreenshotResult {
         browser_id: arguments.browser_id,
