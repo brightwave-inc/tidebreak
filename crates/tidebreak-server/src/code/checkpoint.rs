@@ -4,7 +4,12 @@
 //! untracked files — as a synthetic commit created through a temporary index
 //! file. The user's index, `HEAD`, and reflog are untouched. The commit is
 //! referenced only by a hidden ref
-//! `refs/tidebreak/checkpoints/<workspace>/<ordinal>`.
+//! `refs/tidebreak/checkpoints/<workspace>/<session>/<ordinal>`.
+//!
+//! The session segment is load-bearing. A workspace holds several sessions
+//! (decision 0055) and `next_turn_ordinal` counts per session, so every
+//! session reaches turn 1; a workspace-keyed ref let one sibling's snapshot
+//! overwrite another's.
 //!
 //! Diffs are produced here, bounded in bytes and file count, with truncation
 //! marked on the payload. The renderer never runs git.
@@ -22,8 +27,8 @@ use tidebreak_core::db::code::{
     append_event, get_session, get_turn, get_workspace, list_turns, save_turn,
 };
 use tidebreak_core::{
-    CodeEvent, CodeSession, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, DbStore, Diffstat,
-    FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, WorkspaceId,
+    CodeEvent, CodeSession, CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+    DbStore, Diffstat, FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, WorkspaceId,
 };
 
 use super::bus::CodeEventBus;
@@ -106,9 +111,19 @@ impl CheckpointError {
     }
 }
 
-/// Hidden ref for one turn of one workspace.
-pub(crate) fn checkpoint_ref(workspace_id: WorkspaceId, ordinal: i64) -> String {
-    format!("{REF_PREFIX}/{workspace_id}/{ordinal}")
+/// Hidden ref for one turn of one session.
+///
+/// Keyed on the session as well as the workspace. Ordinals come from
+/// `next_turn_ordinal`, which counts per session, so two sessions sharing a
+/// workspace both reach turn 1. The workspace stays first in the path so
+/// [`delete_workspace_refs`] and [`sweep_orphaned_refs`] keep matching by
+/// prefix.
+pub(crate) fn checkpoint_ref(
+    workspace_id: WorkspaceId,
+    session_id: CodeSessionId,
+    ordinal: i64,
+) -> String {
+    format!("{REF_PREFIX}/{workspace_id}/{session_id}/{ordinal}")
 }
 
 /// After a turn reaches `Completed`, snapshot the worktree and journal.
@@ -183,6 +198,7 @@ async fn record_for_turn(
     record_checkpoint(
         &worktree,
         workspace.id,
+        session.id,
         turn.ordinal,
         previous.as_deref(),
         &workspace.base_ref,
@@ -196,11 +212,12 @@ async fn record_for_turn(
 pub(crate) async fn record_checkpoint(
     worktree: &Path,
     workspace_id: WorkspaceId,
+    session_id: CodeSessionId,
     ordinal: i64,
     previous_oid: Option<&str>,
     base_ref: &str,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
-    let r#ref = checkpoint_ref(workspace_id, ordinal);
+    let r#ref = checkpoint_ref(workspace_id, session_id, ordinal);
     let tree = snapshot_tree(worktree).await?;
     let parent = match previous_oid {
         Some(oid) => oid.to_owned(),
@@ -489,7 +506,7 @@ async fn previous_checkpoint_oid(
     if turn.ordinal <= 1 {
         return Ok(None);
     }
-    let previous_ref = checkpoint_ref(workspace.id, turn.ordinal - 1);
+    let previous_ref = checkpoint_ref(workspace.id, turn.session_id, turn.ordinal - 1);
     if let Ok(oid) = git_text(
         worktree,
         &["rev-parse", "--verify", &previous_ref],
@@ -828,6 +845,10 @@ mod tests {
         WorkspaceId::new()
     }
 
+    fn sess() -> CodeSessionId {
+        CodeSessionId::new()
+    }
+
     #[tokio::test]
     async fn checkpoint_captures_untracked_renames_and_mode_changes() {
         let (_dir, repo) = init_repo();
@@ -842,7 +863,7 @@ mod tests {
         std::fs::set_permissions(tree.join("README.md"), perms).unwrap();
 
         let before = user_git_fingerprint(&tree).await.unwrap();
-        let recorded = record_checkpoint(&tree, ws(), 1, None, "main")
+        let recorded = record_checkpoint(&tree, ws(), sess(), 1, None, "main")
             .await
             .unwrap();
         let after = user_git_fingerprint(&tree).await.unwrap();
@@ -926,7 +947,7 @@ mod tests {
         std::fs::write(tree.join("src/beta.rs"), format!("{body}line 13\n")).unwrap();
         std::fs::write(tree.join("café.txt"), "un\ndeux\n").unwrap();
 
-        let recorded = record_checkpoint(&tree, ws(), 1, None, "main")
+        let recorded = record_checkpoint(&tree, ws(), sess(), 1, None, "main")
             .await
             .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
@@ -972,13 +993,16 @@ mod tests {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "turns");
         let id = ws();
+        let session = sess();
         std::fs::write(tree.join("a.txt"), "one\n").unwrap();
-        let first = record_checkpoint(&tree, id, 1, None, "main").await.unwrap();
+        let first = record_checkpoint(&tree, id, session, 1, None, "main")
+            .await
+            .unwrap();
         std::fs::write(tree.join("b.txt"), "two\n").unwrap();
         let first_oid = git_text(&tree, &["rev-parse", &first.checkpoint_ref], GIT_TIMEOUT)
             .await
             .unwrap();
-        let second = record_checkpoint(&tree, id, 2, Some(&first_oid), "main")
+        let second = record_checkpoint(&tree, id, session, 2, Some(&first_oid), "main")
             .await
             .unwrap();
 
@@ -1022,7 +1046,7 @@ mod tests {
             )
             .unwrap();
         }
-        let recorded = record_checkpoint(&tree, ws(), 1, None, "main")
+        let recorded = record_checkpoint(&tree, ws(), sess(), 1, None, "main")
             .await
             .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
@@ -1052,10 +1076,10 @@ mod tests {
         let live = ws();
         let dead = ws();
         std::fs::write(tree.join("x.txt"), "x\n").unwrap();
-        record_checkpoint(&tree, live, 1, None, "main")
+        record_checkpoint(&tree, live, sess(), 1, None, "main")
             .await
             .unwrap();
-        record_checkpoint(&tree, dead, 1, None, "main")
+        record_checkpoint(&tree, dead, sess(), 1, None, "main")
             .await
             .unwrap();
         let listed = list_checkpoint_refs(&repo).await.unwrap();
@@ -1072,12 +1096,59 @@ mod tests {
         assert!(list_checkpoint_refs(&repo).await.unwrap().is_empty());
     }
 
+    /// Two sessions share a workspace and both reach turn 1, because
+    /// `next_turn_ordinal` counts per session. A workspace-keyed ref made the
+    /// second `update-ref` silently overwrite the first, orphaning its commit
+    /// and leaving the first session's turn row pointing at the other
+    /// session's tree.
+    #[tokio::test]
+    async fn sibling_sessions_do_not_share_a_turn_one_checkpoint() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "siblings");
+        let workspace = ws();
+        let first_session = sess();
+        let second_session = sess();
+
+        std::fs::write(tree.join("first.txt"), "first\n").unwrap();
+        let first = record_checkpoint(&tree, workspace, first_session, 1, None, "main")
+            .await
+            .unwrap();
+        std::fs::write(tree.join("second.txt"), "second\n").unwrap();
+        let second = record_checkpoint(&tree, workspace, second_session, 1, None, "main")
+            .await
+            .unwrap();
+
+        assert_ne!(
+            first.checkpoint_ref, second.checkpoint_ref,
+            "sibling sessions must not share a ref"
+        );
+        let listed = list_checkpoint_refs(&repo).await.unwrap();
+        assert_eq!(listed.len(), 2, "both checkpoints survive: {listed:?}");
+
+        // The first session's ref still resolves, and to its own snapshot:
+        // `first.txt` was there, `second.txt` had not been written yet.
+        let first_tree = git_text(
+            &tree,
+            &["ls-tree", "--name-only", &first.checkpoint_ref],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(first_tree.contains("first.txt"), "{first_tree}");
+        assert!(!first_tree.contains("second.txt"), "{first_tree}");
+
+        // Archiving the workspace still reaps both, since the workspace stays
+        // first in the ref path.
+        let removed = delete_workspace_refs(&repo, workspace).await.unwrap();
+        assert_eq!(removed, 2);
+    }
+
     #[tokio::test]
     async fn snapshot_failure_does_not_write_a_ref() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("not-a-repo");
         std::fs::create_dir_all(&missing).unwrap();
-        let err = record_checkpoint(&missing, ws(), 1, None, "main")
+        let err = record_checkpoint(&missing, ws(), sess(), 1, None, "main")
             .await
             .unwrap_err();
         assert!(!err.to_string().is_empty());
