@@ -251,6 +251,7 @@ const USAGE = {
   output_tokens: 3,
   cache_read_input_tokens: 0,
   cache_creation_input_tokens: 0,
+  context_tokens: 12,
 };
 
 describe("parseCodeTurnList", () => {
@@ -263,6 +264,15 @@ describe("parseCodeTurnList", () => {
     const withUsage = { ...TURN, usage: USAGE };
     expect(parseCodeTurn(withUsage)).toEqual(withUsage);
     expect(parseCodeTurnList([withUsage])).toEqual([withUsage]);
+  });
+
+  it("reads a turn journaled before context_tokens existed as no reading", () => {
+    // The field is serde-defaulted, so old rows arrive without it. Dropping
+    // the whole usage object over a missing occupancy figure would lose the
+    // spend counts beside it.
+    const { context_tokens: _omitted, ...older } = USAGE;
+    const parsed = parseCodeTurn({ ...TURN, usage: older });
+    expect(parsed?.usage).toEqual({ ...older, context_tokens: 0 });
   });
 
   it("rejects a non-array or a row the turn parser would drop", () => {

@@ -90,6 +90,7 @@ describe("accepted turn after the socket already painted", () => {
             output_tokens: 1,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            context_tokens: 0,
           },
         },
       },

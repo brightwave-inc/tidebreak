@@ -500,7 +500,29 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        context_tokens: context_tokens_from(value),
     }
+}
+
+/// The prompt resident on the turn's last model call.
+///
+/// `result.usage` carries `iterations`, one entry per API call, beside the
+/// turn totals it already sums into the four spend counts. The last entry is
+/// the call that closed the turn, so its three prompt-side counts are what the
+/// window actually held. Without this, a ten-call turn reports ten prompts.
+///
+/// A `result` with no `iterations` came from a single call, so the top-level
+/// object is that call and the same three-way sum is correct for it.
+fn context_tokens_from(usage: &Value) -> u64 {
+    let call = usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .and_then(|iterations| iterations.last())
+        .unwrap_or(usage);
+    let field = |name: &str| call.get(name).and_then(Value::as_u64).unwrap_or(0);
+    field("input_tokens")
+        .saturating_add(field("cache_read_input_tokens"))
+        .saturating_add(field("cache_creation_input_tokens"))
 }
 
 fn bound(text: &str, max: usize) -> String {
@@ -514,6 +536,50 @@ fn bound(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `usage.iterations` is one entry per API call. Summing the turn totals
+    /// counts the transcript once per call, so a three-call turn reads as
+    /// three prompts; the window only ever held the last one.
+    #[test]
+    fn context_tokens_come_from_the_last_iteration() {
+        let usage = serde_json::json!({
+            "input_tokens": 6,
+            "output_tokens": 196,
+            "cache_read_input_tokens": 142_916,
+            "cache_creation_input_tokens": 5_479,
+            "iterations": [
+                {"input_tokens": 2, "output_tokens": 80,
+                 "cache_read_input_tokens": 44_122, "cache_creation_input_tokens": 5_211},
+                {"input_tokens": 2, "output_tokens": 91,
+                 "cache_read_input_tokens": 49_334, "cache_creation_input_tokens": 127},
+                {"input_tokens": 2, "output_tokens": 25,
+                 "cache_read_input_tokens": 49_460, "cache_creation_input_tokens": 141}
+            ]
+        });
+        let parsed = usage_from(Some(&usage));
+
+        assert_eq!(parsed.context_tokens, 49_603);
+        // The four spend counts keep the turn totals they already carried.
+        assert_eq!(parsed.cache_read_input_tokens, 142_916);
+        assert_eq!(parsed.output_tokens, 196);
+    }
+
+    /// A single-call turn reports no `iterations`, and the object itself is
+    /// that call.
+    #[test]
+    fn context_tokens_fall_back_to_the_result_itself() {
+        let usage = serde_json::json!({
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "cache_read_input_tokens": 8_192,
+            "cache_creation_input_tokens": 100
+        });
+        assert_eq!(usage_from(Some(&usage)).context_tokens, 8_304);
+
+        // An empty array is the same situation as a missing one.
+        let empty = serde_json::json!({"input_tokens": 12, "iterations": []});
+        assert_eq!(usage_from(Some(&empty)).context_tokens, 12);
+    }
 
     #[test]
     fn unknown_event_types_are_counted_and_do_not_drop_known_events() {

@@ -16,6 +16,7 @@ const USAGE = {
   output_tokens: 3_100,
   cache_read_input_tokens: 900,
   cache_creation_input_tokens: 40,
+  context_tokens: 13_340,
 };
 
 const items: CodeTranscriptItem[] = [

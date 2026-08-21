@@ -525,12 +525,6 @@ describe("Composer", () => {
   });
 
   it("shows last-turn usage left of Send even when the window is unknown", () => {
-    const usage = {
-      input_tokens: 12_000,
-      output_tokens: 800,
-      cache_read_input_tokens: 4_000,
-      cache_creation_input_tokens: 0,
-    };
     const markup = renderToStaticMarkup(
       <Composer
         activeTurnId="turn-2"
@@ -540,7 +534,13 @@ describe("Composer", () => {
         disabled={false}
         draft=""
         contextUsage={{
-          usage,
+          contextTokens: 16_800,
+          spend: {
+            input: 12_000,
+            output: 800,
+            cacheRead: 4_000,
+            cacheWrite: 0,
+          },
           contextWindow: undefined,
           modelName: "GPT-5.6 Sol",
         }}
@@ -571,11 +571,7 @@ describe("Composer", () => {
         cancelPending={false}
         disabled={false}
         draft=""
-        contextUsage={{
-          usage: null,
-          contextWindow: 1_050_000,
-          modelName: "GPT-5.6 Sol",
-        }}
+        contextUsage={null}
         onDraftChange={vi.fn()}
         onSend={noop}
         onSteer={noop}

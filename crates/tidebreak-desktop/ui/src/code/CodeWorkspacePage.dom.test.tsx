@@ -171,6 +171,9 @@ const TURN = {
     output_tokens: 12,
     cache_read_input_tokens: 0,
     cache_creation_input_tokens: 0,
+    // Deliberately not the sum of the four: the ring reads the prompt the
+    // engine reported resident, not what the turn spent getting there.
+    context_tokens: 9_500,
   },
 };
 
@@ -521,7 +524,7 @@ describe("CodeWorkspacePage", () => {
     expect(seam).toHaveTextContent("2 files +42 −7");
     expect(seam).not.toHaveTextContent("in /");
     expect(
-      screen.getByRole("button", { name: /Context: 11,012 tokens used/ }),
+      screen.getByRole("button", { name: /Context: 9,500 tokens used/ }),
     ).toBeInTheDocument();
   });
 

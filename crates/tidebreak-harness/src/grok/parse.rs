@@ -31,6 +31,10 @@ pub struct GrokStreamParser {
     settled_subagents: HashSet<String>,
     emitted_session: bool,
     last_usage: CodeUsage,
+    /// Prompt tokens on the most recent `usage` event, which is one model
+    /// call. Kept apart from `last_usage` because the closing `end` event
+    /// overwrites that with the turn's cumulative total.
+    last_call_context_tokens: Option<u64>,
     pending_text: String,
 }
 
@@ -47,6 +51,7 @@ impl Default for GrokStreamParser {
             settled_subagents: HashSet::new(),
             emitted_session: false,
             last_usage: CodeUsage::default(),
+            last_call_context_tokens: None,
             pending_text: String::new(),
         }
     }
@@ -384,7 +389,13 @@ impl GrokStreamParser {
     }
 
     fn parse_usage(&mut self, value: &Value) -> Vec<HarnessEvent> {
-        self.last_usage = usage_from(value.get("usage"));
+        let usage = usage_from(value.get("usage"));
+        // A `usage` event is one model call: `tool-use.ndjson` reports 9050
+        // then 139 fresh input across two calls, and the closing `end` event
+        // reports their 9189 sum. So this call's prompt-side sum is an
+        // occupancy reading; the `end` event's is spend.
+        self.last_call_context_tokens = Some(usage.context_tokens);
+        self.last_usage = usage;
         self.flush_assistant()
     }
 
@@ -394,6 +405,14 @@ impl GrokStreamParser {
         }
         if let Some(usage) = value.get("usage") {
             self.last_usage = usage_from(Some(usage));
+        }
+        // The `end` usage sums every model call, so its own prompt-side sum
+        // is roughly one prompt per call. The last per-call `usage` event is
+        // the prompt that was still resident when the turn ended. A turn that
+        // published no per-call event keeps the fallback, which is correct
+        // for the single-call case the two shapes agree on.
+        if let Some(context_tokens) = self.last_call_context_tokens {
+            self.last_usage.context_tokens = context_tokens;
         }
         let mut events = self.emit_session();
         events.extend(self.flush_assistant());
@@ -699,6 +718,7 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
     let Some(value) = value else {
         return CodeUsage::default();
     };
+    let field = |name: &str| value.get(name).and_then(Value::as_u64).unwrap_or(0);
     CodeUsage {
         input_tokens: value
             .get("input_tokens")
@@ -716,6 +736,12 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        // Correct for a per-call `usage` event, which is the only place this
+        // reading survives; `parse_end` replaces it when the cumulative
+        // `end` payload lands here.
+        context_tokens: field("input_tokens")
+            .saturating_add(field("cache_read_input_tokens"))
+            .saturating_add(field("cache_creation_input_tokens")),
     }
 }
 

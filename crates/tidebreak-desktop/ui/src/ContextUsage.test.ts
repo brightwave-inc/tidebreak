@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  contextTokens,
   contextTruncationNotice,
   contextUsageLevel,
   contextUsagePercent,
   formatTokenCount,
+  summedTurnTokens,
 } from "./ContextUsage";
 
 const USAGE = {
@@ -14,25 +14,29 @@ const USAGE = {
   cache_creation_input_tokens: 2_500,
 };
 
-describe("context occupancy", () => {
-  it("counts cached prompt tokens as occupying the window", () => {
-    // The four counts are disjoint — a cache hit still fills the window, and
-    // a meter that read only `input_tokens` would report 1k against 200k for
-    // a conversation actually holding 64k.
-    expect(contextTokens(USAGE)).toBe(64_000);
-    expect(contextUsagePercent(USAGE, 200_000)).toBe(32);
+describe("turn spend", () => {
+  it("counts every disjoint field once", () => {
+    // The four counts are disjoint — a cache hit still costs the turn, and a
+    // total that read only `input_tokens` would report 1k for a turn that
+    // actually moved 64k.
+    expect(summedTurnTokens(USAGE)).toBe(64_000);
+  });
+});
+
+describe("context percent", () => {
+  it("divides the resident prompt by the window", () => {
+    expect(contextUsagePercent(64_000, 200_000)).toBe(32);
   });
 
   it("has no percent when the model's window is unknown", () => {
-    expect(contextUsagePercent(USAGE, undefined)).toBeNull();
-    expect(contextUsagePercent(USAGE, 0)).toBeNull();
+    expect(contextUsagePercent(64_000, undefined)).toBeNull();
+    expect(contextUsagePercent(64_000, 0)).toBeNull();
   });
 
-  it("clamps a turn whose totals exceed the window", () => {
-    // A long multi-step turn re-sends its transcript on every model call, so
-    // the summed totals legitimately run past the window. "Full" is the most
-    // a reader can act on.
-    expect(contextUsagePercent(USAGE, 8_000)).toBe(100);
+  it("clamps a reading that exceeds the window", () => {
+    // Trimming, a model switch, or a stale denominator can all put the
+    // numerator over the window. "Full" is the most a reader can act on.
+    expect(contextUsagePercent(64_000, 8_000)).toBe(100);
   });
 });
 

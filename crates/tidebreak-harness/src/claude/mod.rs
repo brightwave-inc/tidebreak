@@ -219,6 +219,45 @@ mod tests {
         )));
     }
 
+    /// The ring's numerator is one prompt, not the turn's summed spend.
+    ///
+    /// `tool-use` ran three model calls: the four spend counts total 148,401
+    /// prompt-side tokens while the last call's own prompt was 49,603. On a
+    /// 200k window that is the difference between reading 74% and 25%.
+    #[test]
+    fn context_tokens_are_the_last_call_not_the_turn_total() {
+        let (events, _) = replay("tool-use");
+        let usage = completed_usage(&events);
+        assert_eq!(usage.context_tokens, 49_603);
+        let spend =
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+        assert_eq!(spend, 148_401);
+        assert!(
+            usage.context_tokens < spend,
+            "summed spend must not be mistaken for occupancy"
+        );
+    }
+
+    /// A single-call turn publishes no `iterations`, and the top-level object
+    /// is that one call — so occupancy and prompt-side spend agree.
+    #[test]
+    fn a_result_without_iterations_reads_its_own_prompt() {
+        let (events, _) = replay("subagent-task");
+        let usage = completed_usage(&events);
+        assert_eq!(usage.context_tokens, 8);
+        assert_eq!(usage.input_tokens, 8);
+    }
+
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+        events
+            .iter()
+            .find_map(|event| match event {
+                HarnessEvent::TurnCompleted { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("the fixture completes its turn")
+    }
+
     #[test]
     fn fixture_replay_permission_denied() {
         let (events, _) = replay("permission-denied");
