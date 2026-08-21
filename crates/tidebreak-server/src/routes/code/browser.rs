@@ -1,23 +1,9 @@
 //! `/code/browser/*` routes: the engine-facing browser channel.
 //!
-//! These routes are called by the engine child, not the renderer, and they
-//! authenticate with the per-session capability bearer minted by
-//! [`crate::code::browser_channel::BrowserTokenRegistry`] — never the
-//! per-launch app token. They are therefore registered outside
-//! `require_token` (see `crate::app`), and each handler resolves its own
-//! `Authorization` header.
-//!
-//! ## Security properties
-//!
-//! * The token travels only in the `Authorization` header — never in a URL
-//!   path, query string, or response body — and no error message echoes it.
-//! * Owner, workspace, and session identity come exclusively from the token
-//!   registry's subject. The body types deny unknown fields, so a payload
-//!   naming `workspace_id`, `session_id`, or `owner_id` is a `400`, not an
-//!   escalation.
-//! * The subject's session must exist, belong to the subject's workspace,
-//!   and not be ended or fenced; the workspace must exist and be active.
-//! * Without an attached [`BrowserRuntime`] every route answers `501`.
+//! These routes authenticate with the per-session capability bearer minted
+//! by [`crate::code::browser_channel::BrowserTokenRegistry`] — never the
+//! per-launch app token. They are registered outside `require_token` (see
+//! `crate::app`), and each handler resolves its own `Authorization` header.
 
 use std::sync::Arc;
 
@@ -30,7 +16,7 @@ use tidebreak_core::{
 };
 
 use crate::code::browser_channel::BrowserSubject;
-use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeScope};
+use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use crate::error::ServerError;
 use crate::extract::Json;
 use crate::state::AppState;
@@ -46,6 +32,7 @@ pub async fn browser_list(
         .list(&BrowserRuntimeScope::from(subject))
         .await
         .map(Json)
+        .map_err(map_runtime_error)
 }
 
 pub async fn browser_navigate(
@@ -61,6 +48,7 @@ pub async fn browser_navigate(
         .navigate(&BrowserRuntimeScope::from(subject), &args)
         .await
         .map(Json)
+        .map_err(map_runtime_error)
 }
 
 pub async fn browser_snapshot(
@@ -76,11 +64,11 @@ pub async fn browser_snapshot(
         .snapshot(&BrowserRuntimeScope::from(subject), &args)
         .await
         .map(Json)
+        .map_err(map_runtime_error)
 }
 
 // ── shared refusal ladder ───────────────────────────────────────────────────
 
-/// Resolve the capability bearer to a live, in-scope [`BrowserSubject`].
 async fn authorize(state: &AppState, headers: &HeaderMap) -> Result<BrowserSubject, ServerError> {
     let token = bearer_token(headers)
         .ok_or_else(|| ServerError::unauthorized("missing browser capability token"))?;
@@ -118,7 +106,6 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> Result<BrowserSubje
     Ok(subject)
 }
 
-/// The embedding's browser runtime, or `501` where none is attached.
 fn attached_runtime(state: &AppState) -> Result<Arc<dyn BrowserRuntime>, ServerError> {
     let code = state
         .code
@@ -145,4 +132,27 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .to_str()
         .ok()?
         .strip_prefix("Bearer ")
+}
+
+fn map_runtime_error(error: BrowserRuntimeError) -> ServerError {
+    match error {
+        BrowserRuntimeError::UnknownBrowserId(id) => {
+            ServerError::not_found(format!("browser {id} not found"))
+        }
+        BrowserRuntimeError::SessionEnded => {
+            ServerError::forbidden("the browser session has ended")
+        }
+        BrowserRuntimeError::Unsupported(operation) => {
+            ServerError::not_implemented(format!(
+                "this browser engine does not support {operation}"
+            ))
+        }
+        BrowserRuntimeError::StaleTarget => ServerError::conflict_kind(
+            "stale_browser_target",
+            "the page changed since that snapshot; take a new browser_snapshot",
+        ),
+        BrowserRuntimeError::Failed(message) => {
+            ServerError::internal(format!("browser operation failed: {message}"))
+        }
+    }
 }

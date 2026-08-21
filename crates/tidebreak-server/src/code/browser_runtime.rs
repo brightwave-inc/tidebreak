@@ -3,8 +3,8 @@
 //! The [`BrowserRuntime`] trait defines the public contract between the
 //! server and the desktop browser adapter. The server owns this trait and
 //! never depends on a desktop crate. The desktop implements it behind an
-//! `Arc<dyn BrowserRuntime>` and installs it through
-//! [`crate::Server::set_browser_runtime`] before [`crate::Server::serve`].
+//! `Arc<dyn BrowserRuntime>` and passes it to the bind-time constructor
+//! (or, in tests, through [`CodeRuntime::set_browser_runtime`]).
 //!
 //! ## Trust boundary
 //!
@@ -46,6 +46,28 @@ impl From<crate::code::browser_channel::BrowserSubject> for BrowserRuntimeScope 
     }
 }
 
+// ── BrowserRuntimeError ─────────────────────────────────────────────────────
+
+/// Server-owned error taxonomy for browser operations.
+///
+/// The route layer maps every variant into a stable HTTP status and
+/// `{kind, message}` JSON body. Desktop implementations return this error
+/// rather than constructing raw [`ServerError`], which is crate-private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserRuntimeError {
+    /// The opaque browser id names no tab this subject may see.
+    UnknownBrowserId(String),
+    /// The subject's browser authority has ended.
+    SessionEnded,
+    /// The engine or platform cannot perform this operation.
+    Unsupported(String),
+    /// The page or target changed since the snapshot the caller is acting
+    /// from; a fresh snapshot is required.
+    StaleTarget,
+    /// The engine failed while performing the operation.
+    Failed(String),
+}
+
 // ── BrowserRuntime trait ────────────────────────────────────────────────────
 
 /// The server's contract with a desktop browser adapter.
@@ -55,29 +77,30 @@ impl From<crate::code::browser_channel::BrowserSubject> for BrowserRuntimeScope 
 /// touching any native resource — the scope alone is not authorization; the
 /// runtime owns the live grant and controller state.
 ///
-/// All methods are async and return `Result<T, ServerError>` so the handler
-/// can map errors to stable HTTP responses without knowing the adapter.
+/// All methods return [`BrowserRuntimeError`] so the adapter can express the
+/// error taxonomy without constructing crate-private [`ServerError`]. The
+/// route layer maps errors to stable HTTP responses centrally.
 #[async_trait]
 pub trait BrowserRuntime: Send + Sync {
     /// List browser tabs visible to the session identified by `scope`.
     async fn list(
         &self,
         scope: &BrowserRuntimeScope,
-    ) -> Result<BrowserListResult, crate::error::ServerError>;
+    ) -> Result<BrowserListResult, BrowserRuntimeError>;
 
     /// Navigate a tab identified by `args.browser_id` within `scope`.
     async fn navigate(
         &self,
         scope: &BrowserRuntimeScope,
         args: &BrowserNavigateArgs,
-    ) -> Result<BrowserNavigateResult, crate::error::ServerError>;
+    ) -> Result<BrowserNavigateResult, BrowserRuntimeError>;
 
     /// Capture a semantic page snapshot for the tab in `args.browser_id`.
     async fn snapshot(
         &self,
         scope: &BrowserRuntimeScope,
         args: &BrowserSnapshotArgs,
-    ) -> Result<BrowserPageSnapshot, crate::error::ServerError>;
+    ) -> Result<BrowserPageSnapshot, BrowserRuntimeError>;
 
     /// Synchronously revoke all browser capability for `scope.session`.
     ///

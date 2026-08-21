@@ -146,7 +146,7 @@ use tidebreak_core::{
 pub use durable_oplog::DurableOperationStore;
 /// Public contract for desktop browser adapters. The desktop implements
 /// [`BrowserRuntime`] behind an `Arc` and installs it with
-/// [`Server::set_browser_runtime`] before [`Server::serve`].
+/// [`bind`] or one of its desktop variants.
 pub use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeScope};
 pub use error::ServerError;
 pub use pairing::{
@@ -1136,18 +1136,7 @@ impl Server {
         PairingHandle::new(self.store.clone(), self.mcp.clone(), self.gateway.clone())
     }
 
-    /// Install the desktop browser adapter before serving.
-    ///
-    /// The desktop calls this after [`bind`] and before [`Self::serve`].
-    /// The adapter must implement [`BrowserRuntime`]. Replaces any
-    /// previous adapter.
-    pub fn set_browser_runtime(&self, runtime: Arc<dyn BrowserRuntime>) {
-        if let Some(code) = &self.code {
-            code.set_browser_runtime(runtime);
-        }
-    }
-
-    /// Run the accept loop until the process exits.
+/// Run the accept loop until the process exits.
     pub async fn serve(self) -> Result<()> {
         axum::serve(self.listener, self.router)
             .await
@@ -1173,6 +1162,7 @@ pub async fn bind(config: Config) -> Result<Server> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1183,7 +1173,7 @@ pub async fn bind(config: Config) -> Result<Server> {
 /// to use [`bind`] when process-environment configuration is undesirable.
 pub async fn bind_configured(config: Config) -> Result<Server> {
     let mcp_servers = mcp_config::ConfiguredMcpServers::from_env()?;
-    bind_inner(config, None, mcp_servers, None, None, None, None, None).await
+    bind_inner(config, None, mcp_servers, None, None, None, None, None, None).await
 }
 
 /// Bind the API with a stable app-private native executor identity.
@@ -1201,6 +1191,7 @@ pub async fn bind_with_desktop_executor(
         config,
         Some(client_executor_id),
         mcp_config::ConfiguredMcpServers::default(),
+        None,
         None,
         None,
         None,
@@ -1229,6 +1220,7 @@ pub async fn bind_configured_with_desktop_executor(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1246,6 +1238,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
         return Err(AgentError::config("client executor id must not be nil"));
@@ -1260,6 +1253,10 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
+        // The desktop's browser engine adapter arrives with the
+        // native driver slice; until then every embedding binds
+        // without one and browser routes answer 501.
+        None,
     )
     .await
 }
@@ -1313,6 +1310,7 @@ async fn bind_inner(
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+    browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
     // Resolved first, before the instance lock or the store: a desktop profile
     // handed `TIDEBREAK_LISTEN_ADDR` refuses the boot rather than binding a
@@ -1536,6 +1534,7 @@ async fn bind_inner(
         state.config.data_dir.clone(),
         state.config.code_worktree_root_default.clone(),
         code_host_tool_broker,
+        browser_runtime,
     ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.

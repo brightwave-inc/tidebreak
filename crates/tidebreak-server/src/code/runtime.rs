@@ -170,6 +170,7 @@ impl CodeRuntime {
         data_dir: PathBuf,
         worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+        browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -188,7 +189,7 @@ impl CodeRuntime {
             worktree_root_default,
             approvals: ApprovalBridge::new(),
             browser_tokens,
-            browser_runtime: Mutex::new(None),
+            browser_runtime: Mutex::new(browser_runtime),
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -302,20 +303,7 @@ impl CodeRuntime {
         *self.gh_search_path.lock().expect("gh search path") = path;
     }
 
-    /// Install the desktop browser adapter after assembly, replacing any
-    /// previous one. Called by [`crate::Server::set_browser_runtime`].
-    ///
-    /// This is the single source of truth — routes read through
-    /// [`Self::browser_runtime`] and lifecycle revocation reads the same
-    /// `Arc`.
-    pub(crate) fn set_browser_runtime(
-        &self,
-        runtime: Arc<dyn crate::code::browser_runtime::BrowserRuntime>,
-    ) {
-        *self.browser_runtime.lock().expect("browser runtime") = Some(runtime);
-    }
-
-    /// Return the installed browser adapter, if any.
+/// Return the installed browser adapter, if any.
     pub(crate) fn browser_runtime(
         &self,
     ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
@@ -328,21 +316,21 @@ impl CodeRuntime {
     /// The token registry is invalidated first so in-flight requests are
     /// rejected. The adapter Arc is cloned and released before
     /// `revoke_session` is called (deadlock-safe).
-    fn revoke_browser_session(
-        &self,
-        session_id: CodeSessionId,
-        owner: &OwnerId,
-        workspace_id: &WorkspaceId,
-    ) {
-        let scope = crate::code::browser_runtime::BrowserRuntimeScope {
-            owner: owner.clone(),
-            workspace: *workspace_id,
-            session: session_id,
-        };
-        self.browser_tokens.revoke(session_id);
-        let adapter = self.browser_runtime.lock().expect("browser runtime").clone();
-        if let Some(runtime) = adapter {
-            runtime.revoke_session(&scope);
+    /// Revoke the session browser token AND the desktop adapter
+    /// capability. Idempotent — safe to call multiple times.
+    ///
+    /// The token registry is invalidated first and the adapter scope is
+    /// derived from the returned [`BrowserSubject`] — no DB lookup needed.
+    /// The adapter Arc is cloned under the lock, the lock is released,
+    /// then `revoke_session` is called (deadlock-safe).
+    fn revoke_browser_session(&self, session_id: CodeSessionId) {
+        let subject = self.browser_tokens.revoke(session_id);
+        if let Some(subject) = subject {
+            let adapter = self.browser_runtime.lock().expect("browser runtime").clone();
+            if let Some(runtime) = adapter {
+                let scope = crate::code::browser_runtime::BrowserRuntimeScope::from(subject);
+                runtime.revoke_session(&scope);
+            }
         }
     }
 
@@ -1345,11 +1333,7 @@ impl CodeRuntime {
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
         // Invalidate the session browser token so in-flight browser route
         // calls are rejected immediately. The installed revocation hook
-        // fires synchronously from browser_tokens.revoke(), so the desktop
-        // adapter receives its Stop before the engine is interrupted.
-        // Token reissue happens on the next turn submission through
-        // attach_and_spawn_worker.
-        self.browser_tokens.revoke(id);
+        self.revoke_browser_session(id);
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
         handle
@@ -1433,7 +1417,7 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
-        self.browser_tokens.revoke(id);
+        self.revoke_browser_session(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -1512,7 +1496,7 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
-        self.browser_tokens.revoke(session.id);
+        self.revoke_browser_session(session.id);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
@@ -1726,7 +1710,7 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
-            self.browser_tokens.revoke(session.id);
+            self.revoke_browser_session(session.id);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
@@ -1850,7 +1834,7 @@ impl CodeRuntime {
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
-                self.browser_tokens.revoke(session.id);
+                self.revoke_browser_session(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -1869,7 +1853,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
-                self.browser_tokens.revoke(session.id);
+                self.revoke_browser_session(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));

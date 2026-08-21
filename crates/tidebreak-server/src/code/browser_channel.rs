@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use tidebreak_core::{CodeSessionId, OwnerId, WorkspaceId};
 use tidebreak_harness::BrowserChannelSpec;
@@ -65,9 +65,6 @@ struct RegistryState {
     by_session: HashMap<CodeSessionId, SessionEntry>,
 }
 
-/// Observer called synchronously when a session's browser authority is
-/// revoked, after the in-memory maps have already dropped it.
-type RevocationHook = Arc<dyn Fn(CodeSessionId) + Send + Sync>;
 
 // ── registry ────────────────────────────────────────────────────────────────
 
@@ -85,10 +82,6 @@ pub(crate) struct BrowserTokenRegistry {
     capfile_dir: PathBuf,
     /// Loopback base URL published after bind.
     loopback_base: Mutex<Option<String>>,
-    /// Fired synchronously by [`Self::revoke`] once per revoked session, so
-    /// an embedding's browser runtime drops its capability before the end
-    /// call returns. Absent everywhere no runtime is attached.
-    revocation_hook: Mutex<Option<RevocationHook>>,
 }
 
 impl BrowserTokenRegistry {
@@ -107,16 +100,7 @@ impl BrowserTokenRegistry {
             }),
             capfile_dir,
             loopback_base: Mutex::new(None),
-            revocation_hook: Mutex::new(None),
         })
-    }
-
-    /// Install the observer [`Self::revoke`] fires synchronously.
-    ///
-    /// Installed once at bind time when the embedding supplies a browser
-    /// runtime; a later install replaces the previous hook.
-    pub(crate) fn set_revocation_hook(&self, hook: RevocationHook) {
-        *self.revocation_hook.lock().expect("revocation hook") = Some(hook);
     }
 
     /// Publish the bound loopback base so later [`Self::issue`] calls can
@@ -229,26 +213,20 @@ impl BrowserTokenRegistry {
     ///
     /// In-memory authority is invalidated first under the registry lock.
     /// File deletion is best-effort because startup subtree cleanup must
-    /// fail closed regardless. The revocation hook fires synchronously after
-    /// the registry lock is released, and only when this call actually
-    /// removed an entry, so a repeated revoke stays silent.
-    pub(crate) fn revoke(&self, session_id: CodeSessionId) {
-        let revoked = {
-            let mut state = self.state.lock().expect("browser registry");
-            match state.by_session.remove(&session_id) {
-                Some(entry) => {
-                    state.tokens.remove(&entry.token);
-                    let _ = std::fs::remove_file(&entry.capfile_path);
-                    true
-                }
-                None => false,
+    /// fail closed regardless.
+    ///
+    /// Returns the [`BrowserSubject`] that was mapped to the revoked
+    /// session so the caller can derive an adapter scope, or `None` if
+    /// the session was not found (idempotent).
+    pub(crate) fn revoke(&self, session_id: CodeSessionId) -> Option<BrowserSubject> {
+        let mut state = self.state.lock().expect("browser registry");
+        match state.by_session.remove(&session_id) {
+            Some(entry) => {
+                let subject = state.tokens.remove(&entry.token);
+                let _ = std::fs::remove_file(&entry.capfile_path);
+                subject
             }
-        };
-        if revoked {
-            let hook = self.revocation_hook.lock().expect("revocation hook").clone();
-            if let Some(hook) = hook {
-                hook(session_id);
-            }
+            None => None,
         }
     }
 
