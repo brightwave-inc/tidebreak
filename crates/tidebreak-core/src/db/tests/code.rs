@@ -6,10 +6,11 @@ use crate::code::{
     CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
-    append_event, bump_spawn_epoch, get_approval, get_repo, get_session, get_turn, get_workspace,
-    insert_approval, insert_repo, insert_session, insert_turn, insert_workspace, list_approvals,
-    list_events, list_repos, list_sessions, list_turns, mark_repo_removed, save_session,
-    set_session_subagents, set_workspace_title_if, CodeJournalError,
+    append_event, bump_spawn_epoch, get_approval, get_repo, get_repo_by_root_path, get_session,
+    get_turn, get_workspace, insert_approval, insert_repo, insert_session, insert_turn,
+    insert_workspace, list_approvals, list_events, list_repos, list_sessions, list_turns,
+    mark_repo_removed, save_session, set_session_subagents, set_workspace_title_if,
+    CodeJournalError,
 };
 use crate::OwnerId;
 use chrono::Utc;
@@ -936,6 +937,51 @@ async fn a_removed_repo_keeps_its_workspaces_and_transcript() {
         .unwrap()
         .is_some());
     assert!(get_turn(&store, &owner, turn_id).await.unwrap().is_some());
+}
+
+/// Removing a registration releases its path for a fresh registration while
+/// the old row remains addressable for archived history.
+#[tokio::test]
+async fn a_removed_repo_path_can_be_registered_again() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    seed_owner(&store, &owner, "example").await;
+    let removed = list_repos(&store, &owner).await.unwrap().remove(0);
+
+    assert!(mark_repo_removed(&store, &owner, removed.id, now())
+        .await
+        .unwrap());
+
+    let replacement = CodeRepo {
+        id: RepoId::new(),
+        owner: owner.clone(),
+        root_path: removed.root_path.clone(),
+        display_name: "example again".into(),
+        default_base_ref: "main".into(),
+        branch_prefix: "tidebreak/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: now(),
+        removed_at: None,
+    };
+    insert_repo(&store, &replacement).await.unwrap();
+
+    let live = get_repo_by_root_path(&store, &owner, &removed.root_path)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.id, replacement.id);
+    assert_eq!(
+        list_repos(&store, &owner).await.unwrap(),
+        vec![replacement]
+    );
+    assert!(get_repo(&store, &owner, removed.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .removed_at
+        .is_some());
 }
 
 /// Removal is once. A second call reports that nothing changed rather than

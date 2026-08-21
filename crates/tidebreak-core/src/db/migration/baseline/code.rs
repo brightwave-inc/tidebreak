@@ -64,6 +64,10 @@ pub(super) fn code_repo_indexes() -> Vec<IndexCreateStatement> {
         .col(CodeRepo::Owner)
         .col(CodeRepo::RootPath)
         .unique()
+        // A removed registration keeps its row for archived history, but it
+        // no longer owns the path. The owner may register that checkout again
+        // and receive a fresh repository id for new work.
+        .and_where(Expr::col(CodeRepo::RemovedAt).is_null())
         .to_owned()]
 }
 

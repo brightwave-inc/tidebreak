@@ -42,7 +42,7 @@ pub async fn get_repo(store: &DbStore, owner: &OwnerId, id: RepoId) -> Result<Op
     Ok(Some(repo_from_row(row)?))
 }
 
-/// Load one of the owner's repositories by its canonical toplevel path.
+/// Load one of the owner's live repositories by its canonical toplevel path.
 pub async fn get_repo_by_root_path(
     store: &DbStore,
     owner: &OwnerId,
@@ -51,6 +51,7 @@ pub async fn get_repo_by_root_path(
     let Some(row) = entities::code_repo::Entity::find()
         .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_repo::Column::RootPath.eq(root_path))
+        .filter(entities::code_repo::Column::RemovedAt.is_null())
         .one(&store.conn)
         .await
         .map_err(store_err)?

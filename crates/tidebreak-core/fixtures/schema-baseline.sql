@@ -1309,7 +1309,7 @@ CREATE TABLE "code_repo" (
     "removed_at" timestamp_with_timezone_text
 );
 
-CREATE UNIQUE INDEX "idx_code_repo_owner_root_path" ON "code_repo" ("owner", "root_path");
+CREATE UNIQUE INDEX "idx_code_repo_owner_root_path" ON "code_repo" ("owner", "root_path") WHERE "removed_at" IS NULL;
 
 CREATE TABLE "code_workspace" (
     "id" uuid_text NOT NULL PRIMARY KEY,
