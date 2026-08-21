@@ -222,7 +222,7 @@ purpose:
   and power turn-scoped diffs; the surface that restores a workspace to an
   earlier checkpoint waits until review flows have settled.
 - **Parallel turns in one worktree.** Several agents may share a workspace
-  ([record 54](decisions/0054-multiple-sessions-per-workspace.md)), but their
+  ([record 55](decisions/0055-multiple-sessions-per-workspace.md)), but their
   turns are serialized on the checkout: two harnesses editing one tree is
   corruption, not concurrency. Running turns side by side would mean a
   worktree per session, which splits the branch, the diff, and the pull
