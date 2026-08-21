@@ -2675,6 +2675,17 @@ export function parseFenceReason(value: unknown): FenceReason | null {
   if (value.type === "resume_lost" && typeof value.detail === "string") {
     return { type: "resume_lost", detail: value.detail };
   }
+  if (
+    value.type === "repeated_turn_failures" &&
+    typeof value.count === "number" &&
+    typeof value.detail === "string"
+  ) {
+    return {
+      type: "repeated_turn_failures",
+      count: value.count,
+      detail: value.detail,
+    };
+  }
   return null;
 }
 

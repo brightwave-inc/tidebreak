@@ -979,6 +979,15 @@ async fn drive_turn(
             false,
         );
     } else if turn.status == CodeTurnStatus::Failed {
+        // Whatever broke may not be about this prompt. An expired credential
+        // or an unreachable provider fails every turn identically, and a
+        // session that keeps saying "idle" invites the user to retry into it
+        // forever. Once enough turns fail back to back, fence and offer a
+        // reap.
+        if let Some(reason) = repeated_failure_fence(db, session, &turn).await {
+            let _ = super::recovery::fence_session(db, bus, session, reason).await;
+            return Ok(turn);
+        }
         super::attention::replace_attention(
             session,
             Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
@@ -1026,6 +1035,57 @@ async fn hydrate_turn_images(
         });
     }
     Ok(images)
+}
+
+/// How many turns must fail back to back before the session is fenced.
+///
+/// Three, not one: a single failure is ordinary — a bad prompt, a transient
+/// provider hiccup, a tool that blew up — and fencing on it would be worse
+/// than the problem. Three in a row with no success between them is a
+/// property of the session, not of any one turn.
+const REPEATED_FAILURE_FENCE: u32 = 3;
+
+/// A fence reason when this failure is the latest in an unbroken run of them.
+///
+/// Counts backwards over the session's turns and stops at the first one that
+/// did not fail, so a session that recovers starts the count over.
+async fn repeated_failure_fence(
+    db: &DbStore,
+    session: &CodeSession,
+    turn: &CodeTurn,
+) -> Option<FenceReason> {
+    let turns = tidebreak_core::db::code::list_turns(db, &session.owner, session.id)
+        .await
+        .ok()?;
+    let mut count = 0u32;
+    for candidate in turns.iter().rev() {
+        match candidate.status {
+            CodeTurnStatus::Failed => count += 1,
+            // A turn still running is the one we are closing out; anything
+            // else ends the streak.
+            CodeTurnStatus::Running if candidate.id == turn.id => count += 1,
+            _ => break,
+        }
+    }
+    if count < REPEATED_FAILURE_FENCE {
+        return None;
+    }
+    let detail = last_failure_detail(db, session).await.unwrap_or_default();
+    Some(FenceReason::RepeatedTurnFailures { count, detail })
+}
+
+/// The message from the most recent `TurnFailed` in the journal.
+///
+/// The turn row keeps no error column, so the journal is the only place the
+/// reason survives. Without it the fence would say only that turns failed.
+async fn last_failure_detail(db: &DbStore, session: &CodeSession) -> Option<String> {
+    let events = tidebreak_core::db::code::list_recent_events(db, &session.owner, session.id, 64)
+        .await
+        .ok()?;
+    events.into_iter().find_map(|item| match item.event {
+        CodeEvent::TurnFailed { error } => Some(error.message),
+        _ => None,
+    })
 }
 
 async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {

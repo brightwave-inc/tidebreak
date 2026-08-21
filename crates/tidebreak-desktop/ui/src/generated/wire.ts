@@ -1978,6 +1978,14 @@ detail: string, } | { "type": "resume_lost",
 /**
  * Bounded human-readable detail, as the engine reported it.
  */
+detail: string, } | { "type": "repeated_turn_failures", 
+/**
+ * How many turns failed in a row.
+ */
+count: number, 
+/**
+ * Bounded detail from the last failure, as the engine reported it.
+ */
 detail: string, };
 
 /**
