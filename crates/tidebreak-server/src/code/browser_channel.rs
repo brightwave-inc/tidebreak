@@ -801,44 +801,42 @@ mod tests {
     #[test]
     fn write_failure_leaves_maps_unchanged() {
         // issue() holds the registry lock across write_capfile + map commit.
-        // A write failure drops the lock without mutating either map. On
-        // Unix we prove this by removing write permission from the capfile
-        // directory so create_new fails; then a subsequent issuance succeeds
-        // with no stale state. On non-Unix the test is a structural-invariant
-        // check: a normal issue/revoke/reissue cycle leaves clean maps.
+        // A write failure drops the lock without mutating either map. Inject a
+        // platform-independent failure by temporarily replacing the capfile
+        // directory with a regular file, so create_dir_all/write_capfile must
+        // fail even when the test process has elevated privileges.
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("writefail");
 
         // Warm up: issue once so the capfile directory exists.
         let warm = reg.issue(subject("warm")).unwrap();
+        let warm_token = read_token_from_capfile(&warm.capability_file);
         assert!(warm.capability_file.exists());
 
-        #[cfg(unix)]
-        let did_fail = {
-            use std::os::unix::fs::PermissionsExt as _;
-            let capdir = reg.capfile_dir();
-            std::fs::set_permissions(capdir, std::fs::Permissions::from_mode(0o500))
-                .expect("remove write permission for failure injection");
-            let result = reg.issue(sub.clone());
-            // Restore permissions immediately.
-            std::fs::set_permissions(capdir, std::fs::Permissions::from_mode(0o700))
-                .expect("restore write permission");
-            assert!(
-                result.is_err(),
-                "issue must fail when directory is read-only"
-            );
-            true
-        };
+        let capdir = reg.capfile_dir().to_path_buf();
+        let held_capdir = dir.path().join("browser-caps-held");
+        std::fs::rename(&capdir, &held_capdir).expect("move capfile directory aside");
+        std::fs::write(&capdir, b"not a directory").expect("install capfile path blocker");
 
-        // After failure (or on non-Unix, after the structural warm), a fresh
-        // issuance for the same session must succeed without stale entries.
+        let result = reg.issue(sub.clone());
+
+        // Restore the original directory before asserting so a failure cannot
+        // strand the fixture in a state that obscures the registry invariant.
+        std::fs::remove_file(&capdir).expect("remove capfile path blocker");
+        std::fs::rename(&held_capdir, &capdir).expect("restore capfile directory");
+        assert!(result.is_err(), "issue must fail when capfile parent is a file");
+        assert_eq!(
+            reg.subject_for_token(&warm_token).as_ref(),
+            Some(&subject("warm")),
+            "the prior mapping must survive the failed issuance"
+        );
+
+        // After failure, a fresh issuance for the same session must succeed
+        // without stale entries.
         let second = reg.issue(sub.clone()).unwrap();
         let second_token = read_token_from_capfile(&second.capability_file);
         assert_eq!(reg.subject_for_token(&second_token).as_ref(), Some(&sub));
-
-        #[cfg(unix)]
-        let _ = did_fail;
 
         // The TempDir will clean up everything when dropped.
         let _ = warm;

@@ -174,6 +174,8 @@ impl CodeRuntime {
             // only failure is an OS-level path resolution error such as a
             // dangling CWD, which is a startup bug, not a runtime condition.
             .expect("browser capfile directory must be resolvable to an absolute path");
+        #[cfg(test)]
+        browser_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
@@ -259,6 +261,8 @@ impl CodeRuntime {
             // only failure is an OS-level path resolution error such as a
             // dangling CWD, which is a startup bug, not a runtime condition.
             .expect("browser capfile directory must be resolvable to an absolute path");
+        #[cfg(test)]
+        browser_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
             bus: Arc::new(CodeEventBus::default()),
