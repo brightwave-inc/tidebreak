@@ -1,0 +1,42 @@
+[
+  {
+    "type": "session_started",
+    "harness_kind": "claude_code",
+    "harness_version": "2.1.233",
+    "resume_ref": "f89fe270-751c-4956-8113-2c940d84a79b"
+  },
+  {
+    "type": "assistant_delta",
+    "text": "one"
+  },
+  {
+    "type": "assistant_message",
+    "text": "one"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 3,
+      "output_tokens": 2,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 29585
+    }
+  },
+  {
+    "type": "assistant_delta",
+    "text": "two"
+  },
+  {
+    "type": "assistant_message",
+    "text": "two"
+  },
+  {
+    "type": "turn_completed",
+    "usage": {
+      "input_tokens": 3,
+      "output_tokens": 2,
+      "cache_read_input_tokens": 37451,
+      "cache_creation_input_tokens": 29
+    }
+  }
+]

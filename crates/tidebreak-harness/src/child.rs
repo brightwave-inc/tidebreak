@@ -1,4 +1,4 @@
-//! Bookkeeping for adapters that run one engine child per turn.
+//! Bookkeeping for adapters that own an engine child.
 //!
 //! Two facts the session worker needs, and a pid read at turn boundaries
 //! cannot give it: the pid *while* the turn is in flight (that is the whole
