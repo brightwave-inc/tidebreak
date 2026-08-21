@@ -543,8 +543,6 @@ pub(crate) async fn browser_wait(
     capability_id: Uuid,
     arguments: tidebreak_core::BrowserWaitArgs,
 ) -> Result<tidebreak_core::BrowserWaitResult, String> {
-    use tidebreak_core::{BrowserWaitCondition, BrowserWaitResult, BrowserWaitStatus};
-
     if !arguments.is_well_formed() {
         return Err("browser wait request is not valid".to_owned());
     }
@@ -684,8 +682,6 @@ pub(crate) async fn browser_screenshot(
     capability_id: Uuid,
     arguments: tidebreak_core::BrowserScreenshotArgs,
 ) -> Result<tidebreak_core::BrowserScreenshotResult, String> {
-    use tidebreak_core::BrowserScreenshotResult;
-
     if !arguments.is_well_formed() {
         return Err("browser screenshot request is not valid".to_owned());
     }
@@ -892,12 +888,12 @@ async fn capture_browser_image(_webview: &Webview) -> Result<String, String> {
 // ── Native semantic act ───────────────────────────────────────────
 
 pub(crate) async fn browser_native_act(
-    app: &AppHandle,
+    _app: &AppHandle,
     registry: &BrowserRegistry,
     capability_id: Uuid,
     arguments: tidebreak_core::BrowserActArgs,
 ) -> Result<tidebreak_core::BrowserActResult, String> {
-    use tidebreak_core::{BrowserActResult, BrowserActStatus};
+    use tidebreak_core::BrowserActStatus;
 
     if !arguments.is_well_formed() {
         return Err("browser action request is not valid".to_owned());

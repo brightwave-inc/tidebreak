@@ -438,6 +438,7 @@ impl BrowserRegistry {
                 pending_navigation_url: None,
                 dispatch: BrowserDispatchState::default(),
                 semantic_snapshot: None,
+                screenshot_epoch: None,
             },
         );
         Ok(instance_id)
