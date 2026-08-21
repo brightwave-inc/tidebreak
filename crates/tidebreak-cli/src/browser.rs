@@ -904,6 +904,19 @@ mod tests {
 
     const VALID_TOKEN: &str = "tbreak_bt_00000000-0000-0000-0000-000000000000";
 
+    /// Extract the error from `BrowserCapfile::load` without requiring
+    /// `Debug` on the `Ok` type. `BrowserCapfile` intentionally does not
+    /// implement `Debug` because it carries the bearer token, so
+    /// `Result::unwrap_err` (which requires `T: Debug`) cannot be used.
+    fn capfile_load_err(path: &std::path::Path) -> AgentError {
+        match BrowserCapfile::load(path) {
+            Ok(_) => panic!(
+                "expected BrowserCapfile::load to fail, but it succeeded"
+            ),
+            Err(error) => error,
+        }
+    }
+
     // -- Capfile parsing ---------------------------------------------------
 
     #[test]
@@ -962,7 +975,7 @@ mod tests {
     #[test]
     fn capfile_rejects_non_regular_file() {
         let dir = tempfile::tempdir().unwrap();
-        let err = BrowserCapfile::load(dir.path()).unwrap_err();
+        let err = capfile_load_err(dir.path());
         assert!(err.to_string().contains("regular file"));
     }
 
@@ -999,7 +1012,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("loopback"), "error: {msg}");
     }
@@ -1018,7 +1031,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("port"), "error: {msg}");
     }
@@ -1037,7 +1050,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("/code/browser"), "error: {msg}");
     }
@@ -1092,7 +1105,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("prefix"), "error: {msg}");
     }
@@ -1111,7 +1124,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("UUID"), "error: {msg}");
     }
@@ -1130,7 +1143,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("length"), "error: {msg}");
     }
@@ -1151,7 +1164,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(msg.contains("version 2"), "error: {msg}");
     }
@@ -1216,7 +1229,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(!msg.contains(token), "token leaked into error: {msg}");
     }
@@ -1236,7 +1249,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(
             !msg.contains(&path_str),
@@ -1259,7 +1272,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = BrowserCapfile::load(&path).unwrap_err();
+        let err = capfile_load_err(&path);
         let msg = err.to_string();
         assert!(!msg.contains(endpoint), "endpoint leaked into error: {msg}");
     }
