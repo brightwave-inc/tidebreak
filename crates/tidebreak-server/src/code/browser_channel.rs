@@ -693,6 +693,22 @@ mod tests {
     }
 
     #[test]
+    fn relative_bridge_command_is_rejected_without_minting_a_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = seeded(dir.path());
+        let sub = subject("relative-bridge");
+
+        let error = reg
+            .issue(sub.clone(), Path::new("tidebreak"))
+            .expect_err("relative bridge command must fail closed");
+        assert!(error.contains("absolute path"));
+        assert!(std::fs::read_dir(reg.capfile_dir()).unwrap().next().is_none());
+
+        let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
+        assert!(spec.capability_file.exists());
+    }
+
+    #[test]
     fn capfile_dir_is_absolute() {
         let dir = tempfile::tempdir().unwrap();
         let reg = BrowserTokenRegistry::new(dir.path()).unwrap();

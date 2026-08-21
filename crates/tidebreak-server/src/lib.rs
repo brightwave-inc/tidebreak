@@ -166,9 +166,8 @@ pub struct BrowserChannelBinding {
     /// The native browser adapter.
     pub runtime: Arc<dyn BrowserRuntime>,
     /// Absolute path to the trusted bridge executable.
-    pub bridge_command: std::path::PathBuf,
+    pub bridge_command: PathBuf,
 }
-
 
 impl BrowserChannelBinding {
     /// Construct a binding from both required halves.
@@ -176,7 +175,7 @@ impl BrowserChannelBinding {
     /// `bridge_command` must be absolute; the desktop sibling resolver must
     /// have already verified existence and executability.
     #[must_use]
-    pub fn new(runtime: Arc<dyn BrowserRuntime>, bridge_command: std::path::PathBuf) -> Self {
+    pub fn new(runtime: Arc<dyn BrowserRuntime>, bridge_command: PathBuf) -> Self {
         Self {
             runtime,
             bridge_command,
@@ -195,7 +194,6 @@ impl BrowserChannelBinding {
         &self.bridge_command
     }
 }
-
 pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
