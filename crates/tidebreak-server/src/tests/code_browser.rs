@@ -143,7 +143,9 @@ impl BrowserRuntime for FakeBrowserRuntime {
     ) -> Result<BrowserWaitResult, BrowserRuntimeError> {
         self.record("wait", scope);
         if args.browser_id != "browser-1" {
-            return Err(BrowserRuntimeError::UnknownBrowserId(args.browser_id.clone()));
+            return Err(BrowserRuntimeError::UnknownBrowserId(
+                args.browser_id.clone(),
+            ));
         }
         if self.stale {
             return Err(BrowserRuntimeError::StaleTarget);
@@ -164,7 +166,9 @@ impl BrowserRuntime for FakeBrowserRuntime {
     ) -> Result<BrowserScreenshotResult, BrowserRuntimeError> {
         self.record("screenshot", scope);
         if args.browser_id != "browser-1" {
-            return Err(BrowserRuntimeError::UnknownBrowserId(args.browser_id.clone()));
+            return Err(BrowserRuntimeError::UnknownBrowserId(
+                args.browser_id.clone(),
+            ));
         }
         if self.stale {
             return Err(BrowserRuntimeError::StaleTarget);
@@ -724,7 +728,14 @@ async fn new_routes_require_capability_token() {
     let _t = mint_token(&a.code, ws, s);
     for rt in ["wait", "screenshot"] {
         assert_eq!(
-            post(a.addr, rt, None, serde_json::json!({"browser_id":"browser-1"})).await.status(),
+            post(
+                a.addr,
+                rt,
+                None,
+                serde_json::json!({"browser_id":"browser-1"}),
+            )
+            .await
+            .status(),
             reqwest::StatusCode::UNAUTHORIZED
         );
     }
