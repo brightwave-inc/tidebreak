@@ -134,9 +134,9 @@ pub(crate) struct CodeRuntime {
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     pub(crate) browser_tokens: BrowserTokenRegistry,
-    /// The desktop browser adapter, installed after assembly. Absent in
-    /// headless deployments and tests that do not register one.
-    browser_runtime: Mutex<Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>>,
+    /// The desktop browser adapter, installed before recovery starts. Absent
+    /// in headless deployments and tests that do not register one.
+    browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -189,7 +189,7 @@ impl CodeRuntime {
             worktree_root_default,
             approvals: ApprovalBridge::new(),
             browser_tokens,
-            browser_runtime: Mutex::new(browser_runtime),
+            browser_runtime,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -260,6 +260,16 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
     ) -> Self {
+        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None)
+    }
+
+    #[cfg(any(test, feature = "scripted-harness"))]
+    pub(crate) fn with_registry_and_browser_runtime(
+        db: Arc<DbStore>,
+        data_dir: PathBuf,
+        adapters: AdapterRegistry,
+        browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+    ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
             // at this point (set from config and validated by the host). The
@@ -277,7 +287,7 @@ impl CodeRuntime {
             worktree_root_default: None,
             approvals: ApprovalBridge::new(),
             browser_tokens,
-            browser_runtime: Mutex::new(None),
+            browser_runtime,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -303,31 +313,23 @@ impl CodeRuntime {
         *self.gh_search_path.lock().expect("gh search path") = path;
     }
 
-/// Return the installed browser adapter, if any.
+    /// Return the installed browser adapter, if any.
     pub(crate) fn browser_runtime(
         &self,
     ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
-        self.browser_runtime.lock().expect("browser runtime").clone()
+        self.browser_runtime.clone()
     }
 
     /// Revoke the session browser token AND the desktop adapter
     /// capability. Idempotent — safe to call multiple times.
     ///
-    /// The token registry is invalidated first so in-flight requests are
-    /// rejected. The adapter Arc is cloned and released before
-    /// `revoke_session` is called (deadlock-safe).
-    /// Revoke the session browser token AND the desktop adapter
-    /// capability. Idempotent — safe to call multiple times.
-    ///
     /// The token registry is invalidated first and the adapter scope is
     /// derived from the returned [`BrowserSubject`] — no DB lookup needed.
-    /// The adapter Arc is cloned under the lock, the lock is released,
-    /// then `revoke_session` is called (deadlock-safe).
+    /// The adapter call happens after the registry lock is released.
     fn revoke_browser_session(&self, session_id: CodeSessionId) {
         let subject = self.browser_tokens.revoke(session_id);
         if let Some(subject) = subject {
-            let adapter = self.browser_runtime.lock().expect("browser runtime").clone();
-            if let Some(runtime) = adapter {
+            if let Some(runtime) = &self.browser_runtime {
                 let scope = crate::code::browser_runtime::BrowserRuntimeScope::from(subject);
                 runtime.revoke_session(&scope);
             }
@@ -1332,7 +1334,7 @@ impl CodeRuntime {
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
         // Invalidate the session browser token so in-flight browser route
-        // calls are rejected immediately. The installed revocation hook
+        // calls are rejected immediately, then revoke the native scope.
         self.revoke_browser_session(id);
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
@@ -2404,7 +2406,13 @@ mod managed_node_wait_tests {
         ))
         .await
         .expect("db");
-        let runtime = CodeRuntime::new(Arc::new(db), data_dir.path().to_path_buf(), None, None);
+        let runtime = CodeRuntime::new(
+            Arc::new(db),
+            data_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(
             runtime.managed_node_root(false).await.expect("node root"),

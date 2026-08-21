@@ -65,7 +65,6 @@ struct RegistryState {
     by_session: HashMap<CodeSessionId, SessionEntry>,
 }
 
-
 // ── registry ────────────────────────────────────────────────────────────────
 
 /// In-memory route-token registry paired with an on-disk capability-file

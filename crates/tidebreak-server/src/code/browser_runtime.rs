@@ -3,16 +3,14 @@
 //! The [`BrowserRuntime`] trait defines the public contract between the
 //! server and the desktop browser adapter. The server owns this trait and
 //! never depends on a desktop crate. The desktop implements it behind an
-//! `Arc<dyn BrowserRuntime>` and passes it to the bind-time constructor
-//! (or, in tests, through [`CodeRuntime::set_browser_runtime`]).
+//! `Arc<dyn BrowserRuntime>` and passes it to the bind-time constructor before
+//! code-session recovery starts.
 //!
 //! ## Trust boundary
 //!
 //! Every method receives a [`BrowserRuntimeScope`] derived from a validated
 //! session browser token — never from request fields. The runtime MUST
 //! validate scope before accessing any native browser resource.
-
-use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -78,7 +76,7 @@ pub enum BrowserRuntimeError {
 /// runtime owns the live grant and controller state.
 ///
 /// All methods return [`BrowserRuntimeError`] so the adapter can express the
-/// error taxonomy without constructing crate-private [`ServerError`]. The
+/// error taxonomy without constructing crate-private [`crate::ServerError`]. The
 /// route layer maps errors to stable HTTP responses centrally.
 #[async_trait]
 pub trait BrowserRuntime: Send + Sync {
@@ -109,7 +107,5 @@ pub trait BrowserRuntime: Send + Sync {
     /// and must never block on async work: the caller holds no runtime
     /// handle after this returns and the session's browser access is dead.
     ///
-    /// The default implementation is a no-op so tests and headless
-    /// deployments without a browser adapter compile without changes.
-    fn revoke_session(&self, _scope: &BrowserRuntimeScope) {}
+    fn revoke_session(&self, scope: &BrowserRuntimeScope);
 }

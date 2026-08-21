@@ -147,7 +147,9 @@ pub use durable_oplog::DurableOperationStore;
 /// Public contract for desktop browser adapters. The desktop implements
 /// [`BrowserRuntime`] behind an `Arc` and installs it with
 /// [`bind`] or one of its desktop variants.
-pub use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeScope};
+pub use crate::code::browser_runtime::{
+    BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope,
+};
 pub use error::ServerError;
 pub use pairing::{
     deprovision_provisioned_gateway, deprovision_target, register_pending_pairing,
@@ -1021,8 +1023,6 @@ pub struct Server {
     gateway: Arc<gateway_runtime::GatewayRuntime>,
     listener: TcpListener,
     router: Router,
-    /// The code runtime, when this server has one.
-    code: Option<Arc<crate::code::CodeRuntime>>,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
     _sandbox_container_run_worker: Option<AbortTask>,
@@ -1136,7 +1136,7 @@ impl Server {
         PairingHandle::new(self.store.clone(), self.mcp.clone(), self.gateway.clone())
     }
 
-/// Run the accept loop until the process exits.
+    /// Run the accept loop until the process exits.
     pub async fn serve(self) -> Result<()> {
         axum::serve(self.listener, self.router)
             .await
@@ -1238,6 +1238,31 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     local_voice: Option<Arc<dyn LocalVoiceRunner>>,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
+) -> Result<Server> {
+    bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
+        config,
+        client_executor_id,
+        folder_grant_resolver,
+        office_converter,
+        host_tool_broker,
+        local_voice,
+        host_folders,
+        None,
+    )
+    .await
+}
+
+/// Desktop binding with the native host bridges plus a browser runtime that
+/// must be available before code-session recovery starts.
+#[allow(clippy::too_many_arguments)]
+pub async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_runtime(
+    config: Config,
+    client_executor_id: Uuid,
+    folder_grant_resolver: Arc<dyn code_execution::ExecFolderGrantResolver>,
+    office_converter: Option<Arc<dyn tidebreak_code_execution::HostOfficeConverter>>,
+    host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    local_voice: Option<Arc<dyn LocalVoiceRunner>>,
+    host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     browser_runtime: Option<Arc<dyn code::browser_runtime::BrowserRuntime>>,
 ) -> Result<Server> {
     if client_executor_id.is_nil() {
@@ -1253,10 +1278,7 @@ pub async fn bind_configured_with_desktop_executor_and_folder_grants(
         host_tool_broker,
         local_voice,
         host_folders,
-        // The desktop's browser engine adapter arrives with the
-        // native driver slice; until then every embedding binds
-        // without one and browser routes answer 501.
-        None,
+        browser_runtime,
     )
     .await
 }
@@ -1742,7 +1764,6 @@ async fn bind_inner(
         gateway: gateway_runtime,
         listener,
         router,
-        code: Some(code),
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _sandbox_container_run_worker: sandbox_container_run_worker.map(AbortTask),

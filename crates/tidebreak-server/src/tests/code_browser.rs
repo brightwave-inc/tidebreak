@@ -43,7 +43,7 @@ impl FakeBrowserRuntime {
 fn engine() -> BrowserEngineDescriptor { BrowserEngineDescriptor {
     name: BrowserEngineName::WkWebView, capabilities: BrowserEngineCapabilities {
         lifecycle: true, persistent_profile: true, semantic_snapshot: true,
-        semantic_actions: true, screenshot: true, cross_origin_frames: false,
+        semantic_actions: false, screenshot: true, cross_origin_frames: false,
         profile_reset: true,
     }}}
 
@@ -88,13 +88,20 @@ struct BrowserApp { addr: std::net::SocketAddr, code: Arc<CodeRuntime>,
 async fn browser_app(fake: Option<Arc<FakeBrowserRuntime>>) -> BrowserApp {
     let (dir, store) = temp_db_store("code-browser.db").await;
     let db = Arc::new(store); let st: Arc<dyn Store> = db.clone();
-    let code = Arc::new(CodeRuntime::with_registry(db, dir.path().into(), AdapterRegistry::new()));
+    let browser_runtime = fake
+        .as_ref()
+        .map(|runtime| -> Arc<dyn BrowserRuntime> { runtime.clone() });
+    let code = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
+        db,
+        dir.path().into(),
+        AdapterRegistry::new(),
+        browser_runtime,
+    ));
     let mut state = AppState::new(Config::desktop(dir.path()), st,
         Arc::new(FixedResolver(Arc::new(FakeProvider))), Arc::new(MemSecrets::default()),
         Arc::new(ToolRegistry::new()),
         AgentConfig { model: "fake".into(), ..AgentConfig::default() });
     state.code = Some(code.clone());
-    if let Some(f) = &fake { code.set_browser_runtime(f.clone()); }
     let addr = serve(app(state)).await;
     BrowserApp { addr, code, fake, _dir: dir }
 }
