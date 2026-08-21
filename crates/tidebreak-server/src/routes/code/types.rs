@@ -294,6 +294,21 @@ pub struct CodeCloneDefaults {
     pub gh_remediation: String,
 }
 
+/// A written fork transcript: `POST /code/sessions/{id}/fork`.
+///
+/// `path` is worktree-relative, which is what the child agent needs: the file
+/// already sits in its working directory, so the prompt names a path rather
+/// than carrying the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeForkTranscript {
+    pub path: String,
+    pub byte_len: u64,
+    pub turns: u32,
+    /// True when anything was left out to fit the size cap: the oldest
+    /// turns, or the end of a turn too large on its own.
+    pub truncated: bool,
+}
+
 /// Where new worktrees land: `GET`/`PUT /code/worktree-root`.
 ///
 /// `root` is the stored setting and is absent while the deployment runs on its

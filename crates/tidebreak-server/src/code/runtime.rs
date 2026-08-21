@@ -36,6 +36,7 @@ use super::checkpoint::{
 };
 use super::clone::CloneJobs;
 use super::delivery::DeliveryCache;
+use super::fork;
 use super::gh::{
     self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
 };
@@ -158,7 +159,7 @@ pub(crate) struct CodeRuntime {
     /// overlap: two harnesses editing the same files, and two checkpoints
     /// racing for `.git/index.lock`, is corruption rather than concurrency.
     /// A worker takes the workspace's lock for the length of a turn, so a
-    /// sibling's turn starts after this one ends. See record 54.
+    /// sibling's turn starts after this one ends. See record 55.
     worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     pr_cache: PrDigestCache,
     pub(crate) delivery_cache: DeliveryCache,
@@ -1145,7 +1146,7 @@ impl CodeRuntime {
     /// A workspace holds any number of interactive sessions and at most one
     /// watch session, so the guard below covers watch only. The worktree they
     /// share is protected by the per-workspace turn lock rather than by a cap
-    /// on conversations; see record 54.
+    /// on conversations; see record 55.
     pub(crate) async fn create_session_of_kind(
         &self,
         owner: &OwnerId,
@@ -1340,7 +1341,7 @@ impl CodeRuntime {
         // A fenced sibling means an engine from a previous boot may still be
         // alive in this checkout, outside every lock this process holds. The
         // turn lock cannot see it, so nothing in the workspace writes until it
-        // is reaped (record 54).
+        // is reaped (record 55).
         if let Some(reason) = self.workspace_fence_reason(owner, &session).await? {
             return Err(ServerError::conflict_kind("workspace_fenced", reason));
         }
@@ -1652,6 +1653,33 @@ impl CodeRuntime {
         let turns = list_turns(&self.db, owner, session_id).await?;
         let events = list_events(&self.db, owner, session_id, 0).await?;
         Ok((session, turns, events))
+    }
+
+    /// Write this session's transcript into its worktree for a fork to read.
+    ///
+    /// The child is a sibling session in the same worktree, so the file only
+    /// has to exist where the engine already works. Nothing is handed over
+    /// here: the caller creates the child and names the path in its first
+    /// message.
+    pub(crate) async fn fork_transcript(
+        &self,
+        owner: &OwnerId,
+        session_id: CodeSessionId,
+    ) -> Result<fork::WrittenTranscript, ServerError> {
+        let session = self.get_session(owner, session_id).await?;
+        let workspace = self
+            .require_live_workspace(owner, session.workspace_id)
+            .await?;
+        let turns = list_turns(&self.db, owner, session_id).await?;
+        let events = list_events(&self.db, owner, session_id, 0).await?;
+        fork::write_transcript(
+            std::path::Path::new(&workspace.worktree_path),
+            &session,
+            &turns,
+            &events,
+        )
+        .await
+        .map_err(|err| ServerError::internal(format!("could not write the fork transcript: {err}")))
     }
 
     pub(crate) async fn workspace_tree(
@@ -2018,7 +2046,7 @@ impl CodeRuntime {
     ///
     /// Every session in the workspace hands the same `Arc` to its worker, so
     /// the lock outlives any one session and a worker recovered after a
-    /// restart rejoins the same queue. See record 54.
+    /// restart rejoins the same queue. See record 55.
     pub(super) fn worktree_turn_lock(
         &self,
         workspace_id: WorkspaceId,
