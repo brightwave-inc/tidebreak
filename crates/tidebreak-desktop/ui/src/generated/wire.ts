@@ -899,7 +899,7 @@ export type CodeDeliveryPrAttentionReason = "changes_requested" | "checks_failed
  * User-initiated global PR action. Code-changing actions deliberately do not
  * exist here; they remain workspace-scoped agent prompts.
  */
-export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, expected_head_sha: string, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, };
+export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, expected_head_sha: string, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
 
 export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullRequestTarget, action: CodeDeliveryPullRequestAction, };
 
@@ -907,18 +907,48 @@ export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullReques
  * Full PR drawer payload. Conversation entries retain the existing bounded
  * comment contract used by workspace PRs.
  */
-export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, changed_files: number, additions: number, deletions: number, comments: Array<PullRequestComment>, can_mark_ready: boolean, can_merge: boolean, can_rerun_failed: boolean, };
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string, 
+/**
+ * Empty when the diff could not be read. Truncated by `files_truncated`
+ * rather than paged: the panel is a review aid, not a diff viewer.
+ */
+files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>, can_mark_ready: boolean, can_merge: boolean, can_rerun_failed: boolean, can_close: boolean, can_reopen: boolean, can_comment: boolean, };
+
+/**
+ * One file in a pull request's diff.
+ *
+ * `patch` is the host's unified hunk text and is absent for binary files and
+ * for diffs GitHub declines to render. It is bounded by the host, not stored.
+ */
+export type CodeDeliveryPullRequestFile = { path: string, 
+/**
+ * `added`, `modified`, `removed`, `renamed`, `copied`, or `changed`.
+ */
+status: string, additions: number, deletions: number, previous_path?: string, patch?: string, };
 
 /**
  * Server-side PR query. Saved views are client-owned; their resolved filters
  * are sent here so paging remains bounded across many repositories.
  */
-export type CodeDeliveryPullRequestQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, states: Array<string>, review_states: Array<string>, check_states: Array<string>, authors: Array<string>, attention_only: boolean, ready_only: boolean, tidebreak_linked?: boolean, updated_after?: string, cursor?: string, limit?: number, };
+export type CodeDeliveryPullRequestQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, states: Array<string>, review_states: Array<string>, check_states: Array<string>, authors: Array<string>, attention_only: boolean, ready_only: boolean, tidebreak_linked?: boolean, updated_after?: string, cursor?: string, limit?: number, 
+/**
+ * Skip the short list cache and reread GitHub.
+ *
+ * Set only by an explicit user refresh. Paging never sets it, so
+ * following a cursor stays on the aggregate the first page came from.
+ */
+refresh: boolean, };
 
 /**
  * Pull request row shared by the overview and notification monitor.
  */
-export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, created_at: string, updated_at: string, };
+export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, labels: Array<string>, created_at: string, updated_at: string, 
+/**
+ * Set only once the pull request merged. `state` alone cannot separate a
+ * merged pull request from a closed one on every host response, and the
+ * row says *when* it settled rather than when it was last touched.
+ */
+merged_at?: string, closed_at?: string, };
 
 /**
  * Target for a pull-request detail read or action.
@@ -946,7 +976,11 @@ export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Arr
 
 export type CodeDeliveryRunKind = "workflow_run" | "deployment";
 
-export type CodeDeliveryRunQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, kinds: Array<CodeDeliveryRunKind>, statuses: Array<string>, conclusions: Array<string>, workflows: Array<string>, environments: Array<string>, branches: Array<string>, events: Array<string>, actors: Array<string>, attention_only: boolean, tidebreak_linked?: boolean, created_after?: string, cursor?: string, limit?: number, };
+export type CodeDeliveryRunQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, kinds: Array<CodeDeliveryRunKind>, statuses: Array<string>, conclusions: Array<string>, workflows: Array<string>, environments: Array<string>, branches: Array<string>, events: Array<string>, actors: Array<string>, attention_only: boolean, tidebreak_linked?: boolean, created_after?: string, cursor?: string, limit?: number, 
+/**
+ * Skip the short list cache and reread GitHub. See the pull-request query.
+ */
+refresh: boolean, };
 
 /**
  * Normalized Actions workflow run or GitHub deployment row.

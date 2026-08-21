@@ -447,6 +447,7 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestTarget>(
             &cfg, &mut out,
         );
+        generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestFile>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestDetail>(
             &cfg, &mut out,
         );
