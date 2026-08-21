@@ -213,9 +213,7 @@ async fn capture_semantic_snapshot(
     // Capture the instance identity and document epoch before the page
     // JavaScript evaluation so a Stop/replace cannot reuse the stale
     // result after completion.
-    let start_fence = registry
-        .observation_fence(capability_id, &browser_id)
-        .map_err(|error| format!("snapshot authorization lapsed: {error}"))?;
+    let start_fence = registry.observation_fence(capability_id, &browser_id)?;
     let instance_id = start_fence.instance_id;
     let document_epoch = start_fence.document_epoch;
 
@@ -288,18 +286,14 @@ async fn capture_semantic_snapshot(
     // halt, controller, grant, instance, epoch, and load state before
     // storing the semantic snapshot. No window for Stop/revoke to
     // repopulate after a separate record call.
-    registry
-        .complete_semantic_snapshot(
-            capability_id,
-            &browser_id,
-            instance_id,
-            document_epoch,
-            snapshot_id.clone(),
-            targets,
-        )
-        .map_err(|error| {
-            format!("browser document changed while it was being inspected: {error}")
-        })?;
+    registry.complete_semantic_snapshot(
+        capability_id,
+        &browser_id,
+        instance_id,
+        document_epoch,
+        snapshot_id.clone(),
+        targets,
+    )?;
 
     Ok(BrowserPageSnapshot {
         browser_id,

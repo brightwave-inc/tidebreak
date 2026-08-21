@@ -540,15 +540,19 @@ jobs:
       # `build.rs` deliberately removes `externalBin` when a plain check starts
       # from a clean checkout. Prepare the real Windows artifact first so the
       # desktop check exercises Tauri's target-suffixed sidecar resolution.
-      - name: Prepare target-named host broker sidecar
+      - name: Prepare target-named sidecar binaries
         shell: pwsh
         env:
           TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
         run: |
           node crates/tidebreak-desktop/scripts/prepare-sidecar.mjs
-          $sidecar = "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
-          if (!(Test-Path -LiteralPath $sidecar -PathType Leaf)) {
-            throw "prepare-sidecar did not produce $sidecar"
+          $broker = "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
+          $cli = "crates/tidebreak-desktop/binaries/tidebreak-$env:TAURI_ENV_TARGET_TRIPLE.exe"
+          if (!(Test-Path -LiteralPath $broker -PathType Leaf)) {
+            throw "prepare-sidecar did not produce $broker"
+          }
+          if (!(Test-Path -LiteralPath $cli -PathType Leaf)) {
+            throw "prepare-sidecar did not produce $cli"
           }
       - name: Check Windows-gated crates
         run: >-

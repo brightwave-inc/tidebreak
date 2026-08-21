@@ -1419,12 +1419,24 @@ test("release caches restore only credential-free compiler products", () => {
         );
         assert.match(
           cacheStep,
+          new RegExp(`target/${target}/release/tidebreak`),
+        );
+        assert.match(
+          cacheStep,
           new RegExp(`binaries/tidebreak-host-broker-${target}`),
+        );
+        assert.match(
+          cacheStep,
+          new RegExp(`binaries/tidebreak-${target}`),
         );
       }
       assert.match(
         cacheStep,
         /binaries\/tidebreak-host-broker-universal-apple-darwin/,
+      );
+      assert.match(
+        cacheStep,
+        /binaries\/tidebreak-universal-apple-darwin/,
       );
     } else {
       assert.match(cacheStep, /target\/\$\{\{ matrix\.target \}\}\/release\/deps/);
@@ -1435,6 +1447,10 @@ test("release caches restore only credential-free compiler products", () => {
       assert.match(
         cacheStep,
         /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak-host-broker/,
+      );
+      assert.match(
+        cacheStep,
+        /target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak/,
       );
     }
     assert.doesNotMatch(cacheStep, /pdfium/i);
@@ -1517,15 +1533,20 @@ test("release caches restore only credential-free compiler products", () => {
     ? [
         /aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin.*release\/tidebreak-desktop/,
         /aarch64-apple-darwin,x86_64-apple-darwin.*release\/tidebreak-host-broker/,
+        /aarch64-apple-darwin,x86_64-apple-darwin.*release\/tidebreak/,
         /libtidebreak_desktop_lib\./,
         /binaries\/tidebreak-host-broker-\{aarch64-apple-darwin,x86_64-apple-darwin\}/,
+        /binaries\/tidebreak-\{aarch64-apple-darwin,x86_64-apple-darwin\}/,
         /binaries\/tidebreak-host-broker-universal-apple-darwin/,
+        /binaries\/tidebreak-universal-apple-darwin/,
       ]
     : [
         /release\/tidebreak-desktop/,
         /release\/tidebreak-host-broker/,
+        /release\/tidebreak/,
         /libtidebreak_desktop_lib\./,
         /binaries\/tidebreak-host-broker-\$RELEASE_TARGET/,
+        /binaries\/tidebreak-\$RELEASE_TARGET/,
       ];
   for (const product of discardedProducts) {
     assert.match(discardProducts, product);
@@ -1636,8 +1657,10 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   for (const product of [
     /release\/tidebreak-desktop\.exe/,
     /release\/tidebreak-host-broker\.exe/,
+    /release\/tidebreak\.exe/,
     /tidebreak_desktop_lib\./,
     /binaries\/tidebreak-host-broker-\$RELEASE_TARGET\.exe/,
+    /binaries\/tidebreak-\$RELEASE_TARGET\.exe/,
   ]) {
     assert.match(discardProducts, product);
   }
@@ -1648,6 +1671,13 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
         buildJob.indexOf("Build the Tauri app without Windows code signing"),
     "restored product binaries must be discarded before the packaged build",
   );
+
+  // The packaging job must use distinct variable names for each sidecar so it
+  // validates both binaries without overwriting the variable.
+  assert.match(buildJob, /broker_sidecar="crates\/tidebreak-desktop\/binaries\/tidebreak-host-broker-\$RELEASE_TARGET\.exe"/);
+  assert.match(buildJob, /cli_sidecar="crates\/tidebreak-desktop\/binaries\/tidebreak-\$RELEASE_TARGET\.exe"/);
+  assert.match(buildJob, /Missing target-named host broker sidecar: \$broker_sidecar/);
+  assert.match(buildJob, /Missing target-named CLI sidecar: \$cli_sidecar/);
 
   // v1 ships unsigned Windows artifacts: no Authenticode configuration may
   // creep in, no Apple credential reaches the Windows jobs, and the updater
@@ -1731,6 +1761,13 @@ test("Linux packaging writes no shared cache before loading updater material", (
       buildJob.indexOf("Verify and collect Linux artifacts"),
     "Linux packages must be built before updater signing material is loaded",
   );
+
+  // The packaging job must use distinct variable names for each sidecar so it
+  // validates both binaries without overwriting the variable.
+  assert.match(buildJob, /broker_sidecar="crates\/tidebreak-desktop\/binaries\/tidebreak-host-broker-\$RELEASE_TARGET"/);
+  assert.match(buildJob, /cli_sidecar="crates\/tidebreak-desktop\/binaries\/tidebreak-\$RELEASE_TARGET"/);
+  assert.match(buildJob, /Missing executable target-named host broker sidecar: \$broker_sidecar/);
+  assert.match(buildJob, /Missing executable target-named CLI sidecar: \$cli_sidecar/);
 });
 
 test("an existing immutable release resumes without rebuilding or overwriting", () => {
@@ -2078,8 +2115,10 @@ test("universal macOS release and staging packages contain both slices", () => {
     assert.match(job, /lipo -archs "\$app_path\/Contents\/MacOS\/\$executable"/);
     assert.match(job, /\$binary_arches" = \*arm64\*/);
     assert.match(job, /\$binary_arches" = \*x86_64\*/);
-    assert.match(job, /Contents\/MacOS\/tidebreak-host-broker/);
+    assert.match(job, /sidecar="\$app_path\/Contents\/MacOS\/tidebreak-host-broker"/);
     assert.match(job, /sidecar_arches="\$\(lipo -archs "\$sidecar"\)"/);
+    assert.match(job, /cli_sidecar="\$app_path\/Contents\/MacOS\/tidebreak"/);
+    assert.match(job, /cli_arches="\$\(lipo -archs "\$cli_sidecar"\)"/);
   }
 });
 
