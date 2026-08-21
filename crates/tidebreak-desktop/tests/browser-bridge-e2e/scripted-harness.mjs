@@ -322,13 +322,20 @@ export async function simulateAbsoluteLaunch({
   const { endpoint, token } = await readCapfile(capfilePath);
   const result = await runChild(command, args, env);
   const allArgv = [command, ...args].join(" ");
-  if (allArgv.includes(token) || result.stdout.includes(token) || result.stderr.includes(token)) {
+  if (
+    allArgv.includes(token) ||
+    outputContainsSecret(result.stdout, token) ||
+    outputContainsSecret(result.stderr, token)
+  ) {
     throw new Error("token escaped through child process argv or output");
   }
   if (allArgv.includes(capfilePath)) {
     throw new Error("capfile path escaped into child process argv");
   }
-  if (result.stdout.includes(capfilePath) || result.stderr.includes(capfilePath)) {
+  if (
+    outputContainsSecret(result.stdout, capfilePath) ||
+    outputContainsSecret(result.stderr, capfilePath)
+  ) {
     throw new Error("capfile path escaped through child process output");
   }
   if (result.code !== 0) {
@@ -350,6 +357,11 @@ export async function simulateAbsoluteLaunch({
     stderr: result.stderr,
     envHasPath: Object.keys(env).some((key) => key.toLowerCase() === "path"),
   };
+}
+
+function outputContainsSecret(output, secret) {
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  return output.includes(secret) || output.includes(jsonEscaped);
 }
 
 function runChild(command, args, env) {

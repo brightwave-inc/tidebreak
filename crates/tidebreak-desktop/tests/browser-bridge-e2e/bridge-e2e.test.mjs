@@ -237,6 +237,34 @@ test("absolute launch rejects capfile-path output leakage", async () => {
   );
 });
 
+test("absolute launch rejects JSON-escaped backslash path leakage", async () => {
+  const backslashDir = join(tmpDir, "browser\\caps");
+  const { capfilePath } = await writeCapfile(backslashDir, bridgeEndpoint);
+  const leakingProbe = `
+    import { readFile } from "node:fs/promises";
+    const path = process.env.TIDEBREAK_BROWSER_CAPFILE;
+    const capfile = JSON.parse(await readFile(path, "utf8"));
+    process.stderr.write(JSON.stringify({ debugPath: path }));
+    process.stdout.write(JSON.stringify({
+      endpoint: capfile.endpoint,
+      tools: [
+        { name: "browser_list" },
+        { name: "browser_navigate" },
+        { name: "browser_snapshot" }
+      ]
+    }));
+  `;
+
+  await assert.rejects(
+    simulateAbsoluteLaunch({
+      capfilePath,
+      command: process.execPath,
+      args: ["--input-type=module", "--eval", leakingProbe],
+    }),
+    /capfile path escaped through child process output/
+  );
+});
+
 test("token never appears in capfile path", async () => {
   const { capfilePath, token } = await writeCapfile(tmpDir, bridgeEndpoint);
 
