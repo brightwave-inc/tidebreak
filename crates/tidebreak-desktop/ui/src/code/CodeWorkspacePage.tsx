@@ -235,6 +235,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
   /** True while the reader is filling in a new agent that has no session yet. */
   const [draftAgent, setDraftAgent] = useState(false);
+  /**
+   * True once the server's session list has arrived for this workspace.
+   *
+   * `?task=` can only be judged against a loaded list. Before it lands, a
+   * param that names nothing looks exactly like one naming a session the page
+   * has not heard of yet, and clearing it would drop a good link on reload.
+   */
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [quickOpenRequest, setQuickOpenRequest] = useState(0);
@@ -341,21 +349,40 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   }, [rememberedSession]);
 
   // `?task=` names the session to show: a sibling agent, or a watch child
-  // opened from the rail. It wins over the default selection below.
-  useEffect(() => {
-    if (!taskParam) return;
-    if (!sessions.some((entry) => entry.id === taskParam)) return;
-    setActiveSessionId(taskParam);
-    setDraftAgent(false);
+  // opened from the rail. The param is a request, not a fact — a link outlives
+  // the agent it points at, so it holds only while that agent is still here
+  // and still live.
+  const namedTask = useMemo(() => {
+    if (!taskParam) return null;
+    const found = sessions.find((entry) => entry.id === taskParam);
+    return found && found.lifecycle !== "ended" ? found : null;
   }, [sessions, taskParam]);
 
-  // Nothing named, or the shown session ended: fall back to the first agent.
+  // A param that names nothing showable is stale: the agent ended, or the link
+  // came from somewhere else. Drop it, so the fallback below runs and the URL
+  // stops naming an agent that is not there. Replace rather than push, so Back
+  // does not lead to the same dead link.
   useEffect(() => {
-    if (taskParam || draftAgent) return;
-    const shown = sessions.some((entry) => entry.id === activeSessionId);
+    if (!sessionsLoaded || !taskParam || namedTask) return;
+    openWorkspaceTask(undefined, { replace: true });
+  }, [namedTask, sessionsLoaded, taskParam]);
+
+  // A named session wins over the default selection below.
+  useEffect(() => {
+    if (!namedTask) return;
+    setActiveSessionId(namedTask.id);
+    setDraftAgent(false);
+  }, [namedTask]);
+
+  // Nothing named, or the shown agent ended: fall back to the first one. The
+  // check reads the live conversations, not every session, so an agent that
+  // ended under the reader does not stay selected.
+  useEffect(() => {
+    if (namedTask || draftAgent) return;
+    const shown = conversations.some((entry) => entry.id === activeSessionId);
     if (activeSessionId && shown) return;
     setActiveSessionId(conversations[0]?.id ?? null);
-  }, [activeSessionId, conversations, draftAgent, sessions, taskParam]);
+  }, [activeSessionId, conversations, draftAgent, namedTask]);
 
   useEffect(() => {
     return () => {
@@ -367,6 +394,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setSessionsLoaded(false);
     void (async () => {
       try {
         const [next, listed] = await Promise.all([
@@ -378,6 +406,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         const catalogState = useCodeCatalogStore.getState();
         catalogState.upsertWorkspace(next);
         setSessions(listed);
+        setSessionsLoaded(true);
         // The card and the rail show one agent per workspace, so the catalog
         // remembers the first — the one the workspace was started with.
         const first = liveCodeSessions(listed)[0];
@@ -518,11 +547,20 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     requestNewTab(splitFocused ? "secondary" : "primary");
   }, [quickOpenPending, splitFocused]);
 
-  /** Attach a child task's transcript (or the conversation when undefined). */
-  function openWorkspaceTask(sessionId: string | undefined) {
+  /**
+   * Attach a child task's transcript (or the conversation when undefined).
+   *
+   * `replace` is for corrections rather than choices: clearing a stale param
+   * should not leave a history entry the reader can walk back into.
+   */
+  function openWorkspaceTask(
+    sessionId: string | undefined,
+    options?: { replace?: boolean },
+  ) {
     void navigate({
       to: "/code/w/$workspaceId",
       params: { workspaceId },
+      replace: options?.replace ?? false,
       search: (current: Record<string, unknown>) => ({
         ...current,
         task: sessionId,

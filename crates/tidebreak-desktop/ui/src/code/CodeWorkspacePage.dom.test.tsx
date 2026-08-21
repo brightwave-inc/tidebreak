@@ -1083,6 +1083,51 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
+  it("falls back to the main agent when ?task names a session that is gone", async () => {
+    // A link outlives the agent it points at. Landing on one must not leave the
+    // page showing nothing, and must not leave the URL still claiming it.
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    const { router } = await mountWorkspace(
+      client,
+      "/code/w/ws-1?task=sess-never-existed",
+    );
+
+    const main = await screen.findByRole("tab", { name: "Main agent" });
+    expect(main).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByRole("article", { name: "You" }),
+    ).toHaveTextContent("list the files");
+    await waitFor(() =>
+      expect(router.state.location.search).not.toHaveProperty("task"),
+    );
+  });
+
+  it("falls back to the main agent when ?task names an ended session", async () => {
+    // Ended is the common case: the reader stopped the agent, then reloaded.
+    // The session is still listed, so existence alone is not enough to select.
+    const client = makeClient();
+    const ended: CodeSessionSnapshot = {
+      ...SESSION,
+      id: "sess-2",
+      harness_kind: "codex",
+      lifecycle: "ended",
+      created_at: "2026-08-15T01:00:00.000Z",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([ended, SESSION]);
+    const { router } = await mountWorkspace(client, "/code/w/ws-1?task=sess-2");
+
+    const main = await screen.findByRole("tab", { name: "Main agent" });
+    expect(main).toHaveAttribute("aria-selected", "true");
+    // An ended agent keeps no tab, so there is nothing to switch back to.
+    expect(
+      screen.queryByRole("tab", { name: "Codex CLI" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(router.state.location.search).not.toHaveProperty("task"),
+    );
+  });
+
   it("opens a draft tab for a second agent and closes it again", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
