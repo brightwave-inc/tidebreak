@@ -31,8 +31,8 @@ use super::approval_bridge::ApprovalBridge;
 use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
-    delete_workspace_refs, list_changed_files, produce_diff, resolve_diff_range,
-    sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
+    delete_workspace_refs, list_changed_files, produce_diff, record_session_baseline,
+    resolve_diff_range, sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
 };
 use super::clone::CloneJobs;
 use super::delivery::DeliveryCache;
@@ -1273,6 +1273,24 @@ impl CodeRuntime {
             created_at: Utc::now(),
         };
         insert_session(&self.db, &session).await?;
+        // Pin where this session starts, before it can take a turn. Sessions
+        // share the worktree (record 55), so without a baseline the first
+        // turn's diff is the whole worktree against the base branch — a
+        // sibling's edits included.
+        if let Err(err) = record_session_baseline(
+            Path::new(&workspace.worktree_path),
+            workspace.id,
+            session.id,
+        )
+        .await
+        {
+            tracing::warn!(
+                session = %session.id,
+                workspace = %workspace.id,
+                error = %err,
+                "could not record the session baseline; its first turn diffs against the base ref"
+            );
+        }
         self.attach_and_spawn_worker(session).await
     }
 
