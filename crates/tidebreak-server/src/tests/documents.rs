@@ -1573,6 +1573,7 @@ impl tidebreak_code_execution::CodeExecutionProvider for UnavailableCodeExecutio
 async fn agent_deps_for_test(
     dir: &std::path::Path,
     computer_use: bool,
+    foreground_browser: bool,
 ) -> (ToolRegistry, AgentConfig) {
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -1607,6 +1608,7 @@ async fn agent_deps_for_test(
             Arc::new(crate::managed_policy::NoOsPolicy),
         ),
         computer_use,
+        foreground_browser,
     )
 }
 
@@ -1616,7 +1618,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // Disabled (self-host, non-macOS, or any non-desktop profile): none of
     // the contracts exist, so no surface can advertise or checkpoint them.
-    let (tools, _) = agent_deps_for_test(dir.path(), false).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, false).await;
     for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert!(
             tools.registered_class(name).is_none(),
@@ -1634,7 +1636,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // Enabled: every contract registers as a validated client tool the server
     // parks for the desktop to claim; the server itself never executes one.
-    let (tools, _) = agent_deps_for_test(dir.path(), true).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), true, false).await;
     for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert_eq!(
             tools.execution(name),
@@ -1735,7 +1737,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 #[tokio::test]
 async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut tools, config) = agent_deps_for_test(dir.path(), false).await;
+    let (mut tools, config) = agent_deps_for_test(dir.path(), false, false).await;
     assert!(
         config.system_prompt.is_none(),
         "prompt must not be frozen before boot-time tools are mounted"

@@ -1954,6 +1954,10 @@ fn agent_deps(
     // macOS, decided by the caller. When false the contracts stay
     // unregistered, so no turn surface can advertise or checkpoint them.
     computer_use: bool,
+    // Whether the foreground browser observation tools register. Always
+    // false in production until a desktop foreground browser executor
+    // explicitly opts in. The code-mode BrowserRuntime is not sufficient.
+    foreground_browser: bool,
 ) -> (ToolRegistry, AgentConfig) {
     let cancellation_acceleration = agent_control_tools::SandboxCancellationAcceleration::new(
         source_store.clone(),
@@ -1970,6 +1974,7 @@ fn agent_deps(
         host_folders,
         gateway,
         computer_use,
+        foreground_browser,
         cancellation_acceleration,
     )
 }
@@ -1984,6 +1989,7 @@ fn agent_deps_with_cancellation_acceleration(
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     gateway: Arc<gateway_runtime::GatewayRuntime>,
     computer_use: bool,
+    foreground_browser: bool,
     cancellation_acceleration: agent_control_tools::SandboxCancellationAcceleration,
 ) -> (ToolRegistry, AgentConfig) {
     /// The host-folder seam folded into `create_app`'s authoring-time folder
@@ -2108,6 +2114,9 @@ fn agent_deps_with_cancellation_acceleration(
     if computer_use {
         register_computer_use_tools(&mut tools);
     }
+    if foreground_browser {
+        register_foreground_browser_tools(&mut tools);
+    }
     tools.register_validated_foreground_client(
         ask_user_questions_tool_spec(),
         ApprovalClass::ReadOnly,
@@ -2201,6 +2210,59 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
     ] {
         tools.register_validated_client(spec, ApprovalClass::Sensitive, validate);
     }
+}
+
+/// Register exactly five observation browser tools as validated client tools.
+///
+/// The server checkpoints each call for the desktop foreground browser
+/// executor to claim, authorize, and dispatch through [].
+/// The server itself never drives a browser — it only validates arguments
+/// and parks the call. No semantic act tool is registered; that requires
+/// native input synthesis and is gated on a separate capability check.
+///
+/// Registered only when an explicit foreground-browser availability flag is
+/// true (the desktop can bind a browser surface for foreground chat). When
+/// absent — the default in every production binding until the foreground
+/// executor opts in — no browser tools are advertised, and no model surface
+/// can see or checkpoint them. The code-mode browser runtime is not sufficient
+/// to enable this gate.
+fn register_foreground_browser_tools(tools: &mut ToolRegistry) {
+    // Observation reads: list, snapshot, wait, screenshot. They never mutate
+    // the workspace or escape the existing browser capability scope. Plan mode
+    // keeps them.
+    for (spec, validate) in [
+        (
+            browser_list_tool_spec(),
+            validate_browser_list_arguments as fn(&serde_json::Value) -> bool,
+        ),
+        (
+            browser_snapshot_tool_spec(),
+            validate_browser_snapshot_arguments as fn(&serde_json::Value) -> bool,
+        ),
+        (
+            browser_wait_tool_spec(),
+            validate_browser_wait_arguments as fn(&serde_json::Value) -> bool,
+        ),
+        (
+            browser_screenshot_tool_spec(),
+            validate_browser_screenshot_arguments as fn(&serde_json::Value) -> bool,
+        ),
+    ] {
+        tools.register_validated_client(spec, ApprovalClass::ReadOnly, validate);
+    }
+    // Navigate can cross origins and must use the existing sensitive-tool
+    // posture until native browser consent reauthorizes it. Plan mode
+    // refuses it.
+    tools.register_validated_client(
+        browser_navigate_tool_spec(),
+        ApprovalClass::Sensitive,
+        validate_browser_navigate_arguments,
+    );
+    // Do NOT register browser_act — semantic action requires native input
+    // synthesis, which is gated on a separate capability check (the desktop
+    // foreground executor declaring semantic_actions support and the user
+    // consenting to browser control grants). Until then, the model surface
+    // must never see or checkpoint an act tool.
 }
 
 /// Open the durable store the profile selects.
