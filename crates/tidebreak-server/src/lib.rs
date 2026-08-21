@@ -2137,7 +2137,6 @@ fn agent_deps_with_cancellation_acceleration(
 fn boot_default_model() -> String {
     std::env::var("TIDEBREAK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
-
 /// Register the computer-use contracts as validated client tools.
 ///
 /// Registered only when the caller determined the host can honor them (the
