@@ -291,11 +291,34 @@ fn pick_loopback_port() -> Result<u16, HarnessError> {
 pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, HarnessError> {
     let mut session = OpencodeSession::new(spec);
     let port = pick_loopback_port()?;
+
+    // The shell/probe snapshot (session.spec.env) may already carry an
+    // OPENCODE_CONFIG_CONTENT from the user's environment. extra_env comes
+    // from settings and wins if present, but when it does not have the key
+    // we must still merge the snapshot value so browser MCP injection does
+    // not silently drop inherited config. apply_child_env_tokio applies the
+    // snapshot first and plan env second, so without this the plan env's
+    // browser-merged value would overwrite the snapshot's inherited entries.
+    let mut effective_env = session.spec.extra_env.clone();
+    let has_config_in_extra = effective_env
+        .iter()
+        .any(|(key, _)| key == OPENCODE_CONFIG_CONTENT);
+    if !has_config_in_extra {
+        if let Some((_, value)) = session
+            .spec
+            .env
+            .iter()
+            .find(|(key, _)| key.to_string_lossy() == OPENCODE_CONFIG_CONTENT)
+        {
+            effective_env.push((OPENCODE_CONFIG_CONTENT.to_owned(), value.to_string_lossy().into_owned()));
+        }
+    }
+
     let plan = compose_serve_plan(
         &session.spec.binary,
         &session.spec.extra_argv,
         &session.spec.worktree,
-        &session.spec.extra_env,
+        &effective_env,
         port,
         session.spec.browser.as_ref(),
     )?;
@@ -1116,5 +1139,47 @@ mod tests {
         assert_eq!(cmd[0], "C:\\Program Files\\Tidebreak\\tidebreak.exe");
         assert_eq!(cmd[1], "browser-mcp");
         assert_eq!(entry["type"], "local");
+    }
+
+    #[test]
+    fn merge_preserves_snapshot_config_when_browser_present() {
+        // When the shell snapshot carries OPENCODE_CONFIG_CONTENT with
+        // inherited MCP entries and extra_env does not have the key,
+        // compose_serve_plan must merge the snapshot value so browser
+        // injection does not drop inherited config.
+        let existing = serde_json::json!({
+            "mcp": { "inherited-server": { "type": "local", "command": ["bar"] } }
+        })
+        .to_string();
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        // Pass the inherited config through extra_env to simulate what
+        // attach() does after pulling it from the snapshot.
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[("OPENCODE_CONFIG_CONTENT".to_owned(), existing)],
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.as_str())
+            .expect("OPENCODE_CONFIG_CONTENT must be set");
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        assert!(
+            config["mcp"].get("inherited-server").is_some(),
+            "inherited MCP entries must survive browser merge"
+        );
+        assert!(
+            config["mcp"].get("tb-browser").is_some(),
+            "browser MCP entry must be added"
+        );
     }
 }
