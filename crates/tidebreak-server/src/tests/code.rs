@@ -14,8 +14,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::code::CodeRuntime;
 use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
+use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BrowserListResult, BrowserNavigateArgs,
@@ -90,8 +90,8 @@ async fn code_app_with_optional_browser(
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(adapter));
-    let installed_browser_runtime = browser_runtime
-        .map(|runtime| -> Arc<dyn BrowserRuntime> { runtime });
+    let installed_browser_runtime =
+        browser_runtime.map(|runtime| -> Arc<dyn BrowserRuntime> { runtime });
     let browser_bridge_command = installed_browser_runtime
         .as_ref()
         .map(|_| std::path::PathBuf::from("/usr/local/bin/tidebreak"));
