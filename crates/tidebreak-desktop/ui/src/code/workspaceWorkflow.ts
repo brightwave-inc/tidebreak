@@ -1,5 +1,6 @@
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
 import {
+  prMergeControls,
   prWorkflowStatus,
   type PrCheckCounts,
   type PrWorkflowAction,
@@ -282,6 +283,145 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
         secondary: [],
       };
   }
+}
+
+/**
+ * A keyboard ask against the workflow.
+ *
+ * A chord names an intent, not an action: `pull_request` means "get this
+ * branch in front of reviewers", which is a push on an unpushed branch, a
+ * create on a pushed one, and a trip to GitHub once the pull request exists.
+ * Binding chords to intents rather than to actions is what lets the reader
+ * press the same key at every stage and always get the useful thing.
+ */
+export type WorkflowShortcut =
+  | "next"
+  | "pull_request"
+  | "update_branch"
+  | "watch"
+  | "merge"
+  | "view_pr"
+  | "source_control";
+
+/**
+ * What a chord does in the state the workspace is actually in.
+ *
+ * `blocked` carries the sentence to show the reader. A chord that quietly did
+ * nothing would be indistinguishable from one that did not fire, which is the
+ * fastest way to lose trust in a keyboard-driven surface.
+ */
+export type WorkflowShortcutResolution =
+  | { run: WorkspaceWorkflowAction }
+  | { stopWatch: true }
+  | { blocked: string };
+
+/**
+ * Resolve a chord against the current workflow model.
+ *
+ * `watching` mirrors the header's own rule: while a watch task holds the
+ * worktree, the chords that would start a second agent in it are refused, and
+ * the ones that only read or push are not.
+ */
+export function resolveWorkflowShortcut(
+  shortcut: WorkflowShortcut,
+  model: WorkspaceWorkflowModel,
+  watching: boolean,
+): WorkflowShortcutResolution {
+  // The review rail is chrome, not a Git operation: it opens whatever else is
+  // going on, including while the status is still loading.
+  if (shortcut === "source_control") return { run: "open_source" };
+  if (shortcut === "view_pr") {
+    return model.pr?.url
+      ? { run: "open_pr" }
+      : { blocked: "No pull request to open yet" };
+  }
+  if (model.stage === "loading") {
+    return { blocked: "Still reading this workspace's status" };
+  }
+  if (shortcut === "watch") {
+    if (watching) return { stopWatch: true };
+    return prBlocker(model) ?? { run: "watch_and_fix" };
+  }
+  if (watching) {
+    return { blocked: "A watch task is already working on this pull request" };
+  }
+  switch (shortcut) {
+    case "next":
+      // `title` rather than `detail`: the title is the one-line statement of
+      // what this workspace is, which is exactly the answer to "why did
+      // nothing happen".
+      return model.primary ? { run: model.primary } : { blocked: model.title };
+    case "pull_request":
+      // Commit and push come first whether or not a pull request exists, so
+      // these stages lead — reaching a pull request from uncommitted work
+      // means going through the commit box.
+      if (model.stage === "dirty" || model.stage === "github_setup") {
+        return { run: "open_source" };
+      }
+      if (model.stage === "unpushed") return { run: "push" };
+      if (model.stage === "ready_for_pr") return { run: "create_pr" };
+      if (model.pr) {
+        return model.pr.url
+          ? { run: "open_pr" }
+          : { blocked: `Pull request #${model.pr.number} has no URL yet` };
+      }
+      return { blocked: "No commits to open a pull request for" };
+    case "update_branch":
+      // A rebase over uncommitted work is the classic way to lose it, and the
+      // snapshot already knows. Send the reader to the commit box instead.
+      if (model.stage === "dirty") {
+        return { blocked: "Commit or discard your changes before rebasing" };
+      }
+      return (
+        prBlocker(model) ?? {
+          run: model.stage === "conflict" ? "resolve_conflicts" : "update_branch",
+        }
+      );
+    case "merge":
+      return prBlocker(model) ?? mergeIfGreen(model);
+  }
+}
+
+/**
+ * Merge only when the pull request is actually mergeable.
+ *
+ * Merging publishes to a shared branch and is the one step decision 42 keeps
+ * for the user, so the chord runs the real merge rather than asking an agent
+ * to. That makes "is it green" a question this has to answer honestly: the
+ * same `prMergeControls` table the review sidebar's Merge button reads, so the
+ * chord can never offer a merge the button refuses.
+ *
+ * Local state blocks too. Uncommitted or unpushed work is not in the pull
+ * request, and merging without it lands a branch the reader thought was
+ * finished.
+ */
+function mergeIfGreen(model: WorkspaceWorkflowModel): WorkflowShortcutResolution {
+  if (model.stage === "dirty") {
+    return { blocked: "Commit or discard your changes before merging" };
+  }
+  if (model.stage === "unpushed") {
+    return { blocked: "Push your local commits before merging" };
+  }
+  const pr = model.pr;
+  if (!pr) return { blocked: "No pull request yet" };
+  const controls = prMergeControls(prWorkflowStatus(pr).state);
+  if (controls.canMerge) return { run: "merge" };
+  return {
+    blocked:
+      controls.explanation ?? `Pull request #${pr.number} cannot merge yet`,
+  };
+}
+
+/** Why a pull request cannot be acted on, or `null` when it can. */
+function prBlocker(model: WorkspaceWorkflowModel): { blocked: string } | null {
+  if (!model.pr) return { blocked: "No pull request yet" };
+  if (model.stage === "merged") {
+    return { blocked: `Pull request #${model.pr.number} is already merged` };
+  }
+  if (model.stage === "closed") {
+    return { blocked: `Pull request #${model.pr.number} is closed` };
+  }
+  return null;
 }
 
 function withOpenPr(

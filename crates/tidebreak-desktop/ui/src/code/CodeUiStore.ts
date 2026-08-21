@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { HarnessKind } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import type { WorkflowShortcut } from "./workspaceWorkflow";
 import {
   isCardDensity,
   isWorkspaceSortMode,
@@ -260,6 +261,33 @@ export type CodeUiStore = {
   /** Opens the review sidebar too: search is dead while that rail is hidden. */
   requestFilesSearch: () => void;
   takeFilesSearch: () => boolean;
+  /**
+   * The Ship chord waiting for the workspace header, which is the one surface
+   * that knows the branch and pull-request state a chord resolves against.
+   *
+   * Held rather than run here because the shell has none of that state, and
+   * because the same chord means different actions at different stages —
+   * deciding which in the store would put the decision two layers from the
+   * data it depends on.
+   *
+   * Scoped to the workspace it was pressed on, the way a queued composer
+   * prompt is. An archived workspace draws no header control, so a chord
+   * pressed there is never taken; without the scope it would sit in the store
+   * and fire on the next workspace the reader opened.
+   */
+  workflowShortcutPending: {
+    workspaceId: string;
+    shortcut: WorkflowShortcut;
+  } | null;
+  requestWorkflowShortcut: (
+    workspaceId: string,
+    shortcut: WorkflowShortcut,
+  ) => void;
+  takeWorkflowShortcut: (workspaceId: string) => WorkflowShortcut | null;
+  /** The archive chord, taken by the workspace page that owns the command. */
+  archivePending: boolean;
+  requestArchiveWorkspace: () => void;
+  takeArchiveWorkspace: () => boolean;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
@@ -288,6 +316,24 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   takeFilesSearch: () => {
     if (!get().filesSearchPending) return false;
     set({ filesSearchPending: false });
+    return true;
+  },
+  workflowShortcutPending: null,
+  // Last chord wins rather than queueing. Two Ship chords in a row is a reader
+  // correcting themselves, not asking for both.
+  requestWorkflowShortcut: (workspaceId, shortcut) =>
+    set({ workflowShortcutPending: { workspaceId, shortcut } }),
+  takeWorkflowShortcut: (workspaceId) => {
+    const pending = get().workflowShortcutPending;
+    if (pending === null || pending.workspaceId !== workspaceId) return null;
+    set({ workflowShortcutPending: null });
+    return pending.shortcut;
+  },
+  archivePending: false,
+  requestArchiveWorkspace: () => set({ archivePending: true }),
+  takeArchiveWorkspace: () => {
+    if (!get().archivePending) return false;
+    set({ archivePending: false });
     return true;
   },
   offerComposerPrompt: (scope, prompt) =>

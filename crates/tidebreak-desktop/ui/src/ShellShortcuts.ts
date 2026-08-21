@@ -22,6 +22,16 @@ export type ShellShortcutAction =
   | "code-next-tab"
   | "code-select-tab"
   | "code-split-editor"
+  | "code-prev-workspace"
+  | "code-next-workspace"
+  | "code-workflow-next"
+  | "code-create-pr"
+  | "code-update-branch"
+  | "code-watch-pr"
+  | "code-merge-pr"
+  | "code-view-pr"
+  | "code-source-control"
+  | "code-archive-workspace"
   | "close-tab"
   | "focus-composer"
   | "zoom-in"
@@ -44,6 +54,7 @@ export type ShellShortcutMode = "chat" | "code";
 export type ShellShortcutGroup =
   | "Navigation"
   | "Work"
+  | "Ship"
   | "Code"
   | "View"
   | "Help";
@@ -52,6 +63,7 @@ export type ShellShortcutGroup =
 export const SHELL_SHORTCUT_GROUPS: readonly ShellShortcutGroup[] = [
   "Navigation",
   "Work",
+  "Ship",
   "Code",
   "View",
   "Help",
@@ -137,6 +149,30 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     description: "Go forward (outside text fields)",
     group: "Navigation",
     allowInEditable: false,
+  },
+  {
+    // Cmd+Alt+Arrow walks the rail in the order the rail draws, so what the
+    // chord lands on is always the next card down. Alt rather than Shift
+    // because Cmd+Shift+Arrow is "select to the end" in every text field, and
+    // this one has to work while the reader is writing the next prompt.
+    id: "code-prev-workspace",
+    keys: ["arrowup"],
+    mod: true,
+    alt: true,
+    description: "Previous workspace",
+    group: "Navigation",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-next-workspace",
+    keys: ["arrowdown"],
+    mod: true,
+    alt: true,
+    description: "Next workspace",
+    group: "Navigation",
+    scope: "code",
+    allowInEditable: true,
   },
   {
     id: "new-chat",
@@ -258,6 +294,101 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     allowInEditable: true,
   },
   {
+    // The whole spine behind one chord. What it runs is whatever the header's
+    // primary control says next — push, open a pull request, mark ready, fix
+    // CI, resolve conflicts, merge — so a reader who learns no other Ship
+    // shortcut can still carry a branch to merged from the keyboard. Every
+    // other chord in this group names one of those steps directly, for when
+    // the next step and the wanted step are not the same.
+    id: "code-workflow-next",
+    codes: ["Enter", "NumpadEnter"],
+    mod: true,
+    shift: true,
+    description: "Run the next step for this workspace",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // Shift is what separates this from Cmd+P's file picker. Both are "P for
+    // the thing this app is about"; on a shipping surface the shifted one is
+    // the pull request.
+    id: "code-create-pr",
+    codes: ["KeyP"],
+    mod: true,
+    shift: true,
+    description: "Push and open a pull request",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-update-branch",
+    codes: ["KeyR"],
+    mod: true,
+    shift: true,
+    description: "Rebase on the base branch, resolving conflicts",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // Pressing it again stops the watch, because a watch is a thing that is
+    // either on or off and the reader has one key for it either way.
+    id: "code-watch-pr",
+    codes: ["KeyW"],
+    mod: true,
+    shift: true,
+    description: "Watch the pull request and fix failures",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-merge-pr",
+    codes: ["KeyM"],
+    mod: true,
+    shift: true,
+    description: "Merge the pull request",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    id: "code-view-pr",
+    codes: ["KeyO"],
+    mod: true,
+    shift: true,
+    description: "Open the pull request on GitHub",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // The chord VS Code gives its source-control view. Cmd+I toggles the whole
+    // review rail; this one always opens it and lands on the changes.
+    id: "code-source-control",
+    codes: ["KeyG"],
+    mod: true,
+    shift: true,
+    description: "Review and commit changes",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
+    // The end of the workflow, and the only chord here that removes a
+    // worktree, so it goes through the same confirmation the menu item does.
+    id: "code-archive-workspace",
+    codes: ["KeyA"],
+    mod: true,
+    shift: true,
+    description: "Archive this workspace",
+    group: "Ship",
+    scope: "code",
+    allowInEditable: true,
+  },
+  {
     id: "close-tab",
     codes: ["KeyW"],
     mod: true,
@@ -367,18 +498,29 @@ export function shortcutKeycaps(
   return caps;
 }
 
-/** The single keycap a definition's key is drawn as. */
+/**
+ * The single keycap a definition's key is drawn as.
+ *
+ * Named keys get the glyph their keycap carries rather than their DOM name, so
+ * a row reads the way the keyboard looks.
+ */
 function shortcutKeyLabel(def: ShellShortcutDef): string {
   if (def.codes) {
     const code = def.codes[0] ?? "";
     const label = code.replace(/^(Key|Digit|Numpad)/, "");
+    if (label === "Enter") return "↩";
     return label.length === 1 ? label.toUpperCase() : code;
   }
   const key = def.keys[0] ?? "";
-  if (key === "arrowleft") return "←";
-  if (key === "arrowright") return "→";
-  return key.length === 1 ? key.toUpperCase() : key;
+  return ARROW_KEYCAPS[key] ?? (key.length === 1 ? key.toUpperCase() : key);
 }
+
+const ARROW_KEYCAPS: Record<string, string> = {
+  arrowleft: "←",
+  arrowright: "→",
+  arrowup: "↑",
+  arrowdown: "↓",
+};
 
 /**
  * The shortcuts under their headings, in the order the help dialog lists them.

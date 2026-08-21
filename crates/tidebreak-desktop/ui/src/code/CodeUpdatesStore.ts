@@ -192,22 +192,33 @@ function digestUrgency(digest: CodeSessionDigest): number {
   return 3;
 }
 
+/**
+ * One digest per workspace, from a snapshot of the store.
+ *
+ * Split from the hook so callers outside React — the rail-walking shortcuts —
+ * order workspaces by the same digests the rail draws with, rather than by a
+ * second, subtly different arrangement.
+ */
+export function workspaceDigests(
+  state: Pick<CodeUpdatesState, "conversationsByWorkspace">,
+): Record<string, CodeSessionDigest> {
+  const digests: Record<string, CodeSessionDigest> = {};
+  for (const workspaceId of Object.keys(state.conversationsByWorkspace)) {
+    const digest = workspaceDigest(state, workspaceId);
+    if (digest) digests[workspaceId] = digest;
+  }
+  return digests;
+}
+
 /** One digest per workspace, for the rail and the card lists. */
 export function useWorkspaceDigests(): Record<string, CodeSessionDigest> {
   const conversations = useCodeUpdatesStore(
     (state) => state.conversationsByWorkspace,
   );
-  return useMemo(() => {
-    const digests: Record<string, CodeSessionDigest> = {};
-    for (const workspaceId of Object.keys(conversations)) {
-      const digest = workspaceDigest(
-        { conversationsByWorkspace: conversations },
-        workspaceId,
-      );
-      if (digest) digests[workspaceId] = digest;
-    }
-    return digests;
-  }, [conversations]);
+  return useMemo(
+    () => workspaceDigests({ conversationsByWorkspace: conversations }),
+    [conversations],
+  );
 }
 
 /** The digest that speaks for one workspace, for a header or an inspector. */

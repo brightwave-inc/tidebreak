@@ -15,6 +15,7 @@ import {
   shortcutKeycaps,
   usesCommandModifier,
   type ShellShortcutDef,
+  type ShellShortcutMode,
 } from "./ShellShortcuts";
 
 function Keycap({ children }: { children: string }) {
@@ -53,9 +54,46 @@ function ShortcutRow({
  * Rendering from the table the listener matches on is the point: a hand-written
  * second copy would drift the first time a binding changed, and a help dialog
  * that misstates the keys is worse than no dialog at all. Listed for the mode
- * the route is in, for the same reason: Cmd+N is one row, and which one is true
+ * asked for, for the same reason: Cmd+N is one row, and which one is true
  * depends on where the reader pressed it.
+ *
+ * Split from the dialog so a story can draw both modes without standing up a
+ * router to answer which one the reader is in.
  */
+export function ShortcutsList({
+  mode,
+  command = usesCommandModifier(navigator.userAgent),
+}: {
+  mode: ShellShortcutMode;
+  command?: boolean;
+}) {
+  const groups = useMemo(() => groupedShellShortcuts(mode), [mode]);
+  return (
+    <div className="grid max-h-[65vh] grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2 overflow-y-auto pr-1">
+      {groups.map(({ group, items }, index) => (
+        <Fragment key={group}>
+          <h3
+            className={cn(
+              "col-span-2 text-2xs font-semibold tracking-[0.08em] text-muted-foreground uppercase",
+              index > 0 && "mt-4",
+            )}
+          >
+            {group}
+          </h3>
+          {items.map((shortcut) => (
+            <ShortcutRow
+              key={`${shortcut.id}:${shortcutKeycaps(shortcut, command).join("")}`}
+              shortcut={shortcut}
+              command={command}
+            />
+          ))}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+/** The help dialog, listing whichever mode the route puts the reader in. */
 export function ShortcutsDialog({
   open,
   onOpenChange,
@@ -63,11 +101,9 @@ export function ShortcutsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
   const mode = useRouterState({
     select: (state) => shellShortcutMode(state.location.pathname),
   });
-  const groups = useMemo(() => groupedShellShortcuts(mode), [mode]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -78,27 +114,7 @@ export function ShortcutsDialog({
             These act on the app frame, so they work from every screen.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid max-h-[65vh] grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2 overflow-y-auto pr-1">
-          {groups.map(({ group, items }, index) => (
-            <Fragment key={group}>
-              <h3
-                className={cn(
-                  "col-span-2 text-2xs font-semibold tracking-[0.08em] text-muted-foreground uppercase",
-                  index > 0 && "mt-4",
-                )}
-              >
-                {group}
-              </h3>
-              {items.map((shortcut) => (
-                <ShortcutRow
-                  key={shortcut.id}
-                  shortcut={shortcut}
-                  command={command}
-                />
-              ))}
-            </Fragment>
-          ))}
-        </div>
+        <ShortcutsList mode={mode} />
       </DialogContent>
     </Dialog>
   );

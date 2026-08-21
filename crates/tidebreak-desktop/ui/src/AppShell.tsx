@@ -43,11 +43,14 @@ import {
 } from "./code/codeChrome";
 import { CodeDeliveryMonitor } from "./code/CodeDeliveryMonitor";
 import { useCodeUiStore } from "./code/CodeUiStore";
+import { stepRailWorkspace } from "./code/railNavigation";
 import {
   codeRepoIdFromPath,
   codeWorkspaceIdFromPath,
+  isCodeRoute,
   shellShortcutMode,
 } from "./code/routes";
+import type { WorkflowShortcut } from "./code/workspaceWorkflow";
 import { layoutFromSearch, searchFromLayout, type PanelSearch } from "./panel/panelUrl";
 import type { LayoutState } from "./panel/panelTypes";
 import { connectOutputs } from "./deliverables";
@@ -237,6 +240,38 @@ export function AppShell() {
     });
   }
 
+  /**
+   * Raise a Ship chord for the workspace header to carry out.
+   *
+   * The shell knows the chord and nothing else: what "open a pull request"
+   * means depends on the branch and pull-request state, which lives a route
+   * down. Off a workspace there is nothing to ship, so the key goes back to
+   * whatever is focused.
+   */
+  function askWorkspace(shortcut: WorkflowShortcut): boolean | void {
+    const workspaceId = codeWorkspaceIdFromPath(router.state.location.pathname);
+    if (!workspaceId) return false;
+    useCodeUiStore.getState().requestWorkflowShortcut(workspaceId, shortcut);
+  }
+
+  /**
+   * Move to the workspace the rail draws next, wherever in code mode we are.
+   *
+   * Works off a workspace too — from a repo page or the code home, a step
+   * enters the rail rather than doing nothing, which is what a reader arriving
+   * by keyboard wants.
+   */
+  function stepWorkspace(delta: -1 | 1): boolean | void {
+    const { pathname } = router.state.location;
+    if (!isCodeRoute(pathname)) return false;
+    const next = stepRailWorkspace(codeWorkspaceIdFromPath(pathname), delta);
+    if (!next) return false;
+    void navigate({
+      to: "/code/w/$workspaceId",
+      params: { workspaceId: next },
+    });
+  }
+
   // Shell shortcuts are defined here because these actions outlive any one
   // route: toggling the frame, starting a chat, reaching the composer, and
   // scaling the window all work wherever the reader is. Mode-scoped ones act
@@ -274,6 +309,19 @@ export function AppShell() {
       const { pathname } = router.state.location;
       if (!codeWorkspaceIdFromPath(pathname)) return false;
       useCodeUiStore.getState().requestFilesSearch();
+    },
+    "code-prev-workspace": () => stepWorkspace(-1),
+    "code-next-workspace": () => stepWorkspace(1),
+    "code-workflow-next": () => askWorkspace("next"),
+    "code-create-pr": () => askWorkspace("pull_request"),
+    "code-update-branch": () => askWorkspace("update_branch"),
+    "code-watch-pr": () => askWorkspace("watch"),
+    "code-merge-pr": () => askWorkspace("merge"),
+    "code-view-pr": () => askWorkspace("view_pr"),
+    "code-source-control": () => askWorkspace("source_control"),
+    "code-archive-workspace": () => {
+      if (!codeWorkspaceIdFromPath(router.state.location.pathname)) return false;
+      useCodeUiStore.getState().requestArchiveWorkspace();
     },
     "code-prev-tab": () => applyCodeLayout((l) => stepCenterTab(l, -1)),
     "code-next-tab": () => applyCodeLayout((l) => stepCenterTab(l, 1)),

@@ -98,6 +98,101 @@ export function prWorkflowStatus(pr: PullRequestDigest): PrWorkflowStatus {
 }
 
 /**
+ * Whether a pull request in this state may be merged, or auto-merge armed.
+ *
+ * One table for every surface that offers merging. Decision 42 makes merging a
+ * user action rather than an agent capability, so the answer to "may this
+ * merge" has to be the same whether the reader clicks the review sidebar's
+ * button, the workspace header's, or presses the chord — a second copy would
+ * eventually let one of them offer a merge the others refuse.
+ *
+ * `explanation` is the sentence to show when the answer is no. `null` means
+ * the pull request is either mergeable or already resolved, and there is
+ * nothing to explain.
+ */
+export function prMergeControls(state: PrWorkflowState): {
+  canMerge: boolean;
+  canEnableAutoMerge: boolean;
+  explanation: string | null;
+} {
+  switch (state) {
+    case "ready":
+      return { canMerge: true, canEnableAutoMerge: true, explanation: null };
+    case "checking":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "GitHub is still determining mergeability. Merge stays unavailable until the pull request is explicitly ready.",
+      };
+    case "pending":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Wait for the pending checks before merging directly.",
+      };
+    case "failing":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Fix the failing checks before merging directly.",
+      };
+    case "conflict":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: "Resolve the merge conflicts before merging directly.",
+      };
+    case "behind":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Update the branch from its base before merging directly.",
+      };
+    case "blocked":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "A review or repository requirement is still blocking a direct merge.",
+      };
+    case "changes_requested":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation: "Address the requested changes before merging directly.",
+      };
+    case "draft":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation:
+          "Mark the pull request ready for review on GitHub before merging it.",
+      };
+    case "queued":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: "This pull request is already waiting in the merge queue.",
+      };
+    case "auto_merge":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation:
+          "Auto-merge is already enabled and will merge after the remaining requirements pass.",
+      };
+    case "merged":
+    case "closed":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: false,
+        explanation: null,
+      };
+  }
+}
+
+/**
  * Prompt actions run in the workspace's interactive session. "Watch and fix"
  * is not one of them: it starts a durable server-side watch task instead
  * (`POST /code/workspaces/{id}/watch`).

@@ -55,7 +55,7 @@ import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { PrCommentCard } from "./PrCommentCard";
-import { prWorkflowStatus, type PrWorkflowState } from "./prActions";
+import { prMergeControls, prWorkflowStatus } from "./prActions";
 import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
@@ -677,89 +677,6 @@ function mergeMethodLabel(method: CodePrMergeMethod): string {
       return "Rebase and merge";
   }
 }
-
-function prMergeControls(state: PrWorkflowState): {
-  canMerge: boolean;
-  canEnableAutoMerge: boolean;
-  explanation: string | null;
-} {
-  switch (state) {
-    case "ready":
-      return { canMerge: true, canEnableAutoMerge: true, explanation: null };
-    case "checking":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: true,
-        explanation:
-          "GitHub is still determining mergeability. Merge stays unavailable until the pull request is explicitly ready.",
-      };
-    case "pending":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: true,
-        explanation: "Wait for the pending checks before merging directly.",
-      };
-    case "failing":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: true,
-        explanation: "Fix the failing checks before merging directly.",
-      };
-    case "conflict":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: false,
-        explanation: "Resolve the merge conflicts before merging directly.",
-      };
-    case "behind":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: true,
-        explanation: "Update the branch from its base before merging directly.",
-      };
-    case "blocked":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: true,
-        explanation:
-          "A review or repository requirement is still blocking a direct merge.",
-      };
-    case "changes_requested":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: true,
-        explanation: "Address the requested changes before merging directly.",
-      };
-    case "draft":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: false,
-        explanation:
-          "Mark the pull request ready for review on GitHub before merging it.",
-      };
-    case "queued":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: false,
-        explanation: "This pull request is already waiting in the merge queue.",
-      };
-    case "auto_merge":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: false,
-        explanation:
-          "Auto-merge is already enabled and will merge after the remaining requirements pass.",
-      };
-    case "merged":
-    case "closed":
-      return {
-        canMerge: false,
-        canEnableAutoMerge: false,
-        explanation: null,
-      };
-  }
-}
-
 function ReviewDecisionBadge({ decision }: { decision?: string }) {
   if (!decision) return null;
   if (decision === "approved") {
