@@ -61,6 +61,12 @@ export function CodeApprovalCard({
       {approval.state === "denied" && approval.feedback && (
         <p className="text-[13.5px] break-words">{approval.feedback}</p>
       )}
+      {approval.state === "abandoned" && (
+        <p className="text-muted-foreground text-[13.5px] break-words">
+          The engine stopped waiting for this one, so a decision can no longer
+          reach it. Whatever it asked for did not run on your say-so.
+        </p>
+      )}
       <div>
         <button
           type="button"
@@ -164,6 +170,11 @@ function ApprovalState({ approval }: { approval: CodeApprovalSnapshot }) {
   if (approval.state === "denied") {
     return (
       <p className="text-warning-foreground shrink-0 text-[11px]">Denied</p>
+    );
+  }
+  if (approval.state === "abandoned") {
+    return (
+      <p className="text-muted-foreground shrink-0 text-[11px]">Not decided</p>
     );
   }
   return null;

@@ -333,6 +333,11 @@ pub enum CodeApprovalState {
     Approved,
     /// The user denied, optionally with steering feedback.
     Denied,
+    /// The tool call resolved before anyone decided, so the decision can no
+    /// longer reach the engine. An engine that times a parked call out — or a
+    /// turn that ends while the call is still open — leaves the approval here
+    /// rather than pending forever.
+    Abandoned,
 }
 
 impl CodeApprovalState {
@@ -343,6 +348,7 @@ impl CodeApprovalState {
             Self::Pending => "pending",
             Self::Approved => "approved",
             Self::Denied => "denied",
+            Self::Abandoned => "abandoned",
         }
     }
 
@@ -354,8 +360,15 @@ impl CodeApprovalState {
             "pending" => Some(Self::Pending),
             "approved" => Some(Self::Approved),
             "denied" => Some(Self::Denied),
+            "abandoned" => Some(Self::Abandoned),
             _ => None,
         }
+    }
+
+    /// Whether this state still accepts a decision.
+    #[must_use]
+    pub const fn is_pending(self) -> bool {
+        matches!(self, Self::Pending)
     }
 }
 

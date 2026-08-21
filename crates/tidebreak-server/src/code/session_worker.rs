@@ -350,6 +350,13 @@ impl HarnessEventSink for LiveSink {
             return;
         };
         self.note_subagent_boundary(&code_event).await;
+        // An approval is parked on the call this completion names. Reconcile
+        // it after the completion lands, so the journal reads in the order it
+        // happened. See `approval_sweep`.
+        let completed_call = match &code_event {
+            CodeEvent::ToolCompleted { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        };
         match persist_and_publish(
             &self.db,
             &self.bus,
@@ -370,6 +377,17 @@ impl HarnessEventSink for LiveSink {
             Err(err) => {
                 warn!(session = %self.session_id, error = %err, "failed to journal engine event");
             }
+        }
+        if let Some(call_id) = completed_call {
+            super::approval_sweep::abandon_for_call(
+                &self.db,
+                &self.bus,
+                &self.owner,
+                self.session_id,
+                self.spawn_epoch,
+                &call_id,
+            )
+            .await;
         }
     }
 }
@@ -1205,10 +1223,24 @@ async fn persist_and_publish(
     if is_activity(&event) {
         let _ = super::attention::note_activity(db, bus, owner, session_id).await;
     }
+    // A tool call the engine dropped without reporting a completion leaves
+    // its approval pending. The turn is over, so nothing can decide it now.
+    // Every route that closes a turn passes through here, and each does so
+    // before writing the turn's own attention verdict, which supersedes the
+    // sweep's. Swept after this event is published so the resolution it
+    // journals keeps its later sequence number on the live stream too.
+    let closes_turn = matches!(
+        &event,
+        CodeEvent::TurnCompleted { .. } | CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted
+    );
     bus.publish(
         session_id,
         tidebreak_core::SequencedCodeEvent { seq, event },
     );
+    if closes_turn {
+        super::approval_sweep::abandon_for_settled_turns(db, bus, owner, session_id, spawn_epoch)
+            .await;
+    }
     if activity_boundary {
         if let Ok(Some(session)) = get_session(db, owner, session_id).await {
             super::attention::emit_digest(db, bus, &session).await;

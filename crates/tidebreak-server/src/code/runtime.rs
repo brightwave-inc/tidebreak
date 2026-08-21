@@ -1696,6 +1696,14 @@ impl CodeRuntime {
                 "the session did not stay ended after the worker stopped",
             ));
         }
+        super::approval_sweep::abandon_for_ended_session(
+            &self.db,
+            &self.bus,
+            owner,
+            current.id,
+            current.spawn_epoch,
+        )
+        .await;
         Ok(())
     }
 
@@ -1949,6 +1957,14 @@ impl CodeRuntime {
                     "the session did not stay ended after the worker stopped",
                 ));
             }
+            super::approval_sweep::abandon_for_ended_session(
+                &self.db,
+                &self.bus,
+                owner,
+                current.id,
+                current.spawn_epoch,
+            )
+            .await;
         }
         Ok(all_stopped)
     }
@@ -2218,10 +2234,17 @@ impl CodeRuntime {
         decision: ApprovalDecision,
     ) -> Result<CodeApproval, ServerError> {
         let mut approval = self.get_approval(owner, id).await?;
-        if approval.state != CodeApprovalState::Pending {
+        // A terminal row is the only thing standing between the user and a
+        // decision that reaches nothing: the parked MCP call may be long gone
+        // — after a restart, for one — and the bridge accepts a decision with
+        // no waiter on purpose. So the row's state, not the park, decides.
+        if !approval.state.is_pending() {
             return Err(ServerError::conflict_kind(
-                "approval_already_decided",
-                format!("approval {id} is {}", approval.state.as_str()),
+                "approval_not_pending",
+                format!(
+                    "approval {id} is no longer awaiting a decision: it is {}",
+                    approval.state.as_str()
+                ),
             ));
         }
         let call_id = approval

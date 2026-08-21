@@ -190,6 +190,140 @@ fn write_approval_script(call_id: &str, content: &str) -> Vec<HarnessEvent> {
     ]
 }
 
+/// An engine that asks for an approval and then stops waiting for one. Claude
+/// Code times a parked permission prompt out after 60 seconds, resolves the
+/// tool call `failed`, and finishes the turn with nobody having decided.
+fn timed_out_approval_script() -> Vec<HarnessEvent> {
+    let mut events = undecided_approval_script("toolu_timeout");
+    events.insert(
+        3,
+        HarnessEvent::ToolCompleted {
+            call_id: "toolu_timeout".into(),
+            outcome: tidebreak_core::ToolOutcome::Failed,
+            preview: "Bash tool call timed out after 60s".into(),
+            detail: None,
+            parent_call_id: None,
+        },
+    );
+    events
+}
+
+/// The same request, but the engine never reports the call at all: only the
+/// turn boundary can settle the row.
+fn dropped_approval_script() -> Vec<HarnessEvent> {
+    undecided_approval_script("toolu_dropped")
+}
+
+fn undecided_approval_script(call_id: &str) -> Vec<HarnessEvent> {
+    vec![
+        HarnessEvent::SessionStarted {
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: "scripted".into(),
+            resume_ref: Some("scripted-session".into()),
+        },
+        HarnessEvent::TurnStarted,
+        HarnessEvent::ApprovalRequested {
+            harness_ref: HarnessApprovalRef {
+                call_id: call_id.into(),
+            },
+            raw: serde_json::json!({
+                "tool_name": "Bash",
+                "input": { "command": "rm -rf /tmp/scratch" },
+                "tool_use_id": call_id
+            }),
+        },
+        HarnessEvent::TurnCompleted {
+            usage: Default::default(),
+        },
+    ]
+}
+
+/// Register a repo and workspace, open an Ask session, and run one turn to
+/// completion. Only useful for scripts that never park, which is every script
+/// modelling an approval nobody decides.
+async fn ran_one_ask_turn(
+    adapter: ScriptedAdapter,
+) -> (
+    reqwest::Client,
+    std::net::SocketAddr,
+    Arc<str>,
+    CodeSessionId,
+    Arc<CodeRuntime>,
+    tempfile::TempDir,
+) {
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session: serde_json::Value = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let turn = tokio::time::timeout(
+        Duration::from_secs(10),
+        client
+            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "run it" }))
+            .send(),
+    )
+    .await
+    .expect("the turn must not park on an approval nobody answers")
+    .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    (client, addr, token, session_id, runtime, dir)
+}
+
+/// Every approval on the session, whatever its state.
+async fn approvals_for(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: CodeSessionId,
+) -> Vec<serde_json::Value> {
+    client
+        .get(format!(
+            "http://{addr}/code/approvals?session_id={session_id}"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// The outcome carried on every `ApprovalResolved` the session journaled.
+async fn journaled_resolutions(
+    db: &DbStore,
+    session_id: CodeSessionId,
+) -> Vec<tidebreak_core::ApprovalDecisionKind> {
+    tidebreak_core::db::code::list_events(db, &tidebreak_core::OwnerId::local(), session_id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|framed| match framed.event {
+            CodeEvent::ApprovalResolved { decision, .. } => Some(decision),
+            _ => None,
+        })
+        .collect()
+}
+
 fn init_git_repo_named(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let repo = dir.join(name);
     std::fs::create_dir_all(&repo).unwrap();
@@ -3949,6 +4083,122 @@ async fn pending_approval_survives_restart_and_is_decidable() {
     let seen = observed.observed_decisions();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].1, ApprovalDecision::Approve);
+}
+
+/// The bug this fixes: an engine that times its own tool call out leaves the
+/// approval row `pending` forever, so `code approvals` lists a request nobody
+/// can act on and `code approve` reports success for a command that never ran.
+/// The completion carries the `tool_use_id` the approval is parked on, which
+/// is the join.
+#[tokio::test]
+async fn an_approval_is_abandoned_when_its_tool_call_resolves_undecided() {
+    let adapter = ScriptedAdapter::new(timed_out_approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_unattended_approvals();
+    let (client, addr, token, session_id, runtime, _dir) = ran_one_ask_turn(adapter).await;
+
+    let rows = approvals_for(&client, addr, &token, session_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["state"], "abandoned");
+    assert!(
+        rows[0]["decided_at"].is_string(),
+        "an abandoned approval is settled, so it carries a decided_at"
+    );
+
+    let pending: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/code/approvals?state=pending"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        pending.is_empty(),
+        "a settled approval must leave the pending list"
+    );
+
+    assert_eq!(
+        journaled_resolutions(&runtime.db, session_id).await,
+        vec![tidebreak_core::ApprovalDecisionKind::Abandoned],
+        "the journal is how the CLI and the UI learn the request went undecided"
+    );
+}
+
+/// Deciding a settled approval must fail out loud. The bridge accepts a
+/// decision with nothing parked on purpose — that is the restart path — so the
+/// row's state is the only thing that can tell the user their approval would
+/// reach nothing.
+#[tokio::test]
+async fn deciding_an_abandoned_approval_is_refused() {
+    let adapter = ScriptedAdapter::new(timed_out_approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_unattended_approvals();
+    let observed = adapter.clone();
+    let (client, addr, token, session_id, runtime, _dir) = ran_one_ask_turn(adapter).await;
+
+    let rows = approvals_for(&client, addr, &token, session_id).await;
+    let approval_id = rows[0]["id"].as_str().unwrap().to_owned();
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/approvals/{approval_id}/decision"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert!(
+        body.to_string().contains("no longer awaiting a decision"),
+        "the refusal must say why, got {body}"
+    );
+
+    let rows = approvals_for(&client, addr, &token, session_id).await;
+    assert_eq!(rows[0]["state"], "abandoned");
+    assert_eq!(
+        journaled_resolutions(&runtime.db, session_id).await,
+        vec![tidebreak_core::ApprovalDecisionKind::Abandoned],
+        "a refused decision journals nothing"
+    );
+    assert!(
+        observed.observed_decisions().is_empty(),
+        "a refused decision never reaches the engine"
+    );
+}
+
+/// A tool call the engine drops without reporting must not leave a row pending
+/// forever either. The turn boundary is the backstop.
+#[tokio::test]
+async fn a_turn_that_ends_without_a_tool_result_abandons_its_approval() {
+    let adapter = ScriptedAdapter::new(dropped_approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_unattended_approvals();
+    let (client, addr, token, session_id, runtime, _dir) = ran_one_ask_turn(adapter).await;
+
+    let rows = approvals_for(&client, addr, &token, session_id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["state"], "abandoned");
+    assert!(rows[0]["decided_at"].is_string());
+    assert_eq!(
+        journaled_resolutions(&runtime.db, session_id).await,
+        vec![tidebreak_core::ApprovalDecisionKind::Abandoned]
+    );
+
+    let session = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        session_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !matches!(session.attention.state, AttentionState::NeedsYou { .. }),
+        "nothing is waiting on the user once the request is settled"
+    );
 }
 
 #[tokio::test]

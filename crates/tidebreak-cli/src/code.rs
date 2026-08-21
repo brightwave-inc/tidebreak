@@ -13,9 +13,9 @@ use std::str::FromStr;
 
 use futures::StreamExt as _;
 use tidebreak_core::{
-    AgentError, Attention, AttentionState, CapLevel, CodeApprovalId, CodeApprovalKind, CodeEvent,
-    CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, HarnessCaps, HarnessKind,
-    RepoId, Result, WorkspaceId,
+    AgentError, ApprovalDecisionKind, Attention, AttentionState, CapLevel, CodeApprovalId,
+    CodeApprovalKind, CodeEvent, CodePermissionMode, CodeSessionId, CodeSessionLifecycle,
+    CodeTurnId, HarnessCaps, HarnessKind, RepoId, Result, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -1262,6 +1262,18 @@ fn render_event(event: &CodeEvent, dangling: bool, streamed_text: &mut bool) -> 
         CodeEvent::TurnInterrupted => {
             finish_line(dangling);
             eprintln!("tidebreak: turn interrupted");
+            return false;
+        }
+        // `code run` already told the user to decide this one. Say when the
+        // window closes, or the prompt is the last thing they ever hear.
+        CodeEvent::ApprovalResolved {
+            approval_id,
+            decision: ApprovalDecisionKind::Abandoned,
+        } => {
+            finish_line(dangling);
+            eprintln!(
+                "tidebreak: approval {approval_id} went undecided; the engine stopped waiting"
+            );
             return false;
         }
         CodeEvent::TurnCompleted { .. }

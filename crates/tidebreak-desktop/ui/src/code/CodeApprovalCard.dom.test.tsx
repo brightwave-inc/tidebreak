@@ -116,6 +116,25 @@ describe("CodeApprovalCard", () => {
     ).not.toBeNull();
   });
 
+  it("drops the buttons on an approval nobody decided", () => {
+    render(
+      <CodeApprovalCard
+        approval={{
+          ...pendingCommand,
+          state: "abandoned",
+          decided_at: "2026-08-15T12:01:00.000Z",
+        }}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Not decided")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(
+      screen.getByText(/a decision can no longer\s+reach it/),
+    ).toBeInTheDocument();
+  });
+
   it("does not render an unknown engine summary as the decision", () => {
     render(
       <CodeApprovalCard

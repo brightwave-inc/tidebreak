@@ -1,5 +1,7 @@
+import type { ApprovalDecisionKind } from "../generated/wire";
 import type {
   Attention,
+  CodeApprovalState,
   CodeSessionLifecycle,
   CodeTurnSnapshot,
   CodeTurnStatus,
@@ -23,6 +25,20 @@ import type {
  */
 
 export type CodeToolStatus = "running" | ToolOutcome;
+
+/**
+ * Terminal approval state each resolution carries. `abandoned` is not a
+ * decision: the tool call resolved before anyone made one, so the card stops
+ * offering buttons and says the request went undecided.
+ */
+const RESOLVED_APPROVAL_STATE: Record<
+  ApprovalDecisionKind["type"],
+  CodeApprovalState
+> = {
+  approve: "approved",
+  deny: "denied",
+  abandoned: "abandoned",
+};
 
 export type CodeTranscriptItem =
   | {
@@ -86,7 +102,7 @@ export type CodeTranscriptItem =
       kind: "approval";
       id: string;
       approvalId: string;
-      state: "pending" | "approved" | "denied";
+      state: CodeApprovalState;
     }
   | {
       kind: "steer";
@@ -485,8 +501,7 @@ export function reduceCodeSessionEvent(
 
     case "approval_resolved": {
       const approvalId = event.approval_id;
-      const nextState =
-        event.decision.type === "approve" ? "approved" : "denied";
+      const nextState = RESOLVED_APPROVAL_STATE[event.decision.type];
       return {
         state: {
           ...state,
