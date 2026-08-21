@@ -140,6 +140,13 @@ pub enum AttentionState {
     },
     /// Finished work the user has not looked at.
     DoneUnreviewed,
+    /// Nothing is running and nothing is waiting.
+    ///
+    /// The resting state. Without it the derivation has to call an idle
+    /// conversation something it is not — the code path used to fall through
+    /// to `Working`, which is survivable for a session someone is watching and
+    /// plainly false for a chat sitting untouched for a week.
+    Idle,
     /// Crash recovery parked it.
     Fenced {
         /// Why it was fenced.

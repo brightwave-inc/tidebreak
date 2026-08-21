@@ -1529,6 +1529,7 @@ fn attention_label(attention: &Attention) -> String {
         AttentionState::NeedsYou { prompt, .. } => format!("needs_you: {prompt}"),
         AttentionState::Stalled { idle_secs } => format!("stalled {idle_secs}s"),
         AttentionState::DoneUnreviewed => "done_unreviewed".to_owned(),
+        AttentionState::Idle => "idle".to_owned(),
         AttentionState::Fenced { .. } => "fenced".to_owned(),
         AttentionState::Manual { note } => format!("manual: {note}"),
     }

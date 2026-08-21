@@ -122,9 +122,12 @@ pub(crate) async fn reap_session(
     session.lifecycle = CodeSessionLifecycle::Idle;
     session.fence_reason = None;
     session.child_pid = None;
+    // A reap resolves the fence and leaves the session idle. It does not start
+    // an engine, so the attention that follows is the resting state, not
+    // `Working` — which is what this said while `Idle` did not exist.
     replace_attention(
         &mut session,
-        Attention::working(AttentionSource::Lifecycle),
+        Attention::new(AttentionState::Idle, AttentionSource::Lifecycle),
         false,
     );
     persist_session(store, bus, &session).await?;
