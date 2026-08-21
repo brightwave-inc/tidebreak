@@ -90,7 +90,7 @@ pub async fn delete_repo(
     code: ScopedCode,
     Path(id): Path<RepoId>,
 ) -> Result<StatusCode, ServerError> {
-    code.delete_repo(id).await?;
+    code.remove_repo(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

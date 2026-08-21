@@ -15,7 +15,8 @@ use chrono::Utc;
 use tidebreak_core::db::code::{
     append_event, get_approval, get_repo, get_repo_by_root_path, get_session, get_turn,
     get_workspace, insert_approval, insert_repo, insert_session, insert_turn, insert_workspace,
-    list_approvals, list_events, list_repos, list_sessions, list_turns, set_workspace_title_if,
+    list_approvals, list_events, list_repos, list_sessions, list_turns, mark_repo_removed,
+    set_workspace_title_if,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
@@ -46,6 +47,7 @@ async fn seed_owner(
             archive_script: None,
             quick_actions: Vec::new(),
             created_at: Utc::now(),
+            removed_at: None,
         },
     )
     .await
@@ -263,8 +265,10 @@ async fn postgres_repository_paths_are_unique_per_owner() {
         archive_script: None,
         quick_actions: Vec::new(),
         created_at: Utc::now(),
+        removed_at: None,
     };
-    insert_repo(&store, &repo(&alice)).await.unwrap();
+    let removed = repo(&alice);
+    insert_repo(&store, &removed).await.unwrap();
     insert_repo(&store, &repo(&bob)).await.unwrap();
 
     let found = get_repo_by_root_path(&store, &bob, &shared_path)
@@ -275,4 +279,17 @@ async fn postgres_repository_paths_are_unique_per_owner() {
 
     // The same owner registering the same path twice is still refused.
     assert!(insert_repo(&store, &repo(&alice)).await.is_err());
+
+    // A removed row preserves old history but releases the path for a fresh
+    // live registration.
+    assert!(mark_repo_removed(&store, &alice, removed.id, Utc::now())
+        .await
+        .unwrap());
+    let replacement = repo(&alice);
+    insert_repo(&store, &replacement).await.unwrap();
+    let found = get_repo_by_root_path(&store, &alice, &shared_path)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, replacement.id);
 }

@@ -19,6 +19,7 @@ pub async fn insert_repo(store: &DbStore, repo: &CodeRepo) -> Result<()> {
         archive_script: Set(repo.archive_script.clone()),
         quick_actions: Set(serde_json::to_value(&repo.quick_actions)?),
         created_at: Set(repo.created_at),
+        removed_at: Set(repo.removed_at),
     }
     .insert(&store.conn)
     .await
@@ -41,7 +42,7 @@ pub async fn get_repo(store: &DbStore, owner: &OwnerId, id: RepoId) -> Result<Op
     Ok(Some(repo_from_row(row)?))
 }
 
-/// Load one of the owner's repositories by its canonical toplevel path.
+/// Load one of the owner's live repositories by its canonical toplevel path.
 pub async fn get_repo_by_root_path(
     store: &DbStore,
     owner: &OwnerId,
@@ -50,6 +51,7 @@ pub async fn get_repo_by_root_path(
     let Some(row) = entities::code_repo::Entity::find()
         .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_repo::Column::RootPath.eq(root_path))
+        .filter(entities::code_repo::Column::RemovedAt.is_null())
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -63,6 +65,7 @@ pub async fn get_repo_by_root_path(
 pub async fn list_repos(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeRepo>> {
     entities::code_repo::Entity::find()
         .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_repo::Column::RemovedAt.is_null())
         .order_by_desc(entities::code_repo::Column::CreatedAt)
         .all(&store.conn)
         .await
@@ -123,12 +126,27 @@ pub async fn save_repo(store: &DbStore, repo: &CodeRepo) -> Result<bool> {
     Ok(result.rows_affected == 1)
 }
 
-/// Delete one of the owner's repositories. Callers must have removed its
-/// workspaces first.
-pub async fn delete_repo(store: &DbStore, owner: &OwnerId, id: RepoId) -> Result<bool> {
-    let result = entities::code_repo::Entity::delete_many()
+/// Mark one of the owner's repositories removed, keeping the row.
+///
+/// The row is what archived workspaces and their transcripts hang off, so a
+/// hard delete is not an option: SQLite does not enforce the workspace foreign
+/// key and would strand that history unreachable, and PostgreSQL does enforce
+/// it and would refuse the delete outright. Removal hides the registration;
+/// reclaiming the bytes on disk is a separate, explicit act.
+pub async fn mark_repo_removed(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: RepoId,
+    removed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let result = entities::code_repo::Entity::update_many()
+        .col_expr(
+            entities::code_repo::Column::RemovedAt,
+            sea_orm::sea_query::Expr::value(removed_at),
+        )
         .filter(entities::code_repo::Column::Id.eq(id.0))
         .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_repo::Column::RemovedAt.is_null())
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -149,5 +167,6 @@ pub(super) fn repo_from_row(row: entities::code_repo::Model) -> Result<CodeRepo>
         archive_script: row.archive_script,
         quick_actions,
         created_at: row.created_at,
+        removed_at: row.removed_at,
     })
 }

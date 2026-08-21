@@ -806,6 +806,7 @@ pub(crate) enum CodeRepo {
     QuickActions,
     CreatedAt,
     Owner,
+    RemovedAt,
 }
 
 #[derive(DeriveIden)]

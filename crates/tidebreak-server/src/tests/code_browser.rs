@@ -253,6 +253,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
             archive_script: None,
             quick_actions: vec![],
             created_at: chrono::Utc::now(),
+            removed_at: None,
         },
     )
     .await

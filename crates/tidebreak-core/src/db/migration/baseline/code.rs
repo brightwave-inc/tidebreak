@@ -50,6 +50,10 @@ pub(super) fn code_repo_table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
+        // Removal is soft: the row outlives the registration so archived
+        // workspaces and their transcripts stay reachable. Deleting it would
+        // orphan that history on SQLite and fail the foreign key on Postgres.
+        .col(ColumnDef::new(CodeRepo::RemovedAt).timestamp_with_time_zone())
         .to_owned()
 }
 
@@ -60,6 +64,10 @@ pub(super) fn code_repo_indexes() -> Vec<IndexCreateStatement> {
         .col(CodeRepo::Owner)
         .col(CodeRepo::RootPath)
         .unique()
+        // A removed registration keeps its row for archived history, but it
+        // no longer owns the path. The owner may register that checkout again
+        // and receive a fresh repository id for new work.
+        .and_where(Expr::col(CodeRepo::RemovedAt).is_null())
         .to_owned()]
 }
 

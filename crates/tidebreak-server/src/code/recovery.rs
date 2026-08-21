@@ -402,6 +402,7 @@ mod tests {
                 archive_script: None,
                 quick_actions: Vec::new(),
                 created_at: now(),
+                removed_at: None,
             },
         )
         .await

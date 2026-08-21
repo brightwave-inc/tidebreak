@@ -1305,10 +1305,11 @@ CREATE TABLE "code_repo" (
     "setup_script" text,
     "archive_script" text,
     "quick_actions" jsonb_text NOT NULL,
-    "created_at" timestamp_with_timezone_text NOT NULL
+    "created_at" timestamp_with_timezone_text NOT NULL,
+    "removed_at" timestamp_with_timezone_text
 );
 
-CREATE UNIQUE INDEX "idx_code_repo_owner_root_path" ON "code_repo" ("owner", "root_path");
+CREATE UNIQUE INDEX "idx_code_repo_owner_root_path" ON "code_repo" ("owner", "root_path") WHERE "removed_at" IS NULL;
 
 CREATE TABLE "code_workspace" (
     "id" uuid_text NOT NULL PRIMARY KEY,

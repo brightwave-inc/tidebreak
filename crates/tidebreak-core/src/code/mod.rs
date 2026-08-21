@@ -588,6 +588,10 @@ pub struct CodeRepo {
     pub quick_actions: Vec<QuickAction>,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the registration was removed, if it was. A removed repository
+    /// stops appearing in the repo list but keeps its archived workspaces and
+    /// their transcripts reachable.
+    pub removed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Persisted workspace record.
