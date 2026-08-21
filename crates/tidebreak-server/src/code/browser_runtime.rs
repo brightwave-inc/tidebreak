@@ -57,6 +57,8 @@ pub enum BrowserRuntimeError {
     UnknownBrowserId(String),
     /// The subject's browser authority has ended.
     SessionEnded,
+    /// The subject is live but does not have a native grant for the target.
+    NotAuthorized(String),
     /// The engine or platform cannot perform this operation.
     Unsupported(String),
     /// The page or target changed since the snapshot the caller is acting
@@ -102,10 +104,10 @@ pub trait BrowserRuntime: Send + Sync {
 
     /// Synchronously revoke all browser capability for `scope.session`.
     ///
-    /// Called by [`CodeRuntime`] lifecycle paths — session end, stop,
-    /// interrupt, reap, relaunch, and launch failure. Must be idempotent
-    /// and must never block on async work: the caller holds no runtime
-    /// handle after this returns and the session's browser access is dead.
+    /// Called only when the logical code session has ended. Implementations
+    /// must leave an enduring tombstone so a stale or reissued HTTP token can
+    /// never lazily recreate native authority for that session id. Must be
+    /// idempotent and synchronous.
     ///
     fn revoke_session(&self, scope: &BrowserRuntimeScope);
 }

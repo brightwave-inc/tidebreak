@@ -138,6 +138,13 @@ pub(crate) struct CodeRuntime {
     /// The desktop browser adapter, installed before recovery starts. Absent
     /// in headless deployments and tests that do not register one.
     browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+    /// Absolute path to the trusted bridge executable (the `tidebreak` CLI
+    /// sidecar). Absent in headless deployments and tests that do not
+    /// register one. When both `browser_runtime` and this are `Some`,
+    /// session creation mints a [`SessionSpec`] with `browser: Some`; when
+    /// either is `None`, `browser` stays `None` and no browser tools are
+    /// advertised or injected.
+    browser_bridge_command: Option<PathBuf>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     loopback_base: Mutex<Option<String>>,
@@ -180,6 +187,7 @@ impl CodeRuntime {
         worktree_root_default: Option<PathBuf>,
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+        browser_bridge_command: Option<PathBuf>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -199,6 +207,7 @@ impl CodeRuntime {
             approvals: ApprovalBridge::new(),
             browser_tokens,
             browser_runtime,
+            browser_bridge_command,
             host: HostEnv {
                 data_dir: Some(data_dir),
                 ..HostEnv::from_process()
@@ -270,7 +279,7 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
     ) -> Self {
-        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None)
+        Self::with_registry_and_browser_runtime(db, data_dir, adapters, None, None)
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -279,6 +288,7 @@ impl CodeRuntime {
         data_dir: PathBuf,
         adapters: AdapterRegistry,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
+        browser_bridge_command: Option<PathBuf>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -298,6 +308,7 @@ impl CodeRuntime {
             approvals: ApprovalBridge::new(),
             browser_tokens,
             browser_runtime,
+            browser_bridge_command,
             host: HostEnv::from_process(),
             host_tool_broker: None,
             loopback_base: Mutex::new(None),
@@ -331,20 +342,33 @@ impl CodeRuntime {
         self.browser_runtime.clone()
     }
 
-    /// Revoke the session browser token AND the desktop adapter
-    /// capability. Idempotent — safe to call multiple times.
+    /// Revoke the session browser token and permanently tombstone its native
+    /// adapter authority. Idempotent — safe to call multiple times.
     ///
-    /// The token registry is invalidated first and the adapter scope is
-    /// derived from the returned [`BrowserSubject`] — no DB lookup needed.
-    /// The adapter call happens after the registry lock is released.
-    fn revoke_browser_session(&self, session_id: CodeSessionId) {
-        let subject = self.browser_tokens.revoke(session_id);
-        if let Some(subject) = subject {
-            if let Some(runtime) = &self.browser_runtime {
-                let scope = crate::code::browser_runtime::BrowserRuntimeScope::from(subject);
-                runtime.revoke_session(&scope);
-            }
+    /// Terminal paths pass the database-backed session scope explicitly so
+    /// the adapter is still tombstoned when a prior launch failure already
+    /// removed the transient bearer token and capfile.
+    fn revoke_browser_session(&self, session: &CodeSession) {
+        self.browser_tokens.revoke(session.id);
+        if let Some(runtime) = &self.browser_runtime {
+            let scope = crate::code::browser_runtime::BrowserRuntimeScope {
+                owner: session.owner.clone(),
+                workspace: session.workspace_id,
+                session: session.id,
+            };
+            runtime.revoke_session(&scope);
         }
+    }
+
+    /// Revoke only the outgoing worker's bearer token and capfile.
+    ///
+    /// Reap and launch-failure paths replace a worker while preserving the
+    /// same logical code session. Its native browser capability therefore
+    /// stays live and can be reused by the fresh channel. Only terminal end
+    /// paths call [`Self::revoke_browser_session`] and plant the adapter's
+    /// enduring tombstone.
+    fn revoke_browser_channel(&self, session_id: CodeSessionId) {
+        self.browser_tokens.revoke(session_id);
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -1415,9 +1439,9 @@ impl CodeRuntime {
     }
 
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
-        // Invalidate the session browser token so in-flight browser route
-        // calls are rejected immediately, then revoke the native scope.
-        self.revoke_browser_session(id);
+        // Interrupt stops only the active turn. The worker and logical code
+        // session continue, so its browser capfile and native capability must
+        // remain live for later turns.
         let handle = self.require_worker(id)?;
         let (reply, rx) = oneshot::channel();
         handle
@@ -1501,7 +1525,7 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
-        self.revoke_browser_session(id);
+        self.revoke_browser_channel(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -1580,7 +1604,7 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
-        self.revoke_browser_session(session.id);
+        self.revoke_browser_session(&session);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
@@ -1827,7 +1851,7 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
-            self.revoke_browser_session(session.id);
+            self.revoke_browser_session(&session);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
@@ -1930,15 +1954,30 @@ impl CodeRuntime {
             attached.subagents.clone(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
-        let browser_subject = BrowserSubject {
-            owner: session.owner.clone(),
-            workspace: session.workspace_id,
-            session: session.id,
+
+        // Mint a browser channel only when both halves are present: the
+        // native BrowserRuntime (the desktop adapter) and the trusted
+        // bridge executable (the CLI sidecar). If either is absent, browser
+        // stays None — no browser tools are advertised or injected, and the
+        // session works exactly as before the browser channel existed.
+        let browser = match (
+            self.browser_runtime.as_ref(),
+            self.browser_bridge_command.as_ref(),
+        ) {
+            (Some(_runtime), Some(bridge)) => {
+                let browser_subject = BrowserSubject {
+                    owner: session.owner.clone(),
+                    workspace: session.workspace_id,
+                    session: session.id,
+                };
+                Some(
+                    self.browser_tokens
+                        .issue(browser_subject, bridge)
+                        .map_err(ServerError::internal)?,
+                )
+            }
+            _ => None,
         };
-        let browser = self
-            .browser_tokens
-            .issue(browser_subject)
-            .map_err(ServerError::internal)?;
 
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
@@ -1951,13 +1990,13 @@ impl CodeRuntime {
             approval,
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
-            browser: Some(browser),
+            browser,
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
-                self.revoke_browser_session(session.id);
+                self.revoke_browser_channel(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -1976,7 +2015,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
-                self.revoke_browser_session(session.id);
+                self.revoke_browser_channel(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));
@@ -2559,6 +2598,7 @@ mod managed_node_wait_tests {
         let runtime = CodeRuntime::new(
             Arc::new(db),
             data_dir.path().to_path_buf(),
+            None,
             None,
             None,
             None,

@@ -3,7 +3,7 @@
 use super::*;
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -14,14 +14,53 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CapLevel, CodeEvent, CodePermissionMode,
-    CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore,
-    FenceReason, HarnessKind, WorkspaceId,
+    Attention, AttentionSource, AttentionState, BrowserListResult, BrowserNavigateArgs,
+    BrowserNavigateResult, BrowserPageSnapshot, BrowserSnapshotArgs, CapLevel, CodeEvent,
+    CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus,
+    CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
+
+#[derive(Default)]
+struct RecordingBrowserRuntime {
+    listed: Mutex<Vec<BrowserRuntimeScope>>,
+    revoked: Mutex<Vec<BrowserRuntimeScope>>,
+}
+
+#[async_trait]
+impl BrowserRuntime for RecordingBrowserRuntime {
+    async fn list(
+        &self,
+        scope: &BrowserRuntimeScope,
+    ) -> Result<BrowserListResult, BrowserRuntimeError> {
+        self.listed.lock().unwrap().push(scope.clone());
+        Ok(BrowserListResult { sessions: vec![] })
+    }
+
+    async fn navigate(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserNavigateArgs,
+    ) -> Result<BrowserNavigateResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported("test navigate".into()))
+    }
+
+    async fn snapshot(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserSnapshotArgs,
+    ) -> Result<BrowserPageSnapshot, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported("test snapshot".into()))
+    }
+
+    fn revoke_session(&self, scope: &BrowserRuntimeScope) {
+        self.revoked.lock().unwrap().push(scope.clone());
+    }
+}
 
 async fn code_app(
     events: Vec<HarnessEvent>,
@@ -32,15 +71,36 @@ async fn code_app(
 async fn code_app_with(
     adapter: ScriptedAdapter,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_optional_browser(adapter, None).await
+}
+
+async fn code_app_with_browser(
+    adapter: ScriptedAdapter,
+    browser_runtime: Arc<RecordingBrowserRuntime>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_optional_browser(adapter, Some(browser_runtime)).await
+}
+
+async fn code_app_with_optional_browser(
+    adapter: ScriptedAdapter,
+    browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(adapter));
-    let runtime = Arc::new(CodeRuntime::with_registry(
+    let installed_browser_runtime =
+        browser_runtime.map(|runtime| -> Arc<dyn BrowserRuntime> { runtime });
+    let browser_bridge_command = installed_browser_runtime
+        .as_ref()
+        .map(|_| std::path::PathBuf::from("/usr/local/bin/tidebreak"));
+    let runtime = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().to_path_buf(),
         registry,
+        installed_browser_runtime,
+        browser_bridge_command,
     ));
     let mut state = AppState::new(
         Config::desktop(dir.path()),
@@ -56,6 +116,26 @@ async fn code_app_with(
     state.code = Some(runtime.clone());
     let token = state.token.clone();
     (app(state), token, runtime, dir)
+}
+
+fn browser_token_for_session(runtime: &CodeRuntime, session_id: CodeSessionId) -> String {
+    for entry in std::fs::read_dir(runtime.browser_tokens.capfile_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let token = value["token"].as_str().unwrap();
+        if runtime
+            .browser_tokens
+            .subject_for_token(token)
+            .is_some_and(|subject| subject.session == session_id)
+        {
+            return token.to_owned();
+        }
+    }
+    panic!("browser token for session {session_id} was not found")
 }
 
 fn approval_script() -> Vec<HarnessEvent> {
@@ -695,8 +775,9 @@ async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
 }
 
 #[tokio::test]
-async fn interrupt_stops_a_running_scripted_turn() {
-    let (router, token, runtime, dir) = code_app_with(
+async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
+    let browser_runtime = Arc::new(RecordingBrowserRuntime::default());
+    let (router, token, runtime, dir) = code_app_with_browser(
         ScriptedAdapter::new(vec![
             HarnessEvent::TurnStarted,
             HarnessEvent::AssistantDelta {
@@ -707,6 +788,7 @@ async fn interrupt_stops_a_running_scripted_turn() {
             },
         ])
         .with_delay(Duration::from_millis(80)),
+        browser_runtime.clone(),
     )
     .await;
     let addr = serve(router).await;
@@ -731,6 +813,7 @@ async fn interrupt_stops_a_running_scripted_turn() {
         .unwrap();
 
     let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let browser_token = browser_token_for_session(&runtime, session_id);
     let mut events = runtime.bus.subscribe(session_id);
 
     let turn_req = client
@@ -768,6 +851,121 @@ async fn interrupt_stops_a_running_scripted_turn() {
         turn_statuses(&client, addr, &token, &session).await,
         ["interrupted"]
     );
+
+    let browser_list = client
+        .get(format!("http://{addr}/code/browser/list"))
+        .bearer_auth(&browser_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(browser_list.status(), reqwest::StatusCode::OK);
+    assert_eq!(browser_runtime.listed.lock().unwrap().len(), 1);
+    assert!(browser_runtime.revoked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn reap_replaces_browser_authority_without_tombstoning_the_session() {
+    let browser_runtime = Arc::new(RecordingBrowserRuntime::default());
+    let (router, token, runtime, dir) = code_app_with_browser(
+        ScriptedAdapter::new(plain_text_script()),
+        browser_runtime.clone(),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let old_browser_token = browser_token_for_session(&runtime, session_id);
+
+    let initial_list = client
+        .get(format!("http://{addr}/code/browser/list"))
+        .bearer_auth(&old_browser_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(initial_list.status(), reqwest::StatusCode::OK);
+
+    let owner = tidebreak_core::OwnerId::local();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Fenced;
+    row.fence_reason = Some(FenceReason::OrphanAlive);
+    row.attention = Attention::new(
+        AttentionState::Fenced {
+            reason: FenceReason::OrphanAlive,
+        },
+        AttentionSource::Lifecycle,
+    );
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    let reaped = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/reap"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reaped.status(), reqwest::StatusCode::OK);
+
+    let old_list = client
+        .get(format!("http://{addr}/code/browser/list"))
+        .bearer_auth(&old_browser_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old_list.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let new_browser_token = browser_token_for_session(&runtime, session_id);
+    assert_ne!(new_browser_token, old_browser_token);
+    let new_list = client
+        .get(format!("http://{addr}/code/browser/list"))
+        .bearer_auth(&new_browser_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(new_list.status(), reqwest::StatusCode::OK);
+
+    assert_eq!(browser_runtime.listed.lock().unwrap().len(), 2);
+    assert!(browser_runtime.revoked.lock().unwrap().is_empty());
+
+    // Model a launch failure that has already removed the transient channel.
+    // A later terminal archive must still tombstone the database-backed
+    // session scope in the native adapter.
+    runtime.browser_tokens.revoke(session_id);
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    let revoked = browser_runtime.revoked.lock().unwrap();
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0].session, session_id);
 }
 
 /// A killed engine reaches EOF exactly like a finished one. Reading that as

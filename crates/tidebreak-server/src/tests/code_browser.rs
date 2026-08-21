@@ -27,12 +27,19 @@ struct FakeBrowserRuntime {
     calls: Mutex<Vec<(&'static str, BrowserRuntimeScope)>>,
     revoked: Mutex<Vec<BrowserRuntimeScope>>,
     stale: bool,
+    not_authorized: bool,
 }
 
 impl FakeBrowserRuntime {
     fn stale() -> Self {
         Self {
             stale: true,
+            ..Self::default()
+        }
+    }
+    fn not_authorized() -> Self {
+        Self {
+            not_authorized: true,
             ..Self::default()
         }
     }
@@ -105,6 +112,11 @@ impl BrowserRuntime for FakeBrowserRuntime {
         if self.stale {
             return Err(BrowserRuntimeError::StaleTarget);
         }
+        if self.not_authorized {
+            return Err(BrowserRuntimeError::NotAuthorized(
+                "browser origin is not shared with this agent".into(),
+            ));
+        }
         Ok(BrowserPageSnapshot {
             browser_id: "browser-1".into(),
             snapshot_id: "snapshot-1".into(),
@@ -142,11 +154,13 @@ async fn browser_app(fake: Option<Arc<FakeBrowserRuntime>>) -> BrowserApp {
     let browser_runtime = fake
         .as_ref()
         .map(|runtime| -> Arc<dyn BrowserRuntime> { runtime.clone() });
+    let bridge = std::path::PathBuf::from("/usr/local/bin/tidebreak");
     let code = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().into(),
         AdapterRegistry::new(),
         browser_runtime,
+        Some(bridge),
     ));
     let mut state = AppState::new(
         Config::desktop(dir.path()),
@@ -235,13 +249,17 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
 }
 
 fn mint_token(code: &CodeRuntime, ws: WorkspaceId, s: CodeSessionId) -> String {
+    let bridge = std::path::Path::new("/usr/local/bin/tidebreak");
     let sp = code
         .browser_tokens
-        .issue(BrowserSubject {
-            owner: OwnerId::local(),
-            workspace: ws,
-            session: s,
-        })
+        .issue(
+            BrowserSubject {
+                owner: OwnerId::local(),
+                workspace: ws,
+                session: s,
+            },
+            bridge,
+        )
         .unwrap();
     let c = std::fs::read_to_string(&sp.capability_file).unwrap();
     serde_json::from_str::<serde_json::Value>(&c).unwrap()["token"]
@@ -388,6 +406,24 @@ async fn stale_snapshot_409() {
         r.json::<serde_json::Value>().await.unwrap()["kind"],
         "stale_browser_target"
     );
+}
+
+#[tokio::test]
+async fn unshared_origin_403() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::not_authorized()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "snapshot",
+        Some(&t),
+        serde_json::json!({"browser_id":"browser-1"}),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::FORBIDDEN);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("not shared"));
+    assert!(!body.contains(&t));
 }
 
 #[tokio::test]
