@@ -705,10 +705,11 @@ mod tests {
             .issue(sub.clone(), Path::new("tidebreak"))
             .expect_err("relative bridge command must fail closed");
         assert!(error.contains("absolute path"));
-        assert!(std::fs::read_dir(reg.capfile_dir())
-            .unwrap()
-            .next()
-            .is_none());
+        match std::fs::read_dir(reg.capfile_dir()) {
+            Ok(mut entries) => assert!(entries.next().is_none()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("failed to inspect browser capfile directory: {error}"),
+        }
 
         let spec = reg.issue(sub, Path::new(TEST_BRIDGE)).unwrap();
         assert!(spec.capability_file.exists());
