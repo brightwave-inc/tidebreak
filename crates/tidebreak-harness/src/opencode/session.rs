@@ -1412,7 +1412,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(preserved.0, entry.0);
         }
-        assert_eq!(preserved.1, &entry.1);
+        assert_eq!(preserved.1, entry.1);
     }
 
     #[cfg(unix)]
