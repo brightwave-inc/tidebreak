@@ -55,6 +55,16 @@
 //! process owns that broker state — `serve`, or the engine `-p` embeds. See
 //! [`folder_executor`].
 //!
+//! `tidebreak browser list|navigate|snapshot --json` drive a running Tidebreak
+//! browser server through the session-private capability file named by
+//! `TIDEBREAK_BROWSER_CAPFILE`. These commands write JSON to stdout and errors
+//! to stderr, and they refuse `--server`/`--attach` since the browser server
+//! is reached exclusively through the capfile.
+//!
+//! `tidebreak browser-mcp` serves the same three browser operations over MCP
+//! stdio so any MCP-speaking host can observe and navigate browser sessions.
+//! See [`browser`].
+//!
 //! Every client command above embeds its own server by default. `--server
 //! <url>` (or `TIDEBREAK_SERVER_URL`) makes it a pure client of one that is
 //! already running instead, with the bearer token coming from
@@ -80,6 +90,7 @@ mod folder;
 mod folder_executor;
 mod outputs;
 mod print;
+mod browser;
 mod setup;
 
 use print::OutputFormat;
@@ -137,6 +148,11 @@ usage: tidebreak serve
        tidebreak agent-run list <chat>
        tidebreak agent-run show <chat> <run>
        tidebreak agent-run cancel <chat> <run>
+
+       tidebreak browser list --json
+       tidebreak browser navigate --browser-id <id> --url <url> --json
+       tidebreak browser snapshot --browser-id <id> [--max-nodes <n>] --json
+       tidebreak browser-mcp
 
        tidebreak folder connect <path> --chat <id> [--output-format text|json]
        tidebreak folder list [--chat <id>] [--output-format text|json]
@@ -358,6 +374,34 @@ async fn run() -> Result<i32> {
                 Ok(command) => folder::run(command).await.map(|()| 0),
                 Err(message) => usage_error(&message),
             }
+        }
+        Some(command) if command == OsStr::new("browser") => {
+            server_flags.refuse("browser");
+            let mut raw = text_args(args);
+            let json_count = raw.iter().filter(|a| a.as_str() == "--json").count();
+            if json_count == 0 {
+                usage_error("browser commands require --json");
+            }
+            if json_count > 1 {
+                usage_error("duplicate --json");
+            }
+            if let Some(pos) = raw.iter().position(|a| a == "--json") {
+                raw.remove(pos);
+            }
+            match crate::browser::parse_browser(raw) {
+                Ok(command) => crate::browser::run_browser(command).await.map(|()| 0),
+                Err(message) => {
+                    eprintln!("tidebreak: {message}\n\n{}", crate::browser::BROWSER_USAGE);
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some(command) if command == OsStr::new("browser-mcp") => {
+            server_flags.refuse("browser-mcp");
+            if args.next().is_some() {
+                usage_error("browser-mcp accepts no arguments");
+            }
+            crate::browser::run_browser_mcp().await.map(|()| 0)
         }
         Some(command) if command == OsStr::new("code") => {
             match crate::code::parse(text_args(args)) {
