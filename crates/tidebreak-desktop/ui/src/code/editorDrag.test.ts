@@ -15,10 +15,12 @@ const lib: PanelContent = { type: "file", path: "src/lib.rs" };
 const main: PanelContent = { type: "file", path: "src/main.rs" };
 const diff: PanelContent = { type: "diff", path: "src/main.rs" };
 
-/** A left group holding three tabs, with the terminal drawer among them. */
+const shell: PanelContent = { type: "terminal", terminalId: "t1" };
+
+/** A left group holding four tabs, one of them a shell. */
 function layout(overrides: Partial<LayoutState> = {}): LayoutState {
   return {
-    tabs: [lib, { type: "terminal" }, main, diff],
+    tabs: [lib, shell, main, diff],
     activeIndex: 0,
     fullscreen: false,
     ...overrides,
@@ -29,17 +31,26 @@ const tabId = (region: "primary" | "secondary", panel: PanelContent) =>
   editorTabDragId(region, panel);
 
 describe("editor tab drops", () => {
-  it("reorders within a group without moving the terminal", () => {
+  it("reorders within a group, shells included", () => {
     const next = dropEditorTab(
       layout(),
       tabId("primary", lib),
       tabId("primary", diff),
     );
 
-    // The drawer holds its slot while the tabs around it shuffle.
-    expect(next?.tabs).toEqual([main, { type: "terminal" }, diff, lib]);
+    expect(next?.tabs).toEqual([shell, main, diff, lib]);
     // And the tab that was active still is, wherever it ended up.
     expect(next?.activeIndex).toBe(3);
+  });
+
+  it("drags a shell like any other tab", () => {
+    const next = dropEditorTab(
+      layout(),
+      tabId("primary", shell),
+      tabId("primary", diff),
+    );
+
+    expect(next?.tabs).toEqual([lib, main, diff, shell]);
   });
 
   it("appends when the drop lands on the strip's open space", () => {
@@ -49,7 +60,7 @@ describe("editor tab drops", () => {
       editorStripDropId("primary"),
     );
 
-    expect(next?.tabs).toEqual([main, { type: "terminal" }, diff, lib]);
+    expect(next?.tabs).toEqual([shell, main, diff, lib]);
   });
 
   it("creates the split from the zone, and reads back across it", () => {
@@ -59,7 +70,7 @@ describe("editor tab drops", () => {
       EDITOR_SPLIT_DROP_ID,
     );
     expect(split?.editorSplit?.tabs).toEqual([diff]);
-    expect(split?.tabs).toEqual([lib, { type: "terminal" }, main]);
+    expect(split?.tabs).toEqual([lib, shell, main]);
 
     // Dropping it on the left strip sends it home again.
     const back = dropEditorTab(

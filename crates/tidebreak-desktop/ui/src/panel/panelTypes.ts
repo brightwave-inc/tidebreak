@@ -23,7 +23,11 @@ export type PanelContent =
   | { type: "agents" }
   /** One background agent run, opened from the agents table or the transcript. */
   | { type: "agent"; runId: string }
-  /** Auxiliary workspace shell; `terminalId` pins a live PTY when known. */
+  /**
+   * Auxiliary workspace shell, as a center tab beside the files and the
+   * browser. `terminalId` names the live PTY; it is absent only in a link
+   * written before terminals were tabs, and the pane fills it in on attach.
+   */
   | { type: "terminal"; terminalId?: string }
   /** One worktree file in the workspace center. */
   | { type: "file"; path: string }
@@ -91,6 +95,11 @@ export function panelKey(panel: PanelContent): string {
       return `diff:${panel.turnId ?? ""}:${panel.path ?? ""}`;
     case "browser":
       return `browser:${panel.browserId}`;
+    case "terminal":
+      // A shell the server has named is its own tab. A terminal with no id is
+      // a link written before terminals were tabs; it adopts an id as soon as
+      // its pane attaches, so only one of those can be open at a time.
+      return panel.terminalId ? `terminal:${panel.terminalId}` : "terminal";
     default:
       return panel.type;
   }

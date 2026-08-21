@@ -24,6 +24,7 @@ import {
   watchChildren,
 } from "./CodeUpdatesStore";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { findCodeTerminalTab } from "./codeChrome";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { RailSettingsMenu } from "./RailSettingsMenu";
 import { RepoSwitcherPopover } from "./RepoSwitcherPopover";
@@ -85,8 +86,7 @@ export function CodeSidebar() {
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const terminalOpen =
-    layout.tabs.some((tab) => tab.type === "terminal") &&
-    pathname.startsWith("/code/w/");
+    findCodeTerminalTab(layout) !== null && pathname.startsWith("/code/w/");
   const viewedWorkspaceId = pathname.startsWith("/code/w/")
     ? pathname.slice("/code/w/".length).split("/")[0]
     : undefined;

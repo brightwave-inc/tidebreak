@@ -73,6 +73,7 @@ import { AttentionBadge } from "./AttentionBadge";
 import { STATUS_MARK } from "./statusTone";
 import {
   codeBrowserIds,
+  codeTerminalIds,
   closeAllEditorTabs,
   closeCodeChromeTab,
   closeEditorTab,
@@ -81,6 +82,7 @@ import {
   type CodeEditorRegion,
   focusCodeChromeTab,
   focusConversation,
+  focusedEditorPosition,
   focusEditorTab,
   mergeEditorSplit,
   moveEditorTab,
@@ -88,8 +90,9 @@ import {
   removedCodeBrowserIds,
   reorderEditorTab,
   splitCodeChromeLayout,
-  openTerminalLayout,
-  toggleTerminalLayout,
+  adoptCodeTerminalId,
+  findCodeTerminalTab,
+  removedCodeTerminalIds,
 } from "./codeChrome";
 import {
   centerEditorTabId,
@@ -152,7 +155,6 @@ import {
 } from "./editorDrag";
 import { FOCUS_RING } from "./interactive";
 import { StartSessionPrompt } from "./StartSessionPrompt";
-import { TerminalDrawer } from "./TerminalDrawer";
 import { TerminalPane } from "./TerminalPane";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useCodeContentRevision } from "./useLiveContent";
@@ -207,6 +209,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const layoutRef = useRef(layout);
   const previousLayoutRef = useRef(layout);
   const closedBrowserIdsRef = useRef(new Set<string>());
+  const closedTerminalIdsRef = useRef(new Set<string>());
+  /** Where focus sat before the terminal chord jumped away from it. */
+  const beforeTerminalRef = useRef<{
+    region: CodeEditorRegion;
+    index: number;
+  } | null>(null);
   const workspaceBrowserIdsRef = useRef(new Set<string>());
   const chrome = splitCodeChromeLayout(layout);
   const workspaceOverlayOpen = usePortalOverlayOpen();
@@ -226,6 +234,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
   const quickOpenPending = useCodeUiStore((state) => state.quickOpenPending);
   const archivePending = useCodeUiStore((state) => state.archivePending);
+  const terminalPending = useCodeUiStore((state) => state.terminalPending);
   const shortcutHints = useCodeShortcutHints();
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
     null,
@@ -286,6 +295,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
     () => storedBrowserTitles(layout),
   );
+  const [terminalLabels, setTerminalLabels] = useState<Record<string, string>>(
+    () => nameTerminals({}, codeTerminalIds(layout)),
+  );
   const conversations = useMemo(() => liveCodeSessions(sessions), [sessions]);
   const session = useMemo(
     () => sessions.find((entry) => entry.id === activeSessionId) ?? null,
@@ -320,6 +332,31 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     [workspaceId],
   );
 
+  /**
+   * End the shells whose tabs have gone.
+   *
+   * A workspace may only hold so many at once, so a closed tab has to give
+   * its shell back rather than leave it running with nothing pointing at it.
+   *
+   * Closing a tab is the only thing that ends a shell. Browsers also close
+   * when the page unmounts, because a native webview is worth nothing once it
+   * is off screen; a shell is the opposite. A build running in one has to
+   * survive a click on another workspace, and the tab's address names it, so
+   * coming back re-attaches to the same process with its output intact.
+   */
+  const closeTerminalPanels = useCallback(
+    (terminalIds: readonly string[]) => {
+      for (const terminalId of terminalIds) {
+        if (closedTerminalIdsRef.current.has(terminalId)) continue;
+        closedTerminalIdsRef.current.add(terminalId);
+        void client.deleteCodeTerminal(workspaceId, terminalId).catch(() => {
+          // A shell that is already gone is the outcome we wanted anyway.
+        });
+      }
+    },
+    [client, workspaceId],
+  );
+
   function setWorkspaceLayout(next: LayoutState) {
     setLayout(next);
   }
@@ -333,7 +370,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     closeBrowserPanels(
       removedCodeBrowserIds(previousLayoutRef.current, layout),
     );
+    closeTerminalPanels(
+      removedCodeTerminalIds(previousLayoutRef.current, layout),
+    );
     previousLayoutRef.current = layout;
+    setTerminalLabels((current) =>
+      nameTerminals(current, codeTerminalIds(layout)),
+    );
     setBrowserTitles((current) => {
       let changed = false;
       const next: Record<string, string> = {};
@@ -345,7 +388,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       if (Object.keys(current).length !== ids.length) changed = true;
       return changed ? next : current;
     });
-  }, [closeBrowserPanels, layout]);
+  }, [closeBrowserPanels, closeTerminalPanels, layout]);
 
   useEffect(() => {
     workspaceBrowserIdsRef.current = new Set(codeBrowserIds(layoutRef.current));
@@ -555,6 +598,61 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     );
   }
 
+  /**
+   * Start a shell and give it a tab.
+   *
+   * The server names the shell, so the tab cannot exist before the call
+   * answers — unlike a browser, whose id the page mints itself.
+   */
+  async function openTerminal(preferredRegion?: CodeEditorRegion) {
+    try {
+      const snap = await client.createCodeTerminal(workspaceId);
+      setTerminalLabels((current) => nameTerminals(current, [snap.id]));
+      setWorkspaceLayout(
+        openCodeEditor(
+          layoutRef.current,
+          { type: "terminal", terminalId: snap.id },
+          preferredRegion,
+        ),
+      );
+    } catch (error) {
+      toast.error(friendlyErrorMessage(error, "Could not open a terminal"));
+    }
+  }
+
+  /**
+   * Jump to the terminal and back again.
+   *
+   * The chord used to show and hide a drawer. A terminal is a tab now, so the
+   * same press moves focus there and the next one returns it where it was —
+   * the flick there and back a drawer gave, without a second kind of surface.
+   */
+  function toggleTerminal() {
+    const found = findCodeTerminalTab(layoutRef.current);
+    if (!found) {
+      beforeTerminalRef.current = focusedEditorPosition(layoutRef.current);
+      void openTerminal("primary");
+      return;
+    }
+    const focused = focusedEditorPosition(layoutRef.current);
+    const onTerminal =
+      focused?.region === found.region && focused.index === found.index;
+    if (!onTerminal) {
+      beforeTerminalRef.current = focused;
+      setWorkspaceLayout(
+        focusEditorTab(layoutRef.current, found.index, found.region),
+      );
+      return;
+    }
+    const back = beforeTerminalRef.current;
+    beforeTerminalRef.current = null;
+    setWorkspaceLayout(
+      back
+        ? focusEditorTab(layoutRef.current, back.index, back.region)
+        : focusConversation(layoutRef.current),
+    );
+  }
+
   function requestNewTab(region: CodeEditorRegion) {
     setQuickOpenTarget(region);
     setQuickOpenRequest((request) => request + 1);
@@ -570,6 +668,16 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!useCodeUiStore.getState().takeQuickOpen()) return;
     requestNewTab(splitFocused ? "secondary" : "primary");
   }, [quickOpenPending, splitFocused]);
+
+  // The chord and the rail command both raise the ask above the route, because
+  // starting a shell is a server call neither of them can make.
+  useEffect(() => {
+    if (!terminalPending) return;
+    if (!useCodeUiStore.getState().takeTerminal()) return;
+    toggleTerminal();
+    // The flag is the trigger; the rest is state read when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalPending]);
 
   /**
    * Archive from the keyboard, through the same confirmation the menu uses.
@@ -765,6 +873,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const activeSplitEditor =
     splitEditorTabs[chrome.splitEditors.activeIndex] ?? null;
   const hasEditorSplit = splitEditorTabs.length > 0;
+  const openTerminalCount = codeTerminalIds(layout).length;
+  const hasTerminal = findCodeTerminalTab(layout) !== null;
+  const canNewTerminal = openTerminalCount < MAX_WORKSPACE_TERMINALS;
 
   function editorPanel(
     panel: PanelContent,
@@ -816,6 +927,22 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               }
             />
           </Suspense>
+        ) : panel.type === "terminal" ? (
+          <TerminalPane
+            client={client}
+            workspaceId={workspaceId}
+            terminalId={panel.terminalId}
+            onAttach={(terminalId) =>
+              setWorkspaceLayout(
+                adoptCodeTerminalId(
+                  layoutRef.current,
+                  panel.terminalId,
+                  terminalId,
+                ),
+              )
+            }
+            hideHeader
+          />
         ) : panel.type === "source_control" ? (
           <div
             className="flex min-h-0 flex-1 flex-col overflow-hidden"
@@ -854,6 +981,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       <CodeCenterTabs
         editorTabs={editorTabs}
         browserTitles={browserTitles}
+        terminalLabels={terminalLabels}
         editorActiveIndex={chrome.editors.activeIndex}
         conversationFocused={showingChat}
         conversations={conversationTabs}
@@ -896,7 +1024,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onNewPr={() =>
           setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, "primary"))
         }
-        onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
+        onNewTerminal={() => void openTerminal("primary")}
+        canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(
             moveEditorTab(layout, "primary", index, "secondary"),
@@ -1005,7 +1134,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               )}
             </div>
           )}
-          renderPanel={(panel) => renderCodePanel(panel, client, workspaceId)}
+          renderPanel={() => renderCodePanel()}
         />
       </div>
       {!showingChat &&
@@ -1023,6 +1152,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         region="secondary"
         editorTabs={splitEditorTabs}
         browserTitles={browserTitles}
+        terminalLabels={terminalLabels}
         editorActiveIndex={chrome.splitEditors.activeIndex}
         conversationFocused={false}
         onSelectEditor={(index) =>
@@ -1058,7 +1188,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             openCodeEditor(layout, { type: "pr" }, "secondary"),
           )
         }
-        onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
+        onNewTerminal={() => void openTerminal("secondary")}
+        canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(
             moveEditorTab(layout, "secondary", index, "primary"),
@@ -1117,19 +1248,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           {draggedPanel ? (
             <span className="flex h-8 items-center gap-1.5 rounded-lg bg-background px-2.5 text-xs font-medium text-foreground shadow-lg">
               <CenterTabIcon panel={draggedPanel} />
-              {centerTabParts(draggedPanel, browserTitles).name}
+              {centerTabParts(draggedPanel, browserTitles, terminalLabels).name}
             </span>
           ) : null}
         </DragOverlay>
       </DndContext>
-      {chrome.terminal && (
-        <TerminalDrawer
-          client={client}
-          workspaceId={workspaceId}
-          shortcutHint={shortcutHints.terminal}
-          onClose={() => setWorkspaceLayout(toggleTerminalLayout(layout))}
-        />
-      )}
     </div>
   );
 
@@ -1190,13 +1313,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             </>
           ) : undefined
         }
-        terminalOpen={chrome.terminal !== null}
+        terminalOpen={hasTerminal}
         reviewOpen={reviewSidebarOpen}
         terminalShortcut={shortcutHints.terminal}
         reviewShortcut={shortcutHints.review}
-        onToggleTerminal={() =>
-          setWorkspaceLayout(toggleTerminalLayout(layout))
-        }
+        onToggleTerminal={toggleTerminal}
         onToggleReview={toggleReviewSidebar}
         overflowAction={
           workspace ? (
@@ -1365,6 +1486,42 @@ function storedBrowserTitles(layout: LayoutState): Record<string, string> {
   );
 }
 
+/**
+ * Shells one workspace may hold at once, matching the server's own cap. The
+ * plus menu stops offering another rather than letting the create fail.
+ */
+const MAX_WORKSPACE_TERMINALS = 8;
+
+/**
+ * Give every open shell a tab label, keeping the ones already assigned.
+ *
+ * Several shells in a strip all reading "Terminal" would be untellable apart,
+ * so each takes the lowest number no other open shell is using. A number is
+ * released when its tab closes, which is also when its shell ends.
+ */
+function nameTerminals(
+  current: Readonly<Record<string, string>>,
+  terminalIds: readonly string[],
+): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const id of terminalIds) {
+    const existing = current[id];
+    if (existing) kept[id] = existing;
+  }
+  const taken = new Set(Object.values(kept));
+  for (const id of terminalIds) {
+    if (kept[id]) continue;
+    let ordinal = 1;
+    while (taken.has(`Terminal ${ordinal}`)) ordinal += 1;
+    kept[id] = `Terminal ${ordinal}`;
+    taken.add(kept[id]);
+  }
+  const unchanged =
+    Object.keys(kept).length === Object.keys(current).length &&
+    Object.entries(kept).every(([id, label]) => current[id] === label);
+  return unchanged ? (current as Record<string, string>) : kept;
+}
+
 /** Native child webviews must yield whenever a portaled app surface overlaps them. */
 
 function shortcutHint(id: ShellShortcutAction, command: boolean): string {
@@ -1372,14 +1529,13 @@ function shortcutHint(id: ShellShortcutAction, command: boolean): string {
   return def ? shortcutKeycaps(def, command).join("") : "";
 }
 
-function renderCodePanel(
-  panel: PanelContent,
-  client: ApiClient,
-  workspaceId: string,
-) {
-  if (panel.type === "terminal") {
-    return <TerminalPane client={client} workspaceId={workspaceId} />;
-  }
+/**
+ * The side region beside the conversation.
+ *
+ * Every panel it used to draw has become a center tab, so a link naming one
+ * lands here and says so rather than rendering an empty frame.
+ */
+function renderCodePanel() {
   return (
     <p className="text-muted-foreground px-3 py-6 text-sm">
       This panel is not available here.

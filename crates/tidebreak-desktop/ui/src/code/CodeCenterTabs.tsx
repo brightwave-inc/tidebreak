@@ -119,7 +119,9 @@ export function CodeCenterTabs({
   onNewSourceControl,
   onNewPr,
   onNewTerminal,
+  canNewTerminal = true,
   browserTitles = {},
+  terminalLabels = {},
   region = "primary",
   onMoveEditorToOtherGroup,
   onMoveEditor,
@@ -155,9 +157,13 @@ export function CodeCenterTabs({
   onNewSourceControl?: () => void;
   /** Open the pull request's details as a center tab. */
   onNewPr?: () => void;
-  /** Open the workspace terminal. */
+  /** Open a shell in the worktree as a center tab. */
   onNewTerminal?: () => void;
+  /** False once the workspace holds as many shells as the server allows. */
+  canNewTerminal?: boolean;
   browserTitles?: Readonly<Record<string, string>>;
+  /** Each open shell's tab label, so several shells stay tellable apart. */
+  terminalLabels?: Readonly<Record<string, string>>;
   region?: CenterTabRegion;
   onMoveEditorToOtherGroup?: (index: number) => void;
   /**
@@ -330,6 +336,7 @@ export function CodeCenterTabs({
             active={!conversationFocused && index === editorActiveIndex}
             tabCount={editorTabs.length}
             browserTitles={browserTitles}
+            terminalLabels={terminalLabels}
             tabRef={(node) => {
               tabRefs.current[index + tabOffset] = node;
             }}
@@ -365,16 +372,32 @@ export function CodeCenterTabs({
             <Plus className="size-3.5" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-44">
+        <DropdownMenuContent align="start" className="w-48">
+          {/* Two groups, and the split is a rule rather than an ordering: the
+              top three start something new that the workspace can hold many
+              of, and the rest open the one view there is of the worktree. */}
           {onNewConversation && (
-            <>
-              <DropdownMenuItem onSelect={onNewConversation}>
-                <Bot />
-                New agent
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-            </>
+            <DropdownMenuItem onSelect={onNewConversation}>
+              <Bot />
+              New agent
+            </DropdownMenuItem>
           )}
+          {onNewTerminal && (
+            <DropdownMenuItem
+              disabled={!canNewTerminal}
+              onSelect={onNewTerminal}
+            >
+              <SquareTerminal />
+              New terminal
+            </DropdownMenuItem>
+          )}
+          {onNewBrowser && (
+            <DropdownMenuItem onSelect={onNewBrowser}>
+              <Globe2 />
+              New browser
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={onNewTab}>
             <FileCode />
             Open file…
@@ -395,18 +418,6 @@ export function CodeCenterTabs({
             <DropdownMenuItem onSelect={onNewPr}>
               <GitPullRequest />
               Pull request
-            </DropdownMenuItem>
-          )}
-          {onNewBrowser && (
-            <DropdownMenuItem onSelect={onNewBrowser}>
-              <Globe2 />
-              New browser tab
-            </DropdownMenuItem>
-          )}
-          {onNewTerminal && (
-            <DropdownMenuItem onSelect={onNewTerminal}>
-              <SquareTerminal />
-              Terminal
             </DropdownMenuItem>
           )}
         </DropdownMenuContent>
@@ -459,6 +470,7 @@ function EditorTab({
   active,
   tabCount,
   browserTitles,
+  terminalLabels,
   tabRef,
   onSelect,
   onKeyDown: onTabKeyDown,
@@ -477,6 +489,7 @@ function EditorTab({
   active: boolean;
   tabCount: number;
   browserTitles: Readonly<Record<string, string>>;
+  terminalLabels: Readonly<Record<string, string>>;
   tabRef: (node: HTMLButtonElement | null) => void;
   onSelect: () => void;
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
@@ -488,7 +501,7 @@ function EditorTab({
   onMoveToOtherGroup?: (() => void) | undefined;
   onMove?: ((to: number) => void) | undefined;
 }) {
-  const { name, suffix } = centerTabParts(panel, browserTitles);
+  const { name, suffix } = centerTabParts(panel, browserTitles, terminalLabels);
   const label = suffix ? `${name} ${suffix}` : name;
   const path =
     panel.type === "file" || panel.type === "diff" ? panel.path : undefined;
@@ -541,7 +554,7 @@ function EditorTab({
             <CenterTabIcon panel={panel} />
             <span
               className="flex min-w-0 items-baseline gap-1"
-              title={centerTabTitle(panel, browserTitles)}
+              title={centerTabTitle(panel, browserTitles, terminalLabels)}
             >
               <span className="max-w-40 truncate">{name}</span>
               {/* The suffix stays outside the truncating name. */}
@@ -646,6 +659,9 @@ function EditorTab({
 export function CenterTabIcon({ panel }: { panel: PanelContent }) {
   if (panel.type === "diff") return <FileDiff className="size-3.5 shrink-0" />;
   if (panel.type === "browser") return <Globe2 className="size-3.5 shrink-0" />;
+  if (panel.type === "terminal") {
+    return <SquareTerminal className="size-3.5 shrink-0" />;
+  }
   if (panel.type === "source_control") {
     return <GitBranch className="size-3.5 shrink-0" />;
   }
@@ -674,10 +690,11 @@ function TabContextMenuContent({
 function centerTabTitle(
   panel: PanelContent,
   browserTitles: Readonly<Record<string, string>>,
+  terminalLabels: Readonly<Record<string, string>> = {},
 ): string {
   if (panel.type === "file") return panel.path;
   if (panel.type === "diff" && panel.path) return `${panel.path} (diff)`;
-  const { name, suffix } = centerTabParts(panel, browserTitles);
+  const { name, suffix } = centerTabParts(panel, browserTitles, terminalLabels);
   return suffix ? `${name} ${suffix}` : name;
 }
 
@@ -688,6 +705,7 @@ function centerTabTitle(
 export function centerTabParts(
   panel: PanelContent,
   browserTitles: Readonly<Record<string, string>>,
+  terminalLabels: Readonly<Record<string, string>> = {},
 ): {
   name: string;
   suffix: string | null;
@@ -709,6 +727,12 @@ export function centerTabParts(
       name: browserTitles[panel.browserId]?.trim() || "Browser",
       suffix: null,
     };
+  }
+  if (panel.type === "terminal") {
+    const label = panel.terminalId
+      ? terminalLabels[panel.terminalId]
+      : undefined;
+    return { name: label?.trim() || "Terminal", suffix: null };
   }
   if (panel.type === "source_control") {
     return { name: "Source control", suffix: null };

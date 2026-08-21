@@ -269,6 +269,7 @@ export function layoutFromSearch(search: PanelSearch): LayoutState {
       (panel.type !== "file" &&
         panel.type !== "diff" &&
         panel.type !== "browser" &&
+        panel.type !== "terminal" &&
         panel.type !== "source_control" &&
         panel.type !== "pr")
     ) {

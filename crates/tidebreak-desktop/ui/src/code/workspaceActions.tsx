@@ -32,10 +32,6 @@ import { Input } from "@/components/ui/input";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
-import { EMPTY_LAYOUT } from "@/panel/panelTypes";
-import { searchFromLayout } from "@/panel/panelUrl";
-import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
-import { toggleTerminalLayout } from "./codeChrome";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 
@@ -294,8 +290,6 @@ export function useWorkspaceCardCommands(): {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const layout = useLayoutState();
-  const { setLayout } = usePanelNav();
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
   const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
   const forgetWorkspaceSession = useCodeCatalogStore(
@@ -483,14 +477,14 @@ export function useWorkspaceCardCommands(): {
         return;
       }
       case "toggle-terminal": {
-        if (pathname === `/code/w/${context.workspace.id}`) {
-          setLayout(toggleTerminalLayout(layout));
-          return;
-        }
+        // The workspace page owns this: a terminal is a tab over a shell the
+        // server has to start first. Raising the ask works whether the
+        // workspace is already on screen or about to be.
+        useCodeUiStore.getState().requestTerminal();
+        if (pathname === `/code/w/${context.workspace.id}`) return;
         void navigate({
           to: "/code/w/$workspaceId",
           params: { workspaceId: context.workspace.id },
-          search: searchFromLayout(toggleTerminalLayout(EMPTY_LAYOUT)),
         });
         return;
       }

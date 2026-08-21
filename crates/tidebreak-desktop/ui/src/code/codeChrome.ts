@@ -7,24 +7,18 @@ import {
 
 /**
  * Split a workspace layout into the panels that sit beside the conversation
- * and the terminal, which the workspace draws as a bottom drawer instead.
+ * and the editor tabs that fill the center.
  *
- * The terminal stays in the URL so a reload or a shared link still opens it.
- * Only the rendering changes: it is not a tab in the side region.
+ * The terminal is an editor tab like any other: it drags, reorders, and moves
+ * into the split with the files and the browser beside it.
  */
 export function splitCodeChromeLayout(layout: LayoutState): {
   panels: LayoutState;
   editors: LayoutState;
   splitEditors: LayoutState;
-  terminal: Extract<PanelContent, { type: "terminal" }> | null;
 } {
-  const terminal = layout.tabs.find((tab) => tab.type === "terminal") as
-    | Extract<PanelContent, { type: "terminal" }>
-    | undefined;
   const active = layout.tabs[layout.activeIndex];
-  const side = layout.tabs.filter(
-    (tab) => !isDrawerTab(tab) && !isEditorTab(tab),
-  );
+  const side = layout.tabs.filter((tab) => !isEditorTab(tab));
   const editors = layout.tabs.filter(isEditorTab);
   const splitTabs = layout.editorSplit?.tabs.filter(isEditorTab) ?? [];
   const splitActive = layout.editorSplit?.tabs[layout.editorSplit.activeIndex];
@@ -40,7 +34,6 @@ export function splitCodeChromeLayout(layout: LayoutState): {
             conversationFocused: layout.conversationFocused,
           },
     splitEditors: sliceLayout(splitTabs, splitActive, false),
-    terminal: terminal ?? null,
   };
 }
 
@@ -58,15 +51,12 @@ function sliceLayout(
   return { tabs, activeIndex, fullscreen };
 }
 
-function isDrawerTab(tab: PanelContent): boolean {
-  return tab.type === "terminal";
-}
-
 export function isEditorTab(tab: PanelContent): boolean {
   return (
     tab.type === "file" ||
     tab.type === "diff" ||
     tab.type === "browser" ||
+    tab.type === "terminal" ||
     tab.type === "source_control" ||
     tab.type === "pr"
   );
@@ -74,7 +64,9 @@ export function isEditorTab(tab: PanelContent): boolean {
 
 export type CodeEditorPanel = Extract<
   PanelContent,
-  { type: "file" | "diff" | "browser" | "source_control" | "pr" }
+  {
+    type: "file" | "diff" | "browser" | "terminal" | "source_control" | "pr";
+  }
 >;
 
 /** Browser session ids removed by a layout transition, once each. */
@@ -93,6 +85,82 @@ export function codeBrowserIds(layout: LayoutState): string[] {
     if (panel.type === "browser") ids.add(panel.browserId);
   }
   return [...ids];
+}
+
+/**
+ * Shell ids removed by a layout transition, once each.
+ *
+ * Closing a terminal tab ends its shell. A terminal is a live process rather
+ * than a view onto the worktree, and the server caps how many a workspace may
+ * hold at once — leaving the process running would spend that budget on tabs
+ * the reader has already dismissed, with nothing left to reclaim it.
+ */
+export function removedCodeTerminalIds(
+  previous: LayoutState,
+  next: LayoutState,
+): string[] {
+  const remaining = new Set(codeTerminalIds(next));
+  return codeTerminalIds(previous).filter((id) => !remaining.has(id));
+}
+
+/** Shell ids owned by either editor group, once each. */
+export function codeTerminalIds(layout: LayoutState): string[] {
+  const ids = new Set<string>();
+  for (const panel of [...layout.tabs, ...(layout.editorSplit?.tabs ?? [])]) {
+    if (panel.type === "terminal" && panel.terminalId) {
+      ids.add(panel.terminalId);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Where the workspace's first terminal tab sits, or null when it has none.
+ *
+ * The terminal chord is a jump rather than a toggle of some drawer, so it
+ * needs a position to jump to. The main group is searched first because that
+ * is where a new terminal opens.
+ */
+export function findCodeTerminalTab(
+  layout: LayoutState,
+): { region: CodeEditorRegion; index: number } | null {
+  const primary = layout.tabs
+    .filter(isEditorTab)
+    .findIndex((tab) => tab.type === "terminal");
+  if (primary >= 0) return { region: "primary", index: primary };
+  const secondary = (layout.editorSplit?.tabs ?? []).findIndex(
+    (tab) => tab.type === "terminal",
+  );
+  if (secondary >= 0) return { region: "secondary", index: secondary };
+  return null;
+}
+
+/**
+ * Point a terminal tab at the shell its pane actually attached to.
+ *
+ * A pane opened from a link written before terminals were tabs has no id
+ * until it adopts one, and a pane whose shell died reports the replacement it
+ * started. Both arrive here, so the tab keeps its place in the strip while its
+ * identity changes underneath it.
+ */
+export function adoptCodeTerminalId(
+  layout: LayoutState,
+  previousId: string | undefined,
+  terminalId: string,
+): LayoutState {
+  const matches = (tab: PanelContent) =>
+    tab.type === "terminal" && tab.terminalId === previousId;
+  const replace = (tabs: PanelContent[]) =>
+    tabs.map((tab) => (matches(tab) ? { ...tab, terminalId } : tab));
+
+  if (layout.tabs.some(matches)) {
+    return { ...layout, tabs: replace(layout.tabs) };
+  }
+  const split = layout.editorSplit;
+  if (split?.tabs.some(matches)) {
+    return { ...layout, editorSplit: { ...split, tabs: replace(split.tabs) } };
+  }
+  return layout;
 }
 
 export type CodeEditorRegion = "primary" | "secondary";
@@ -116,6 +184,27 @@ export function closeFocusedCodeTab(layout: LayoutState): LayoutState | null {
   }
   if (chrome.panels.tabs.length > 0) {
     return closeCodeChromeTab(layout, chrome.panels.activeIndex);
+  }
+  return null;
+}
+
+/**
+ * Which editor tab the workspace is actually showing, or null when the
+ * conversation holds the center.
+ *
+ * Reads what is on screen the same way {@link closeFocusedCodeTab} does, so a
+ * command that acts on "the tab in front of you" and one that closes it always
+ * agree on which tab that is.
+ */
+export function focusedEditorPosition(
+  layout: LayoutState,
+): { region: CodeEditorRegion; index: number } | null {
+  const chrome = splitCodeChromeLayout(layout);
+  if (layout.editorSplit?.focused && chrome.splitEditors.tabs.length > 0) {
+    return { region: "secondary", index: chrome.splitEditors.activeIndex };
+  }
+  if (!chrome.editors.conversationFocused && chrome.editors.tabs.length > 0) {
+    return { region: "primary", index: chrome.editors.activeIndex };
   }
   return null;
 }
@@ -599,15 +688,15 @@ function editorUrlIndex(layout: LayoutState, editorIndex: number): number {
 /**
  * URL-tab index of the side-region tab at `stripIndex`.
  *
- * The strip is the URL tabs with the terminal removed, so a click or close on
- * the strip has to skip it rather than treat it as a neighbour.
+ * The strip is the URL tabs with the editor tabs removed, so a click or close
+ * on the strip has to skip them rather than treat them as neighbours.
  */
 function codeChromeUrlIndex(layout: LayoutState, stripIndex: number): number {
   if (stripIndex < 0) return -1;
   let remaining = stripIndex;
   for (let index = 0; index < layout.tabs.length; index += 1) {
     const tab = layout.tabs[index];
-    if (!tab || isDrawerTab(tab) || isEditorTab(tab)) continue;
+    if (!tab || isEditorTab(tab)) continue;
     if (remaining === 0) return index;
     remaining -= 1;
   }
@@ -624,24 +713,22 @@ export function focusCodeChromeTab(
   return { ...layout, activeIndex: urlIndex };
 }
 
-/** Close the side-region tab at `stripIndex` and keep the terminal in the URL. */
+/** Close the side-region tab at `stripIndex`. */
 export function closeCodeChromeTab(
   layout: LayoutState,
   stripIndex: number,
 ): LayoutState {
-  const { panels, editors, terminal } = splitCodeChromeLayout(layout);
+  const { panels, editors } = splitCodeChromeLayout(layout);
   const nextPanels = closeLayoutTab(panels, stripIndex);
-  return combineChrome(nextPanels, editors, terminal, layout.editorSplit);
+  return combineChrome(nextPanels, editors, layout.editorSplit);
 }
 
 function combineChrome(
   panels: LayoutState,
   editors: LayoutState,
-  terminal: Extract<PanelContent, { type: "terminal" }> | null,
   editorSplit?: LayoutState["editorSplit"],
 ): LayoutState {
   const tabs = [...editors.tabs, ...panels.tabs];
-  if (terminal) tabs.push(terminal);
   if (tabs.length === 0 && !editorSplit) return EMPTY_LAYOUT;
   const focused =
     !editors.conversationFocused && editors.tabs[editors.activeIndex]
@@ -681,49 +768,5 @@ function closeLayoutTab(layout: LayoutState, index: number): LayoutState {
     ...layout,
     tabs,
     activeIndex: Math.min(Math.max(activeIndex, 0), tabs.length - 1),
-  };
-}
-
-/** Open the terminal drawer; a no-op when it is already in the layout. */
-export function openTerminalLayout(layout: LayoutState): LayoutState {
-  if (layout.tabs.some((tab) => tab.type === "terminal")) return layout;
-  return toggleTerminalLayout(layout);
-}
-
-/** Open the terminal drawer, or close it if it is already in the layout. */
-export function toggleTerminalLayout(layout: LayoutState): LayoutState {
-  const index = layout.tabs.findIndex((tab) => tab.type === "terminal");
-  if (index === -1) {
-    // Leave the still-visible side tab selected. splitCodeChromeLayout remaps
-    // only when a reload or a shared link actually named the terminal.
-    return {
-      ...layout,
-      tabs: [...layout.tabs, { type: "terminal" }],
-    };
-  }
-
-  const tabs = layout.tabs.filter((_, at) => at !== index);
-  if (tabs.length === 0) {
-    return layout.editorSplit
-      ? {
-          ...layout,
-          tabs: [],
-          activeIndex: 0,
-          fullscreen: false,
-          conversationFocused: undefined,
-        }
-      : EMPTY_LAYOUT;
-  }
-
-  let activeIndex = layout.activeIndex;
-  if (index < activeIndex) activeIndex -= 1;
-  else if (index === activeIndex) {
-    activeIndex = Math.min(index, tabs.length - 1);
-  }
-  return {
-    ...layout,
-    tabs,
-    activeIndex: Math.max(0, Math.min(activeIndex, tabs.length - 1)),
-    fullscreen: layout.fullscreen && tabs.length > 0,
   };
 }

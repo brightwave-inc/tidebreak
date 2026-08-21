@@ -1102,7 +1102,7 @@ describe("CodeWorkspacePage", () => {
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", true);
   });
 
-  it("keeps git and comments in the review sidebar, and opens the terminal as a drawer", async () => {
+  it("keeps git and comments in the review sidebar, and opens the terminal as a tab", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);
     const user = userEvent.setup();
@@ -1121,11 +1121,17 @@ describe("CodeWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Terminal" }));
 
-    expect(await screen.findByTestId("terminal-drawer")).toBeInTheDocument();
+    // The chord and the header button both start a shell and give it a tab,
+    // named after the shell the server handed back.
     expect(
-      screen.queryByRole("tab", { name: /Terminal/i }),
-    ).not.toBeInTheDocument();
-    expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
+      await screen.findByRole("tab", { name: /Terminal 1/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("terminal-drawer")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "terminal.term-1",
+      }),
+    );
 
     await user.click(screen.getByRole("tab", { name: "Pull request" }));
     expect(
@@ -1146,13 +1152,17 @@ describe("CodeWorkspacePage", () => {
     expect(
       screen.queryByRole("tablist", { name: "Open panels" }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("tab", { name: /Terminal/i }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
-    expect(router.state.location.search).toMatchObject({
-      tabs: "files,terminal",
-    });
+    // A link written before terminals were tabs still opens one; the pane
+    // adopts a shell and the tab takes its id.
+    expect(screen.getByRole("tab", { name: /Terminal 1/ })).toBeInTheDocument();
+    expect(screen.queryByTestId("terminal-drawer")).not.toBeInTheDocument();
+    // Adopting a shell rewrites the address to name it, so the link heals
+    // itself the first time it is opened.
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "terminal.term-1",
+      }),
+    );
 
     const inspector = screen.getByTestId("code-inspector");
     expect(
@@ -1160,7 +1170,7 @@ describe("CodeWorkspacePage", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens the terminal drawer without creating a files or diff strip tab", async () => {
+  it("opens a terminal tab without creating a files or diff strip tab", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);
     const user = userEvent.setup();
@@ -1172,13 +1182,15 @@ describe("CodeWorkspacePage", () => {
     await user.click(screen.getByRole("button", { name: "Terminal" }));
 
     await waitFor(() =>
-      expect(router.state.location.search).toMatchObject({ tabs: "terminal" }),
+      expect(router.state.location.search).toMatchObject({
+        tabs: "terminal.term-1",
+      }),
     );
     expect(
       screen.queryByRole("tablist", { name: "Open panels" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Diff" })).not.toBeInTheDocument();
-    expect(screen.getByTestId("terminal-drawer")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Terminal 1/ })).toBeInTheDocument();
     expect(
       within(screen.getByTestId("code-inspector")).getByRole("tab", {
         name: "Files",
@@ -1639,17 +1651,22 @@ describe("CodeWorkspacePage", () => {
     await user.click(screen.getByRole("button", { name: "Terminal" }));
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({
-        tabs: "terminal",
+        tabs: "terminal.term-1",
         subagent: callId,
       }),
     );
 
+    // The terminal is a tab, so opening it covers the conversation. What the
+    // reader was reading has to survive coming back to it.
+    await user.click(screen.getByRole("tab", { name: "Main agent" }));
     await user.click(
       within(context).getByRole("button", { name: "Back to main agent" }),
     );
     await waitFor(() => {
       expect(router.state.location.search).not.toHaveProperty("subagent");
-      expect(router.state.location.search).toMatchObject({ tabs: "terminal" });
+      expect(router.state.location.search).toMatchObject({
+        tabs: "terminal.term-1",
+      });
     });
     expect(client.openCodeEvents).toHaveBeenCalledTimes(1);
     expect(
@@ -1781,7 +1798,7 @@ describe("CodeWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "New tab" }));
     await user.click(
-      await screen.findByRole("menuitem", { name: "New browser tab" }),
+      await screen.findByRole("menuitem", { name: "New browser" }),
     );
 
     expect(await screen.findByRole("tab", { name: "Browser" })).toHaveAttribute(

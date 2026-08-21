@@ -117,8 +117,8 @@ export function WorkspaceHeader({
         <WithTooltip
           label={
             terminalOpen
-              ? `Hide terminal${shortcutSuffix(terminalShortcut)}`
-              : `Terminal${shortcutSuffix(terminalShortcut)}`
+              ? `Go to terminal${shortcutSuffix(terminalShortcut)}`
+              : `New terminal${shortcutSuffix(terminalShortcut)}`
           }
         >
           <Button
