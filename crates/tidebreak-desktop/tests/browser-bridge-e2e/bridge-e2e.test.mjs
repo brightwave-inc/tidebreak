@@ -200,7 +200,7 @@ test("simulated launch uses absolute bridge command with PATH unavailable", asyn
   // Capfile is readable via TIDEBREAK_BROWSER_CAPFILE
   const capfile = await readCapfile(capfilePath);
   assert.equal(capfile.token, token);
-  assert.equal(capfile.endpoint, `${bridgeEndpoint}/code/browser`);
+  assert.equal(capfile.endpoint, bridgeEndpoint);
 
   // Token never appears in the simulated process args
   const allArgs = ["/opt/tidebreak/bin/tidebreak", "browser-mcp"].join(" ");
