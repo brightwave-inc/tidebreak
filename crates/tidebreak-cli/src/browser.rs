@@ -246,6 +246,7 @@ impl BrowserClient {
     fn new(cap: &BrowserCapfile) -> Result<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .build()
@@ -1557,6 +1558,7 @@ mod tests {
         // since they never send a request.
         BrowserClient {
             client: reqwest::Client::builder()
+                .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
@@ -2193,5 +2195,86 @@ mod tests {
             assert_eq!(output.error_category, Some(*expected));
             assert!(output.is_error);
         }
+    }
+
+    // -- Proxy bypass contract -------------------------------------------
+
+    /// When an ambient HTTP_PROXY is set, the browser client must ignore it.
+    /// Capfile endpoints are always http and the agent child inherits
+    /// HTTP_PROXY/ALL_PROXY, so a missing `.no_proxy()` would route the
+    /// Authorization bearer through the proxy.
+    #[tokio::test]
+    async fn browser_client_ignores_ambient_http_proxy() {
+        // Set HTTP_PROXY to an unreachable address.
+        let proxy_guard = std::env::var("HTTP_PROXY").ok();
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:65535")
+
+        // Build a real client — must not fail on proxy resolution since
+        // .no_proxy() tells reqwest to skip proxy configuration.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut buf_reader = tokio::io::BufReader::new(reader);
+            let mut headers = Vec::new();
+            loop {
+                let mut line = String::new();
+                if tokio::io::AsyncBufReadExt::read_line(&mut buf_reader, &mut line)
+                    .await
+                    .unwrap()
+                    == 0
+                {
+                    break;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                headers.push(line);
+            }
+            let body = serde_json::json!({
+                "sessions": []
+            });
+            let body_bytes = serde_json::to_vec(&body).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body_bytes.len()
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut writer, response.as_bytes())
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &body_bytes)
+                .await
+                .unwrap();
+            headers
+        });
+
+        let cap = BrowserCapfile {
+            endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
+            token: VALID_TOKEN.to_string(),
+        };
+        let client = BrowserClient::new(&cap).unwrap();
+        let mut test_client = client.clone();
+        test_client.endpoint = format!("http://127.0.0.1:{}/code/browser/list", addr.port());
+
+        let result = browser_list(&test_client).await;
+        let req_headers = handle.await.unwrap();
+
+        // Restore HTTP_PROXY.
+        match proxy_guard {
+            Some(v) => std::env::set_var("HTTP_PROXY", v),
+            None => std::env::remove_var("HTTP_PROXY"),
+        }
+
+        // The request must reach the listener, not the bogus proxy.
+        assert!(result.is_ok(), "request must bypass ambient proxy: {result:?}");
+
+        // Authorization header must be present — the token reaches the real
+        // endpoint, not an intercepted proxy.
+        let has_auth = req_headers
+            .iter()
+            .any(|h| h.to_lowercase().starts_with("authorization"));
+        assert!(has_auth, "Authorization must reach the listener: {req_headers:?}");
     }
 }
