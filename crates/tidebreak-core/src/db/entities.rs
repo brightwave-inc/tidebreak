@@ -1669,6 +1669,7 @@ pub mod code_repo {
         pub quick_actions: Json,
         pub created_at: DateTimeUtc,
         pub removed_at: Option<DateTimeUtc>,
+        pub cloned_from: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

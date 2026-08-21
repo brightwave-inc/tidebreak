@@ -212,7 +212,14 @@ impl CodeRuntime {
         .await
         {
             Ok(()) => match self
-                .register_repo(owner, target, super::runtime::RepoRegistration::default())
+                .register_repo(
+                    owner,
+                    target,
+                    super::runtime::RepoRegistration {
+                        cloned_from: Some(redact_clone_url(&url)),
+                        ..Default::default()
+                    },
+                )
                 .await
             {
                 Ok(repo) => {
@@ -339,6 +346,23 @@ async fn validate_parent_dir(parent: &Path) -> Result<(), ServerError> {
         ));
     }
     Ok(())
+}
+
+/// The clone URL with any embedded credentials removed.
+///
+/// A user may clone `https://token@host/org/repo.git`, and this string is
+/// persisted and shown back. Keep the origin, drop the secret: the userinfo
+/// segment is the credential, and nothing downstream needs it — the checkout's
+/// own remote holds whatever git needs to fetch again.
+pub(crate) fn redact_clone_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        // scp-style `git@host:org/repo` carries a username, not a secret.
+        return url.to_owned();
+    };
+    match rest.split_once('@') {
+        Some((_userinfo, host)) => format!("{scheme}://{host}"),
+        None => url.to_owned(),
+    }
 }
 
 async fn clone_into(
@@ -554,5 +578,28 @@ mod tests {
         assert!(!valid_github_slug("acme"));
         assert!(!valid_github_slug("acme/demo/extra"));
         assert!(!valid_github_slug("acme/de mo"));
+    }
+
+    /// A clone URL is persisted and shown back, so a credential embedded in it
+    /// must not be what gets stored.
+    #[test]
+    fn a_clone_url_keeps_its_origin_and_loses_its_credential() {
+        assert_eq!(
+            redact_clone_url("https://ghp_secret@github.com/acme/demo.git"),
+            "https://github.com/acme/demo.git"
+        );
+        assert_eq!(
+            redact_clone_url("https://user:token@git.example.com/acme/demo.git"),
+            "https://git.example.com/acme/demo.git"
+        );
+        assert_eq!(
+            redact_clone_url("https://github.com/acme/demo.git"),
+            "https://github.com/acme/demo.git"
+        );
+        // scp-style carries a username, not a secret.
+        assert_eq!(
+            redact_clone_url("git@github.com:acme/demo.git"),
+            "git@github.com:acme/demo.git"
+        );
     }
 }

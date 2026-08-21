@@ -20,6 +20,7 @@ pub async fn insert_repo(store: &DbStore, repo: &CodeRepo) -> Result<()> {
         quick_actions: Set(serde_json::to_value(&repo.quick_actions)?),
         created_at: Set(repo.created_at),
         removed_at: Set(repo.removed_at),
+        cloned_from: Set(repo.cloned_from.clone()),
     }
     .insert(&store.conn)
     .await
@@ -168,5 +169,6 @@ pub(super) fn repo_from_row(row: entities::code_repo::Model) -> Result<CodeRepo>
         quick_actions,
         created_at: row.created_at,
         removed_at: row.removed_at,
+        cloned_from: row.cloned_from,
     })
 }

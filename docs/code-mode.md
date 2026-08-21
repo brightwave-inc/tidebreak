@@ -103,7 +103,14 @@ Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
 - **`code_repo`** — `id`, `root_path` (unique, canonical toplevel),
   `display_name`, `default_base_ref`, `branch_prefix`, `setup_script`,
   `archive_script`, `quick_actions` (JSON array of
-  `{name, command, auto_run_on_create}`), `created_at`, `removed_at`.
+  `{name, command, auto_run_on_create}`), `created_at`, `removed_at`,
+  `cloned_from`.
+  `cloned_from` records the remote Tidebreak cloned the checkout from, and is
+  null when the user registered a directory that already existed. It is what
+  makes `?reclaim_checkout=true` safe: both paths register identically, and
+  the clone parent is a setting that moves, so no path test stays honest.
+  Only a checkout Tidebreak made is Tidebreak's to delete.
+
   Removal is soft: `DELETE /code/repos/{id}` stamps `removed_at` and hides the
   registration, keeping every archived workspace and transcript that hangs off
   it reachable. Deleting the row would strand that history on SQLite, which

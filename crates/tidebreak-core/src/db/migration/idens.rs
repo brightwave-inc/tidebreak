@@ -807,6 +807,7 @@ pub(crate) enum CodeRepo {
     CreatedAt,
     Owner,
     RemovedAt,
+    ClonedFrom,
 }
 
 #[derive(DeriveIden)]

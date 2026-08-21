@@ -108,6 +108,9 @@ fn probe_describes(cached: Option<&HarnessProbe>, installed: &Path) -> bool {
 /// the value [`CodeRuntime::register_repo`] derives from the checkout.
 #[derive(Debug, Default)]
 pub(crate) struct RepoRegistration {
+    /// Set only by the clone path: the remote the checkout came from, which
+    /// is what makes the directory Tidebreak's to reclaim later.
+    pub cloned_from: Option<String>,
     pub display_name: Option<String>,
     pub default_base_ref: Option<String>,
     pub branch_prefix: Option<String>,
@@ -567,6 +570,7 @@ impl CodeRuntime {
         metadata: RepoRegistration,
     ) -> Result<CodeRepo, ServerError> {
         let RepoRegistration {
+            cloned_from,
             display_name,
             default_base_ref,
             branch_prefix,
@@ -623,6 +627,7 @@ impl CodeRuntime {
             quick_actions: Vec::new(),
             created_at: Utc::now(),
             removed_at: None,
+            cloned_from,
         };
         insert_repo(&self.db, &repo).await?;
         Ok(repo)
@@ -676,7 +681,13 @@ impl CodeRuntime {
     /// enforced, so the delete fails against the very archived workspaces this
     /// path requires. Reclaiming the checkout on disk is a separate act with
     /// its own confirmation.
-    pub(crate) async fn remove_repo(&self, owner: &OwnerId, id: RepoId) -> Result<(), ServerError> {
+    pub(crate) async fn remove_repo(
+        &self,
+        owner: &OwnerId,
+        id: RepoId,
+        reclaim_checkout: bool,
+    ) -> Result<(), ServerError> {
+        let repo = self.get_repo(owner, id).await?;
         let workspaces = list_workspaces(&self.db, owner, Some(id)).await?;
         if workspaces.iter().any(|workspace| {
             !matches!(
@@ -688,6 +699,49 @@ impl CodeRuntime {
                 "repo_has_workspaces",
                 "archive every workspace before removing the repository",
             ));
+        }
+        if reclaim_checkout {
+            // Only a checkout Tidebreak cloned is Tidebreak's to delete. A
+            // registration names a directory the user already had, and the
+            // clone parent is a setting that moves, so there is no path test
+            // that stays honest — the recorded origin is the only safe
+            // signal.
+            if repo.cloned_from.is_none() {
+                return Err(ServerError::conflict_kind(
+                    "checkout_not_reclaimable",
+                    "Tidebreak did not clone this repository, so it will not delete the directory; \
+                     remove the registration and delete the checkout yourself",
+                ));
+            }
+            let root = PathBuf::from(&repo.root_path);
+            // Re-validate rather than trusting the stored path: a row written
+            // long ago must not turn into a recursive delete of whatever
+            // occupies that path now.
+            match validate_repo_path(&root).await {
+                // `root_path` was stored as the canonical toplevel, so a
+                // repository still rooted there resolves back to the same
+                // path. Anything else — a nested checkout, a different repo
+                // moved in — compares unequal and is left alone.
+                Ok(validated) if validated.toplevel == root => {
+                    tokio::fs::remove_dir_all(&root).await.map_err(|error| {
+                        ServerError::internal(format!(
+                            "could not remove the cloned checkout {}: {error}",
+                            root.display()
+                        ))
+                    })?;
+                    tracing::info!(repo = %repo.id, "code-mode: reclaimed a cloned checkout");
+                }
+                _ => {
+                    return Err(ServerError::conflict_kind(
+                        "checkout_not_a_repository",
+                        format!(
+                            "{} is no longer the git repository Tidebreak cloned; \
+                             it was left alone",
+                            root.display()
+                        ),
+                    ));
+                }
+            }
         }
         if !mark_repo_removed(&self.db, owner, id, Utc::now()).await? {
             return Err(ServerError::not_found(format!("repo {id} not found")));

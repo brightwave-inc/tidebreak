@@ -730,6 +730,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             quick_actions: Vec::new(),
             created_at: now,
             removed_at: None,
+            cloned_from: None,
         },
     )
     .await

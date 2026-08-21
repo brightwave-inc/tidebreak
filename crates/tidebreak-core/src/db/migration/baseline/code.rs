@@ -54,6 +54,13 @@ pub(super) fn code_repo_table() -> TableCreateStatement {
         // workspaces and their transcripts stay reachable. Deleting it would
         // orphan that history on SQLite and fail the foreign key on Postgres.
         .col(ColumnDef::new(CodeRepo::RemovedAt).timestamp_with_time_zone())
+        // The remote Tidebreak cloned this checkout from, when Tidebreak made
+        // it. Null means the user registered a directory that was already
+        // there. Reclaiming disk needs this distinction and cannot infer it:
+        // both paths register identically, and the clone parent is a setting
+        // that moves, so a path test would eventually delete someone's own
+        // repository.
+        .col(ColumnDef::new(CodeRepo::ClonedFrom).text())
         .to_owned()
 }
 

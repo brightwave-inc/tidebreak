@@ -1225,7 +1225,8 @@ CREATE TABLE "code_repo" (
     "archive_script" text,
     "quick_actions" jsonb NOT NULL,
     "created_at" timestamp with time zone NOT NULL,
-    "removed_at" timestamp with time zone
+    "removed_at" timestamp with time zone,
+    "cloned_from" text
 );
 
 CREATE UNIQUE INDEX "idx_code_repo_owner_root_path" ON "code_repo" ("owner", "root_path") WHERE "removed_at" IS NULL;

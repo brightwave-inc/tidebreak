@@ -102,8 +102,14 @@ impl ScopedCode {
         self.runtime.save_repo(repo).await
     }
 
-    pub(crate) async fn remove_repo(&self, id: RepoId) -> Result<(), ServerError> {
-        self.runtime.remove_repo(&self.owner, id).await
+    pub(crate) async fn remove_repo(
+        &self,
+        id: RepoId,
+        reclaim_checkout: bool,
+    ) -> Result<(), ServerError> {
+        self.runtime
+            .remove_repo(&self.owner, id, reclaim_checkout)
+            .await
     }
 
     pub(crate) async fn clone_defaults(&self) -> Result<CodeCloneDefaults, ServerError> {
