@@ -138,7 +138,9 @@ describe("seq cursor", () => {
       },
       clock,
     );
-    expect(again.state.items.filter((item) => item.kind === "notice")).toHaveLength(1);
+    expect(
+      again.state.items.filter((item) => item.kind === "notice"),
+    ).toHaveLength(1);
   });
 
   it("advances the cursor for unknown event kinds", () => {
