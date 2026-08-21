@@ -26,8 +26,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 827
-- Desktop UI production packages: 521
-- Distinct license texts: 574
+- Desktop UI production packages: 525
+- Distinct license texts: 575
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -5050,6 +5050,30 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/chenglou/pretext.git
 - License text: `LICENSE` ([L-7f2fadc433d1](#l-7f2fadc433d1))
+
+### @dnd-kit/accessibility 3.1.1
+
+- License: `MIT`
+- Repository: git+https://github.com/clauderic/dnd-kit.git
+- License text: `LICENSE` ([L-6fdf84a73d06](#l-6fdf84a73d06))
+
+### @dnd-kit/core 6.3.1
+
+- License: `MIT`
+- Repository: git+https://github.com/clauderic/dnd-kit.git
+- License text: `LICENSE` ([L-6fdf84a73d06](#l-6fdf84a73d06))
+
+### @dnd-kit/sortable 10.0.0
+
+- License: `MIT`
+- Repository: git+https://github.com/clauderic/dnd-kit.git
+- License text: `LICENSE` ([L-6fdf84a73d06](#l-6fdf84a73d06))
+
+### @dnd-kit/utilities 3.2.2
+
+- License: `MIT`
+- Repository: git+https://github.com/clauderic/dnd-kit.git
+- License text: `LICENSE` ([L-6fdf84a73d06](#l-6fdf84a73d06))
 
 ### @dukelib/sheets-wasm 0.1.23
 
@@ -21289,6 +21313,32 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+```
+
+### L-6fdf84a73d06
+
+```
+MIT License
+
+Copyright (c) 2021, Claudéric Demers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-7001906d3fe6

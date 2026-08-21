@@ -33,7 +33,6 @@ import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
-import { CODE_EDITOR_DRAG_TYPE } from "./editorDrag";
 import {
   readStoredBrowserSession,
   seedBrowserSession,
@@ -404,6 +403,30 @@ function appContext(client: ReturnType<typeof makeClient>): AppContextValue {
     }),
     restartForUpdate: async () => {},
   };
+}
+
+/**
+ * Press `element` and drag it `distance` pixels to the right.
+ *
+ * Pointer events, deliberately: dnd-kit's sensor listens for them and never
+ * touches the native drag path, so this is the same sequence the webview
+ * delivers. The move has to clear the sensor's 4px activation distance, and it
+ * goes to the document because that is where the sensor listens once a press
+ * has started.
+ */
+function dragBy(element: Element, distance: number) {
+  fireEvent.pointerDown(element, {
+    isPrimary: true,
+    button: 0,
+    pointerId: 1,
+    clientX: 0,
+    clientY: 0,
+  });
+  fireEvent.pointerMove(document, {
+    pointerId: 1,
+    clientX: distance,
+    clientY: 0,
+  });
 }
 
 /**
@@ -1458,7 +1481,7 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
-  it("moves and drags file tabs into a reloadable split group from the transfer payload", async () => {
+  it("moves file tabs into a reloadable split group and back", async () => {
     const client = makeClient();
     const user = userEvent.setup();
     const { router } = await mountWorkspace(
@@ -1495,38 +1518,75 @@ describe("CodeWorkspacePage", () => {
       screen.queryByRole("tablist", { name: "Workspace split" }),
     ).not.toBeInTheDocument();
 
-    const libTab = screen.getByRole("tab", { name: "lib.rs" });
-    const dragPayload = new Map<string, string>();
-    const dataTransfer = {
-      effectAllowed: "none",
-      dropEffect: "none",
-      types: [] as string[],
-      setData: vi.fn((type: string, value: string) => {
-        dragPayload.set(type, value);
-        if (!dataTransfer.types.includes(type)) dataTransfer.types.push(type);
-      }),
-      getData: vi.fn((type: string) => dragPayload.get(type) ?? ""),
-    };
-    fireEvent.dragStart(libTab, { dataTransfer });
-    // The preview state still says lib.rs. The durable transfer payload now
-    // says main.rs, proving the drop resolves the actual drag data instead of
-    // trusting the source component's transient React state.
-    dataTransfer.setData(
-      CODE_EDITOR_DRAG_TYPE,
-      JSON.stringify({ region: "primary", index: 1 }),
-    );
-    const dropZone = await screen.findByTestId("split-drop-zone");
-    fireEvent.dragOver(dropZone, { dataTransfer });
-    fireEvent.drop(dropZone, { dataTransfer });
-
-    expect(
-      await screen.findByRole("tablist", { name: "Workspace split" }),
-    ).toBeInTheDocument();
+    // The split zone belongs to a drag, so it is not on screen without one.
+    expect(screen.queryByTestId("split-drop-zone")).not.toBeInTheDocument();
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({
-        split: "file.src%2Fmain.rs",
+        tabs: "file.src%2Flib.rs,file.src%2Fmain.rs",
       }),
     );
+  });
+
+  it("reorders a tab from its context menu, without a pointer drag", async () => {
+    const client = makeClient();
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=file.src%252Flib.rs,file.src%252Fmain.rs&active=file.src%252Fmain.rs",
+    );
+
+    // Dragging reorders too, but a pointer is the only way to reach it. This
+    // menu is the same move for anyone on a keyboard, which is why the tab
+    // wrapper stays out of the tab order rather than becoming a second stop.
+    const libTab = await screen.findByRole("tab", { name: "lib.rs" });
+    fireEvent.contextMenu(libTab);
+    await user.click(await screen.findByRole("menuitem", { name: "Move right" }));
+
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "file.src%2Fmain.rs,file.src%2Flib.rs",
+      }),
+    );
+  });
+
+  // The reported bug was that a drag never started: the strip was the only
+  // HTML5 drag source in the app, and WebKit would not begin an ancestor's
+  // drag from the inner `<button role="tab">` the reader actually presses.
+  // These two cover that gesture from the pointer down. Where it lands is a
+  // separate question, and the pure rules in `editorDrag` answer it: dnd-kit
+  // resolves a target from element rects, and jsdom reports every rect as
+  // zero, so asserting a drop here would prove nothing.
+  it("starts a tab drag from a pointer press on the tab itself", async () => {
+    const client = makeClient();
+    await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=file.src%252Flib.rs,file.src%252Fmain.rs&active=file.src%252Fmain.rs",
+    );
+
+    const mainTab = await screen.findByRole("tab", { name: "main.rs" });
+    expect(screen.queryByTestId("split-drop-zone")).not.toBeInTheDocument();
+
+    dragBy(mainTab, 40);
+
+    // The zone renders only while a drag is live, so its presence is the drag.
+    expect(await screen.findByTestId("split-drop-zone")).toBeInTheDocument();
+  });
+
+  it("does not start a tab drag from a press on the close control", async () => {
+    const client = makeClient();
+    await mountWorkspace(
+      client,
+      "/code/w/ws-1?tabs=file.src%252Flib.rs,file.src%252Fmain.rs&active=file.src%252Fmain.rs",
+    );
+
+    await screen.findByRole("tab", { name: "main.rs" });
+    const close = screen.getByRole("button", { name: "Close main.rs" });
+
+    dragBy(close, 40);
+
+    // A press that drifts a few pixels should still close the tab rather than
+    // carry it somewhere, which is what the sensor's opt-out marker buys.
+    expect(screen.queryByTestId("split-drop-zone")).not.toBeInTheDocument();
   });
 
   it("keeps the jump-to-latest pill out of the tab order until it is on screen", async () => {

@@ -1,4 +1,17 @@
 import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  closestCenter,
+  pointerWithin,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type CollisionDetection,
+  type DragEndEvent,
+  type PointerSensorOptions,
+} from "@dnd-kit/core";
+import {
   lazy,
   Suspense,
   useCallback,
@@ -6,6 +19,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { ArrowDown, Bot, CircleDotDashed } from "lucide-react";
@@ -69,12 +83,15 @@ import {
   moveEditorTab,
   openCodeEditor,
   removedCodeBrowserIds,
+  reorderEditorTab,
   splitCodeChromeLayout,
   openTerminalLayout,
   toggleTerminalLayout,
 } from "./codeChrome";
 import {
   centerEditorTabId,
+  centerTabParts,
+  CenterTabIcon,
   CHAT_PANEL_ID,
   CHAT_TAB_ID,
   CodeCenterTabs,
@@ -118,9 +135,11 @@ import {
   type CodeTranscriptItem,
 } from "./CodeSessionReducer";
 import {
-  hasEditorTabDrag,
-  readEditorTabDrag,
-  type EditorTabDrag,
+  dropEditorTab,
+  findEditorPanel,
+  isEditorStripDropId,
+  offersSplitDrop,
+  EDITOR_SPLIT_DROP_ID,
 } from "./editorDrag";
 import { FOCUS_RING } from "./interactive";
 import { StartSessionPrompt } from "./StartSessionPrompt";
@@ -207,10 +226,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     tab: InspectorTab;
     revision: number;
   } | null>(null);
-  const [draggedEditor, setDraggedEditor] = useState<{
-    region: CodeEditorRegion;
-    index: number;
-  } | null>(null);
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const tabDragSensors = useSensors(
+    // Four pixels of travel before a press becomes a drag, so a click still
+    // selects the tab it landed on.
+    useSensor(TabPointerSensor, { activationConstraint: { distance: 4 } }),
+  );
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
   const [fileReveal, setFileReveal] = useState<{
@@ -495,21 +516,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     );
   }, []);
 
-  function dropDraggedEditor(
-    region: CodeEditorRegion,
-    transfer?: Pick<DataTransfer, "getData">,
-  ): boolean {
-    const drag: EditorTabDrag | null = transfer
-      ? readEditorTabDrag(transfer)
-      : draggedEditor;
-    if (!drag) return false;
-    setDraggedEditor(null);
-    if (drag.region !== region) {
-      setWorkspaceLayout(
-        moveEditorTab(layout, drag.region, drag.index, region),
-      );
-    }
-    return true;
+  function finishTabDrag(event: DragEndEvent) {
+    setDraggedTabId(null);
+    const next = dropEditorTab(
+      layout,
+      String(event.active.id),
+      event.over ? String(event.over.id) : null,
+    );
+    if (next) setWorkspaceLayout(next);
   }
 
   function copyEditorPath(path: string) {
@@ -613,16 +627,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     <div
       className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       data-testid="primary-editor-group"
-      onDragOver={(event) => {
-        if (!draggedEditor && !hasEditorTabDrag(event.dataTransfer)) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={(event) => {
-        if (dropDraggedEditor("primary", event.dataTransfer)) {
-          event.preventDefault();
-        }
-      }}
     >
       <CodeCenterTabs
         editorTabs={editorTabs}
@@ -664,6 +668,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(moveEditorTab(layout, "primary", index, "secondary"))
         }
+        onMoveEditor={(from, to) =>
+          setWorkspaceLayout(reorderEditorTab(layout, "primary", from, to))
+        }
         onSplitActive={() =>
           setWorkspaceLayout(
             moveEditorTab(
@@ -674,10 +681,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             ),
           )
         }
-        onDragEditorStart={(index) =>
-          setDraggedEditor({ region: "primary", index })
-        }
-        onDragEditorEnd={() => setDraggedEditor(null)}
       />
       <div
         className={cn("min-h-0 flex-1", !showingChat && "hidden")}
@@ -769,16 +772,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     <div
       className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       data-testid="secondary-editor-group"
-      onDragOver={(event) => {
-        if (!draggedEditor && !hasEditorTabDrag(event.dataTransfer)) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={(event) => {
-        if (dropDraggedEditor("secondary", event.dataTransfer)) {
-          event.preventDefault();
-        }
-      }}
     >
       <CodeCenterTabs
         region="secondary"
@@ -823,11 +816,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onMoveEditorToOtherGroup={(index) =>
           setWorkspaceLayout(moveEditorTab(layout, "secondary", index, "primary"))
         }
-        onCloseGroup={() => setWorkspaceLayout(mergeEditorSplit(layout))}
-        onDragEditorStart={(index) =>
-          setDraggedEditor({ region: "secondary", index })
+        onMoveEditor={(from, to) =>
+          setWorkspaceLayout(reorderEditorTab(layout, "secondary", from, to))
         }
-        onDragEditorEnd={() => setDraggedEditor(null)}
+        onCloseGroup={() => setWorkspaceLayout(mergeEditorSplit(layout))}
       />
       {editorPanel(
         activeSplitEditor,
@@ -837,53 +829,51 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     </div>
   ) : null;
 
+  const draggedPanel = draggedTabId
+    ? findEditorPanel(layout, draggedTabId)
+    : null;
+
   const workspaceMain = (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-        {hasEditorSplit ? (
-          <ResizablePanelGroup
-            direction="horizontal"
-            className="h-full min-h-0"
-          >
-            <ResizablePanel defaultSize={55} minSize={25} className="min-w-0">
-              {primaryEditorGroup}
-            </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel defaultSize={45} minSize={25} className="min-w-0">
-              {splitEditorGroup}
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        ) : (
-          primaryEditorGroup
-        )}
-        {draggedEditor?.region === "primary" && !hasEditorSplit && (
-          <div
-            data-testid="split-drop-zone"
-            className="workspace-split-drop-zone absolute inset-y-3 right-3 z-10 flex w-[min(40%,22rem)] flex-col items-center justify-center gap-2 rounded-xl border border-border bg-background/92 px-6 text-center shadow-lg backdrop-blur-md"
-            onDragOver={(event) => {
-              if (!draggedEditor && !hasEditorTabDrag(event.dataTransfer)) return;
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-            }}
-            onDrop={(event) => {
-              if (dropDraggedEditor("secondary", event.dataTransfer)) {
-                event.preventDefault();
-              }
-            }}
-          >
-            <span className="grid size-9 place-items-center rounded-lg bg-muted text-foreground">
-              <span className="grid grid-cols-2 gap-0.5" aria-hidden>
-                <span className="h-4 w-2 rounded-[2px] bg-foreground/25" />
-                <span className="h-4 w-2 rounded-[2px] bg-foreground" />
-              </span>
+      <DndContext
+        sensors={tabDragSensors}
+        collisionDetection={tabDropTarget}
+        onDragStart={(event) => setDraggedTabId(String(event.active.id))}
+        onDragCancel={() => setDraggedTabId(null)}
+        onDragEnd={finishTabDrag}
+      >
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+          {hasEditorSplit ? (
+            <ResizablePanelGroup
+              direction="horizontal"
+              className="h-full min-h-0"
+            >
+              <ResizablePanel defaultSize={55} minSize={25} className="min-w-0">
+                {primaryEditorGroup}
+              </ResizablePanel>
+              <ResizableHandle />
+              <ResizablePanel defaultSize={45} minSize={25} className="min-w-0">
+                {splitEditorGroup}
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          ) : (
+            primaryEditorGroup
+          )}
+          {draggedTabId && offersSplitDrop(layout, draggedTabId) && (
+            <SplitDropZone />
+          )}
+        </div>
+        {/* The strip scrolls, so a transformed child would be clipped by it.
+            The overlay draws the moving tab above everything instead. */}
+        <DragOverlay dropAnimation={null}>
+          {draggedPanel ? (
+            <span className="flex h-8 items-center gap-1.5 rounded-lg bg-background px-2.5 text-xs font-medium text-foreground shadow-lg">
+              <CenterTabIcon panel={draggedPanel} />
+              {centerTabParts(draggedPanel, browserTitles).name}
             </span>
-            <span className="text-sm font-semibold">Open beside the agent</span>
-            <span className="max-w-44 text-xs leading-relaxed text-muted-foreground">
-              Drop here to create a working pane on the right.
-            </span>
-          </div>
-        )}
-      </div>
+          ) : null}
+        </DragOverlay>
+      </DndContext>
       {chrome.terminal && (
         <TerminalDrawer
           client={client}
@@ -1033,6 +1023,74 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * The pointer sensor, minus the controls that live inside a tab.
+ *
+ * A tab's close button sits within the draggable, so without this a press that
+ * drifts a few pixels would pick the tab up rather than close it. A control
+ * opts itself out by carrying the marker attribute.
+ */
+class TabPointerSensor extends PointerSensor {
+  static activators = [
+    {
+      eventName: "onPointerDown" as const,
+      handler: (
+        { nativeEvent: event }: ReactPointerEvent,
+        { onActivation }: PointerSensorOptions,
+      ) => {
+        if (!event.isPrimary || event.button !== 0) return false;
+        const target = event.target;
+        if (!(target instanceof Element)) return true;
+        if (target.closest('[data-no-drag="true"]')) return false;
+        onActivation?.({ event });
+        return true;
+      },
+    },
+  ];
+}
+
+/**
+ * The drop target under the pointer, with the nearest one as a fallback.
+ *
+ * A strip contains its tabs and overlaps the split zone, so it collides on
+ * every drop that lands on either. Dropping it whenever something more specific
+ * was hit is what makes a tab a reorder and the strip's open space an append.
+ * The nearest-center fallback covers the frames where a fast drag has the
+ * pointer outside every registered box.
+ */
+const tabDropTarget: CollisionDetection = (args) => {
+  const under = pointerWithin(args);
+  const collisions = under.length > 0 ? under : closestCenter(args);
+  const specific = collisions.filter(
+    (collision) => !isEditorStripDropId(String(collision.id)),
+  );
+  return specific.length > 0 ? specific : collisions;
+};
+
+/** The mid-drag target that offers to open the tab beside the conversation. */
+function SplitDropZone() {
+  const { isOver, setNodeRef } = useDroppable({ id: EDITOR_SPLIT_DROP_ID });
+  return (
+    <div
+      ref={setNodeRef}
+      data-testid="split-drop-zone"
+      data-over={isOver ? "true" : undefined}
+      className="workspace-split-drop-zone absolute inset-y-3 right-3 z-10 flex w-[min(40%,22rem)] flex-col items-center justify-center gap-2 rounded-xl border border-border bg-background/92 px-6 text-center shadow-lg backdrop-blur-md data-[over=true]:border-ring data-[over=true]:bg-accent/60"
+    >
+      <span className="grid size-9 place-items-center rounded-lg bg-muted text-foreground">
+        <span className="grid grid-cols-2 gap-0.5" aria-hidden>
+          <span className="h-4 w-2 rounded-[2px] bg-foreground/25" />
+          <span className="h-4 w-2 rounded-[2px] bg-foreground" />
+        </span>
+      </span>
+      <span className="text-sm font-semibold">Open beside the agent</span>
+      <span className="max-w-44 text-xs leading-relaxed text-muted-foreground">
+        Drop here to create a working pane on the right.
+      </span>
+    </div>
   );
 }
 

@@ -334,7 +334,7 @@ function transcriptFrames(
       event: {
         type: "assistant_message",
         text:
-          "The split interaction now carries a typed payload in DataTransfer, so the drop target can recover the dragged tab without trusting transient React state. I also enlarged the target and made its destination explicit: “Open beside the agent.”",
+          "Tabs now move on pointer events rather than native drag, so a drag starts every time in the desktop webview. Dropping one on another tab reorders the strip; dropping it on the right-hand target opens it beside the agent.",
       },
     },
     {
@@ -371,12 +371,12 @@ function transcriptFrames(
         type: "tool_completed",
         call_id: `${spec.callId}-search`,
         outcome: "succeeded",
-        preview: "Found the typed transfer payload in the editor tab strip.",
+        preview: "Found the pointer sensor wiring in the editor tab strip.",
         parent_call_id: spec.callId,
       });
       emit({
         type: "assistant_message",
-        text: "The typed drag payload is intact. I’m checking the focus handoff before I report back.",
+        text: "The pointer sensor picks the tab up cleanly. I’m checking the focus handoff before I report back.",
         parent_call_id: spec.callId,
       });
       break;
@@ -841,21 +841,31 @@ function subagentUrl(scenario: SubagentScenario): string {
   return `${conversationUrl}?subagent=${encodeURIComponent(spec.callId)}`;
 }
 
-function dragTransfer(): DataTransfer {
-  const payload = new Map<string, string>();
-  const transfer = {
-    effectAllowed: "none",
-    dropEffect: "none",
-    types: [] as string[],
-    setData(type: string, value: string) {
-      payload.set(type, value);
-      if (!transfer.types.includes(type)) transfer.types.push(type);
-    },
-    getData(type: string) {
-      return payload.get(type) ?? "";
-    },
-  };
-  return transfer as unknown as DataTransfer;
+/**
+ * Press a tab and drag it far enough to count as a drag.
+ *
+ * Tabs move on pointer events, so the gesture is a real press and a real move
+ * rather than a synthetic `dragstart`. The move has to clear the sensor's
+ * four-pixel activation distance, which is what keeps a click a click.
+ */
+function startTabDrag(tab: Element) {
+  // The press lands on the tab itself, not the draggable wrapper around it.
+  // That is the gesture that used to fail: WebKit would not begin an
+  // ancestor's native drag from the inner button, so the drag never started.
+  const box = tab.getBoundingClientRect();
+  const from = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  fireEvent.pointerDown(tab, {
+    pointerId: 1,
+    isPrimary: true,
+    button: 0,
+    clientX: from.x,
+    clientY: from.y,
+  });
+  fireEvent.pointerMove(document, {
+    pointerId: 1,
+    clientX: from.x + 40,
+    clientY: from.y,
+  });
 }
 
 const conversationUrl = workspaceUrl();
@@ -941,8 +951,7 @@ export const ActiveDragTarget: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const tab = await canvas.findByRole("tab", { name: "WorkspaceCard.tsx" });
-    const draggable = tab.closest('[draggable="true"]') ?? tab;
-    fireEvent.dragStart(draggable, { dataTransfer: dragTransfer() });
+    startTabDrag(tab);
     await expect(await canvas.findByTestId("split-drop-zone")).toBeVisible();
   },
 };
@@ -966,7 +975,7 @@ export const RunningSubagent: Story = {
     await expect(context).toHaveTextContent("Running");
     await expect(
       await canvas.findByText(
-        "The typed drag payload is intact. I’m checking the focus handoff before I report back.",
+        "The pointer sensor picks the tab up cleanly. I’m checking the focus handoff before I report back.",
       ),
     ).toBeVisible();
   },

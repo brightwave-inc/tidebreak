@@ -15,6 +15,9 @@
     "tauri": "cargo tauri"
   },
   "dependencies": {
+    "@dnd-kit/core": "6.3.1",
+    "@dnd-kit/sortable": "10.0.0",
+    "@dnd-kit/utilities": "3.2.2",
     "@dukelib/sheets-wasm": "0.1.23",
     "@embedpdf/core": "2.15.0",
     "@embedpdf/engines": "2.15.0",
