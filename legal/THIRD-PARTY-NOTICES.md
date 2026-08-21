@@ -25,7 +25,7 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 827
+- Rust crates: 829
 - Desktop UI production packages: 525
 - Distinct license texts: 575
 - Packages with no declared license: 0
@@ -4023,6 +4023,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/tracing
 - License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
 
+### tracing-serde 0.2.0
+
+- License: `MIT`
+- Repository: https://github.com/tokio-rs/tracing
+- License text: `LICENSE` ([L-c1e08ee9a728](#l-c1e08ee9a728))
+
 ### tracing-subscriber 0.3.23
 
 - License: `MIT`
@@ -4225,6 +4231,12 @@ License identifiers named across all declared expressions:
 
 - License: `MIT`
 - Repository: https://github.com/Nugine/simd
+- License text: not distributed with this package
+
+### valuable 0.1.1
+
+- License: `MIT`
+- Repository: https://github.com/tokio-rs/valuable
 - License text: not distributed with this package
 
 ### vcpkg 0.2.15
