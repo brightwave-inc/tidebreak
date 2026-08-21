@@ -858,6 +858,63 @@ impl BrowserRegistry {
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
     }
 
+    /// Re-check live authorization for observation without clearing the
+    /// stored semantic snapshot.
+    ///
+    /// Unlike [`begin_agent_control`](Self::begin_agent_control), this
+    /// preserves `semantic_snapshot` and `screenshot_epoch` so a wait or
+    /// screenshot can chain on a prior snapshot. Used by observation-only
+    /// operations (wait, screenshot) that validate `snapshot_id` and
+    /// `document_epoch` against the stored snapshot.
+    ///
+    /// Requires exclusive agent control from a prior
+    /// [`begin_agent_control`](Self::begin_agent_control) — this method does
+    /// NOT acquire or mutate controller state. It returns
+    /// `"browser is not controlled by this agent"` when the controller is not
+    /// already this agent capability (human takeover, different agent, or
+    /// no prior control). Two concurrent observers for the same browser by
+    /// different capabilities are refused.
+    pub(crate) fn begin_agent_observation(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+    ) -> Result<BrowserSnapshot, String> {
+        let state = self.lock();
+        let capability = active_capability(&state, capability_id)?.clone();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, &capability.workspace_id, record)?;
+        let origin = current_origin(record)
+            .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+        if !record.visible {
+            return Err("browser is hidden".to_owned());
+        }
+        if *record.dispatch.halt.borrow() {
+            return Err("browser control was stopped by the user".to_owned());
+        }
+        if !grants_cover(
+            &state,
+            &capability.workspace_id,
+            &origin,
+            BrowserGrantCapability::BrowserObserveOrigin,
+        ) {
+            return Err("browser origin is not shared with this agent".to_owned());
+        }
+        // Observation does NOT acquire or mutate controller state — it only
+        // succeeds when this capability already holds exclusive agent control
+        // (set by a prior begin_agent_control). A human takeover, a different
+        // agent, or no controller at all is refused. This preserves the stored
+        // semantic snapshot that issued the refs the observation chains from.
+        if record.controller.kind != BrowserControllerKind::Agent
+            || record.controller_capability_id != Some(capability_id)
+        {
+            return Err("browser is not controlled by this agent".to_owned());
+        }
+        Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
     pub(crate) fn set_agent_action(
         &self,
         capability_id: Uuid,
@@ -2948,6 +3005,128 @@ mod tests {
             .is_err());
     }
 
+    // ── begin_agent_observation tests ─────────────────────────────
+
+    #[test]
+    fn begin_agent_observation_preserves_stored_snapshot_for_same_capability() {
+        let (registry, _, _origin, capability, _private) = controlled_registry();
+        // First acquire control via begin_agent_control (clears snapshot).
+        let _ = registry
+            .begin_agent_control(capability, "browser-1")
+            .unwrap();
+        // Then record a snapshot — this is what a real snapshot op does.
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::from([("@e1".to_owned(), target("Continue"))]),
+            )
+            .unwrap();
+
+        // begin_agent_observation must NOT clear the stored snapshot.
+        let _snap = registry
+            .begin_agent_observation(capability, "browser-1")
+            .unwrap();
+
+        registry
+            .validate_snapshot_id("browser-1", "workspace-1", "snapshot-1", 0)
+            .expect("snapshot must survive begin_agent_observation");
+    }
+
+    #[test]
+    fn begin_agent_observation_refuses_wrong_capability() {
+        let (registry, _, _origin, capability, _private) = controlled_registry();
+        let other = registry.issue_agent_capability("workspace-1", "Other");
+
+        let result = registry.begin_agent_observation(other, "browser-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not controlled by this agent"));
+        assert!(registry
+            .begin_agent_observation(capability, "browser-1")
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn begin_agent_observation_refuses_human_takeover() {
+        let (registry, _, _origin, capability, _private) = controlled_registry();
+        // Human takes over — clears the agent controller.
+        registry
+            .take_human_control("browser-1", "workspace-1")
+            .await
+            .unwrap();
+
+        // Observation must refuse: a human currently holds the browser.
+        let result = registry.begin_agent_observation(capability, "browser-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not controlled by this agent"));
+    }
+
+    #[test]
+    fn begin_agent_observation_refuses_no_prior_control() {
+        // ready_registry() registers a browser but issues no capability
+        // and calls no begin_agent_control — the controller is Human.
+        let (registry, _private) = ready_registry(true);
+        let origin = BrowserOrigin::from_url("https://example.com").unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin { origin },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        let capability = registry.issue_agent_capability("workspace-1", "Code agent");
+        let result = registry.begin_agent_observation(capability, "browser-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not controlled by this agent"));
+    }
+
+    #[tokio::test]
+    async fn begin_agent_observation_refuses_after_stop() {
+        let (registry, _, _origin, capability, _private) = controlled_registry();
+        let _ = registry
+            .begin_agent_control(capability, "browser-1")
+            .unwrap();
+        registry
+            .stop_agent_control("browser-1", "workspace-1")
+            .await
+            .unwrap();
+        let result = registry.begin_agent_observation(capability, "browser-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("stopped"));
+    }
+
+    #[test]
+    fn begin_agent_observation_same_capability_continuation_preserves_snapshot() {
+        let (registry, _, _origin, capability, _private) = controlled_registry();
+        let _ = registry
+            .begin_agent_control(capability, "browser-1")
+            .unwrap();
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snap-2".to_owned(),
+                HashMap::from([("@btn".to_owned(), target("Submit"))]),
+            )
+            .unwrap();
+
+        // Same capability, observation continues.
+        let snap = registry
+            .begin_agent_observation(capability, "browser-1")
+            .unwrap();
+        assert_eq!(snap.controller.unwrap().kind, BrowserControllerKind::Agent);
+
+        // Snapshot still validates.
+        registry
+            .validate_snapshot_id("browser-1", "workspace-1", "snap-2", 0)
+            .expect("snapshot must persist across observation continuation");
+    }
+
     #[tokio::test]
     async fn observation_fence_and_halt_watch_fail_closed_on_stop() {
         let (registry, instance, _origin, capability, _private) = controlled_registry();
@@ -3126,8 +3305,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn complete_screenshot_recording_rejects_wrong_instance() {
+    #[test]
+    fn complete_screenshot_recording_rejects_wrong_instance() {
         let (registry, instance, _origin, capability, _private) = controlled_registry();
         registry
             .record_semantic_snapshot(
@@ -3154,8 +3333,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn complete_screenshot_recording_rejects_forged_snapshot_id() {
+    #[test]
+    fn complete_screenshot_recording_rejects_forged_snapshot_id() {
         let (registry, instance, _origin, capability, _private) = controlled_registry();
         registry
             .record_semantic_snapshot(
@@ -3176,8 +3355,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn complete_screenshot_recording_rejects_missing_snapshot() {
+    #[test]
+    fn complete_screenshot_recording_rejects_missing_snapshot() {
         let (registry, instance, _origin, capability, _private) = controlled_registry();
         // No record_semantic_snapshot call — there is no stored snapshot.
 

@@ -19,7 +19,8 @@ use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BrowserListResult, BrowserNavigateArgs,
-    BrowserNavigateResult, BrowserPageSnapshot, BrowserSnapshotArgs, CapLevel, CodeEvent,
+    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent,
     CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus,
     CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, WorkspaceId,
 };
@@ -55,6 +56,22 @@ impl BrowserRuntime for RecordingBrowserRuntime {
         _args: &BrowserSnapshotArgs,
     ) -> Result<BrowserPageSnapshot, BrowserRuntimeError> {
         Err(BrowserRuntimeError::Unsupported("test snapshot".into()))
+    }
+
+    async fn wait(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserWaitArgs,
+    ) -> Result<BrowserWaitResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported("test wait".into()))
+    }
+
+    async fn screenshot(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserScreenshotArgs,
+    ) -> Result<BrowserScreenshotResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported("test screenshot".into()))
     }
 
     fn revoke_session(&self, scope: &BrowserRuntimeScope) {
