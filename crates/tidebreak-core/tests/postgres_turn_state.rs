@@ -118,6 +118,40 @@ async fn expire_postgres_turn_admission(url: &str, turn_id: TurnId) {
     assert_eq!(updated.rows_affected(), 1);
 }
 
+/// Delete every row the product owns, leaving the migrated schema in place.
+///
+/// The tests in this file share one database and serialize on
+/// [`POSTGRES_TEST_LOCK`], which keeps them from running at once but not from
+/// reading each other's leftovers. A test that asserts on a scan across the
+/// whole store has to start from an empty one, or it passes only against a
+/// database no run has touched — which is exactly what CI hands it, and why
+/// running the suite twice locally used to fail.
+///
+/// The table list comes from the catalog rather than a constant, so a new table
+/// is covered without anyone remembering to add it. Two tables are held back:
+/// SeaORM's bookkeeping, because dropping it re-runs every migration, and
+/// `advisory_lock`, whose seeded rows are what serializes the claim paths — the
+/// baseline inserts them once, and every claim fails without them.
+async fn empty_postgres_tables(url: &str) {
+    let connection = Database::connect(url).await.unwrap();
+    connection
+        .execute_unprepared(
+            "DO $$ \
+             DECLARE tables text; \
+             BEGIN \
+               SELECT string_agg(format('%I.%I', schemaname, tablename), ', ') INTO tables \
+                 FROM pg_tables \
+                WHERE schemaname = 'public' \
+                  AND tablename NOT IN ('seaql_migrations', 'advisory_lock'); \
+               IF tables IS NOT NULL THEN \
+                 EXECUTE 'TRUNCATE TABLE ' || tables || ' CASCADE'; \
+               END IF; \
+             END $$;",
+        )
+        .await
+        .unwrap();
+}
+
 async fn set_postgres_turn_max_attempts(url: &str, turn_id: TurnId, max_attempts: i32) {
     assert!(max_attempts > 0);
     let connection = Database::connect(url).await.unwrap();
@@ -2642,6 +2676,12 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         Err(_) => return,
     };
     let store = Arc::new(DbStore::connect(&url).await.unwrap());
+    // The claims below race over the whole queue, not over one chat, and this
+    // test asserts the winner is its own turn. Every other test in this file
+    // leaves queued turns behind, and so does every earlier run of this one
+    // against the same database. Start from an empty queue so a global claim
+    // really is global over one turn.
+    empty_postgres_tables(&url).await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
     let turn_id = TurnId::new();
