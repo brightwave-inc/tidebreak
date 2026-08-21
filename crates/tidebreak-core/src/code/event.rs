@@ -126,13 +126,30 @@ pub struct Diffstat {
     pub truncated: bool,
 }
 
-/// Token accounting as reported by the engine. Missing fields stay zero.
+/// Token accounting for one turn.
+///
+/// The four counts are **disjoint** and they are **turn totals**, summed over
+/// every model call the engine made while servicing the turn. This is the same
+/// contract the chat side states on `RendererTurnUsage`, and the reason to
+/// state it here is that every adapter reports something different natively:
+/// one engine sends a running total beside the last call's slice, another
+/// folds the cached portion back into the prompt count, another overwrites a
+/// snapshot per message. Normalizing belongs in the adapter, so that anything
+/// reading this struct — cost accounting, the CLI's turn list, the desktop's
+/// context indicator — can compare two harnesses without knowing which engine
+/// produced the row.
+///
+/// Concretely: `input_tokens` is the *fresh*, uncached prompt only. It never
+/// includes `cache_read_input_tokens` or `cache_creation_input_tokens`, so
+/// the prompt an engine actually sent is the sum of all three. Missing fields
+/// stay zero, which is not the same as "the engine sent zero" — an engine that
+/// does not surface cache counts reports nothing rather than a real zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 pub struct CodeUsage {
-    /// Input tokens.
+    /// Fresh, uncached input tokens. Excludes both cache fields.
     #[serde(default)]
     pub input_tokens: u64,
-    /// Output tokens.
+    /// Output tokens, summed over the turn's model calls.
     #[serde(default)]
     pub output_tokens: u64,
     /// Cache-read input tokens, when the engine reports them.

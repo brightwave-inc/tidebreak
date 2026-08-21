@@ -508,25 +508,38 @@ fn command_detail(item: &Value) -> ToolDetail {
     }
 }
 
+/// Normalize `thread/tokenUsage` into the disjoint per-turn split
+/// [`CodeUsage`] documents.
+///
+/// Two corrections over reading the payload verbatim.
+///
+/// The engine reports `total` (the turn so far) beside `last` (the most
+/// recent model call). A turn that makes several calls has genuinely
+/// different values in the two — `total.totalTokens 28912` against
+/// `last.totalTokens 14471` in `approval-approve.ndjson` — and the turn's
+/// usage is the total.
+///
+/// `inputTokens` is the whole prompt: `totalTokens == inputTokens +
+/// outputTokens` holds in every captured payload, and `cachedInputTokens` is
+/// a subset of it. Filing that subset into `cache_read_input_tokens` while
+/// leaving it inside `input_tokens` double-counts it. Subtract the cached and
+/// written portions so the four fields stay disjoint and still sum to the
+/// prompt.
 fn usage_from(value: Option<&Value>) -> CodeUsage {
     let Some(value) = value else {
         return CodeUsage::default();
     };
-    let last = value.get("last").unwrap_or(value);
+    let total = value.get("total").unwrap_or(value);
+    let field = |name: &str| total.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let cache_read_input_tokens = field("cachedInputTokens");
+    let cache_creation_input_tokens = field("cacheWriteInputTokens");
     CodeUsage {
-        input_tokens: last.get("inputTokens").and_then(Value::as_u64).unwrap_or(0),
-        output_tokens: last
-            .get("outputTokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cache_read_input_tokens: last
-            .get("cachedInputTokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cache_creation_input_tokens: last
-            .get("cacheWriteInputTokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        input_tokens: field("inputTokens")
+            .saturating_sub(cache_read_input_tokens)
+            .saturating_sub(cache_creation_input_tokens),
+        output_tokens: field("outputTokens"),
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
     }
 }
 
@@ -548,6 +561,53 @@ fn bound(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `thread/tokenUsage` reports the turn's running `total` beside the last
+    /// model call's `last`, and folds the cached portion into `inputTokens`.
+    /// Reading it verbatim took one call's slice and double-counted the cache.
+    #[test]
+    fn token_usage_is_a_disjoint_turn_total() {
+        let payload = serde_json::json!({
+            "total": {
+                "totalTokens": 28912, "inputTokens": 28794,
+                "cachedInputTokens": 23040, "cacheWriteInputTokens": 0,
+                "outputTokens": 118, "reasoningOutputTokens": 9
+            },
+            "last": {
+                "totalTokens": 14471, "inputTokens": 14466,
+                "cachedInputTokens": 14080, "cacheWriteInputTokens": 0,
+                "outputTokens": 5, "reasoningOutputTokens": 0
+            }
+        });
+        let usage = usage_from(Some(&payload));
+
+        // The turn total, not the last call: `last` would report 5.
+        assert_eq!(usage.output_tokens, 118);
+        // Disjoint: the three prompt-side counts sum to the prompt the engine
+        // actually sent, and the cached portion is not also in `input_tokens`.
+        assert_eq!(usage.cache_read_input_tokens, 23040);
+        assert_eq!(usage.input_tokens, 5754);
+        assert_eq!(
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
+            28794,
+            "the split must reconstruct inputTokens"
+        );
+    }
+
+    /// A payload with no `total` (an older shape, or one already narrowed)
+    /// still normalizes rather than reporting zeros.
+    #[test]
+    fn token_usage_without_a_total_falls_back_to_the_object_itself() {
+        let payload = serde_json::json!({
+            "inputTokens": 100, "cachedInputTokens": 30,
+            "cacheWriteInputTokens": 10, "outputTokens": 7
+        });
+        let usage = usage_from(Some(&payload));
+        assert_eq!(usage.input_tokens, 60);
+        assert_eq!(usage.cache_read_input_tokens, 30);
+        assert_eq!(usage.cache_creation_input_tokens, 10);
+        assert_eq!(usage.output_tokens, 7);
+    }
+
     use super::*;
 
     #[test]
