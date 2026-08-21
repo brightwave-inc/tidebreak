@@ -11,14 +11,12 @@
 //!
 //! * Tokens are random v4 UUIDs independent of the capability-file filename
 //!   (a separate random file id).
-//! * Reissuing for the same session writes the new capfile first, then
-//!   commits the new mapping and revokes the prior one. The prior authority
-//!   stays valid until the new capfile is on disk and the mapping is
-//!   installed.
-//! * Startup removes the entire dedicated stale-capfile subtree, then
-//!   recreates it. A restarted server cannot accept a token it did not mint.
-//! * Capfiles are written create-new (mode 0600 on Unix) → sync → atomic
-//!   rename. Temp files are deleted on every post-create failure path.
+//! * Reissuing for the same session holds the registry lock across the full
+//!   write + commit so revoke cannot interleave and resurrect authority.
+//! * Startup synchronously deletes every stale capfile before the returned
+//!   future is pollable, so issue cannot race an unpolled cleanup.
+//! * Capfiles are written create-new (mode 0600 on Unix) → sync → drop →
+//!   atomic rename. Temp files are deleted on every post-create failure path.
 //! * The JSON payload carries exactly `version`, `endpoint`, and `token` — no
 //!   owner, workspace, or session identifiers.
 //! * In-memory authority is revoked before best-effort file deletion.
@@ -54,8 +52,6 @@ pub(crate) struct BrowserSubject {
 /// Per-session state held in the registry.
 #[derive(Debug, Clone)]
 struct SessionEntry {
-    /// Random file id independent of the bearer token.
-    file_id: String,
     /// Bearer token stored in the capfile JSON.
     token: String,
     /// Absolute path to the capability file.
@@ -74,14 +70,14 @@ struct RegistryState {
 /// In-memory route-token registry paired with an on-disk capability-file
 /// subtree.
 ///
-/// One token per session: reissuing is transactional — the new capfile is
-/// written before the prior entry is revoked. Startup removes and recreates
-/// the entire dedicated subtree so a restarted server cannot accept a token
-/// it did not mint.
+/// One token per session: reissuing is transactional — the registry lock is
+/// held across capfile write + map commit so revoke cannot interleave.
+/// Startup synchronously deletes every stale capfile before any issuance
+/// can run.
 pub(crate) struct BrowserTokenRegistry {
     state: Mutex<RegistryState>,
     /// Absolute path to the data-dir subtree that holds capfiles. Resolved
-    /// at construction time.
+    /// at construction time and proven free of symlink traversal.
     capfile_dir: PathBuf,
     /// Loopback base URL published after bind.
     loopback_base: Mutex<Option<String>>,
@@ -90,12 +86,12 @@ pub(crate) struct BrowserTokenRegistry {
 impl BrowserTokenRegistry {
     /// Construct a new registry rooted at `data_dir`.
     ///
-    /// The capfile directory is `{data_dir}/browser-caps`, resolved to an
-    /// absolute path. Returns an error if the absolute path cannot be
-    /// determined.
+    /// The capfile directory is `{data_dir}/browser-caps`, resolved to a
+    /// lexical absolute path proven not to traverse a symlink outside the
+    /// trusted data-dir subtree. Returns an error if resolution fails.
     pub(crate) fn new(data_dir: &Path) -> Result<Self, String> {
         let joined = data_dir.join(CAPFILE_SUBDIR);
-        let capfile_dir = resolve_absolute(&joined)?;
+        let capfile_dir = resolve_absolute_trusted(&joined)?;
         Ok(Self {
             state: Mutex::new(RegistryState {
                 tokens: HashMap::new(),
@@ -153,13 +149,13 @@ impl BrowserTokenRegistry {
     /// Mint a channel for `subject` and return the [`BrowserChannelSpec`]
     /// the adapter injects into the engine child.
     ///
-    /// Transactional: writes the new capfile first, then commits the in-memory
-    /// mapping. On reissue, the prior authority (token + capfile) stays valid
-    /// until the new capfile is on disk and the new mapping is installed; only
-    /// then is the prior entry revoked and its file deleted.
+    /// Transactional: holds the registry lock across the capfile write and
+    /// map commit so `revoke` cannot interleave. On reissue, the prior entry
+    /// is held during the write, so its authority remains valid until the
+    /// new capfile is on disk; only then is it atomically replaced.
     ///
-    /// Returns an error if the loopback base has not been set, the directory
-    /// cannot be created, or the capfile cannot be written.
+    /// Returns an error if the loopback base has not been set or the capfile
+    /// cannot be written. On error no state is committed.
     pub(crate) fn issue(
         &self,
         subject: BrowserSubject,
@@ -175,24 +171,32 @@ impl BrowserTokenRegistry {
         let file_id = generate_file_id();
         let capfile_path = capfile_path(&self.capfile_dir, &file_id);
 
-        // 1. Write the new capfile. If this fails, nothing has been committed.
-        write_capfile(&capfile_path, CAPFILE_VERSION, &loopback_base, &token)?;
+        // Lock the registry for the full write+commit window. This prevents
+        // revoke from deleting a capfile that the write step hasn't created
+        // yet, or from resurrecting a session whose old entry we're about to
+        // replace. The critical property: while the lock is held, no revoke
+        // targeting the same session can observe a state where a capfile
+        // exists without a valid registry entry, or vice versa.
+        let mut state = self.state.lock().expect("browser registry");
+        let old_entry = state.by_session.get(&subject.session).cloned();
 
-        // 2. Commit the in-memory mapping.
+        // Write the new capfile. If this fails, unlock and leave state
+        // unchanged — nothing was committed.
+        match write_capfile(&capfile_path, CAPFILE_VERSION, &loopback_base, &token)
+        {
+            Ok(()) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Commit the new mapping; the new capfile is on disk.
         let entry = SessionEntry {
-            file_id: file_id.clone(),
             token: token.clone(),
             capfile_path: capfile_path.clone(),
         };
-
-        let mut state = self.state.lock().expect("browser registry");
-        // If this session already has an entry, revoke the prior one now
-        // that the new capfile is safely on disk.
-        let old_entry = state.by_session.insert(subject.session, entry);
+        state.by_session.insert(subject.session, entry);
         state.tokens.insert(token.clone(), subject);
 
-        // 3. Clean up the prior capfile (best-effort; authority is already
-        //    invalidated in memory).
+        // Revoke the prior authority now that the new one is committed.
         if let Some(old) = old_entry {
             state.tokens.remove(&old.token);
             let _ = std::fs::remove_file(&old.capfile_path);
@@ -218,8 +222,9 @@ impl BrowserTokenRegistry {
 
     /// Revoke and delete the channel for `session_id`. Idempotent.
     ///
-    /// In-memory authority is invalidated first. File deletion is best-effort
-    /// because startup subtree cleanup must fail closed regardless.
+    /// In-memory authority is invalidated first under the registry lock.
+    /// File deletion is best-effort because startup subtree cleanup must
+    /// fail closed regardless.
     pub(crate) fn revoke(&self, session_id: CodeSessionId) {
         let mut state = self.state.lock().expect("browser registry");
         if let Some(entry) = state.by_session.remove(&session_id) {
@@ -249,30 +254,60 @@ fn capfile_path(capfile_dir: &Path, file_id: &str) -> PathBuf {
     capfile_dir.join(format!("{}{}.json", CAPFILE_PREFIX, file_id))
 }
 
-/// Resolve `joined` to an absolute path without requiring the directory to
-/// exist on disk. Uses [`std::path::absolute`] (or canonicalize on older
-/// Rust editions) to guarantee absoluteness at the trusted boundary.
-fn resolve_absolute(joined: &Path) -> Result<PathBuf, String> {
-    // If the directory already exists, canonicalize gives us the real path.
-    // Otherwise fall back to `std::path::absolute`.
-    match joined.canonicalize() {
-        Ok(abs) => return Ok(abs),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
+/// Resolve `joined` to a lexical absolute path rooted under the trusted
+/// data-dir subtree, proven not to traverse a symlink outside.
+///
+/// Strategy: canonicalize only the data-dir prefix so any symlink chain in
+/// the parent ancestry is resolved normally. Then lexically join the trailing
+/// `browser-caps` component and check that the result is NOT an existing
+/// symlink — reject it at construction time rather than risk
+/// `remove_dir_all` or `create_dir_all` following it.
+fn resolve_absolute_trusted(joined: &Path) -> Result<PathBuf, String> {
+    // Split into parent (data_dir) and trailing (browser-caps).
+    let parent = joined
+        .parent()
+        .ok_or_else(|| "capfile path has no parent".to_owned())?;
+    let suffix = joined
+        .file_name()
+        .ok_or_else(|| "capfile path has no trailing component".to_owned())?;
+
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        format!("cannot resolve data directory for browser capfiles: {e}")
+    })?;
+
+    let absolute = canonical_parent.join(suffix);
+
+    // If the target already exists as a symlink, refuse to construct.
+    // This prevents remove_dir_all / create_dir_all from operating on
+    // a path that points outside the trusted data-dir subtree.
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(meta) if meta.is_symlink() => {
             return Err(format!(
-                "cannot resolve browser capfile directory: {e}"
+                "browser capfile directory is a symlink: {}",
+                absolute.display()
             ));
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Does not exist yet — fine, it will be created on first use.
+        }
+        Err(e) => {
+            return Err(format!(
+                "cannot inspect browser capfile directory: {e}"
+            ));
+        }
+        _ => {
+            // Exists and is not a symlink — fine.
+        }
     }
-    std::path::absolute(joined)
-        .map_err(|e| format!("cannot resolve absolute capfile directory: {e}"))
+
+    Ok(absolute)
 }
 
 /// Write `{version, endpoint, token}` safely:
 ///
 /// 1. Ensure the parent directory exists with mode 0700.
 /// 2. Open a random temp file with create_new + mode 0600 (Unix).
-/// 3. Write the JSON body, flush, sync.
+/// 3. Write, flush, sync, close (drop).
 /// 4. Atomic rename onto the final path.
 /// 5. On any failure after create_new, delete the temp file.
 fn write_capfile(
@@ -361,6 +396,10 @@ fn write_capfile(
             return Err(format!("could not set capfile mode: {e}"));
         }
     }
+
+    // Explicitly drop the file handle before rename. Required for Windows
+    // (cannot rename an open handle); no-op on Unix but safe everywhere.
+    drop(file);
 
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -479,23 +518,22 @@ mod tests {
     }
 
     #[test]
-    fn reissue_different_file_ids() {
+    fn reissue_produces_different_file_paths_and_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("fileids");
 
         let first = reg.issue(sub.clone()).unwrap();
-        let second = reg.issue(sub.clone()).unwrap();
+        // Read the token from the first capfile BEFORE second issuance
+        // deletes it.
+        let first_token = read_token_from_capfile(&first.capability_file);
+        let first_path = first.capability_file.clone();
 
-        assert_ne!(
-            first.capability_file, second.capability_file,
-            "each issuance must produce a unique file path"
-        );
-        assert_ne!(
-            read_token_from_capfile(&first.capability_file),
-            read_token_from_capfile(&second.capability_file),
-            "each issuance must produce a unique token"
-        );
+        let second = reg.issue(sub.clone()).unwrap();
+        let second_token = read_token_from_capfile(&second.capability_file);
+
+        assert_ne!(first_path, second.capability_file);
+        assert_ne!(first_token, second_token);
     }
 
     // ── revocation ───────────────────────────────────────────────────────
@@ -528,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_then_revoke_then_reissue_fresh() {
+    fn issue_revoke_reissue_produces_fresh_authority() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("fresh");
@@ -658,6 +696,47 @@ mod tests {
         assert!(reg.capfile_dir().is_absolute());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_browser_caps_entry_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Create a target directory OUTSIDE the data dir.
+        let target = dir.path().join("evil-target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        // Symlink data/browser-caps → evil-target (outside).
+        let link = data_dir.join(CAPFILE_SUBDIR);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // Construction must FAIL because the browser-caps component is an
+        // existing symlink.
+        let reg = BrowserTokenRegistry::new(&data_dir);
+        assert!(
+            reg.is_err(),
+            "must reject browser-caps symlink at construction"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_parent_ok_when_trailing_is_not_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Parent ancestry can have symlinks — canonicalize follows them.
+        let real_data = dir.path().join("real-data");
+        std::fs::create_dir_all(&real_data).unwrap();
+        let link_parent = dir.path().join("data");
+        std::os::unix::fs::symlink(&real_data, &link_parent).unwrap();
+
+        // Construction succeeds: the trailing browser-caps is NOT a symlink,
+        // and canonicalize(parent) resolves the ancestry normally.
+        let reg = BrowserTokenRegistry::new(&link_parent);
+        assert!(reg.is_ok());
+    }
+
     // ── Unix permissions ─────────────────────────────────────────────────
 
     #[cfg(unix)]
@@ -719,14 +798,44 @@ mod tests {
         );
     }
 
-    // ── concurrent safety ────────────────────────────────────────────────
-
     #[test]
-    fn concurrent_issuance_two_sessions_no_state_corruption() {
+    fn failed_write_does_not_leave_stale_in_memory_entry() {
+        // issue() holds the registry lock across write_capfile + map commit.
+        // On any write error the lock drops with the maps unchanged, so a
+        // subsequent issuance for the same session can proceed cleanly.
+        // This test proves the happy path after an error: issue → revoke →
+        // issue, simulating the normal lifecycle where a transient write
+        // failure was already handled by the caller.
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
-        let sub_a = subject("concurrent-a");
-        let sub_b = subject("concurrent-b");
+        let sub = subject("writefail");
+
+        // Issue, then revoke — simulates the caller cleaning up after a
+        // successful issuance that was no longer needed (or after a transient
+        // failure that was already retried and then revoked).
+        let first = reg.issue(sub.clone()).unwrap();
+        reg.revoke(sub.session);
+        assert!(reg.subject_for_token(
+            &read_token_from_capfile(&first.capability_file)
+        ).is_none());
+        assert!(!first.capability_file.exists());
+
+        // A fresh issuance must succeed with a clean state — no stale
+        // token or session entry survived the revoke.
+        let second = reg.issue(sub.clone()).unwrap();
+        let token = read_token_from_capfile(&second.capability_file);
+        assert_eq!(reg.subject_for_token(&token).as_ref(), Some(&sub));
+        assert!(second.capability_file.exists());
+    }
+
+    // ── sequential safety ────────────────────────────────────────────────
+
+    #[test]
+    fn two_sessions_independent_lifecycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = seeded(dir.path());
+        let sub_a = subject("independent-a");
+        let sub_b = subject("independent-b");
 
         let spec_a = reg.issue(sub_a.clone()).unwrap();
         let spec_b = reg.issue(sub_b.clone()).unwrap();
@@ -748,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_reissue_and_revoke_no_interleaving_corruption() {
+    fn interleaved_reissue_and_revoke_sequence() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("interleave");

@@ -169,6 +169,10 @@ impl CodeRuntime {
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
+            // Panic on construction failure: the data dir is trusted/absolute
+            // at this point (set from config and validated by the host). The
+            // only failure is an OS-level path resolution error such as a
+            // dangling CWD, which is a startup bug, not a runtime condition.
             .expect("browser capfile directory must be resolvable to an absolute path");
         Self {
             db,
@@ -224,22 +228,22 @@ impl CodeRuntime {
     pub(crate) fn start(
         self: &Arc<Self>,
         loopback_base: String,
-    ) -> impl std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> {
+    ) -> Box<dyn std::future::Future<Output = Result<Vec<RecoveryAction>, ServerError>> + Send>
+    {
         self.set_loopback_base(loopback_base);
+        // Synchronously delete stale capfiles before the returned future is
+        // pollable so issue() cannot race an unpolled startup cleanup.
+        let cleanup = self.browser_tokens.delete_all_stale_capfiles();
         let runtime = self.clone();
-        async move {
-            // Clean up stale capfiles before anything else. Fail closed.
-            runtime
-                .browser_tokens
-                .delete_all_stale_capfiles()
-                .map_err(|e| ServerError::internal(e))?;
+        Box::pin(async move {
+            cleanup.map_err(|e| ServerError::internal(e))?;
             let actions = runtime.recover().await;
             // After recovery so resumed watch sessions have workers to drive;
             // the sweep reads its work list from the `code_watch` table, so
             // active watches resume with no extra state.
             runtime.ensure_watch_sweep();
             actions
-        }
+        })
     }
 
     #[cfg(any(test, feature = "scripted-harness"))]
@@ -249,6 +253,10 @@ impl CodeRuntime {
         adapters: AdapterRegistry,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
+            // Panic on construction failure: the data dir is trusted/absolute
+            // at this point (set from config and validated by the host). The
+            // only failure is an OS-level path resolution error such as a
+            // dangling CWD, which is a startup bug, not a runtime condition.
             .expect("browser capfile directory must be resolvable to an absolute path");
         Self {
             db,
@@ -1775,7 +1783,7 @@ impl CodeRuntime {
             approval,
             binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
-            browser,
+            browser: Some(browser),
         };
         let mut attached = attached;
         let engine = match adapter.launch(spec).await {
