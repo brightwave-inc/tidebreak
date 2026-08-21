@@ -2767,6 +2767,7 @@ function parseAttentionState(value: unknown): AttentionState | null {
   switch (value.type) {
     case "working":
     case "done_unreviewed":
+    case "idle":
       return { type: value.type };
     case "needs_you":
       if (
