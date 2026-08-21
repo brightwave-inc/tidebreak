@@ -111,7 +111,7 @@ impl ClaudeSession {
         if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
-        ) {
+        )? {
             argv.extend(flags);
         }
         if let Some(resume) = self.resume_ref.lock().expect("claude resume").clone() {

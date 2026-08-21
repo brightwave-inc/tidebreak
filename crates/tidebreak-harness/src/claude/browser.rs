@@ -26,13 +26,19 @@ pub const BROWSER_MCP_SERVER: &str = "tb-browser";
 /// `bridge_command` is the absolute path from [`BrowserChannelSpec::bridge_command`].
 /// The child inherits `TIDEBREAK_BROWSER_CAPFILE` from the engine process
 /// environment; no env block is needed in the config.
-#[must_use]
-pub fn browser_mcp_config_entry(bridge_command: &std::path::Path) -> serde_json::Value {
-    serde_json::json!({
+pub fn browser_mcp_config_entry(
+    bridge_command: &std::path::Path,
+) -> Result<serde_json::Value, crate::HarnessError> {
+    let bridge_command = bridge_command.to_str().ok_or_else(|| {
+        crate::HarnessError::Other(
+            "browser bridge command must be valid UTF-8 for Claude MCP config".into(),
+        )
+    })?;
+    Ok(serde_json::json!({
         "type": "stdio",
-        "command": bridge_command.to_string_lossy(),
+        "command": bridge_command,
         "args": ["browser-mcp"],
-    })
+    }))
 }
 
 /// Build a merged `--mcp-config` JSON string containing every present MCP
@@ -43,12 +49,11 @@ pub fn browser_mcp_config_entry(bridge_command: &std::path::Path) -> serde_json:
 /// unchanged. When only the browser channel is present, the output contains
 /// only the browser entry. When both are present, both entries appear in one
 /// `mcpServers` object under one `--mcp-config` flag.
-#[must_use]
 pub fn merged_mcp_config_json(
     approval: Option<&crate::ApprovalChannelSpec>,
     browser: Option<&BrowserChannelSpec>,
-) -> Option<String> {
-    match (approval, browser) {
+) -> Result<Option<String>, crate::HarnessError> {
+    let config = match (approval, browser) {
         (None, None) => None,
         (Some(channel), None) => {
             // Existing behavior: approval-only config.
@@ -58,7 +63,7 @@ pub fn merged_mcp_config_json(
             let mut servers = serde_json::Map::new();
             servers.insert(
                 BROWSER_MCP_SERVER.into(),
-                browser_mcp_config_entry(spec.bridge_command()),
+                browser_mcp_config_entry(spec.bridge_command())?,
             );
             Some(serde_json::json!({ "mcpServers": servers }).to_string())
         }
@@ -79,11 +84,12 @@ pub fn merged_mcp_config_json(
             // Browser entry (stdio, inherits env).
             servers.insert(
                 BROWSER_MCP_SERVER.into(),
-                browser_mcp_config_entry(spec.bridge_command()),
+                browser_mcp_config_entry(spec.bridge_command())?,
             );
             Some(serde_json::json!({ "mcpServers": servers }).to_string())
         }
-    }
+    };
+    Ok(config)
 }
 
 /// Launch argv fragments for the browser and/or approval MCP config.
@@ -94,18 +100,19 @@ pub fn merged_mcp_config_json(
 /// exactly. When the browser channel is present, the `--mcp-config` flag
 /// carries the merged config and the `--permission-prompt-tool` flag is
 /// added only when the approval channel is also present.
-#[must_use]
 pub fn launch_args_for_mcp_channels(
     approval: Option<&crate::ApprovalChannelSpec>,
     browser: Option<&BrowserChannelSpec>,
-) -> Option<Vec<String>> {
-    let config = merged_mcp_config_json(approval, browser)?;
+) -> Result<Option<Vec<String>>, crate::HarnessError> {
+    let Some(config) = merged_mcp_config_json(approval, browser)? else {
+        return Ok(None);
+    };
     let mut flags = vec!["--mcp-config".into(), config];
     if approval.is_some() {
         flags.push("--permission-prompt-tool".into());
         flags.push(crate::claude::approvals::PERMISSION_PROMPT_TOOL.into());
     }
-    Some(flags)
+    Ok(Some(flags))
 }
 
 #[cfg(test)]
@@ -146,13 +153,15 @@ mod tests {
 
     #[test]
     fn neither_channel_produces_no_flags() {
-        assert!(launch_args_for_mcp_channels(None, None).is_none());
+        assert!(launch_args_for_mcp_channels(None, None).unwrap().is_none());
     }
 
     #[test]
     fn approval_only_matches_existing_behavior() {
         let channel = approval_channel();
-        let flags = launch_args_for_mcp_channels(Some(&channel), None).unwrap();
+        let flags = launch_args_for_mcp_channels(Some(&channel), None)
+            .unwrap()
+            .unwrap();
         let existing =
             crate::claude::approvals::launch_args_for_approval_channel(&channel).unwrap();
         assert_eq!(flags, existing);
@@ -161,7 +170,9 @@ mod tests {
     #[test]
     fn browser_only_emits_stdio_config_without_prompt_tool() {
         let browser = browser_channel();
-        let flags = launch_args_for_mcp_channels(None, Some(&browser)).unwrap();
+        let flags = launch_args_for_mcp_channels(None, Some(&browser))
+            .unwrap()
+            .unwrap();
         assert_eq!(flags[0], "--mcp-config");
         let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         assert_eq!(config["mcpServers"]["tb-browser"]["type"], "stdio");
@@ -180,7 +191,9 @@ mod tests {
     fn both_channels_merge_into_one_config() {
         let approval = approval_channel();
         let browser = browser_channel();
-        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser)).unwrap();
+        let flags = launch_args_for_mcp_channels(Some(&approval), Some(&browser))
+            .unwrap()
+            .unwrap();
         // Exactly one --mcp-config flag.
         assert_eq!(flags.iter().filter(|f| **f == "--mcp-config").count(), 1);
         let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
@@ -201,7 +214,7 @@ mod tests {
             launch_args_for_mcp_channels(None, Some(&browser)),
             launch_args_for_mcp_channels(Some(&approval_channel()), Some(&browser)),
         ] {
-            let flags = flags.unwrap();
+            let flags = flags.unwrap().unwrap();
             let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
             let config_str = config.to_string();
             // No capfile path or env key in the config text.
@@ -227,7 +240,9 @@ mod tests {
             PathBuf::from("/tmp/with spaces/cap.json"),
             PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
         );
-        let flags = launch_args_for_mcp_channels(None, Some(&browser)).unwrap();
+        let flags = launch_args_for_mcp_channels(None, Some(&browser))
+            .unwrap()
+            .unwrap();
         let config: serde_json::Value = serde_json::from_str(&flags[1]).unwrap();
         let command = config["mcpServers"]["tb-browser"]["command"]
             .as_str()
@@ -243,5 +258,21 @@ mod tests {
             .unwrap();
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], "browser-mcp");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let browser = BrowserChannelSpec::new(
+            PathBuf::from("/tmp/tidebreak-browser-cap.json"),
+            PathBuf::from(OsString::from_vec(b"/tmp/tidebreak-\xff".to_vec())),
+        );
+        let error = launch_args_for_mcp_channels(None, Some(&browser))
+            .expect_err("non-UTF-8 bridge paths must fail closed");
+
+        assert!(error.to_string().contains("must be valid UTF-8"));
     }
 }
