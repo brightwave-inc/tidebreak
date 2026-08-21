@@ -171,7 +171,9 @@ export async function copyAgentRunDebug(
       deps.fetchActivity().catch(() => null),
       deps.fetchProgress().catch(() => null),
     ]);
-    await deps.writeClipboard(formatAgentRunDebugReport({ run, activity, progress }));
+    await deps.writeClipboard(
+      formatAgentRunDebugReport({ run, activity, progress }),
+    );
     deps.notify({
       message: "Debug info copied",
       description:

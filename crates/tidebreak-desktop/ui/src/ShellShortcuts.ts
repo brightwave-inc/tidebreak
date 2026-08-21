@@ -270,10 +270,24 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
   {
     id: "code-select-tab",
     codes: [
-      "Digit1", "Digit2", "Digit3", "Digit4", "Digit5",
-      "Digit6", "Digit7", "Digit8", "Digit9",
-      "Numpad1", "Numpad2", "Numpad3", "Numpad4", "Numpad5",
-      "Numpad6", "Numpad7", "Numpad8", "Numpad9",
+      "Digit1",
+      "Digit2",
+      "Digit3",
+      "Digit4",
+      "Digit5",
+      "Digit6",
+      "Digit7",
+      "Digit8",
+      "Digit9",
+      "Numpad1",
+      "Numpad2",
+      "Numpad3",
+      "Numpad4",
+      "Numpad5",
+      "Numpad6",
+      "Numpad7",
+      "Numpad8",
+      "Numpad9",
     ],
     mod: true,
     description: "Go to a tab by number, or 9 for the last",
@@ -577,7 +591,8 @@ export function matchesShellShortcut(
     ? def.codes.includes(event.code)
     : def.keys.includes(event.key.toLowerCase());
   if (!hit) return false;
-  if (def.shift !== "any" && event.shiftKey !== (def.shift ?? false)) return false;
+  if (def.shift !== "any" && event.shiftKey !== (def.shift ?? false))
+    return false;
   if (command ? event.ctrlKey : event.metaKey) return false;
   const hasMod = command ? event.metaKey : event.ctrlKey;
   return def.mod ? hasMod : !hasMod;

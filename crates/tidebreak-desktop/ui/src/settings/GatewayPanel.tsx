@@ -74,11 +74,10 @@ export function GatewayPanel({
         description="This profile is not connected to a model gateway."
       >
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Connecting happens from your gateway&apos;s own page — open it in
-          your browser and choose Connect — or through your
-          organization&apos;s device management. There is nothing to
-          configure here; until then, Tidebreak stays fully local with your
-          own provider keys.
+          Connecting happens from your gateway&apos;s own page — open it in your
+          browser and choose Connect — or through your organization&apos;s
+          device management. There is nothing to configure here; until then,
+          Tidebreak stays fully local with your own provider keys.
         </p>
       </SettingsPanel>
     );
@@ -185,7 +184,9 @@ function ManagedGatewayPanel({
   }
 
   const pendingUrl =
-    status.sign_in.state === "pending" ? status.sign_in.authorization_url : null;
+    status.sign_in.state === "pending"
+      ? status.sign_in.authorization_url
+      : null;
   // The policy names the deployment; the status echoes it. Prefer the policy
   // (it is what the profile is locked to) and fall back to the echo.
   const origin = gatewayUrl ?? status.base_url ?? null;
@@ -255,7 +256,9 @@ function ManagedGatewayPanel({
                   void run(async () => {
                     await client.syncGatewayModels();
                     onChanged();
-                    toast.success("Synced models and MCP endpoints from the gateway");
+                    toast.success(
+                      "Synced models and MCP endpoints from the gateway",
+                    );
                   })
                 }
               >

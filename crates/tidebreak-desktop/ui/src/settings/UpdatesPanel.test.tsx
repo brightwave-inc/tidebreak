@@ -42,11 +42,7 @@ describe("UpdatesPanel", () => {
       version: "1.2.3",
     };
     const markup = renderToStaticMarkup(
-      <UpdatesPanel
-        state={state}
-        onCheck={vi.fn()}
-        onRestart={vi.fn()}
-      />,
+      <UpdatesPanel state={state} onCheck={vi.fn()} onRestart={vi.fn()} />,
     );
 
     expect(updateStateSummary(state)).toContain("Version 1.2.3");
@@ -61,7 +57,10 @@ describe("UpdatesPanel", () => {
   it("shows generic host errors without exposing updater diagnostics", () => {
     const markup = renderToStaticMarkup(
       <UpdatesPanel
-        state={{ ...idle, error: "Could not check for updates. Try again later." }}
+        state={{
+          ...idle,
+          error: "Could not check for updates. Try again later.",
+        }}
         onCheck={vi.fn()}
         onRestart={vi.fn()}
       />,

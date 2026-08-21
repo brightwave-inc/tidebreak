@@ -92,7 +92,9 @@ export function TurnFailureNotice({
       <div className="message-turn-failure-text">
         <p className="message-turn-failure-title">{copy.title}</p>
         <p className="message-turn-failure-body">{copy.body}</p>
-        {detail && <code className="message-turn-failure-detail">{detail}</code>}
+        {detail && (
+          <code className="message-turn-failure-detail">{detail}</code>
+        )}
         {model && (
           <p className="message-turn-failure-model">
             {model.id} · {provider}

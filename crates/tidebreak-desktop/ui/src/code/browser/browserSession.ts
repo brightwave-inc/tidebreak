@@ -71,10 +71,9 @@ export function beginBrowserNavigation(
   const history =
     current?.url === url
       ? session.history
-      : [
-          ...session.history.slice(0, session.historyIndex + 1),
-          { url },
-        ].slice(-MAX_HISTORY_ENTRIES);
+      : [...session.history.slice(0, session.historyIndex + 1), { url }].slice(
+          -MAX_HISTORY_ENTRIES,
+        );
   return {
     ...session,
     url,
@@ -205,8 +204,10 @@ export function canBrowserGoBack(session: BrowserSession): boolean {
 }
 
 export function canBrowserGoForward(session: BrowserSession): boolean {
-  return session.historyIndex >= 0 &&
-    session.historyIndex < session.history.length - 1;
+  return (
+    session.historyIndex >= 0 &&
+    session.historyIndex < session.history.length - 1
+  );
 }
 
 function cleanTitle(title: string): string {

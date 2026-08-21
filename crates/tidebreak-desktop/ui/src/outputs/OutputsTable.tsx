@@ -125,7 +125,8 @@ export function OutputsTable({
         cellRenderer: DateCellRenderer,
         sortable: true,
         sort: "desc",
-        comparator: (left: string, right: string) => Date.parse(left) - Date.parse(right),
+        comparator: (left: string, right: string) =>
+          Date.parse(left) - Date.parse(right),
       },
       {
         headerName: "",

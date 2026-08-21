@@ -25,7 +25,10 @@ const OPEN_EGRESS: ExecConfigInfo["egress"] = {
     {
       provider: "e2b",
       status: "applied_with_gaps",
-      gaps: ["DNS resolution", "domain filtering covers HTTP and HTTPS ports only"],
+      gaps: [
+        "DNS resolution",
+        "domain filtering covers HTTP and HTTPS ports only",
+      ],
     },
     {
       provider: "daytona",
@@ -118,15 +121,14 @@ afterEach(cleanup);
 
 describe("ExecPanel", () => {
   it("saves a key per managed provider before the active selection", async () => {
-    const { client, putExecConfig, putExecCredential } =
-      clientFor({
-        provider: "e2b",
-        timeout_ms: 20_000,
-        available: false,
-        has_credential: false,
-        egress: OPEN_EGRESS,
+    const { client, putExecConfig, putExecCredential } = clientFor({
+      provider: "e2b",
+      timeout_ms: 20_000,
+      available: false,
+      has_credential: false,
+      egress: OPEN_EGRESS,
       detached_admission: NO_DETACHED,
-      });
+    });
 
     render(<ExecPanel client={client} />);
 
@@ -142,23 +144,17 @@ describe("ExecPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() =>
-      expect(putExecCredential).toHaveBeenCalledWith(
-        "e2b",
-        "e2b-secret",
-      ),
+      expect(putExecCredential).toHaveBeenCalledWith("e2b", "e2b-secret"),
     );
-    expect(putExecCredential).toHaveBeenCalledWith(
-      "daytona",
-      "daytona-secret",
-    );
+    expect(putExecCredential).toHaveBeenCalledWith("daytona", "daytona-secret");
     expect(putExecConfig).toHaveBeenCalledWith({
       provider: "e2b",
       timeout_ms: 30_000,
     });
     // A provider must not go active in a pass that failed to store its key.
-    expect(
-      putExecCredential.mock.invocationCallOrder[0],
-    ).toBeLessThan(putExecConfig.mock.invocationCallOrder[0]);
+    expect(putExecCredential.mock.invocationCallOrder[0]).toBeLessThan(
+      putExecConfig.mock.invocationCallOrder[0],
+    );
     expect(
       screen.queryByText(/Files staged for a run leave this machine/i),
     ).toBeNull();
@@ -172,7 +168,7 @@ describe("ExecPanel", () => {
         available: true,
         has_credential: true,
         egress: OPEN_EGRESS,
-      detached_admission: NO_DETACHED,
+        detached_admission: NO_DETACHED,
       },
       [
         { provider: "e2b", has_credential: true },

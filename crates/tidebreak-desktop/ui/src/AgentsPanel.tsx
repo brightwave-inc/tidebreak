@@ -37,7 +37,10 @@ export function AgentsPanel({
       {runs.length > 0 ? (
         <AgentsTable runs={runs} onOpenRun={onOpenRun} />
       ) : error ? (
-        <div className="flex items-center justify-between gap-3 p-4 text-sm" role="status">
+        <div
+          className="flex items-center justify-between gap-3 p-4 text-sm"
+          role="status"
+        >
           <span>Background agent status is unavailable.</span>
           <button
             type="button"
@@ -48,7 +51,11 @@ export function AgentsPanel({
           </button>
         </div>
       ) : loading ? (
-        <div className="flex flex-col gap-3 p-4" role="status" aria-label="Loading agents">
+        <div
+          className="flex flex-col gap-3 p-4"
+          role="status"
+          aria-label="Loading agents"
+        >
           <Skeleton className="h-5 w-48" />
           <Skeleton className="h-5 w-64" />
           <Skeleton className="h-5 w-56" />

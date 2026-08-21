@@ -1,4 +1,7 @@
-import type { ChatTerminalTurnSnapshot, RendererTurnUsage } from "./generated/wire";
+import type {
+  ChatTerminalTurnSnapshot,
+  RendererTurnUsage,
+} from "./generated/wire";
 
 /**
  * Every token this chat has spent, summed over its finished turns.

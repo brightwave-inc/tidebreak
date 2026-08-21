@@ -33,14 +33,19 @@ export async function connectRemoteMachine(
   baseUrl: string,
   token: string,
 ): Promise<RemoteMachineState> {
-  return await invoke<RemoteMachineState>("connect_remote_machine", { baseUrl, token });
+  return await invoke<RemoteMachineState>("connect_remote_machine", {
+    baseUrl,
+    token,
+  });
 }
 
 /** Attach using the Model Gateway session this desktop already holds. */
 export async function connectGatewayRemoteMachine(
   baseUrl: string,
 ): Promise<RemoteMachineState> {
-  return await invoke<RemoteMachineState>("connect_gateway_remote_machine", { baseUrl });
+  return await invoke<RemoteMachineState>("connect_gateway_remote_machine", {
+    baseUrl,
+  });
 }
 
 /** Mint or retrieve a fresh bearer for the currently attached machine. */

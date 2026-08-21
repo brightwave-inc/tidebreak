@@ -55,7 +55,13 @@ function panelTabFallbackLabel(panel: PanelContent): string {
   }
 }
 
-function PanelTabIcon({ panel, active }: { panel: PanelContent; active: boolean }) {
+function PanelTabIcon({
+  panel,
+  active,
+}: {
+  panel: PanelContent;
+  active: boolean;
+}) {
   const className = "size-3.5 shrink-0";
   const tone = (activeTone: string) => cn(className, active && activeTone);
   switch (panel.type) {
@@ -129,7 +135,9 @@ export function PanelTabs({
               onClick={() => onSelect(index)}
               className={cn(
                 "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 pl-2 pr-1 text-xs font-medium whitespace-nowrap transition-colors",
-                active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+                active
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               <PanelTabIcon panel={panel} active={active} />

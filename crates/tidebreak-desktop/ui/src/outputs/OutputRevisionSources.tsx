@@ -23,7 +23,9 @@ export function OutputRevisionSources({
       aria-label="Output sources"
     >
       <div className="mx-auto max-w-4xl">
-        <h2 className="mb-2 text-xs font-medium text-muted-foreground">Sources</h2>
+        <h2 className="mb-2 text-xs font-medium text-muted-foreground">
+          Sources
+        </h2>
         <ol className="flex flex-wrap gap-1.5">
           {sources.map((source, index) => (
             <li key={sourceKey(source)}>
@@ -35,7 +37,10 @@ export function OutputRevisionSources({
                   disabled={!onOpenDocument}
                   onClick={() => onOpenDocument?.(source)}
                 >
-                  <FileTextIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                  <FileTextIcon
+                    className="size-3.5 shrink-0"
+                    aria-hidden="true"
+                  />
                   <span className="truncate">
                     <CitationLocatorLabel locator={source.locator} />
                   </span>
@@ -50,7 +55,10 @@ export function OutputRevisionSources({
                 >
                   <DomainFavicon url={source.url} className="size-3.5" />
                   <span className="truncate">{source.domain}</span>
-                  <ExternalLinkIcon className="size-3 shrink-0" aria-hidden="true" />
+                  <ExternalLinkIcon
+                    className="size-3 shrink-0"
+                    aria-hidden="true"
+                  />
                 </button>
               )}
             </li>

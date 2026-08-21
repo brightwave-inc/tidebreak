@@ -35,7 +35,9 @@ describe("citation directives", () => {
     );
 
     expect(markup).toContain(":cit[unterminated");
-    expect(markup).toContain(":cit[phrase]{ref=0123456789abcdef0123456789abcdef}");
+    expect(markup).toContain(
+      ":cit[phrase]{ref=0123456789abcdef0123456789abcdef}",
+    );
   });
 
   it("strips citations from the text the clipboard is handed", () => {
@@ -55,7 +57,9 @@ describe("safeMarkdownUrl", () => {
     expect(safeMarkdownUrl("http://tidebreak.io")).toBeUndefined();
     expect(safeMarkdownUrl("javascript:alert(1)")).toBeUndefined();
     expect(safeMarkdownUrl("data:text/html,unsafe")).toBeUndefined();
-    expect(safeMarkdownUrl("file:///Users/example/private.txt")).toBeUndefined();
+    expect(
+      safeMarkdownUrl("file:///Users/example/private.txt"),
+    ).toBeUndefined();
   });
 });
 
@@ -73,7 +77,9 @@ describe("MessageMarkdown", () => {
   it("renders useful Markdown without emitting embeds or unsafe links", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown>
-        {"## Heading\n\n- `inline` item\n\n> A quote\n\n[Docs](https://tidebreak.io/docs) [Unsafe](javascript:alert(1))\n\n![remote](https://example.com/image.png)\n\n<iframe src=\"https://example.com\"></iframe>"}
+        {
+          '## Heading\n\n- `inline` item\n\n> A quote\n\n[Docs](https://tidebreak.io/docs) [Unsafe](javascript:alert(1))\n\n![remote](https://example.com/image.png)\n\n<iframe src="https://example.com"></iframe>'
+        }
       </MessageMarkdown>,
     );
 
@@ -143,7 +149,9 @@ describe("code blocks", () => {
   const FENCED = "```ts\nconst x: number = 1;\n```";
 
   it("highlights fence-tagged code and passes token classes through", () => {
-    const markup = renderToStaticMarkup(<MessageMarkdown>{FENCED}</MessageMarkdown>);
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown>{FENCED}</MessageMarkdown>,
+    );
     expect(markup).toContain("hljs-keyword");
     expect(markup).toContain('class="code-block"');
   });
@@ -157,7 +165,9 @@ describe("code blocks", () => {
   });
 
   it("adds a copy control to blocks but not inline code", () => {
-    const block = renderToStaticMarkup(<MessageMarkdown>{FENCED}</MessageMarkdown>);
+    const block = renderToStaticMarkup(
+      <MessageMarkdown>{FENCED}</MessageMarkdown>,
+    );
     expect(block).toContain('aria-label="Copy code"');
     const inline = renderToStaticMarkup(
       <MessageMarkdown>{"use `inline()` here"}</MessageMarkdown>,

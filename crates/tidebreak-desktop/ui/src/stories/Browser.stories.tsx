@@ -113,12 +113,16 @@ function browserSession(
     address: url ? "localhost:4173/review/browser" : "",
     title: hasUrl ? "Browser review — Tidebreak" : "Browser",
     loadState,
-    error: loadState === "failed" ? "The local preview stopped responding." : null,
+    error:
+      loadState === "failed" ? "The local preview stopped responding." : null,
     notice: null,
     inspectEnabled: false,
     history: url
       ? [
-          { url: "https://github.com/brightwave-inc/tidebreak/pull/2335", title: "Agent browser epic" },
+          {
+            url: "https://github.com/brightwave-inc/tidebreak/pull/2335",
+            title: "Agent browser epic",
+          },
           { url, title: "Browser review — Tidebreak" },
         ]
       : [],
@@ -136,31 +140,34 @@ function BrowserStory({
   compact?: boolean;
   viewport?: BrowserViewport;
 }) {
-  const loadState = scenario === "empty"
-    ? "idle"
-    : scenario === "loading" || scenario === "slow"
-      ? "loading"
-      : scenario === "failure"
-        ? "failed"
-        : "ready";
+  const loadState =
+    scenario === "empty"
+      ? "idle"
+      : scenario === "loading" || scenario === "slow"
+        ? "loading"
+        : scenario === "failure"
+          ? "failed"
+          : "ready";
   const session = browserSession(loadState);
   const [address, setAddress] = useState(session.address);
   const [viewportState, setViewportState] = useState<BrowserViewport>(
     viewport ?? { preset: "fit", customWidth: 1024 },
   );
   const inspectEnabled = scenario === "inspect-on";
-  const controller = scenario === "agent"
-    ? activeAgent
-    : scenario === "takeover"
-      ? takeoverAgent
-      : undefined;
-  const agentAccess = scenario === "empty" || scenario === "failure"
-    ? undefined
-    : scenario === "shared" || scenario === "agent" || scenario === "takeover"
-      ? localSharedAccess
-      : scenario === "paused"
-        ? pausedAccess
-        : unsharedAccess;
+  const controller =
+    scenario === "agent"
+      ? activeAgent
+      : scenario === "takeover"
+        ? takeoverAgent
+        : undefined;
+  const agentAccess =
+    scenario === "empty" || scenario === "failure"
+      ? undefined
+      : scenario === "shared" || scenario === "agent" || scenario === "takeover"
+        ? localSharedAccess
+        : scenario === "paused"
+          ? pausedAccess
+          : unsharedAccess;
 
   return (
     <div className="grid min-h-dvh place-items-center bg-muted/45 p-4 sm:p-8">
@@ -242,9 +249,11 @@ function BrowserStory({
         )}
 
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          {viewportState.preset !== "fit" && scenario !== "empty" && scenario !== "failure" && (
-            <div aria-hidden className="absolute inset-0 bg-muted/30" />
-          )}
+          {viewportState.preset !== "fit" &&
+            scenario !== "empty" &&
+            scenario !== "failure" && (
+              <div aria-hidden className="absolute inset-0 bg-muted/30" />
+            )}
           <div
             className={cn(
               "relative h-full",
@@ -358,15 +367,24 @@ function DeveloperPage({ compact }: { compact: boolean }) {
   return (
     <div className="h-full overflow-auto bg-[#f1eee7] text-[#20211f]">
       <header className="flex h-14 items-center justify-between border-b border-black/10 px-5 sm:px-8">
-        <span className="text-sm font-semibold tracking-[-0.02em]">Tidebreak / browser lab</span>
+        <span className="text-sm font-semibold tracking-[-0.02em]">
+          Tidebreak / browser lab
+        </span>
         <nav className="hidden items-center gap-5 text-xs text-black/55 sm:flex">
           <span>Fixture</span>
           <span>Contracts</span>
           <span>Runs</span>
         </nav>
-        <span className="font-mono text-[10px] text-black/45">localhost:4173</span>
+        <span className="font-mono text-[10px] text-black/45">
+          localhost:4173
+        </span>
       </header>
-      <main className={cn("mx-auto max-w-5xl px-5 py-10 sm:px-8 sm:py-16", compact && "py-10")}>
+      <main
+        className={cn(
+          "mx-auto max-w-5xl px-5 py-10 sm:px-8 sm:py-16",
+          compact && "py-10",
+        )}
+      >
         <p className="font-mono text-[10px] tracking-[0.16em] text-[#7b5e36] uppercase">
           deterministic browser fixture
         </p>
@@ -374,7 +392,8 @@ function DeveloperPage({ compact }: { compact: boolean }) {
           One page for people and agents.
         </h1>
         <p className="mt-5 max-w-xl text-sm leading-6 text-black/58 sm:text-base sm:leading-7">
-          Inspect the live document, act on fresh semantic targets, and hand control back without losing the browser state you were both using.
+          Inspect the live document, act on fresh semantic targets, and hand
+          control back without losing the browser state you were both using.
         </p>
         <div className="mt-8 flex flex-wrap items-center gap-3">
           <button className="rounded-lg bg-[#20211f] px-4 py-2.5 text-xs font-medium text-white shadow-sm">
@@ -387,16 +406,25 @@ function DeveloperPage({ compact }: { compact: boolean }) {
         {!compact && (
           <div className="mt-16 grid gap-px overflow-hidden rounded-xl border border-black/10 bg-black/10 sm:grid-cols-[1.25fr_0.75fr]">
             <section className="bg-[#f8f5ee] p-6 sm:p-8">
-              <p className="font-mono text-[10px] text-black/45">latest snapshot</p>
-              <p className="mt-8 text-3xl font-medium tracking-[-0.04em]">42 semantic nodes</p>
+              <p className="font-mono text-[10px] text-black/45">
+                latest snapshot
+              </p>
+              <p className="mt-8 text-3xl font-medium tracking-[-0.04em]">
+                42 semantic nodes
+              </p>
               <p className="mt-2 max-w-sm text-sm leading-6 text-black/55">
-                Visible text and interactive controls, bounded and explicitly treated as untrusted page data.
+                Visible text and interactive controls, bounded and explicitly
+                treated as untrusted page data.
               </p>
             </section>
             <section className="bg-[#ded8cc] p-6 sm:p-8">
-              <p className="font-mono text-[10px] text-black/45">document epoch</p>
+              <p className="font-mono text-[10px] text-black/45">
+                document epoch
+              </p>
               <p className="mt-8 font-mono text-3xl tracking-[-0.04em]">008</p>
-              <p className="mt-2 text-sm leading-6 text-black/55">Every navigation retires the old refs.</p>
+              <p className="mt-2 text-sm leading-6 text-black/55">
+                Every navigation retires the old refs.
+              </p>
             </section>
           </div>
         )}
@@ -426,20 +454,26 @@ function ControlRows() {
     <div className="grid min-h-dvh place-items-center bg-muted/45 p-8">
       <div className="w-full max-w-4xl overflow-hidden rounded-xl border border-border-subtle bg-background shadow-lg">
         <BrowserAgentControlRow
-          controller={activeAgent as Extract<BrowserController, { kind: "agent" }>}
+          controller={
+            activeAgent as Extract<BrowserController, { kind: "agent" }>
+          }
           onStop={fn()}
           onTakeOver={fn()}
         />
         <BrowserAgentControlRow
-          controller={{
-            ...activeAgent,
-            halted: true,
-            action: undefined,
-          } as Extract<BrowserController, { kind: "agent" }>}
+          controller={
+            {
+              ...activeAgent,
+              halted: true,
+              action: undefined,
+            } as Extract<BrowserController, { kind: "agent" }>
+          }
           onTakeOver={fn()}
         />
         <BrowserAgentControlRow
-          controller={takeoverAgent as Extract<BrowserController, { kind: "agent" }>}
+          controller={
+            takeoverAgent as Extract<BrowserController, { kind: "agent" }>
+          }
           onStop={fn()}
           onTakeOver={fn()}
         />
@@ -461,8 +495,12 @@ export const Empty: Story = {
   args: { scenario: "empty" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole("textbox", { name: "Address or search" })).toHaveFocus();
-    await expect(canvas.getByText("Bring the live work into the workspace")).toBeVisible();
+    await expect(
+      canvas.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveFocus();
+    await expect(
+      canvas.getByText("Bring the live work into the workspace"),
+    ).toBeVisible();
   },
 };
 
@@ -472,7 +510,9 @@ export const ReadyLocalUnshared: Story = {
   args: { scenario: "unshared" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole("button", { name: "Share with agent" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Share with agent" }),
+    ).toBeVisible();
   },
 };
 
@@ -481,7 +521,9 @@ export const SharedLocalSites: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("Local sites shared")).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Stop sharing" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Stop sharing" }),
+    ).toBeVisible();
   },
 };
 
@@ -490,7 +532,9 @@ export const AgentPausedAtNewOrigin: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("Agent paused")).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Review & resume" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Review & resume" }),
+    ).toBeVisible();
   },
 };
 
@@ -498,9 +542,13 @@ export const AgentControlled: Story = {
   args: { scenario: "agent" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("Code agent is using this tab")).toBeVisible();
+    await expect(
+      canvas.getByText("Code agent is using this tab"),
+    ).toBeVisible();
     await expect(canvas.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Take over" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Take over" }),
+    ).toBeVisible();
   },
 };
 
@@ -517,7 +565,10 @@ export const DownloadBlocked: Story = { args: { scenario: "download" } };
 export const Compact: Story = { args: { scenario: "agent", compact: true } };
 
 export const ViewportFit: Story = {
-  args: { scenario: "viewport-fit", viewport: { preset: "fit", customWidth: 1024 } },
+  args: {
+    scenario: "viewport-fit",
+    viewport: { preset: "fit", customWidth: 1024 },
+  },
 };
 
 export const ViewportDesktop: Story = {
@@ -600,7 +651,9 @@ export const InspectOff: Story = {
   args: { scenario: "inspect-off" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole("button", { name: "Inspect page elements" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Inspect page elements" }),
+    ).toBeVisible();
     const btn = canvas.getByRole("button", { name: "Inspect page elements" });
     await expect(btn).toHaveAttribute("aria-pressed", "false");
   },
@@ -610,7 +663,9 @@ export const InspectOn: Story = {
   args: { scenario: "inspect-on" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByRole("button", { name: "Hide inspect highlights" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Hide inspect highlights" }),
+    ).toBeVisible();
     const btn = canvas.getByRole("button", { name: "Hide inspect highlights" });
     await expect(btn).toHaveAttribute("aria-pressed", "true");
   },

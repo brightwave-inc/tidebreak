@@ -124,7 +124,11 @@ function CodeNotificationsBody() {
     const query = search.trim().toLocaleLowerCase();
     return notifications.filter((notification) => {
       if (filter === "unread" && notification.readAt) return false;
-      if (filter !== "all" && filter !== "unread" && notification.rule !== filter) {
+      if (
+        filter !== "all" &&
+        filter !== "unread" &&
+        notification.rule !== filter
+      ) {
         return false;
       }
       if (!query) return true;
@@ -154,7 +158,9 @@ function CodeNotificationsBody() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-semibold tracking-tight">Notifications</h1>
+              <h1 className="text-xl font-semibold tracking-tight">
+                Notifications
+              </h1>
               {unread > 0 && (
                 <span className="rounded-full bg-primary px-2 py-0.5 text-[11px] font-medium text-primary-foreground">
                   {unread} unread
@@ -206,14 +212,19 @@ function CodeNotificationsBody() {
               placeholder="Search notifications…"
               className="min-w-56 flex-1 md:max-w-md"
             />
-            <Select value={filter} onValueChange={(value) => setFilter(value as FeedFilter)}>
+            <Select
+              value={filter}
+              onValueChange={(value) => setFilter(value as FeedFilter)}
+            >
               <SelectTrigger size="sm" className="w-44">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All notifications</SelectItem>
                 <SelectItem value="unread">Unread</SelectItem>
-                <SelectItem value="pull_request_attention">PR attention</SelectItem>
+                <SelectItem value="pull_request_attention">
+                  PR attention
+                </SelectItem>
                 <SelectItem value="pull_request_ready">PR ready</SelectItem>
                 <SelectItem value="run_failure">Run failures</SelectItem>
               </SelectContent>
@@ -223,7 +234,9 @@ function CodeNotificationsBody() {
               size="sm"
               variant="outline"
               disabled={unread === 0}
-              onClick={() => useCodeDeliveryStore.getState().markAllNotificationsRead()}
+              onClick={() =>
+                useCodeDeliveryStore.getState().markAllNotificationsRead()
+              }
             >
               <CheckCheck />
               Mark all read
@@ -234,7 +247,9 @@ function CodeNotificationsBody() {
               variant="ghost-destructive"
               disabled={notifications.length === 0}
               aria-label="Clear notification history"
-              onClick={() => useCodeDeliveryStore.getState().clearNotifications()}
+              onClick={() =>
+                useCodeDeliveryStore.getState().clearNotifications()
+              }
             >
               <Trash2 />
             </Button>
@@ -248,7 +263,8 @@ function CodeNotificationsBody() {
                   </EmptyMedia>
                   <EmptyTitle>No delivery notifications yet</EmptyTitle>
                   <EmptyDescription>
-                    New PR attention, merge readiness, and failed runs appear here.
+                    New PR attention, merge readiness, and failed runs appear
+                    here.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -256,7 +272,9 @@ function CodeNotificationsBody() {
               <Empty className="min-h-72">
                 <EmptyHeader>
                   <EmptyTitle>No notifications match</EmptyTitle>
-                  <EmptyDescription>Change the search or feed filter.</EmptyDescription>
+                  <EmptyDescription>
+                    Change the search or feed filter.
+                  </EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : (
@@ -274,7 +292,9 @@ function CodeNotificationsBody() {
                               .markNotificationRead(notification.id);
                             void navigate({
                               to: "/code/w/$workspaceId",
-                              params: { workspaceId: notification.workspaceId! },
+                              params: {
+                                workspaceId: notification.workspaceId!,
+                              },
                             });
                           }
                         : undefined
@@ -318,11 +338,18 @@ function NotificationRow({
       )}
     >
       <div className="mt-0.5">{icon}</div>
-      <button type="button" className="min-w-0 cursor-pointer text-left" onClick={onOpen}>
+      <button
+        type="button"
+        className="min-w-0 cursor-pointer text-left"
+        onClick={onOpen}
+      >
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="truncate text-sm font-medium">{notification.title}</h2>
           {!notification.readAt && (
-            <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="Unread" />
+            <span
+              className="size-1.5 shrink-0 rounded-full bg-primary"
+              aria-label="Unread"
+            />
           )}
         </div>
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
@@ -374,7 +401,9 @@ function NotificationRules({
     <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
       <div className="mx-auto max-w-3xl">
         <div className="mb-4">
-          <h2 className="text-base font-semibold">Delivery notification rules</h2>
+          <h2 className="text-base font-semibold">
+            Delivery notification rules
+          </h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Rules run locally. Repository scope, history, and read state stay on
             this device.
@@ -409,7 +438,9 @@ function RuleRow({
       />
       <div className="min-w-52 flex-1">
         <h3 className="text-sm font-medium">{copy.title}</h3>
-        <p className="mt-0.5 text-xs text-muted-foreground">{copy.description}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {copy.description}
+        </p>
       </div>
       <label className="flex cursor-pointer items-center gap-2 text-xs">
         <Checkbox
@@ -469,7 +500,9 @@ function RuleRepositoryScope({
                     onChange(toggleValue(selected, key, checked === true))
                   }
                 />
-                <span className="min-w-0 truncate">{repository.name_with_owner}</span>
+                <span className="min-w-0 truncate">
+                  {repository.name_with_owner}
+                </span>
               </label>
             );
           })}
@@ -487,7 +520,8 @@ function ruleCopy(kind: CodeDeliveryNotificationRuleKind): {
     case "pull_request_attention":
       return {
         title: "Pull requests need attention",
-        description: "Changes requested, failed checks, conflicts, or blocked state.",
+        description:
+          "Changes requested, failed checks, conflicts, or blocked state.",
       };
     case "pull_request_ready":
       return {
@@ -502,7 +536,11 @@ function ruleCopy(kind: CodeDeliveryNotificationRuleKind): {
   }
 }
 
-function toggleValue(values: string[], value: string, enabled: boolean): string[] {
+function toggleValue(
+  values: string[],
+  value: string,
+  enabled: boolean,
+): string[] {
   if (enabled) return values.includes(value) ? values : [...values, value];
   return values.filter((candidate) => candidate !== value);
 }

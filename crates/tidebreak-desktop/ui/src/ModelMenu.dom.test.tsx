@@ -85,11 +85,15 @@ it("warns only when a model choice switches providers", async () => {
   );
 
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "Model: Claude Sonnet 4" }));
+  await user.click(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  );
   await user.click(screen.getByRole("menuitem", { name: "Claude Haiku 4" }));
   expect(toast.warning).not.toHaveBeenCalled();
 
-  await user.click(screen.getByRole("button", { name: "Model: Claude Sonnet 4" }));
+  await user.click(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  );
   await user.click(screen.getByRole("tab", { name: "OpenAI" }));
   await user.click(screen.getByRole("menuitem", { name: "GPT-5" }));
 
@@ -112,7 +116,9 @@ it("searches every visible provider when typing with the picker open", async () 
   );
 
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "Model: Claude Sonnet 4" }));
+  await user.click(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  );
   await user.keyboard("gpt");
 
   expect(screen.getByRole("searchbox", { name: "Search models" })).toHaveValue(
@@ -155,14 +161,18 @@ it("splits a mixed gateway catalog into vendor tabs", async () => {
   );
 
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "Model: Claude Sonnet 4" }));
+  await user.click(
+    screen.getByRole("button", { name: "Model: Claude Sonnet 4" }),
+  );
 
   // One tab per vendor, opened on the selected model's vendor; only the
   // unrecognizable row keeps the generic gateway tab.
   const anthropicTab = screen.getByRole("tab", { name: "Anthropic" });
   expect(anthropicTab).toHaveAttribute("aria-selected", "true");
   expect(anthropicTab.querySelector("svg[fill='#D97757']")).not.toBeNull();
-  expect(screen.getByRole("menuitem", { name: "Claude Sonnet 4" })).toBeTruthy();
+  expect(
+    screen.getByRole("menuitem", { name: "Claude Sonnet 4" }),
+  ).toBeTruthy();
   expect(screen.queryByRole("menuitem", { name: "GPT-5" })).toBeNull();
 
   await user.click(screen.getByRole("tab", { name: "OpenAI" }));
@@ -185,8 +195,7 @@ it("opens when the first-task walkthrough is on the model step", () => {
     />,
   );
 
-  expect(screen.getByRole("menuitem", { name: "Claude Sonnet 4" })).toHaveAttribute(
-    "data-first-task-target",
-    "model-choice",
-  );
+  expect(
+    screen.getByRole("menuitem", { name: "Claude Sonnet 4" }),
+  ).toHaveAttribute("data-first-task-target", "model-choice");
 });

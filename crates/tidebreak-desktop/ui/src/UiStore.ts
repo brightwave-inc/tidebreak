@@ -2,7 +2,8 @@ import { create } from "zustand";
 
 const SIDEBAR_COLLAPSED_KEY = "tidebreak.sidebar-collapsed";
 const SIDEBAR_WIDTH_KEY = "tidebreak.sidebar-width";
-const MODEL_MENU_NOT_CONNECTED_KEY = "tidebreak.model-menu-not-connected-collapsed";
+const MODEL_MENU_NOT_CONNECTED_KEY =
+  "tidebreak.model-menu-not-connected-collapsed";
 const ACTIVE_TURN_SEND_MODE_KEY = "tidebreak.composer.sendMode";
 
 export type ActiveTurnSendMode = "queue" | "steer";
@@ -15,7 +16,10 @@ export const SIDEBAR_DEFAULT_WIDTH = 280;
 
 export function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
-  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
+  return Math.min(
+    SIDEBAR_MAX_WIDTH,
+    Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)),
+  );
 }
 
 function readStoredSidebarCollapsed(): boolean {
@@ -62,7 +66,10 @@ function readStoredNotConnectedCollapsed(): boolean {
 
 function storeNotConnectedCollapsed(collapsed: boolean): void {
   try {
-    window.localStorage.setItem(MODEL_MENU_NOT_CONNECTED_KEY, String(collapsed));
+    window.localStorage.setItem(
+      MODEL_MENU_NOT_CONNECTED_KEY,
+      String(collapsed),
+    );
   } catch {
     // Preference persistence is best-effort.
   }

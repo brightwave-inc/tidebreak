@@ -76,7 +76,9 @@ describe("TerminalDrawer", () => {
       />,
     );
 
-    const separator = screen.getByRole("separator", { name: "Resize terminal" });
+    const separator = screen.getByRole("separator", {
+      name: "Resize terminal",
+    });
     expect(separator).toHaveAttribute(
       "aria-valuenow",
       String(DEFAULT_TERMINAL_DRAWER_HEIGHT),
@@ -88,7 +90,9 @@ describe("TerminalDrawer", () => {
 
     const taller = DEFAULT_TERMINAL_DRAWER_HEIGHT + 32;
     expect(separator).toHaveAttribute("aria-valuenow", String(taller));
-    expect(useCodeUiStore.getState().terminalDrawerHeights["ws-1"]).toBe(taller);
+    expect(useCodeUiStore.getState().terminalDrawerHeights["ws-1"]).toBe(
+      taller,
+    );
     expect(window.localStorage.getItem(HEIGHTS_KEY)).toBe(
       JSON.stringify({ "ws-1": taller }),
     );

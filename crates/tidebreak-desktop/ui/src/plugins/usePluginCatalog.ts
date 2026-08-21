@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import type {
-  PluginCatalog,
-  PluginEnableUpdate,
-  PluginSkillInfo,
-} from "@/api";
+import type { PluginCatalog, PluginEnableUpdate, PluginSkillInfo } from "@/api";
 import type { PluginsApis } from "./pluginsApis";
 
 /**
@@ -127,6 +123,8 @@ export function usePluginCatalog(apis: PluginsApis): PluginCatalogState {
 }
 
 export function friendlyPluginError(error: unknown, fallback: string): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
   return message && message.length <= 240 ? message : fallback;
 }

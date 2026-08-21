@@ -64,9 +64,7 @@ describe("ProvidersPanel", () => {
     fireEvent.change(screen.getByLabelText("Custom model 1 max output"), {
       target: { value: "8192" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save configuration" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("openai_compatible", {
@@ -105,9 +103,7 @@ describe("ProvidersPanel", () => {
     });
     // Display name left blank, which is the case the server represents by
     // omitting the key. It used to be sent as an explicit null.
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save configuration" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() => expect(putProvider).toHaveBeenCalled());
 
@@ -195,9 +191,7 @@ describe("ProvidersPanel", () => {
     fireEvent.change(screen.getByPlaceholderText("API key"), {
       target: { value: "xai-key" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save configuration" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("xai", {
@@ -206,7 +200,9 @@ describe("ProvidersPanel", () => {
       }),
     );
     expect(screen.queryByPlaceholderText(/base URL/i)).not.toBeInTheDocument();
-    expect(screen.getByText("Requests go directly to api.x.ai/v1.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Requests go directly to api.x.ai/v1."),
+    ).toBeInTheDocument();
   });
 
   it("does not expose custom model registration for curated providers", () => {
@@ -270,9 +266,7 @@ describe("ProvidersPanel", () => {
     fireEvent.change(screen.getByLabelText("Custom model 1 ID"), {
       target: { value: "qwen3:0.6b" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save configuration" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("ollama", {
@@ -372,9 +366,7 @@ describe("ProvidersPanel", () => {
     fireEvent.change(screen.getByPlaceholderText("API key"), {
       target: { value: "sk-or" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Save configuration" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
 
     await waitFor(() =>
       expect(putProvider).toHaveBeenCalledWith("openrouter", {

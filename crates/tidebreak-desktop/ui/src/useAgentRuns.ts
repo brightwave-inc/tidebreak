@@ -136,7 +136,9 @@ export function useAgentRuns(
     spawnKeys.some(
       (key) =>
         !runs.some(
-          (run) => matchesVisibleSpawn(run) && (run.id === key || run.spawn_call_id === key),
+          (run) =>
+            matchesVisibleSpawn(run) &&
+            (run.id === key || run.spawn_call_id === key),
         ),
     );
   useEffect(() => {
@@ -183,7 +185,8 @@ export function useAgentRuns(
 
   const loadProgress = useCallback(
     async (runId: string, afterSequence: number) => {
-      if (!client || !chatId) return { entries: [], nextSequence: afterSequence };
+      if (!client || !chatId)
+        return { entries: [], nextSequence: afterSequence };
       return client.listAgentRunProgress(chatId, runId, afterSequence);
     },
     [client, chatId],

@@ -13,6 +13,8 @@ export function cn(...inputs: ClassValue[]) {
  * a serialized payload falls back to the caller's own wording.
  */
 export function friendlyErrorMessage(error: unknown, fallback: string): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
   return message && message.length <= 240 ? message : fallback;
 }

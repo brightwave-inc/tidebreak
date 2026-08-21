@@ -38,7 +38,10 @@ function AppCard({ entry }: { entry: ResultEntry }) {
   const appId = entry.targetId;
   return (
     <div className={TRANSCRIPT_RESULT_CARD_FRAME}>
-      <span className="grid size-9 shrink-0 place-items-center" aria-hidden="true">
+      <span
+        className="grid size-9 shrink-0 place-items-center"
+        aria-hidden="true"
+      >
         <LayoutGrid className="text-icon-blue size-5" />
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
@@ -55,7 +58,9 @@ function AppCard({ entry }: { entry: ResultEntry }) {
           size="sm"
           variant="outline"
           className="ml-2 shrink-0"
-          onClick={() => void navigate({ to: "/apps/$appId", params: { appId } })}
+          onClick={() =>
+            void navigate({ to: "/apps/$appId", params: { appId } })
+          }
           aria-label={`Open app ${entry.label}`}
         >
           Open app

@@ -53,7 +53,9 @@ async function desktopListenInfo(): Promise<ServerInfo | null> {
     if (!body || typeof body !== "object") return null;
     const record = body as { baseUrl?: unknown; token?: unknown };
     const baseUrl =
-      typeof record.baseUrl === "string" ? record.baseUrl.trim().replace(/\/$/, "") : "";
+      typeof record.baseUrl === "string"
+        ? record.baseUrl.trim().replace(/\/$/, "")
+        : "";
     const token = typeof record.token === "string" ? record.token.trim() : "";
     if (!baseUrl || !token) return null;
     return { baseUrl, token, attachment: "local", gatewayAuth: false };

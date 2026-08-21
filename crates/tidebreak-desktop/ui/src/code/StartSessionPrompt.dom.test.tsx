@@ -144,8 +144,13 @@ describe("StartSessionPrompt", () => {
         />,
       ),
     );
-    expect(screen.getByRole("button", { name: "Permissions: Plan" })).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    expect(
+      screen.getByRole("button", { name: "Permissions: Plan" }),
+    ).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
@@ -181,11 +186,21 @@ describe("StartSessionPrompt", () => {
     await user.click(screen.getByRole("combobox", { name: "Harness" }));
     await user.click(screen.getByRole("option", { name: /Grok CLI/ }));
     // The selected Ask is not honorable here; the mode follows the engine.
-    expect(screen.getByRole("button", { name: "Permissions: Auto" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Permissions: Auto" }),
+    ).toBeInTheDocument();
     expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    expect(onStart).toHaveBeenCalledWith("grok", "auto", "list the files", undefined);
+    expect(onStart).toHaveBeenCalledWith(
+      "grok",
+      "auto",
+      "list the files",
+      undefined,
+    );
   });
 
   it("posts the listed default model when starting", async () => {
@@ -215,7 +230,10 @@ describe("StartSessionPrompt", () => {
     expect(
       await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
     ).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Message" }), "list the files");
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(onStart).toHaveBeenCalledWith(
       "claude_code",
@@ -271,9 +289,7 @@ describe("StartSessionPrompt", () => {
     await act(async () => {
       codex.resolve({
         kind: "codex",
-        models: [
-          { id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true },
-        ],
+        models: [{ id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true }],
       });
     });
     expect(
@@ -296,7 +312,9 @@ describe("StartSessionPrompt", () => {
         />,
       ),
     );
-    await user.click(screen.getByRole("button", { name: "Permissions: Allow all" }));
+    await user.click(
+      screen.getByRole("button", { name: "Permissions: Allow all" }),
+    );
     await user.click(screen.getByRole("menuitem", { name: /Ask/ }));
     expect(onSelectMode).toHaveBeenCalledWith("ask");
   });

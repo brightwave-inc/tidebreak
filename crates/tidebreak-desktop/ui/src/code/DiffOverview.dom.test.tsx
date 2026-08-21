@@ -83,17 +83,15 @@ describe("DiffOverview", () => {
       }),
     };
     render(
-      <DiffOverview
-        client={client}
-        workspaceId="ws-1"
-        onOpenFile={vi.fn()}
-      />,
+      <DiffOverview client={client} workspaceId="ws-1" onOpenFile={vi.fn()} />,
     );
 
     const root = await screen.findByRole("button", {
       name: "Collapse crates/tidebreak-desktop/ui/src",
     });
-    expect(screen.getByText("crates/tidebreak-desktop/ui/src")).toBeInTheDocument();
+    expect(
+      screen.getByText("crates/tidebreak-desktop/ui/src"),
+    ).toBeInTheDocument();
     expect(screen.getByText("CodeInspector.tsx")).toBeInTheDocument();
     await userEvent.setup().click(root);
     expect(screen.queryByText("CodeInspector.tsx")).not.toBeInTheDocument();
@@ -135,11 +133,7 @@ describe("DiffOverview", () => {
       }),
     };
     rerender(
-      <DiffOverview
-        client={clean}
-        workspaceId="ws-2"
-        onOpenFile={vi.fn()}
-      />,
+      <DiffOverview client={clean} workspaceId="ws-2" onOpenFile={vi.fn()} />,
     );
     expect(
       await screen.findByText("The worktree matches its base branch."),

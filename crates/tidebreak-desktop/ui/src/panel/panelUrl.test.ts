@@ -13,7 +13,9 @@ describe("panel search", () => {
     expect(
       panelSearchFrom({ task: " watch-session ", subagent: " task-call " }),
     ).toMatchObject({ task: "watch-session", subagent: undefined });
-    expect(panelSearchFrom({ task: "   ", subagent: " task-call " })).toMatchObject({
+    expect(
+      panelSearchFrom({ task: "   ", subagent: " task-call " }),
+    ).toMatchObject({
       task: undefined,
       subagent: "task-call",
     });
@@ -26,7 +28,10 @@ describe("panel URLs", () => {
     expect(parsePanelSegment("folders")).toEqual({ type: "folders" });
     expect(parsePanelSegment("permissions")).toEqual({ type: "permissions" });
     expect(parsePanelSegment("agents")).toEqual({ type: "agents" });
-    expect(parsePanelSegment("agent.run-1")).toEqual({ type: "agent", runId: "run-1" });
+    expect(parsePanelSegment("agent.run-1")).toEqual({
+      type: "agent",
+      runId: "run-1",
+    });
     expect(parsePanelSegment("terminal")).toEqual({ type: "terminal" });
     expect(parsePanelSegment("terminal.term-1")).toEqual({
       type: "terminal",
@@ -137,7 +142,11 @@ describe("layout URLs", () => {
     const layout = {
       tabs: [
         { type: "folders" as const },
-        { type: "document" as const, documentId: "doc-1", citationId: "cite-2" },
+        {
+          type: "document" as const,
+          documentId: "doc-1",
+          citationId: "cite-2",
+        },
       ],
       activeIndex: 1,
       fullscreen: true,
@@ -152,7 +161,10 @@ describe("layout URLs", () => {
   });
 
   it("falls back to the first tab when nothing usable is named active", () => {
-    expect(layoutFromSearch({ tabs: "folders,outputs", active: "agents" }).activeIndex).toBe(0);
+    expect(
+      layoutFromSearch({ tabs: "folders,outputs", active: "agents" })
+        .activeIndex,
+    ).toBe(0);
     expect(layoutFromSearch({ tabs: "folders,outputs" }).activeIndex).toBe(0);
   });
 
@@ -168,13 +180,15 @@ describe("layout URLs", () => {
   it("reads one tab per panel however often the URL names it", () => {
     // Both segments address the same document, which is one tab open at one
     // of the two places in it.
-    expect(layoutFromSearch({ tabs: "document.doc-1,document.doc-1.cite-2" }).tabs).toEqual([
-      { type: "document", documentId: "doc-1" },
-    ]);
+    expect(
+      layoutFromSearch({ tabs: "document.doc-1,document.doc-1.cite-2" }).tabs,
+    ).toEqual([{ type: "document", documentId: "doc-1" }]);
   });
 
   it("restores a link written in the retired pair-of-slots grammar", () => {
-    expect(layoutFromSearch({ left: "folders", right: "document.doc-1" })).toEqual({
+    expect(
+      layoutFromSearch({ left: "folders", right: "document.doc-1" }),
+    ).toEqual({
       tabs: [{ type: "folders" }, { type: "document", documentId: "doc-1" }],
       activeIndex: 0,
       fullscreen: false,
@@ -190,15 +204,25 @@ describe("layout URLs", () => {
 
   it("carries a legacy expanded panel over, but not an expanded conversation", () => {
     expect(
-      layoutFromSearch({ left: "chat", right: "document.doc-1", fullscreen: "right" }),
+      layoutFromSearch({
+        left: "chat",
+        right: "document.doc-1",
+        fullscreen: "right",
+      }),
     ).toMatchObject({ fullscreen: true });
     expect(
-      layoutFromSearch({ left: "chat", right: "document.doc-1", fullscreen: "left" }),
+      layoutFromSearch({
+        left: "chat",
+        right: "document.doc-1",
+        fullscreen: "left",
+      }),
     ).toMatchObject({ fullscreen: false });
   });
 
   it("clears the retired params whenever it writes a layout", () => {
-    expect(searchFromLayout(layoutFromSearch({ left: "folders" }))).toMatchObject({
+    expect(
+      searchFromLayout(layoutFromSearch({ left: "folders" })),
+    ).toMatchObject({
       tabs: "folders",
       left: undefined,
       right: undefined,

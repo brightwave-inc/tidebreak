@@ -29,7 +29,10 @@ function storeTheme(mode: ThemeMode): void {
 }
 
 function darkMediaQuery(): MediaQueryList | null {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+  if (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function"
+  ) {
     return null;
   }
   return window.matchMedia(DARK_QUERY);
@@ -119,7 +122,11 @@ export function setThemeMode(mode: ThemeMode): void {
 
 export function cycleThemeMode(): void {
   setThemeMode(
-    state.mode === "light" ? "dark" : state.mode === "dark" ? "system" : "light",
+    state.mode === "light"
+      ? "dark"
+      : state.mode === "dark"
+        ? "system"
+        : "light",
   );
 }
 
@@ -136,6 +143,10 @@ export function useTheme(): {
   setMode: (mode: ThemeMode) => void;
   cycle: () => void;
 } {
-  const { mode, resolved } = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const { mode, resolved } = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getSnapshot,
+  );
   return { mode, resolved, setMode: setThemeMode, cycle: cycleThemeMode };
 }

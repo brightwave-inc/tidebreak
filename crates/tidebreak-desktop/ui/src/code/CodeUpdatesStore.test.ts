@@ -13,7 +13,11 @@ import {
 
 const working: Attention = { state: { type: "working" }, source: "lifecycle" };
 const need: Attention = {
-  state: { type: "needs_you", prompt: "an approval is waiting", source: "structured" },
+  state: {
+    type: "needs_you",
+    prompt: "an approval is waiting",
+    source: "structured",
+  },
   source: "structured",
 };
 
@@ -47,7 +51,10 @@ describe("reduceCodeUpdates", () => {
   it("replaces the map on snapshot and upserts a digest", () => {
     const afterSnapshot = reduceCodeUpdates(EMPTY_STATE, {
       type: "snapshot",
-      sessions: [digest(), digest({ workspace: "ws-2", session: "sess-2", title: "other" })],
+      sessions: [
+        digest(),
+        digest({ workspace: "ws-2", session: "sess-2", title: "other" }),
+      ],
     });
     expect(Object.keys(afterSnapshot.conversationsByWorkspace)).toEqual([
       "ws-1",
@@ -60,9 +67,9 @@ describe("reduceCodeUpdates", () => {
     const first = afterDigest.conversationsByWorkspace["ws-1"]["sess-1"];
     expect(first.turn_count).toBe(2);
     expect(first.attention).toEqual(need);
-    expect(
-      afterDigest.conversationsByWorkspace["ws-2"]["sess-2"].title,
-    ).toBe("other");
+    expect(afterDigest.conversationsByWorkspace["ws-2"]["sess-2"].title).toBe(
+      "other",
+    );
     const restated = reduceCodeUpdates(afterDigest, {
       type: "snapshot",
       sessions: [digest({ workspace: "ws-3", session: "sess-3" })],
@@ -121,9 +128,9 @@ describe("reduceCodeUpdates", () => {
     expect(Object.keys(seeded.conversationsByWorkspace["ws-1"])).toEqual([
       "sess-1",
     ]);
-    expect(watchChildren(seeded, "ws-1").map((child) => child.session)).toEqual([
-      "sess-watch",
-    ]);
+    expect(watchChildren(seeded, "ws-1").map((child) => child.session)).toEqual(
+      ["sess-watch"],
+    );
 
     const afterWatchDigest = reduceCodeUpdates(seeded, {
       type: "digest",
@@ -153,7 +160,11 @@ describe("reduceCodeUpdates", () => {
     });
     const ended = reduceCodeUpdates(seeded, {
       type: "digest",
-      digest: digest({ session: "sess-watch", kind: "watch", lifecycle: "ended" }),
+      digest: digest({
+        session: "sess-watch",
+        kind: "watch",
+        lifecycle: "ended",
+      }),
     });
     expect(watchChildren(ended, "ws-1")).toEqual([]);
 
@@ -264,7 +275,9 @@ describe("shouldRequestOsAttention", () => {
     expect(shouldRequestOsAttention(undefined, need, "ws-1", null)).toBe(true);
     expect(shouldRequestOsAttention(need, need, "ws-1", null)).toBe(false);
     expect(shouldRequestOsAttention(working, need, "ws-1", "ws-1")).toBe(false);
-    expect(shouldRequestOsAttention(working, need, "ws-1", "ws-other")).toBe(true);
+    expect(shouldRequestOsAttention(working, need, "ws-1", "ws-other")).toBe(
+      true,
+    );
     expect(
       shouldRequestOsAttention(
         working,

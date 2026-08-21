@@ -271,8 +271,7 @@ function useRailPositions(
           relativeTop < 0
             ? 1 - Math.abs(relativeTop) / PROXIMITY_THRESHOLD
             : relativeTop > container.height
-              ? 1 -
-                (relativeTop - container.height) / PROXIMITY_THRESHOLD
+              ? 1 - (relativeTop - container.height) / PROXIMITY_THRESHOLD
               : 1;
         indicator.style.display = "";
         indicator.style.opacity = String(Math.max(0, opacity));
@@ -355,6 +354,8 @@ export function layoutRailIndicatorTops(
   }
 
   return new Map(
-    retained.map((candidate, index) => [candidate.anchorId, tops[index]!] as const),
+    retained.map(
+      (candidate, index) => [candidate.anchorId, tops[index]!] as const,
+    ),
   );
 }

@@ -3,10 +3,7 @@ import {
   type BrowserHistoryEntry,
   type BrowserSession,
 } from "./browserSession";
-import {
-  browserDisplayAddress,
-  validateBrowserUrl,
-} from "./browserNavigation";
+import { browserDisplayAddress, validateBrowserUrl } from "./browserNavigation";
 
 const STORAGE_KEY = "tidebreak.code-browser-sessions.v1";
 const MAX_STORED_SESSIONS = 24;
@@ -122,10 +119,7 @@ export function storedBrowserTitle(browserId: string): string {
 }
 
 function persistableSession(session: BrowserSession): BrowserSession {
-  const historyStart = Math.max(
-    0,
-    session.history.length - MAX_STORED_HISTORY,
-  );
+  const historyStart = Math.max(0, session.history.length - MAX_STORED_HISTORY);
   const history = session.history.slice(historyStart);
   const shiftedIndex = session.historyIndex - historyStart;
   return {

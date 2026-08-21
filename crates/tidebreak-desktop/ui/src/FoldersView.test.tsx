@@ -296,7 +296,11 @@ describe("FoldersView", () => {
         folder("available", "Research"),
       ]);
     vi.mocked(host.listApprovedFolders).mockResolvedValue([
-      { rootId: "connected", displayName: "Current project", status: "connected" },
+      {
+        rootId: "connected",
+        displayName: "Current project",
+        status: "connected",
+      },
       { rootId: "available", displayName: "Research", status: "connected" },
     ]);
     vi.mocked(host.connectApprovedFolder).mockResolvedValue({
@@ -307,7 +311,9 @@ describe("FoldersView", () => {
     const user = userEvent.setup();
     render(<FoldersView chat={chat} />);
 
-    expect(await screen.findByText("Available on this device")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Available on this device"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Current project")).toBeInTheDocument();
     expect(screen.getByText("Research")).toBeInTheDocument();
     expect(screen.getAllByText("Current project")).toHaveLength(1);
@@ -317,7 +323,9 @@ describe("FoldersView", () => {
     await waitFor(() =>
       expect(host.listConnectedFolders).toHaveBeenCalledTimes(2),
     );
-    expect(screen.queryByText("Available on this device")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Available on this device"),
+    ).not.toBeInTheDocument();
     expect(screen.getAllByText("Research")).toHaveLength(1);
   });
 

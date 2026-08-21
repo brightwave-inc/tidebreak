@@ -45,7 +45,9 @@ afterEach(() => {
 describe("useAgentRuns", () => {
   it("reads the exact chat once a spawn row is present", async () => {
     const api = client(async () => [run()]);
-    const { result } = renderHook(() => useAgentRuns(api, "chat-1", ["spawn-1"]));
+    const { result } = renderHook(() =>
+      useAgentRuns(api, "chat-1", ["spawn-1"]),
+    );
 
     await waitFor(() => expect(result.current.runs).toEqual([run()]));
     expect(api.listAgentRuns).toHaveBeenCalledWith("chat-1");

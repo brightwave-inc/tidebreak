@@ -17,7 +17,9 @@ import { Sidebar, SidebarButton, SidebarContent } from "./primitives";
  */
 export function SettingsSidebar({ onBack }: { onBack: () => void }) {
   const navigate = useNavigate();
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const { managed } = useManagedPolicy();
   const sections = settingsSectionsFor(managed);
 

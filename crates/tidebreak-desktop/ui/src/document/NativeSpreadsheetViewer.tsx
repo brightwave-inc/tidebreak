@@ -234,11 +234,7 @@ function RenderedWorkbook({
 
   return (
     <div
-      className={cn(
-        WORKBOOK_SURFACE,
-        "min-h-0 overflow-hidden",
-        className,
-      )}
+      className={cn(WORKBOOK_SURFACE, "min-h-0 overflow-hidden", className)}
       {...restProps}
     >
       <XlsxViewer
@@ -256,9 +252,7 @@ function RenderedWorkbook({
         experimentalCanvas
         getCellStyle={getCellStyle}
         isDark={dark}
-        loadingState={
-          <ViewerMessage spinner>Reading workbook…</ViewerMessage>
-        }
+        loadingState={<ViewerMessage spinner>Reading workbook…</ViewerMessage>}
         readOnly
         renderScroller={renderScroller}
         renderTableHeaderMenu={() => null}
@@ -274,13 +268,14 @@ function RenderedWorkbook({
   );
 }
 
-function readOnlyCellStyle({
-  cell,
-  isMerged,
-  resolvedStyle,
-  value,
-  workbookSheetIndex,
-}: XlsxCellStyleContext,
+function readOnlyCellStyle(
+  {
+    cell,
+    isMerged,
+    resolvedStyle,
+    value,
+    workbookSheetIndex,
+  }: XlsxCellStyleContext,
   conditionalStylesBySheet: Record<
     number,
     Record<string, ReadOnlyConditionalCellStyle>
@@ -589,8 +584,7 @@ function resolveCitation(
   ) {
     const found = controller.tabs.findIndex(
       (tab) =>
-        tab.kind === "sheet" &&
-        tab.sheetIndex === highlightRange.sheetIndex,
+        tab.kind === "sheet" && tab.sheetIndex === highlightRange.sheetIndex,
     );
     if (found >= 0) tabIndex = found;
   }
@@ -604,7 +598,10 @@ function resolveCitation(
 }
 
 function parseAddress(address: string): { row: number; col: number } | null {
-  const match = address.trim().replaceAll("$", "").match(/^([A-Z]+)(\d+)$/i);
+  const match = address
+    .trim()
+    .replaceAll("$", "")
+    .match(/^([A-Z]+)(\d+)$/i);
   if (!match?.[1] || !match[2]) return null;
   const row = Number.parseInt(match[2], 10) - 1;
   if (row < 0) return null;
@@ -637,8 +634,14 @@ function scrollRangeIntoView(
     sheet.colWidthOverridesPx,
     sheet.hiddenCols,
   );
-  viewport.scrollTop = Math.max(0, (24 + top) * zoom - viewport.clientHeight / 2);
-  viewport.scrollLeft = Math.max(0, (40 + left) * zoom - viewport.clientWidth / 2);
+  viewport.scrollTop = Math.max(
+    0,
+    (24 + top) * zoom - viewport.clientHeight / 2,
+  );
+  viewport.scrollLeft = Math.max(
+    0,
+    (40 + left) * zoom - viewport.clientWidth / 2,
+  );
   viewport.focus({ preventScroll: true });
 }
 

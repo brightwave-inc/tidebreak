@@ -49,7 +49,8 @@ export const NarrowResponse: Story = {
 
 export const HighlightedPassage: Story = {
   args: {
-    children: "The workshop should stay small enough to remain trustworthy and fast.",
+    children:
+      "The workshop should stay small enough to remain trustworthy and fast.",
     highlightRange: { start: 4, end: 18 },
   },
 };

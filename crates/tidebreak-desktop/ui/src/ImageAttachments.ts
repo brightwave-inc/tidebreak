@@ -1,4 +1,3 @@
-
 /**
  * Composer image attachments: what one is, how it moves between states, and the
  * two ways its bytes reach the server.
@@ -328,7 +327,11 @@ export function imageAttachmentName(
 ): string {
   const given = file.name?.trim() ?? "";
   if (given && !/^image\.(png|jpe?g|webp|gif)$/i.test(given)) return given;
-  const stamp = at.toISOString().slice(0, 19).replace("T", "-").replace(/:/g, "-");
+  const stamp = at
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", "-")
+    .replace(/:/g, "-");
   const extension = file.type.split("/")[1] || "png";
   return `pasted-image-${stamp}.${extension}`;
 }
@@ -471,7 +474,9 @@ export function uploadImageAttachment(
     };
     request.onload = () => {
       if (request.status !== 201) {
-        reject(new Error(refusalFromBody(request.status, request.responseText)));
+        reject(
+          new Error(refusalFromBody(request.status, request.responseText)),
+        );
         return;
       }
       try {
@@ -553,7 +558,8 @@ export function parseAttachedImage(value: unknown): PickedImage | null {
  */
 function isSafeRendererText(value: string, maxCodePoints: number): boolean {
   const characters = [...value];
-  if (characters.length === 0 || characters.length > maxCodePoints) return false;
+  if (characters.length === 0 || characters.length > maxCodePoints)
+    return false;
   return characters.every(
     (character) => !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(character),
   );
@@ -662,5 +668,7 @@ function isExactRecord(
 ): value is Record<string, unknown> {
   if (!isRecord(value)) return false;
   const actual = Object.keys(value);
-  return actual.length === keys.length && actual.every((key) => keys.includes(key));
+  return (
+    actual.length === keys.length && actual.every((key) => keys.includes(key))
+  );
 }

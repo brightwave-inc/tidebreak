@@ -4,7 +4,9 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-type SelectProps = React.ComponentPropsWithoutRef<typeof SelectPrimitive.Root> & {
+type SelectProps = React.ComponentPropsWithoutRef<
+  typeof SelectPrimitive.Root
+> & {
   modal?: boolean;
 };
 
@@ -45,7 +47,10 @@ const SelectScrollUpButton = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SelectPrimitive.ScrollUpButton
     ref={ref}
-    className={cn("flex cursor-default items-center justify-center py-1", className)}
+    className={cn(
+      "flex cursor-default items-center justify-center py-1",
+      className,
+    )}
     {...props}
   >
     <ChevronUp className="size-4" />
@@ -59,13 +64,17 @@ const SelectScrollDownButton = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SelectPrimitive.ScrollDownButton
     ref={ref}
-    className={cn("flex cursor-default items-center justify-center py-1", className)}
+    className={cn(
+      "flex cursor-default items-center justify-center py-1",
+      className,
+    )}
     {...props}
   >
     <ChevronDown className="size-4" />
   </SelectPrimitive.ScrollDownButton>
 ));
-SelectScrollDownButton.displayName = SelectPrimitive.ScrollDownButton.displayName;
+SelectScrollDownButton.displayName =
+  SelectPrimitive.ScrollDownButton.displayName;
 
 type SelectContentProps = React.ComponentPropsWithoutRef<
   typeof SelectPrimitive.Content
@@ -77,33 +86,45 @@ type SelectContentProps = React.ComponentPropsWithoutRef<
 const SelectContent = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Content>,
   SelectContentProps
->(({ className, children, position = "popper", alignItemWithTrigger: _alignItemWithTrigger, scrollButtons = true, ...props }, ref) => (
-  <SelectPrimitive.Portal>
-    <SelectPrimitive.Content
-      ref={ref}
-      className={cn(
-        "relative z-[60] max-h-96 min-w-32 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
-        position === "popper" &&
-          "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
-        className,
-      )}
-      position={position}
-      {...props}
-    >
-      {scrollButtons && <SelectScrollUpButton />}
-      <SelectPrimitive.Viewport
+>(
+  (
+    {
+      className,
+      children,
+      position = "popper",
+      alignItemWithTrigger: _alignItemWithTrigger,
+      scrollButtons = true,
+      ...props
+    },
+    ref,
+  ) => (
+    <SelectPrimitive.Portal>
+      <SelectPrimitive.Content
+        ref={ref}
         className={cn(
-          "p-1",
+          "relative z-[60] max-h-96 min-w-32 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           position === "popper" &&
-            "h-(--radix-select-trigger-height) w-full min-w-(--radix-select-trigger-width)",
+            "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
+          className,
         )}
+        position={position}
+        {...props}
       >
-        {children}
-      </SelectPrimitive.Viewport>
-      {scrollButtons && <SelectScrollDownButton />}
-    </SelectPrimitive.Content>
-  </SelectPrimitive.Portal>
-));
+        {scrollButtons && <SelectScrollUpButton />}
+        <SelectPrimitive.Viewport
+          className={cn(
+            "p-1",
+            position === "popper" &&
+              "h-(--radix-select-trigger-height) w-full min-w-(--radix-select-trigger-width)",
+          )}
+        >
+          {children}
+        </SelectPrimitive.Viewport>
+        {scrollButtons && <SelectScrollDownButton />}
+      </SelectPrimitive.Content>
+    </SelectPrimitive.Portal>
+  ),
+);
 SelectContent.displayName = SelectPrimitive.Content.displayName;
 
 const SelectLabel = React.forwardRef<
@@ -144,7 +165,11 @@ const SelectSeparator = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Separator>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>
 >(({ className, ...props }, ref) => (
-  <SelectPrimitive.Separator ref={ref} className={cn("-mx-1 my-1 h-px bg-muted", className)} {...props} />
+  <SelectPrimitive.Separator
+    ref={ref}
+    className={cn("-mx-1 my-1 h-px bg-muted", className)}
+    {...props}
+  />
 ));
 SelectSeparator.displayName = SelectPrimitive.Separator.displayName;
 

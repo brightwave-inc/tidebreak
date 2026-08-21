@@ -3,8 +3,7 @@ import { splitMarkdownBlocks } from "./markdownBlocks";
 
 describe("splitMarkdownBlocks", () => {
   it("keeps a fenced block whole even when it contains blank lines", () => {
-    const source =
-      "before\n\n```ts\nline one\n\nline two\n```\n\nafter";
+    const source = "before\n\n```ts\nline one\n\nline two\n```\n\nafter";
     const blocks = splitMarkdownBlocks(source);
 
     const fence = blocks.find((block) => block.includes("```"));

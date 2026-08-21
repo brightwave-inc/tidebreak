@@ -30,7 +30,10 @@ export type PendingPromptsStore = {
   refresh: () => void;
   setUserQuestions: (chatId: string, requests: PendingUserQuestions[]) => void;
   setPlanApprovals: (chatId: string, requests: PendingPlanApproval[]) => void;
-  setFolderAccess: (chatId: string, requests: PendingFolderAccessRequest[]) => void;
+  setFolderAccess: (
+    chatId: string,
+    requests: PendingFolderAccessRequest[],
+  ) => void;
   setOutputWritebacks: (
     chatId: string,
     requests: PendingOutputWritebackRequest[],

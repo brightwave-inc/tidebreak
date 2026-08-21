@@ -4,8 +4,7 @@ import type { Element, ElementContent, Root, RootContent } from "hast";
 const OPENING = ":cit[";
 const CLOSING = /^\]\{([^}]*)\}/;
 const MAX_PHRASE_CHARACTERS = 512;
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CELL_RANGE = /^[A-Z]+[1-9][0-9]*(?::[A-Z]+[1-9][0-9]*)?$/i;
 
 /** Properties carrying a validated locator from the hast tree to React. */
@@ -82,7 +81,9 @@ function convertContent(nodes: ElementContent[]): ElementContent[] {
         tagName: "span",
         properties: {
           [CITATION_DOCUMENT_PROPERTY]: citation.attributes.documentId,
-          [CITATION_LOCATOR_PROPERTY]: JSON.stringify(citation.attributes.locator),
+          [CITATION_LOCATOR_PROPERTY]: JSON.stringify(
+            citation.attributes.locator,
+          ),
         },
         children: citation.children,
       });
@@ -176,7 +177,11 @@ function parseAttributes(raw: string): CitationAttributes | null {
   );
   if (locatorKeys.length > 1) return null;
   if (values.has("cells") && !values.has("sheet")) return null;
-  const allowed = new Set(["doc", ...locatorKeys, ...(values.has("cells") ? ["cells"] : [])]);
+  const allowed = new Set([
+    "doc",
+    ...locatorKeys,
+    ...(values.has("cells") ? ["cells"] : []),
+  ]);
   if ([...values.keys()].some((key) => !allowed.has(key))) return null;
 
   let locator: CitationLocator = { kind: "document" };

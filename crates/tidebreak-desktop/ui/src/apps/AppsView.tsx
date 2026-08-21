@@ -120,7 +120,10 @@ export function AppsView({
             </EmptyHeader>
           </Empty>
         ) : (
-          <ul className="flex flex-col gap-0.5 overflow-y-auto px-3" aria-label="Apps">
+          <ul
+            className="flex flex-col gap-0.5 overflow-y-auto px-3"
+            aria-label="Apps"
+          >
             {apps.map((app) => (
               <li key={app.id}>
                 <button

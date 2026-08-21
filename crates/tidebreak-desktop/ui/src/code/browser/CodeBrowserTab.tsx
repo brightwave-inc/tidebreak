@@ -119,9 +119,9 @@ function CodeBrowserTabSession({
   const sessionRef = useRef(session);
   const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
   const viewportSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const [renderedViewportWidth, setRenderedViewportWidth] = useState<number | null>(
-    null,
-  );
+  const [renderedViewportWidth, setRenderedViewportWidth] = useState<
+    number | null
+  >(null);
   const visible =
     !obscured &&
     !historyOpen &&
@@ -236,16 +236,21 @@ function CodeBrowserTabSession({
     if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
       lastNativeBounds.current = bounds;
       recordRuntime(
-        await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
+        await host.command(workspaceId, browserId, {
+          type: "set_bounds",
+          bounds,
+        }),
       );
     }
     if (!mountedRef.current || !visibleRef.current) {
       if (!mountedRef.current) nativeReady.current = false;
       cancelNativeReveal();
-      recordRuntime(await host.command(workspaceId, browserId, {
-        type: "set_visible",
-        visible: false,
-      }));
+      recordRuntime(
+        await host.command(workspaceId, browserId, {
+          type: "set_visible",
+          visible: false,
+        }),
+      );
       return;
     }
     scheduleNativeReveal();
@@ -266,7 +271,10 @@ function CodeBrowserTabSession({
       nativeReady.current = false;
       if (host.available()) {
         void host
-          .command(workspaceId, browserId, { type: "set_visible", visible: false })
+          .command(workspaceId, browserId, {
+            type: "set_visible",
+            visible: false,
+          })
           .catch(() => undefined);
       }
     };
@@ -354,7 +362,10 @@ function CodeBrowserTabSession({
           updateSession((value) =>
             failBrowserSession(
               value,
-              friendlyErrorMessage(error, "Could not connect to the in-app browser"),
+              friendlyErrorMessage(
+                error,
+                "Could not connect to the in-app browser",
+              ),
             ),
           );
         }
@@ -366,13 +377,17 @@ function CodeBrowserTabSession({
       if (!bounds) return;
 
       try {
-        const snapshot = await host.command(workspaceId, browserId, { type: "snapshot" });
+        const snapshot = await host.command(workspaceId, browserId, {
+          type: "snapshot",
+        });
         if (cancelled) return;
         if (
           snapshot.browserId !== browserId ||
           snapshot.workspaceId !== workspaceId
         ) {
-          throw new Error("The browser host returned a session from another workspace");
+          throw new Error(
+            "The browser host returned a session from another workspace",
+          );
         }
         recordRuntime(snapshot);
         if (snapshot.exists) {
@@ -380,9 +395,10 @@ function CodeBrowserTabSession({
           nativeHistoryAvailable.current = true;
           if (snapshot.url) {
             updateSession((value) => {
-              let next = snapshot.loadState === "loading"
-                ? observeBrowserNavigation(value, snapshot.url!, "loading")
-                : finishBrowserNavigation(value, snapshot.url!);
+              let next =
+                snapshot.loadState === "loading"
+                  ? observeBrowserNavigation(value, snapshot.url!, "loading")
+                  : finishBrowserNavigation(value, snapshot.url!);
               if (snapshot.title) next = setBrowserTitle(next, snapshot.title);
               return next;
             });
@@ -390,12 +406,14 @@ function CodeBrowserTabSession({
           }
           await reconcileAfterNativeReady();
         } else {
-          recordRuntime(await host.command(workspaceId, browserId, {
-            type: "create",
-            url: current.url,
-            bounds,
-            visible: false,
-          }));
+          recordRuntime(
+            await host.command(workspaceId, browserId, {
+              type: "create",
+              url: current.url,
+              bounds,
+              visible: false,
+            }),
+          );
           lastNativeBounds.current = bounds;
           await reconcileAfterNativeReady();
           nativeHistoryAvailable.current = current.history.length <= 1;
@@ -452,7 +470,8 @@ function CodeBrowserTabSession({
           setBrowserNotice(current, {
             kind: "blocked",
             url: event.url,
-            message: event.message || "This address cannot open in the in-app browser",
+            message:
+              event.message || "This address cannot open in the in-app browser",
           }),
         );
       }
@@ -486,7 +505,14 @@ function CodeBrowserTabSession({
       cancelled = true;
       unsubscribe?.();
     };
-  }, [browserId, host, recordRuntime, reconcileAfterNativeReady, updateSession, workspaceId]);
+  }, [
+    browserId,
+    host,
+    recordRuntime,
+    reconcileAfterNativeReady,
+    updateSession,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     const surface = viewportSurfaceRef.current;
@@ -532,7 +558,10 @@ function CodeBrowserTabSession({
     if (!visible) {
       cancelNativeReveal();
       void host
-        .command(workspaceId, browserId, { type: "set_visible", visible: false })
+        .command(workspaceId, browserId, {
+          type: "set_visible",
+          visible: false,
+        })
         .catch(() => undefined);
       return;
     }
@@ -572,12 +601,14 @@ function CodeBrowserTabSession({
       }
       const bounds = readBrowserBounds(viewportSurfaceRef.current);
       if (!bounds) throw new Error("The browser surface is not ready");
-      recordRuntime(await host.command(workspaceId, browserId, {
-        type: "create",
-        url: target.url,
-        bounds,
-        visible: false,
-      }));
+      recordRuntime(
+        await host.command(workspaceId, browserId, {
+          type: "create",
+          url: target.url,
+          bounds,
+          visible: false,
+        }),
+      );
       lastNativeBounds.current = bounds;
       await reconcileAfterNativeReady();
       nativeHistoryAvailable.current = sessionRef.current.history.length <= 1;
@@ -638,15 +669,16 @@ function CodeBrowserTabSession({
     try {
       recordRuntime(await host.command(workspaceId, browserId, action));
     } catch (error) {
-      const fallback = action.type === "share_with_agent" ||
-          action.type === "revoke_agent_access"
-        ? "Could not update agent access"
-        : "Could not change browser control";
+      const fallback =
+        action.type === "share_with_agent" ||
+        action.type === "revoke_agent_access"
+          ? "Could not update agent access"
+          : "Could not change browser control";
       updateSession((current) =>
         setBrowserNotice(current, {
           kind: "blocked",
           message: friendlyErrorMessage(error, fallback),
-        })
+        }),
       );
     }
   }
@@ -677,31 +709,34 @@ function CodeBrowserTabSession({
   const notice = session.notice;
   const noticeTarget = notice?.url ? validateBrowserUrl(notice.url) : null;
   const actionableNoticeUrl = noticeTarget?.ok ? noticeTarget.url : null;
-  const noticeAction = actionableNoticeUrl && notice
-    ? notice.kind === "popup"
-      ? {
-          label: "Open here",
-          run: () => {
-            updateSession((current) => setBrowserNotice(current, null));
-            void navigate(actionableNoticeUrl);
-          },
-        }
-      : notice.kind === "download"
+  const noticeAction =
+    actionableNoticeUrl && notice
+      ? notice.kind === "popup"
         ? {
-            label: "Open externally",
+            label: "Open here",
             run: () => {
               updateSession((current) => setBrowserNotice(current, null));
-              void openExternal(actionableNoticeUrl);
+              void navigate(actionableNoticeUrl);
             },
           }
-        : null
-    : null;
+        : notice.kind === "download"
+          ? {
+              label: "Open externally",
+              run: () => {
+                updateSession((current) => setBrowserNotice(current, null));
+                void openExternal(actionableNoticeUrl);
+              },
+            }
+          : null
+      : null;
   const showNative = Boolean(session.url) && session.loadState !== "failed";
 
   return (
     <section
       className="flex min-h-0 flex-1 flex-col bg-background text-foreground"
-      aria-label={session.title === "Browser" ? "Browser" : `Browser: ${session.title}`}
+      aria-label={
+        session.title === "Browser" ? "Browser" : `Browser: ${session.title}`
+      }
     >
       <BrowserToolbar
         session={session}
@@ -722,13 +757,17 @@ function CodeBrowserTabSession({
         onReload={() => void reload()}
         onStop={() => void stop()}
         onStopAgent={() =>
-          void runAgentHostAction({ type: "stop_agent_control" })}
+          void runAgentHostAction({ type: "stop_agent_control" })
+        }
         onTakeOver={() =>
-          void runAgentHostAction({ type: "take_human_control" })}
+          void runAgentHostAction({ type: "take_human_control" })
+        }
         onShareAgent={() =>
-          void runAgentHostAction({ type: "share_with_agent" })}
+          void runAgentHostAction({ type: "share_with_agent" })
+        }
         onRevokeAgent={() =>
-          void runAgentHostAction({ type: "revoke_agent_access" })}
+          void runAgentHostAction({ type: "revoke_agent_access" })
+        }
         onSelectHistory={(index) => void selectHistory(index)}
         onOpenExternal={() => void openExternal()}
         onOverlayOpenChange={setHistoryOpen}
@@ -786,7 +825,9 @@ function CodeBrowserTabSession({
               error={session.error}
               hasUrl={Boolean(session.url)}
               onRetry={session.url ? () => void navigate() : undefined}
-              onOpenExternal={session.url ? () => void openExternal() : undefined}
+              onOpenExternal={
+                session.url ? () => void openExternal() : undefined
+              }
             />
           )}
         </ViewportSurface>
@@ -828,7 +869,9 @@ export function BrowserFallback({
           Workspace browser
         </p>
         <h2 className="mt-1.5 max-w-md text-xl font-semibold tracking-[-0.025em] text-balance">
-          {error ? "This page did not open" : "Bring the live work into the workspace"}
+          {error
+            ? "This page did not open"
+            : "Bring the live work into the workspace"}
         </h2>
         <p className="mt-2 max-w-md text-sm leading-6 text-pretty text-muted-foreground">
           {error ||
@@ -853,13 +896,23 @@ export function BrowserFallback({
         {hasUrl && (onRetry || onOpenExternal) && (
           <div className="mt-5 flex flex-wrap items-center gap-2">
             {onRetry && (
-              <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={onRetry}
+              >
                 <RefreshCw />
                 Try again
               </Button>
             )}
             {onOpenExternal && (
-              <Button type="button" variant="outline" size="sm" onClick={onOpenExternal}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onOpenExternal}
+              >
                 <ExternalLink />
                 Open externally
               </Button>

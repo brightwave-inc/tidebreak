@@ -36,7 +36,8 @@ export function useWheelPageNavigation({
 
       const { scrollTop, scrollHeight, clientHeight } = containerRef;
       const isAtTop = scrollTop <= SCROLL_EPSILON;
-      const isAtBottom = scrollHeight - scrollTop - clientHeight <= SCROLL_EPSILON;
+      const isAtBottom =
+        scrollHeight - scrollTop - clientHeight <= SCROLL_EPSILON;
 
       // Normalize deltaMode: 0=pixel, 1=line, 2=page
       let normalizedDelta = e.deltaY;
@@ -100,7 +101,10 @@ export function useWheelPageNavigation({
       if (direction === "down") {
         containerRef.scrollTo({ top: 0, behavior: "auto" });
       } else if (direction === "up") {
-        containerRef.scrollTo({ top: scrollHeight - clientHeight, behavior: "auto" });
+        containerRef.scrollTo({
+          top: scrollHeight - clientHeight,
+          behavior: "auto",
+        });
       }
     }, 50);
 

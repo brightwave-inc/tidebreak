@@ -1,10 +1,5 @@
 import { useState } from "react";
-import {
-  Globe2,
-  Package,
-  ShieldOff,
-  SlidersHorizontal,
-} from "lucide-react";
+import { Globe2, Package, ShieldOff, SlidersHorizontal } from "lucide-react";
 
 import type { NetworkPolicy } from "./api";
 import { Button } from "@/components/ui/button";
@@ -41,7 +36,8 @@ const OPTIONS = [
   {
     mode: "open",
     label: "Internet access",
-    description: "Reach public internet destinations; local networks stay blocked.",
+    description:
+      "Reach public internet destinations; local networks stay blocked.",
     icon: Globe2,
   },
 ] as const;
@@ -116,7 +112,9 @@ export function NetworkPolicyDialog({
       await onChange(policy);
       onOpenChange(false);
     } catch (caught) {
-      const message = String(caught).replace(/^Error:\s*/, "").trim();
+      const message = String(caught)
+        .replace(/^Error:\s*/, "")
+        .trim();
       setSaveError(message || "Could not update the network policy.");
     } finally {
       setSaving(false);

@@ -51,15 +51,19 @@ describe("code chrome layout", () => {
   });
 
   it("keeps the visible side tab when the URL did not name the terminal", () => {
-    expect(splitCodeChromeLayout(foldersTerminalAgents).panels.activeIndex).toBe(0);
+    expect(
+      splitCodeChromeLayout(foldersTerminalAgents).panels.activeIndex,
+    ).toBe(0);
     expect(splitCodeChromeLayout(foldersTerminalAgents).panels.tabs).toEqual([
       { type: "folders" },
       { type: "agents" },
     ]);
-    expect(splitCodeChromeLayout(foldersTerminalAgents).editors.tabs).toEqual([]);
-    expect(splitCodeChromeLayout(foldersTerminalAgents).splitEditors.tabs).toEqual(
+    expect(splitCodeChromeLayout(foldersTerminalAgents).editors.tabs).toEqual(
       [],
     );
+    expect(
+      splitCodeChromeLayout(foldersTerminalAgents).splitEditors.tabs,
+    ).toEqual([]);
   });
 
   it("leaves a terminal-only layout as the conversation plus a drawer", () => {
@@ -87,7 +91,9 @@ describe("code chrome layout", () => {
     const opened = toggleTerminalLayout(withFolders);
     expect(opened.tabs).toEqual([{ type: "folders" }, { type: "terminal" }]);
     expect(toggleTerminalLayout(opened)).toEqual(withFolders);
-    expect(toggleTerminalLayout(EMPTY_LAYOUT).tabs).toEqual([{ type: "terminal" }]);
+    expect(toggleTerminalLayout(EMPTY_LAYOUT).tabs).toEqual([
+      { type: "terminal" },
+    ]);
     expect(toggleTerminalLayout(toggleTerminalLayout(EMPTY_LAYOUT))).toEqual(
       EMPTY_LAYOUT,
     );
@@ -221,9 +227,10 @@ describe("code chrome layout", () => {
         closeEditorTabsToRight(withBrowserOnRight, 0, "primary"),
       ),
     ).toEqual(["browser-1"]);
-    expect(
-      removedCodeBrowserIds(layout, closeAllEditorTabs(layout)),
-    ).toEqual(["browser-1", "browser-2"]);
+    expect(removedCodeBrowserIds(layout, closeAllEditorTabs(layout))).toEqual([
+      "browser-1",
+      "browser-2",
+    ]);
   });
 
   it("closes editor-tab groups without dropping side panels or the terminal", () => {
@@ -346,9 +353,9 @@ describe("code chrome layout", () => {
     expect(moveEditorTab(split, "secondary", 0, "primary").editorSplit).toBe(
       undefined,
     );
-    expect(mergeEditorSplit(split).tabs.filter((tab) => tab.type === "file")).toEqual([
-      { type: "file", path: "src/lib.rs" },
-    ]);
+    expect(
+      mergeEditorSplit(split).tabs.filter((tab) => tab.type === "file"),
+    ).toEqual([{ type: "file", path: "src/lib.rs" }]);
   });
 
   it("counts the main agent as the first numbered tab", () => {
@@ -465,10 +472,7 @@ describe("code chrome layout", () => {
 
     expect(closeFocusedCodeTab(primary)).toEqual({
       ...primary,
-      tabs: [
-        { type: "file", path: "src/lib.rs" },
-        { type: "terminal" },
-      ],
+      tabs: [{ type: "file", path: "src/lib.rs" }, { type: "terminal" }],
       activeIndex: 0,
     });
 
@@ -482,20 +486,17 @@ describe("code chrome layout", () => {
     });
   });
 
-  it(
-    "does not claim Cmd/Ctrl+W when the persistent conversation owns focus",
-    () => {
-      const layout = {
-        tabs: [{ type: "file" as const, path: "src/lib.rs" }],
-        activeIndex: 0,
-        fullscreen: false,
-        conversationFocused: true,
-      };
+  it("does not claim Cmd/Ctrl+W when the persistent conversation owns focus", () => {
+    const layout = {
+      tabs: [{ type: "file" as const, path: "src/lib.rs" }],
+      activeIndex: 0,
+      fullscreen: false,
+      conversationFocused: true,
+    };
 
-      expect(closeFocusedCodeTab(layout)).toBeNull();
-      expect(closeFocusedCodeTab(EMPTY_LAYOUT)).toBeNull();
-    },
-  );
+    expect(closeFocusedCodeTab(layout)).toBeNull();
+    expect(closeFocusedCodeTab(EMPTY_LAYOUT)).toBeNull();
+  });
 
   it("opens new editors in the group that last received focus", () => {
     const split = moveEditorTab(

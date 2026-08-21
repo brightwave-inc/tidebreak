@@ -99,9 +99,10 @@ export function useLiveResource<T>({
   // Every load carries the generation it started in; a response from an older
   // generation belongs to a key we have moved off, or to an unmounted view.
   const generationRef = useRef(0);
-  const inFlightRef = useRef<{ generation: number; promise: Promise<void> } | null>(
-    null,
-  );
+  const inFlightRef = useRef<{
+    generation: number;
+    promise: Promise<void>;
+  } | null>(null);
   const pendingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenRef = useRef<{ key: string; revision: number }>({ key, revision });

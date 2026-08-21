@@ -15,7 +15,9 @@ import { SidebarButton } from "./primitives";
  */
 export function InboxButton() {
   const navigate = useNavigate();
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const waiting = useInbox((state) => state.items.length);
   const active = pathname === "/inbox";
 

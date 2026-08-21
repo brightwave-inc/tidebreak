@@ -10,7 +10,12 @@ import {
 
 const CANDIDATES: MentionCandidate[] = [
   { kind: "file", id: "doc-1", label: "Budget.xlsx", mediaType: "text/csv" },
-  { kind: "file", id: "doc-2", label: "Q3 budget notes.md", mediaType: "text/markdown" },
+  {
+    kind: "file",
+    id: "doc-2",
+    label: "Q3 budget notes.md",
+    mediaType: "text/markdown",
+  },
   { kind: "folder", id: "root-1", label: "Reports" },
 ];
 
@@ -19,7 +24,11 @@ function file(documentId: string, name: string) {
 }
 
 it("ranks a prefix above a mid-name hit", () => {
-  const rows = mentionRows(CANDIDATES, ["browse-files", "connect-folder"], "budget");
+  const rows = mentionRows(
+    CANDIDATES,
+    ["browse-files", "connect-folder"],
+    "budget",
+  );
 
   // The pickers are named too, so a query that misses them drops them: an `@`
   // list should answer what was typed, not always end in the same two rows.
@@ -49,13 +58,15 @@ it("names each transcript file once, newest first, minus what is already attache
   ];
 
   const recent = recentChatFiles(messages, [
-    { documentId: "doc-3", displayName: "Third.pdf", mediaType: "application/pdf", byteLen: 12 },
+    {
+      documentId: "doc-3",
+      displayName: "Third.pdf",
+      mediaType: "application/pdf",
+      byteLen: 12,
+    },
   ]);
 
-  expect(recent.map((entry) => entry.documentId)).toEqual([
-    "doc-1",
-    "doc-2",
-  ]);
+  expect(recent.map((entry) => entry.documentId)).toEqual(["doc-1", "doc-2"]);
 });
 
 it("bounds the transcript scan at the list's size", () => {
@@ -83,7 +94,11 @@ it("offers workspace paths as insertable mention rows", () => {
 it("offers only approved folders this conversation has not attached", () => {
   const approved = [
     { rootId: "root-1", displayName: "Reports", status: "connected" as const },
-    { rootId: "root-2", displayName: "Contracts", status: "connected" as const },
+    {
+      rootId: "root-2",
+      displayName: "Contracts",
+      status: "connected" as const,
+    },
   ];
 
   expect(attachableFolders(approved, [{ rootId: "root-1" }])).toEqual([

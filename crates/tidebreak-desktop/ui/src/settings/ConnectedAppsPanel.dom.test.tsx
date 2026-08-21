@@ -97,9 +97,11 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
  * for tests that exercise the endpoint rows. */
 function signedInOverrides() {
   return {
-    getGatewayStatus: vi
-      .fn()
-      .mockResolvedValue({ signed_in: true, model_count: 1, sign_in: { state: "idle" } }),
+    getGatewayStatus: vi.fn().mockResolvedValue({
+      signed_in: true,
+      model_count: 1,
+      sign_in: { state: "idle" },
+    }),
     getGatewayApps: vi.fn().mockResolvedValue({
       supported: true,
       apps: [
@@ -197,9 +199,7 @@ describe("ConnectedAppsPanel", () => {
     ).toBeGreaterThan(0);
 
     // The approval boundary is stated once, as the page footer.
-    expect(
-      screen.getAllByText(/existing approval boundary/),
-    ).toHaveLength(1);
+    expect(screen.getAllByText(/existing approval boundary/)).toHaveLength(1);
   });
 
   it("managed: prose notice, once-only facts, and a collapsed Advanced", async () => {
@@ -262,9 +262,7 @@ describe("ConnectedAppsPanel", () => {
     expect(
       screen.queryByText(/available to new turns/),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getAllByText(/existing approval boundary/),
-    ).toHaveLength(1);
+    expect(screen.getAllByText(/existing approval boundary/)).toHaveLength(1);
   });
 
   it("submits the PUT shape from the create form and never renders the value back", async () => {
@@ -342,16 +340,12 @@ describe("ConnectedAppsPanel", () => {
       "https://us.posthog.example",
     );
     // URL is the default source: no paste textarea on screen.
-    expect(
-      screen.queryByLabelText(/OpenAPI document/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/OpenAPI document/)).not.toBeInTheDocument();
     await user.type(
       screen.getByLabelText(/Document URL/),
       "https://us.posthog.example/api/schema/?format=json",
     );
-    await user.click(
-      screen.getByRole("button", { name: /Fetch operations/ }),
-    );
+    await user.click(screen.getByRole("button", { name: /Fetch operations/ }));
 
     // Everything under the catalog bound starts selected, and the picker is
     // honest about what it could not list.

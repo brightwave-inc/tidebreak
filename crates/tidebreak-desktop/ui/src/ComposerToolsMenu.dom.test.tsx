@@ -46,9 +46,9 @@ it("gathers the turn's setup actions behind one button", async () => {
     "NetworkOffline",
   ]);
 
-  await userEvent.setup().click(
-    screen.getByRole("menuitem", { name: "Attach files" }),
-  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("menuitem", { name: "Attach files" }));
   expect(attachFiles).toHaveBeenCalledOnce();
 });
 
@@ -158,10 +158,9 @@ it("opens when the first-task walkthrough is on the tools step", () => {
     />,
   );
 
-  expect(screen.getByRole("menuitem", { name: "Attach files" })).toHaveAttribute(
-    "data-first-task-target",
-    "attach-files",
-  );
+  expect(
+    screen.getByRole("menuitem", { name: "Attach files" }),
+  ).toHaveAttribute("data-first-task-target", "attach-files");
   expect(screen.getByRole("menuitem", { name: /Network/ })).toHaveAttribute(
     "data-first-task-target",
     "network",

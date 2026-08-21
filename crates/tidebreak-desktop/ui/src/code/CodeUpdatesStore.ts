@@ -288,11 +288,14 @@ export function shouldRequestOsAttention(
 
 function isStructuredNeed(attention: Attention): boolean {
   return (
-    attention.state.type === "needs_you" && attention.state.source === "structured"
+    attention.state.type === "needs_you" &&
+    attention.state.source === "structured"
   );
 }
 
-export function noticeToAction(notice: CodeUpdateNotice): CodeUpdatesAction | null {
+export function noticeToAction(
+  notice: CodeUpdateNotice,
+): CodeUpdatesAction | null {
   if (notice.type === "snapshot") {
     return { type: "snapshot", sessions: notice.sessions };
   }
@@ -376,7 +379,10 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
   reset: () => set({ ...EMPTY }),
 }));
 
-function maybeNotify(previous: CodeUpdatesState, digest: CodeSessionDigest): void {
+function maybeNotify(
+  previous: CodeUpdatesState,
+  digest: CodeSessionDigest,
+): void {
   const prior =
     previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
       ?.attention;

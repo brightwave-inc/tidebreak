@@ -113,8 +113,8 @@ describe("an activity that cannot be read", () => {
     // also reads "Read a file", so the row is found inside the rail itself.)
     const rail = within(screen.getByRole("list"));
     expect(rail.getByText("Read a file")).toBeTruthy();
-    expect(
-      rail.getAllByText("This step could not be displayed.").length,
-    ).toBe(1);
+    expect(rail.getAllByText("This step could not be displayed.").length).toBe(
+      1,
+    );
   });
 });

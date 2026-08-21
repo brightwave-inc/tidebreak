@@ -45,7 +45,11 @@ beforeEach(() => {
   // The latch is app-wide, so a decision left open by one case would block
   // the next one.
   useNativePickerLatch.setState({ holder: null });
-  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
+  usePendingPrompts.setState({
+    chatId: null,
+    userQuestions: [],
+    folderAccess: [],
+  });
 });
 
 afterEach(cleanup);

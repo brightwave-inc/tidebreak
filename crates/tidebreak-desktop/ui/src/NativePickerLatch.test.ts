@@ -37,12 +37,20 @@ describe("native picker latch", () => {
 
   it("lets the holding surface tell itself apart from the blocked ones", () => {
     expect(
-      pickerHeldByAnotherSurface(PICKER_HOLDERS.connectFolder, PICKER_HOLDERS.connectFolder),
+      pickerHeldByAnotherSurface(
+        PICKER_HOLDERS.connectFolder,
+        PICKER_HOLDERS.connectFolder,
+      ),
     ).toBe(false);
     expect(
-      pickerHeldByAnotherSurface(PICKER_HOLDERS.connectFolder, PICKER_HOLDERS.importSource),
+      pickerHeldByAnotherSurface(
+        PICKER_HOLDERS.connectFolder,
+        PICKER_HOLDERS.importSource,
+      ),
     ).toBe(true);
-    expect(pickerHeldByAnotherSurface(null, PICKER_HOLDERS.importSource)).toBe(false);
+    expect(pickerHeldByAnotherSurface(null, PICKER_HOLDERS.importSource)).toBe(
+      false,
+    );
   });
 
   it("names every surface that opens a host picker", () => {

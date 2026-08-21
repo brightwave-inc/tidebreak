@@ -50,10 +50,7 @@ describe("office-to-PDF conversion", () => {
       installFailure: "Download cancelled",
     });
 
-    const error = await convertOfficeToPdf(
-      new Uint8Array([1]),
-      PPTX,
-    ).then(
+    const error = await convertOfficeToPdf(new Uint8Array([1]), PPTX).then(
       () => null,
       (thrown: unknown) => thrown,
     );
@@ -72,10 +69,7 @@ describe("office-to-PDF conversion", () => {
         "Exit status: exit status: 1\n\nStandard error:\nfirst line\nsecond line",
     });
 
-    const error = await convertOfficeToPdf(
-      new Uint8Array([1]),
-      PPTX,
-    ).then(
+    const error = await convertOfficeToPdf(new Uint8Array([1]), PPTX).then(
       () => null,
       (thrown: unknown) => thrown,
     );

@@ -1,27 +1,27 @@
-"use client"
+"use client";
 
-import * as React from "react"
+import * as React from "react";
 import type {
   DocxCommentCardRenderProps,
   DocxDocumentTheme,
   DocxTrackedChangeCardRenderProps,
-} from "@extend-ai/react-docx"
+} from "@extend-ai/react-docx";
 
-import { Badge } from "@/components/ui/badge"
-import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 
 function trackedChangeBadgeVariant(
-  kind: DocxTrackedChangeCardRenderProps["change"]["kind"]
+  kind: DocxTrackedChangeCardRenderProps["change"]["kind"],
 ): React.ComponentProps<typeof Badge>["variant"] {
   switch (kind) {
     case "insertion":
     case "move-to":
-      return "success"
+      return "success";
     case "deletion":
     case "move-from":
-      return "destructive"
+      return "destructive";
     default:
-      return "warning"
+      return "warning";
   }
 }
 function trackedChangeBadgeLabel({
@@ -30,15 +30,15 @@ function trackedChangeBadgeLabel({
 }: Pick<DocxTrackedChangeCardRenderProps, "change" | "kindLabel">) {
   switch (change.kind) {
     case "insertion":
-      return "Inserted"
+      return "Inserted";
     case "deletion":
-      return "Removed"
+      return "Removed";
     case "move-from":
-      return "Moved from"
+      return "Moved from";
     case "move-to":
-      return "Moved to"
+      return "Moved to";
     default:
-      return kindLabel
+      return kindLabel;
   }
 }
 
@@ -52,30 +52,30 @@ function DocxAnnotationCard({
   snippet,
   style,
 }: {
-  anchorText?: string
-  badge: string
-  badgeVariant?: React.ComponentProps<typeof Badge>["variant"]
-  date?: string
-  documentTheme: DocxDocumentTheme
-  meta: string
-  snippet: string
-  style: React.CSSProperties
+  anchorText?: string;
+  badge: string;
+  badgeVariant?: React.ComponentProps<typeof Badge>["variant"];
+  date?: string;
+  documentTheme: DocxDocumentTheme;
+  meta: string;
+  snippet: string;
+  style: React.CSSProperties;
 }) {
-  const isDarkDocument = documentTheme === "dark"
+  const isDarkDocument = documentTheme === "dark";
   const cardStyle: React.CSSProperties = {
     ...style,
     backgroundColor: isDarkDocument
       ? "rgb(24 24 27 / 0.95)"
       : "rgb(255 255 255 / 0.95)",
     color: isDarkDocument ? "#f4f4f5" : "#18181b",
-  }
-  const mutedTextColor = isDarkDocument ? "#a1a1aa" : "#71717a"
+  };
+  const mutedTextColor = isDarkDocument ? "#a1a1aa" : "#71717a";
   const anchorStyle: React.CSSProperties = {
     backgroundColor: isDarkDocument
       ? "rgb(63 63 70 / 0.55)"
       : "rgb(244 244 245 / 0.75)",
     color: mutedTextColor,
-  }
+  };
 
   return (
     <Card
@@ -108,11 +108,11 @@ function DocxAnnotationCard({
       ) : null}
       <div className="text-xs leading-snug break-words">{snippet}</div>
     </Card>
-  )
+  );
 }
 
 export function createDocxTrackedChangeCardRenderer(
-  documentTheme: DocxDocumentTheme
+  documentTheme: DocxDocumentTheme,
 ) {
   return function renderDocxTrackedChangeCard({
     change,
@@ -131,12 +131,12 @@ export function createDocxTrackedChangeCardRenderer(
         snippet={snippet}
         style={style}
       />
-    )
-  }
+    );
+  };
 }
 
 export function createDocxCommentCardRenderer(
-  documentTheme: DocxDocumentTheme
+  documentTheme: DocxDocumentTheme,
 ) {
   return function renderDocxCommentCard({
     comment,
@@ -148,7 +148,7 @@ export function createDocxCommentCardRenderer(
       ? "Resolved"
       : comment.parentId !== undefined
         ? "Reply"
-        : "Comment"
+        : "Comment";
 
     return (
       <DocxAnnotationCard
@@ -161,6 +161,6 @@ export function createDocxCommentCardRenderer(
         snippet={snippet}
         style={style}
       />
-    )
-  }
+    );
+  };
 }

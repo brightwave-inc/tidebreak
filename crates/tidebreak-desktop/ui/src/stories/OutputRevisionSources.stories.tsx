@@ -9,7 +9,9 @@ function RevisionPanel({ sources }: { sources: OutputRevisionSource[] }) {
     <div className="flex h-80 flex-col overflow-hidden rounded-lg border bg-page-background">
       <div className="min-h-0 flex-1 overflow-auto p-6">
         <article className="mx-auto max-w-4xl text-sm">
-          <h1 className="mb-3 text-xl font-semibold">Quarterly revenue brief</h1>
+          <h1 className="mb-3 text-xl font-semibold">
+            Quarterly revenue brief
+          </h1>
           <p>Revenue increased, led by enterprise expansion.</p>
         </article>
       </div>

@@ -76,7 +76,9 @@ export function DiffOverview({
     errorMessage: "Could not load changed files",
   });
 
-  const scopeCaption = turnId ? (turnLabel ?? "This turn") : "Workspace vs base";
+  const scopeCaption = turnId
+    ? (turnLabel ?? "This turn")
+    : "Workspace vs base";
   const tree = useMemo(
     () => buildChangeTree(payload?.files ?? []),
     [payload?.files],
@@ -157,7 +159,9 @@ type ChangeFileNode = {
 };
 
 /** Build and compact a Git-style changed-file tree from relative paths. */
-export function buildChangeTree(files: readonly CodeFileChange[]): ChangeTreeNode[] {
+export function buildChangeTree(
+  files: readonly CodeFileChange[],
+): ChangeTreeNode[] {
   const root: ChangeTreeNode[] = [];
   for (const file of files) {
     const parts = file.path.split("/").filter(Boolean);
@@ -336,9 +340,7 @@ function ChangeFileRow({
         onClick={() => onOpenFile(file.path)}
       >
         <CodeFileIcon path={file.path} className={kind.className} />
-        <span className="min-w-0 flex-1 truncate text-[13px]">
-          {node.name}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-[13px]">{node.name}</span>
         <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] tabular-nums">
           {file.insertions > 0 && (
             <span className="text-success-foreground">+{file.insertions}</span>
@@ -346,7 +348,9 @@ function ChangeFileRow({
           {file.deletions > 0 && (
             <span className="text-critical-foreground">−{file.deletions}</span>
           )}
-          <span className={cn("w-2.5 text-right font-semibold", kind.className)}>
+          <span
+            className={cn("w-2.5 text-right font-semibold", kind.className)}
+          >
             {kind.letter}
           </span>
         </span>

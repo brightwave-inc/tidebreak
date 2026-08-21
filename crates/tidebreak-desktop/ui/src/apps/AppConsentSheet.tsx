@@ -59,7 +59,10 @@ export function AppConsentSheet({
       aria-label="App access consent"
     >
       <div className="flex items-center gap-2">
-        <ShieldAlert className="text-warning size-4 shrink-0" aria-hidden="true" />
+        <ShieldAlert
+          className="text-warning size-4 shrink-0"
+          aria-hidden="true"
+        />
         <h2 className="text-sm font-medium">This app needs your permission</h2>
       </div>
       {state.bindings.length > 0 && (
@@ -124,7 +127,10 @@ export function AppConsentSheet({
                   </span>
                   {binding.access === "read_write" && (
                     <span className="text-warning flex items-center gap-1.5 pl-1 text-xs">
-                      <PencilLine className="size-3 shrink-0" aria-hidden="true" />
+                      <PencilLine
+                        className="size-3 shrink-0"
+                        aria-hidden="true"
+                      />
                       Create and replace files in this folder
                     </span>
                   )}
@@ -136,10 +142,7 @@ export function AppConsentSheet({
                     key={operationId}
                     className="text-muted-foreground flex items-center gap-1.5 pl-1 text-xs"
                   >
-                    <Globe
-                      className="size-3 shrink-0"
-                      aria-hidden="true"
-                    />
+                    <Globe className="size-3 shrink-0" aria-hidden="true" />
                     <span className="truncate font-mono">{operationId}</span>
                   </li>
                 ))}
@@ -153,7 +156,10 @@ export function AppConsentSheet({
           className="border-warning/50 text-warning flex items-start gap-2 rounded-md border px-3 py-2 text-xs"
           role="alert"
         >
-          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+          <TriangleAlert
+            className="mt-0.5 size-3.5 shrink-0"
+            aria-hidden="true"
+          />
           <span>{exfiltrationWarning}</span>
         </p>
       )}

@@ -53,7 +53,10 @@ describe("CodeQuickOpen", () => {
       ),
     ).toEqual(["src/CodeWorkspacePage.tsx"]);
     expect(
-      rankQuickOpenPaths(["src/index.ts", "tests/index.ts", "src/lib.ts"], "index"),
+      rankQuickOpenPaths(
+        ["src/index.ts", "tests/index.ts", "src/lib.ts"],
+        "index",
+      ),
     ).toEqual(["src/index.ts", "tests/index.ts"]);
   });
 
@@ -74,7 +77,9 @@ describe("CodeQuickOpen", () => {
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     ui.open();
-    const input = await screen.findByRole("combobox", { name: "Search files by name" });
+    const input = await screen.findByRole("combobox", {
+      name: "Search files by name",
+    });
     expect(input).toHaveFocus();
     expect(client.listCodeWorkspaceTree).toHaveBeenCalledWith("ws-1", {
       limit: 5000,
@@ -82,7 +87,9 @@ describe("CodeQuickOpen", () => {
 
     await userEvent.setup().type(input, "m");
     await waitFor(() =>
-      expect(screen.getByRole("option", { name: "src/main.rs" })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("option", { name: "src/main.rs" }),
+      ).toBeInTheDocument(),
     );
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -156,7 +163,9 @@ describe("CodeQuickOpen", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     ui.open();
-    expect(screen.queryByRole("option", { name: "old.ts" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "old.ts" }),
+    ).not.toBeInTheDocument();
     resolveSecond?.({ paths: ["new.ts"], truncated: false });
     expect(
       await screen.findByRole("option", { name: "new.ts" }),

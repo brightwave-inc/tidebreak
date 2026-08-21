@@ -37,7 +37,9 @@ export function SkillDialog({
 }) {
   const name = skill?.name ?? null;
   const [body, setBody] = useState<
-    { state: "loading" } | { state: "failed" } | { state: "ready"; text: string }
+    | { state: "loading" }
+    | { state: "failed" }
+    | { state: "ready"; text: string }
   >({ state: "loading" });
 
   useEffect(() => {
@@ -78,14 +80,20 @@ export function SkillDialog({
             </div>
             <DialogTitle className="flex items-baseline gap-2">
               {skill.name}
-              <span className="text-muted-foreground text-base font-normal">Skill</span>
+              <span className="text-muted-foreground text-base font-normal">
+                Skill
+              </span>
             </DialogTitle>
             <DialogDescription>{skill.description}</DialogDescription>
           </div>
 
           <div className="bg-muted/50 min-h-0 flex-1 overflow-y-auto rounded-lg border p-4">
             {body.state === "loading" && (
-              <div className="flex flex-col gap-2" role="status" aria-label="Loading skill">
+              <div
+                className="flex flex-col gap-2"
+                role="status"
+                aria-label="Loading skill"
+              >
                 <Skeleton className="h-4 w-3/4" />
                 <Skeleton className="h-4 w-full" />
                 <Skeleton className="h-4 w-2/3" />

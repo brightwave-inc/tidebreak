@@ -33,9 +33,7 @@ const LOCAL_PROVIDER: ExecProviderKind = "local";
 
 export function ExecPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<ExecConfigInfo | null>(null);
-  const [credentials, setCredentials] = useState<
-    ExecCredentialReadiness[]
-  >([]);
+  const [credentials, setCredentials] = useState<ExecCredentialReadiness[]>([]);
   const [provider, setProvider] = useState<ExecProviderKind | "">("");
   const [timeoutSeconds, setTimeoutSeconds] = useState("");
   // One draft key per managed provider, so E2B and Daytona can be configured
@@ -45,9 +43,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
   >({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [removing, setRemoving] = useState<ExecProviderKind | null>(
-    null,
-  );
+  const [removing, setRemoving] = useState<ExecProviderKind | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -233,7 +229,11 @@ export function ExecPanel({ client }: { client: ApiClient }) {
               and the selection together, so a provider cannot go active in a
               pass that failed to save its key. */}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={working} onClick={() => void save()}>
+            <Button
+              type="button"
+              disabled={working}
+              onClick={() => void save()}
+            >
               {saving ? "Saving…" : "Save settings"}
             </Button>
           </div>
@@ -242,12 +242,12 @@ export function ExecPanel({ client }: { client: ApiClient }) {
             Local execution confines writes to private work scratch and routes
             any granted network access through a loopback broker. E2B and
             Daytona run commands in managed cloud sandboxes and reuse their
-            workspace while it is alive. Docker runs them in a container on
-            this machine, so staged files never leave it, with the same
-            document tooling the cloud sandboxes have — but it does not yet
-            enforce a conversation's network setting. Every provider retains
-            the same direct-command, bounded-output, idempotency, and
-            execution-consent contract.
+            workspace while it is alive. Docker runs them in a container on this
+            machine, so staged files never leave it, with the same document
+            tooling the cloud sandboxes have — but it does not yet enforce a
+            conversation's network setting. Every provider retains the same
+            direct-command, bounded-output, idempotency, and execution-consent
+            contract.
           </p>
         </>
       )}
@@ -256,21 +256,17 @@ export function ExecPanel({ client }: { client: ApiClient }) {
   );
 }
 
-type EgressEnforcementRow =
-  ExecConfigInfo["egress"]["enforcement"][number];
+type EgressEnforcementRow = ExecConfigInfo["egress"]["enforcement"][number];
 
-type DetachedAdmissionRow =
-  ExecConfigInfo["detached_admission"][number];
+type DetachedAdmissionRow = ExecConfigInfo["detached_admission"][number];
 
-const PROVIDER_SANDBOX_LABEL: Record<
-  DetachedAdmissionRow["provider"],
-  string
-> = {
-  local: "Local native sandbox",
-  e2b: "E2B cloud sandbox",
-  daytona: "Daytona cloud sandbox",
-  docker: "Docker container",
-};
+const PROVIDER_SANDBOX_LABEL: Record<DetachedAdmissionRow["provider"], string> =
+  {
+    local: "Local native sandbox",
+    e2b: "E2B cloud sandbox",
+    daytona: "Daytona cloud sandbox",
+    docker: "Docker container",
+  };
 
 type ProviderAvailabilityRow = ExecConfigInfo["providers"][number];
 type ProviderUnavailableReason = NonNullable<
@@ -283,18 +279,20 @@ type ProviderUnavailableReason = NonNullable<
  * decision, so this list is exactly the set of states execution can be in —
  * the panel never guesses why a provider is dark.
  */
-const PROVIDER_UNAVAILABLE_SENTENCES: Record<ProviderUnavailableReason, string> =
-  {
-    unsupported_platform:
-      "Not supported on this operating system. Use a cloud sandbox instead — it runs the same commands with the same staged files.",
-    missing_sandbox_binary:
-      "This host is missing the sandbox binary local execution needs to confine commands.",
-    missing_credential: "Add an API key above to make this provider usable.",
-    missing_container_runtime:
-      "No container runtime was found. Install Docker (or a Docker-compatible runtime) to run commands in a container on this machine.",
-    container_runtime_unreachable:
-      "A container runtime is installed but isn't responding. Start it — Docker Desktop, or the daemon on this host — and this becomes usable.",
-  };
+const PROVIDER_UNAVAILABLE_SENTENCES: Record<
+  ProviderUnavailableReason,
+  string
+> = {
+  unsupported_platform:
+    "Not supported on this operating system. Use a cloud sandbox instead — it runs the same commands with the same staged files.",
+  missing_sandbox_binary:
+    "This host is missing the sandbox binary local execution needs to confine commands.",
+  missing_credential: "Add an API key above to make this provider usable.",
+  missing_container_runtime:
+    "No container runtime was found. Install Docker (or a Docker-compatible runtime) to run commands in a container on this machine.",
+  container_runtime_unreachable:
+    "A container runtime is installed but isn't responding. Start it — Docker Desktop, or the daemon on this host — and this becomes usable.",
+};
 
 /**
  * Per-provider capability, stated plainly: which providers could run here at
@@ -334,7 +332,11 @@ function ProviderAvailabilityDisclosure({
  */
 const EGRESS_STATUS_PRESENTATION: Record<
   EgressEnforcementRow["status"],
-  { badge: "success" | "info" | "warning" | "critical"; label: string; lead: string }
+  {
+    badge: "success" | "info" | "warning" | "critical";
+    label: string;
+    lead: string;
+  }
 > = {
   boundary: {
     badge: "success",
@@ -449,9 +451,7 @@ function codeExecutionState(config: ExecConfigInfo | null): {
   };
 }
 
-function codeExecutionProviderLabel(
-  provider: ExecProviderKind,
-): string {
+function codeExecutionProviderLabel(provider: ExecProviderKind): string {
   switch (provider) {
     case "local":
       return "Local";

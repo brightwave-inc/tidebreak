@@ -7,8 +7,13 @@ type ChatAttentionStore = {
   clear: () => void;
 };
 
-function sameChatIds(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
-  return left.size === right.size && [...left].every((chatId) => right.has(chatId));
+function sameChatIds(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  return (
+    left.size === right.size && [...left].every((chatId) => right.has(chatId))
+  );
 }
 
 /**

@@ -376,7 +376,8 @@ export function resolveWorkflowShortcut(
       }
       return (
         prBlocker(model) ?? {
-          run: model.stage === "conflict" ? "resolve_conflicts" : "update_branch",
+          run:
+            model.stage === "conflict" ? "resolve_conflicts" : "update_branch",
         }
       );
     case "merge":
@@ -403,7 +404,9 @@ export function resolveWorkflowShortcut(
  * pull request, and landing without it leaves behind work the reader thought
  * was going in.
  */
-function mergeIfGreen(model: WorkspaceWorkflowModel): WorkflowShortcutResolution {
+function mergeIfGreen(
+  model: WorkspaceWorkflowModel,
+): WorkflowShortcutResolution {
   if (model.stage === "dirty") {
     return { blocked: "Commit or discard your changes before merging" };
   }

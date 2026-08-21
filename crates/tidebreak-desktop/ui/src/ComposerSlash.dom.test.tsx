@@ -268,7 +268,10 @@ it("invokes a picked skill and shows it as a chip the reader can drop", async ()
   const onInvoke = vi.fn();
   const onDraftChange = vi.fn();
   render(
-    <ComposerHarness slash={slash({ onInvoke })} onDraftChange={onDraftChange} />,
+    <ComposerHarness
+      slash={slash({ onInvoke })}
+      onDraftChange={onDraftChange}
+    />,
   );
 
   await user.click(screen.getByRole("textbox", { name: "Message" }));

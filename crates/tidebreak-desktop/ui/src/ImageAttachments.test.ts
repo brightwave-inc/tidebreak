@@ -118,7 +118,9 @@ describe("image attachment state machine", () => {
     expect(list[0].uploadedBytes).toBe(1_000);
     expect(imageUploadPercent(list[0])).toBe(100);
     // A queued attachment is not receiving bytes yet.
-    expect(withUploadProgress([queued("b")], "b", 500)[0].uploadedBytes).toBe(0);
+    expect(withUploadProgress([queued("b")], "b", 500)[0].uploadedBytes).toBe(
+      0,
+    );
   });
 
   it("touches only the attachment it names", () => {
@@ -162,9 +164,9 @@ describe("attaching images", () => {
   it("replaces a name that says nothing about the image", () => {
     const at = new Date("2026-07-27T12:34:56.789Z");
     // A pasted screenshot arrives as a generic name, or none at all.
-    expect(imageAttachmentName({ name: "image.png", type: "image/png" }, at)).toBe(
-      "pasted-image-2026-07-27-12-34-56.png",
-    );
+    expect(
+      imageAttachmentName({ name: "image.png", type: "image/png" }, at),
+    ).toBe("pasted-image-2026-07-27-12-34-56.png");
     expect(imageAttachmentName({ name: "", type: "image/jpeg" }, at)).toBe(
       "pasted-image-2026-07-27-12-34-56.jpeg",
     );
@@ -173,7 +175,10 @@ describe("attaching images", () => {
     );
     // A name the reader would recognize is left alone.
     expect(
-      imageAttachmentName({ name: "quarterly-chart.png", type: "image/png" }, at),
+      imageAttachmentName(
+        { name: "quarterly-chart.png", type: "image/png" },
+        at,
+      ),
     ).toBe("quarterly-chart.png");
   });
 
@@ -222,7 +227,11 @@ describe("drags and drops", () => {
     // types the drag advertises.
     const dragging = { types: ["Files"], files: [] } as unknown as DataTransfer;
     expect(transferCarriesFiles(dragging)).toBe(true);
-    expect(transferCarriesFiles({ types: ["text/plain"] } as unknown as DataTransfer)).toBe(false);
+    expect(
+      transferCarriesFiles({
+        types: ["text/plain"],
+      } as unknown as DataTransfer),
+    ).toBe(false);
     expect(transferCarriesFiles(null)).toBe(false);
 
     const dropped = {
@@ -313,7 +322,9 @@ describe("image attachment responses", () => {
     ).toThrow();
     expect(() => parseAttachedImage({ ...valid, width: 0 })).toThrow();
     expect(() => parseAttachedImage({ ...valid, height: 8_001 })).toThrow();
-    expect(() => parseAttachedImage({ ...valid, attachmentId: "nope" })).toThrow();
+    expect(() =>
+      parseAttachedImage({ ...valid, attachmentId: "nope" }),
+    ).toThrow();
     // An unexpected field means this is not the shape it claims to be.
     expect(() => parseAttachedImage({ ...valid, path: "/Users/me" })).toThrow();
   });

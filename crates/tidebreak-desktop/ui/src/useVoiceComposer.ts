@@ -42,7 +42,9 @@ function voiceError(error: unknown): string {
   if (error instanceof DOMException && error.name === "NotAllowedError") {
     return "Microphone access was denied. Allow it in system settings and try again.";
   }
-  const message = String(error).replace(/^Error:\s*/, "").trim();
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
   return message || "Could not record from the microphone.";
 }
 
@@ -125,11 +127,14 @@ export function useVoiceComposer(
         if (recorderFailedRef.current) return;
         if (audio.size === 0 || elapsed < MIN_RECORDING_MS) {
           setState("idle");
-          setError("That recording was too short. Hold the button a little longer and try again.");
+          setError(
+            "That recording was too short. Hold the button a little longer and try again.",
+          );
           return;
         }
         setState("transcribing");
-        void transcribeRef.current(audio)
+        void transcribeRef
+          .current(audio)
           .then((transcript) => {
             if (!mountedRef.current) return;
             if (transcript.trim()) {
@@ -150,7 +155,9 @@ export function useVoiceComposer(
         releaseStream();
         if (!mountedRef.current) return;
         setState("idle");
-        setError(voiceError((event as ErrorEvent).error ?? "The recording failed."));
+        setError(
+          voiceError((event as ErrorEvent).error ?? "The recording failed."),
+        );
       });
       startedAtRef.current = now();
       recorder.start();

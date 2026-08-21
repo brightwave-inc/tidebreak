@@ -76,11 +76,10 @@ export function clampCustomWidth(value: number): number {
  *
  * Returns `null` for Fit, meaning "use the available surface width".
  */
-export function viewportTargetWidth(
-  viewport: BrowserViewport,
-): number | null {
+export function viewportTargetWidth(viewport: BrowserViewport): number | null {
   if (viewport.preset === "fit") return null;
-  if (viewport.preset === "custom") return clampCustomWidth(viewport.customWidth);
+  if (viewport.preset === "custom")
+    return clampCustomWidth(viewport.customWidth);
   return VIEWPORT_PRESET_WIDTHS[viewport.preset];
 }
 
@@ -170,7 +169,8 @@ export function parseViewport(value: unknown): BrowserViewport | null {
     return null;
   }
   const rawWidth =
-    typeof record.customWidth === "number" && Number.isFinite(record.customWidth)
+    typeof record.customWidth === "number" &&
+    Number.isFinite(record.customWidth)
       ? record.customWidth
       : DEFAULT_CUSTOM_WIDTH;
   return { preset, customWidth: clampCustomWidth(rawWidth) };

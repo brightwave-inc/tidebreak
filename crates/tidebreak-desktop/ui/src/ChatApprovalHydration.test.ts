@@ -5,7 +5,12 @@ import {
 } from "./ChatApprovalHydration";
 import { initialChatSessionState } from "./ChatSessionReducer";
 
-const transcript = { messages: [], tool_activity: [], terminal_turns: [], last_event_seq: 7 };
+const transcript = {
+  messages: [],
+  tool_activity: [],
+  terminal_turns: [],
+  last_event_seq: 7,
+};
 
 const USAGE = {
   input_tokens: 12_000,
@@ -43,8 +48,14 @@ describe("loadChatApprovalHydration", () => {
       listChatMessages: vi.fn(async () => transcript),
       listPendingApprovals: vi.fn(() => pending),
     };
-    const loading = loadChatApprovalHydration(client, "old-chat", () => current);
-    await vi.waitFor(() => expect(client.listPendingApprovals).toHaveBeenCalled());
+    const loading = loadChatApprovalHydration(
+      client,
+      "old-chat",
+      () => current,
+    );
+    await vi.waitFor(() =>
+      expect(client.listPendingApprovals).toHaveBeenCalled(),
+    );
     current = false;
     release([]);
     await expect(loading).resolves.toBeNull();

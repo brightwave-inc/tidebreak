@@ -346,7 +346,8 @@ export function ManagedGate({
     !pairing &&
     status?.signed_in === true &&
     sameGateway(status.base_url, lockedUrl);
-  if (sessionSatisfiesPolicy) return <Published policy={policy}>{children}</Published>;
+  if (sessionSatisfiesPolicy)
+    return <Published policy={policy}>{children}</Published>;
   // The device's managed gateway is the policy's URL — or, for a pairing
   // awaiting consent, the URL the shell registered from the provision link.
   const shownUrl = pairing

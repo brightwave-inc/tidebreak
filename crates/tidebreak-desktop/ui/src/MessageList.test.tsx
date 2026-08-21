@@ -46,7 +46,13 @@ function backgroundRun(
 describe("MessageBubble", () => {
   it("keeps a phase ahead of the response it precedes, with one worker status", () => {
     const messages: ChatMessage[] = [
-      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "running" },
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "web_search",
+        status: "running",
+      },
       {
         id: "approval-1",
         role: "approval",
@@ -152,10 +158,22 @@ describe("MessageBubble", () => {
   // outside the phase.
   it("keeps one phase across assistant bubbles that render nothing", () => {
     const messages: ChatMessage[] = [
-      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "web_search",
+        status: "completed",
+      },
       { id: "assistant-1", role: "assistant", text: "", sources: [] },
       { id: "assistant-2", role: "assistant", text: "", sources: [] },
-      { id: "tool-2", role: "tool", callId: "call-2", name: "read_file", status: "completed" },
+      {
+        id: "tool-2",
+        role: "tool",
+        callId: "call-2",
+        name: "read_file",
+        status: "completed",
+      },
       { id: "assistant-3", role: "assistant", text: "", sources: [] },
     ];
     const markup = renderToStaticMarkup(
@@ -184,10 +202,28 @@ describe("MessageBubble", () => {
 
   it("splits phases at the response between them", () => {
     const messages: ChatMessage[] = [
-      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
-      { id: "tool-2", role: "tool", callId: "call-2", name: "read_file", status: "failed" },
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "web_search",
+        status: "completed",
+      },
+      {
+        id: "tool-2",
+        role: "tool",
+        callId: "call-2",
+        name: "read_file",
+        status: "failed",
+      },
       { id: "assistant-1", role: "assistant", text: "Done", sources: [] },
-      { id: "tool-3", role: "tool", callId: "call-3", name: "list_dir", status: "cancelled" },
+      {
+        id: "tool-3",
+        role: "tool",
+        callId: "call-3",
+        name: "list_dir",
+        status: "cancelled",
+      },
     ];
     const markup = renderToStaticMarkup(
       <MessageList
@@ -219,10 +255,34 @@ describe("MessageBubble", () => {
 
   it("keeps a live call in the same phase as the settled ones around it", () => {
     const messages: ChatMessage[] = [
-      { id: "tool-1", role: "tool", callId: "call-1", name: "web_search", status: "completed" },
-      { id: "tool-2", role: "tool", callId: "call-2", name: "list_dir", status: "running" },
-      { id: "tool-3", role: "tool", callId: "call-3", name: "request_folder_access", status: "completed" },
-      { id: "tool-4", role: "tool", callId: "call-4", name: "read_file", status: "completed" },
+      {
+        id: "tool-1",
+        role: "tool",
+        callId: "call-1",
+        name: "web_search",
+        status: "completed",
+      },
+      {
+        id: "tool-2",
+        role: "tool",
+        callId: "call-2",
+        name: "list_dir",
+        status: "running",
+      },
+      {
+        id: "tool-3",
+        role: "tool",
+        callId: "call-3",
+        name: "request_folder_access",
+        status: "completed",
+      },
+      {
+        id: "tool-4",
+        role: "tool",
+        callId: "call-4",
+        name: "read_file",
+        status: "completed",
+      },
     ];
     const markup = renderToStaticMarkup(
       <MessageList
@@ -261,7 +321,13 @@ describe("MessageBubble", () => {
         name: "mcp__private_server__read_a_sensitive_path",
         status: "completed",
       },
-      { id: "tool-2", role: "tool", callId: "call-2", name: "web_search", status: "completed" },
+      {
+        id: "tool-2",
+        role: "tool",
+        callId: "call-2",
+        name: "web_search",
+        status: "completed",
+      },
     ];
     const markup = renderToStaticMarkup(
       <MessageList
@@ -533,7 +599,12 @@ describe("background-agent transcript activity", () => {
             name: "spawn_sandbox_agent",
             status: "completed",
           },
-          { id: "assistant", role: "assistant", text: "I will wait.", sources: [] },
+          {
+            id: "assistant",
+            role: "assistant",
+            text: "I will wait.",
+            sources: [],
+          },
         ]}
         folderAccessRequests={[]}
         nativeHost={false}
@@ -615,7 +686,12 @@ describe("retryableTurn", () => {
         role: "user",
         text: "what is in this",
         images: [
-          { attachmentId: "img-1", mediaType: "image/png", width: 8, height: 8 },
+          {
+            attachmentId: "img-1",
+            mediaType: "image/png",
+            width: 8,
+            height: 8,
+          },
         ],
         files: [
           {

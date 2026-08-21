@@ -211,7 +211,9 @@ describe("CodeComposer", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Permissions: Ask" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Permissions: Ask" }),
+    ).toBeInTheDocument();
   });
 
   it("shows the chat context meter from the last turn's usage", () => {
@@ -274,10 +276,16 @@ describe("CodeComposer", () => {
 
     const box = screen.getByRole("textbox", { name: "Message" });
     fireEvent.change(box, { target: { value: "and run the tests" } });
-    expect(screen.getByRole("button", { name: "Queue message for after this response" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", {
+        name: "Queue message for after this response",
+      }),
+    ).toBeEnabled();
     fireEvent.keyDown(box, { key: "Enter" });
 
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith("and run the tests"));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("and run the tests"),
+    );
     expect(box).toHaveValue("");
     expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
   });
@@ -434,7 +442,9 @@ describe("CodeComposer", () => {
     const box = screen.getByRole("textbox", { name: "Message" });
     fireEvent.change(box, { target: { value: "and push it" } });
     fireEvent.click(
-      screen.getByRole("button", { name: "Queue message for after this response" }),
+      screen.getByRole("button", {
+        name: "Queue message for after this response",
+      }),
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -536,7 +546,9 @@ describe("CodeComposer", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Model: Sonnet 4.6" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Model: Sonnet 4.6" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Reasoning:/ })).toBeNull();
   });
 
@@ -647,7 +659,9 @@ describe("CodeComposer", () => {
   });
 
   it("puts images back when send is refused", async () => {
-    const onSend = vi.fn().mockRejectedValue(new Error("Could not send that turn"));
+    const onSend = vi
+      .fn()
+      .mockRejectedValue(new Error("Could not send that turn"));
     useComposerDrafts.getState().setImages("sess-1", [
       readyImageAttachment("img-1", {
         attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",

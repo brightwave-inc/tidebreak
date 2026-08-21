@@ -31,7 +31,10 @@ export function documentIcon(mediaType: string | null | undefined): LucideIcon {
   ) {
     return FileSpreadsheet;
   }
-  if (type.includes("presentationml") || type === "application/vnd.ms-powerpoint") {
+  if (
+    type.includes("presentationml") ||
+    type === "application/vnd.ms-powerpoint"
+  ) {
     return Presentation;
   }
   // Charts are JSON on disk, but a reader scanning a catalog is looking for the

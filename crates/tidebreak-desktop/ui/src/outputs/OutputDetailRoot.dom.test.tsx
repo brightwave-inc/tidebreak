@@ -21,9 +21,9 @@ vi.mock("@/components/document/image-viewer", () => ({
 }));
 
 vi.mock("@/document/DocumentViewer", async () => {
-  const actual = await vi.importActual<typeof import("@/document/DocumentViewer")>(
-    "@/document/DocumentViewer",
-  );
+  const actual = await vi.importActual<
+    typeof import("@/document/DocumentViewer")
+  >("@/document/DocumentViewer");
   return {
     ...actual,
     DocumentViewer: ({ mediaType }: { mediaType: string }) => (
@@ -44,7 +44,9 @@ const documentId = "4571ebc0-69a7-4f8a-a9c7-936c50f0f022";
 /** An output id this conversation does not own. */
 const absentOutputId = "ce116263-15b5-5df2-b472-269378e9da58";
 
-function preview(overrides: Partial<DeliverablePreview> = {}): DeliverablePreview {
+function preview(
+  overrides: Partial<DeliverablePreview> = {},
+): DeliverablePreview {
   return {
     outputId,
     filename: "Research brief.md",
@@ -59,7 +61,9 @@ function preview(overrides: Partial<DeliverablePreview> = {}): DeliverablePrevie
 
 const olderRevisionId = "0e44560b-5d3b-4f80-b24c-647560f7ef19";
 
-function revisionRow(overrides: Partial<OutputRevisionInfo> = {}): OutputRevisionInfo {
+function revisionRow(
+  overrides: Partial<OutputRevisionInfo> = {},
+): OutputRevisionInfo {
   return {
     revisionId,
     ordinal: 2,
@@ -72,7 +76,9 @@ function revisionRow(overrides: Partial<OutputRevisionInfo> = {}): OutputRevisio
   };
 }
 
-function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis {
+function detailApis(
+  overrides: Partial<OutputDetailApis> = {},
+): OutputDetailApis {
   return {
     read: vi.fn().mockResolvedValue(preview()),
     export: vi.fn().mockResolvedValue({
@@ -92,9 +98,11 @@ function detailApis(overrides: Partial<OutputDetailApis> = {}): OutputDetailApis
         }),
       ],
     }),
-    readRevision: vi.fn().mockResolvedValue(
-      preview({ revisionCount: 2, content: "# Findings\n\nEarlier draft." }),
-    ),
+    readRevision: vi
+      .fn()
+      .mockResolvedValue(
+        preview({ revisionCount: 2, content: "# Findings\n\nEarlier draft." }),
+      ),
     save: vi.fn().mockResolvedValue({ status: "saved", preview: preview() }),
     restoreRevision: vi.fn().mockResolvedValue({
       outputId,
@@ -134,11 +142,17 @@ describe("OutputDetailRoot", () => {
     await openOutput(apis);
 
     expect(apis.read).toHaveBeenCalledWith("chat-1", outputId);
-    expect(await screen.findByRole("heading", { name: "Findings" })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Findings" }),
+    ).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Save as…" }));
-    await waitFor(() => expect(apis.export).toHaveBeenCalledWith("chat-1", outputId));
-    expect(await screen.findByText("Research brief.md was saved.")).toBeVisible();
+    await waitFor(() =>
+      expect(apis.export).toHaveBeenCalledWith("chat-1", outputId),
+    );
+    expect(
+      await screen.findByText("Research brief.md was saved."),
+    ).toBeVisible();
   });
 
   it("leads back to the list", async () => {
@@ -158,7 +172,9 @@ describe("OutputDetailRoot", () => {
     });
     await openOutput(apis, absentOutputId);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("output not found");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "output not found",
+    );
   });
 
   // CSV shares the spreadsheet viewer with xlsx — never markdown, which would
@@ -176,8 +192,12 @@ describe("OutputDetailRoot", () => {
     });
     await openOutput(apis);
 
-    expect(await screen.findByText("Document preview (text/csv)")).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "not a heading,2" })).toBeNull();
+    expect(
+      await screen.findByText("Document preview (text/csv)"),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "not a heading,2" }),
+    ).toBeNull();
   });
 
   // The history affordance stays hidden until an output actually has history,
@@ -190,7 +210,9 @@ describe("OutputDetailRoot", () => {
     expect(
       screen.queryByRole("button", { name: "Version history" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Revert/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Revert/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the exact revision's document and web sources", async () => {
@@ -252,7 +274,9 @@ describe("OutputDetailRoot", () => {
     expect(await screen.findByLabelText("Output sources")).toBeVisible();
     expect(screen.getByText("Lines 4–8")).toBeVisible();
     expect(screen.getByText("example.com")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Open document source 1" }));
+    await user.click(
+      screen.getByRole("button", { name: "Open document source 1" }),
+    );
     expect(openCitation).toHaveBeenCalledWith({ documentId, citationId });
     await user.click(screen.getByRole("button", { name: "Current research" }));
     expect(hostMocks.openExternal).toHaveBeenCalledWith(
@@ -292,14 +316,20 @@ describe("OutputDetailRoot", () => {
 
     await user.click(screen.getByRole("button", { name: /v1/ }));
     await waitFor(() =>
-      expect(apis.readRevision).toHaveBeenCalledWith("chat-1", outputId, olderRevisionId),
+      expect(apis.readRevision).toHaveBeenCalledWith(
+        "chat-1",
+        outputId,
+        olderRevisionId,
+      ),
     );
     expect(await screen.findByText(/Viewing v1/)).toBeVisible();
     expect(await screen.findByText("Earlier draft.")).toBeVisible();
     // Export is scoped to the latest version, so it pauses while previewing.
     expect(screen.getByRole("button", { name: "Save as…" })).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "Restore this version" }));
+    await user.click(
+      screen.getByRole("button", { name: "Restore this version" }),
+    );
     await waitFor(() =>
       expect(apis.restoreRevision).toHaveBeenCalledWith(
         "chat-1",
@@ -308,7 +338,9 @@ describe("OutputDetailRoot", () => {
       ),
     );
     // Back at the latest version, which now carries the restored content.
-    expect(await screen.findByText(/Restored version 1 as the latest/)).toBeVisible();
+    expect(
+      await screen.findByText(/Restored version 1 as the latest/),
+    ).toBeVisible();
     expect(screen.queryByText(/Viewing v1/)).not.toBeInTheDocument();
   });
 

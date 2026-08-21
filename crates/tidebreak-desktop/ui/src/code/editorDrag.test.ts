@@ -80,10 +80,14 @@ describe("editor tab drops", () => {
     ).toBeNull();
     // Aimed at a tab that closed underneath the drag.
     expect(
-      dropEditorTab(state, tabId("primary", lib), tabId("primary", {
-        type: "file",
-        path: "src/gone.rs",
-      })),
+      dropEditorTab(
+        state,
+        tabId("primary", lib),
+        tabId("primary", {
+          type: "file",
+          path: "src/gone.rs",
+        }),
+      ),
     ).toBeNull();
     // Dragging something that is not one of ours, onto something that is not
     // one of our targets.

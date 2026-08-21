@@ -15,7 +15,9 @@ import { useRouterState } from "@tanstack/react-router";
 export function useActiveChatId(): string | null {
   return useRouterState({
     select: (state) => {
-      const params = state.matches.at(-1)?.params as { chatId?: string } | undefined;
+      const params = state.matches.at(-1)?.params as
+        | { chatId?: string }
+        | undefined;
       return params?.chatId ?? null;
     },
   });

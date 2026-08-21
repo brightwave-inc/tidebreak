@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PluginCatalog } from "@/api";
@@ -48,9 +54,7 @@ const CATALOG: PluginCatalog = {
   prompts: [],
 };
 
-function catalogWith(
-  plugins: Partial<Record<string, boolean>>,
-): PluginCatalog {
+function catalogWith(plugins: Partial<Record<string, boolean>>): PluginCatalog {
   return {
     ...CATALOG,
     plugins: CATALOG.plugins.map((plugin) => ({
@@ -66,9 +70,10 @@ function apisWith(overrides: Partial<PluginsApis> = {}): PluginsApis {
   return {
     list: vi.fn().mockResolvedValue(CATALOG),
     setEnabled: vi.fn(),
-    instructions: vi
-      .fn()
-      .mockImplementation(async (name: string) => ({ name, instructions: SKILL_BODY })),
+    instructions: vi.fn().mockImplementation(async (name: string) => ({
+      name,
+      instructions: SKILL_BODY,
+    })),
     promptBody: vi.fn(),
     ...overrides,
   };
@@ -78,7 +83,11 @@ function apisWith(overrides: Partial<PluginsApis> = {}): PluginsApis {
 function ListHarness({ apis }: { apis: PluginsApis }) {
   const state = usePluginCatalog(apis);
   return (
-    <PluginsView state={state} loadInstructions={apis.instructions} onOpen={() => {}} />
+    <PluginsView
+      state={state}
+      loadInstructions={apis.instructions}
+      onOpen={() => {}}
+    />
   );
 }
 
@@ -145,10 +154,14 @@ describe("Plugins library", () => {
       ...catalogWith({ documents: true }),
       skills: [{ ...CATALOG.skills[0]!, enabled: false }],
     };
-    const apis = apisWith({ setEnabled: vi.fn().mockResolvedValue(reconciled) });
+    const apis = apisWith({
+      setEnabled: vi.fn().mockResolvedValue(reconciled),
+    });
     render(<ListHarness apis={apis} />);
 
-    const bundle = await screen.findByRole("switch", { name: "Enable Documents" });
+    const bundle = await screen.findByRole("switch", {
+      name: "Enable Documents",
+    });
     fireEvent.click(bundle);
     // Optimistic: the switch is on before the request resolves.
     expect(bundle).toBeChecked();
@@ -166,7 +179,9 @@ describe("Plugins library", () => {
     });
     render(<ListHarness apis={apis} />);
 
-    const skill = await screen.findByRole("switch", { name: "Enable my-notes" });
+    const skill = await screen.findByRole("switch", {
+      name: "Enable my-notes",
+    });
     expect(skill).toBeChecked();
     fireEvent.click(skill);
     // Optimistic first, then back where it was once the write fails: the

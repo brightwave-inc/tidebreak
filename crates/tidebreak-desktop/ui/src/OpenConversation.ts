@@ -25,7 +25,10 @@ export function useOpenConversation(
   chatId: string | null,
 ): (startedChatId: string) => boolean {
   const deletingChatId = useChatListStore((state) => state.deletingChatId);
-  const current = useRef<{ chatId: string | null; deletingChatId: string | null }>({
+  const current = useRef<{
+    chatId: string | null;
+    deletingChatId: string | null;
+  }>({
     chatId,
     deletingChatId,
   });

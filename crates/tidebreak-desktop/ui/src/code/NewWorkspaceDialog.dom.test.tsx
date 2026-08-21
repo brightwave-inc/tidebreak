@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -172,7 +178,9 @@ describe("NewWorkspaceDialog", () => {
           createCodeSession,
           listCodeHarnessModels: vi.fn(async () => ({
             kind: "codex" as const,
-            models: [{ id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true }],
+            models: [
+              { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
+            ],
           })),
         })}
       >
@@ -307,9 +315,7 @@ describe("NewWorkspaceDialog", () => {
       metaKey: true,
     });
 
-    await waitFor(() =>
-      expect(createCodeWorkspace).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalled());
     expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
       scope: "ws-prompt",
       text: "list the files",
@@ -362,9 +368,7 @@ describe("NewWorkspaceDialog", () => {
     await act(async () => {
       codex.resolve({
         kind: "codex",
-        models: [
-          { id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true },
-        ],
+        models: [{ id: "gpt-5.6-luna", label: "GPT 5.6 Luna", default: true }],
       });
     });
     expect(
@@ -436,11 +440,7 @@ describe("NewWorkspaceDialog", () => {
           })),
         })}
       >
-        <NewWorkspaceDialog
-          open
-          onOpenChange={onOpenChange}
-          repos={repos}
-        />
+        <NewWorkspaceDialog open onOpenChange={onOpenChange} repos={repos} />
       </AppContextProvider>,
       { initialUrl: "/code" },
     );
@@ -499,7 +499,9 @@ describe("NewWorkspaceDialog", () => {
       name: "Search models",
     });
     await user.type(search, "opus");
-    expect(screen.getByRole("menuitem", { name: /Claude Opus 5/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: /Claude Opus 5/ }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("menuitem", { name: /GPT 5.6 Sol/ }),
     ).not.toBeInTheDocument();

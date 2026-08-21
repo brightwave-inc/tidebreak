@@ -14,7 +14,7 @@ const managed: ManagedPolicy = {
   gateway_url: "https://gateway.example/",
   source: "os",
   misconfigured: false,
-allow_local_mcp_servers: false,
+  allow_local_mcp_servers: false,
 };
 
 const signedOut: GatewayStatus = {
@@ -35,9 +35,9 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   return {
     getPolicy: vi.fn().mockResolvedValue(managed),
     getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
-    gatewaySignIn: vi
-      .fn()
-      .mockResolvedValue({ authorization_url: "http://gw/oauth/authorize?x=1" }),
+    gatewaySignIn: vi.fn().mockResolvedValue({
+      authorization_url: "http://gw/oauth/authorize?x=1",
+    }),
     putProvider: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as ApiClient;
@@ -90,7 +90,10 @@ describe("ManagedGate", () => {
         .mockResolvedValueOnce(signedOut)
         .mockResolvedValue({
           ...signedOut,
-          sign_in: { state: "pending", authorization_url: "http://gw/authorize" },
+          sign_in: {
+            state: "pending",
+            authorization_url: "http://gw/authorize",
+          },
         }),
     });
     const open = vi.fn();
@@ -115,7 +118,9 @@ describe("ManagedGate", () => {
       "noreferrer,noopener",
     );
     // The reload after starting the flow reports it pending.
-    expect(await screen.findByText(/Waiting for the browser/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Waiting for the browser/),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /Open the sign-in page again/ }),
     ).toHaveAttribute("href", "http://gw/authorize");
@@ -149,7 +154,7 @@ describe("ManagedGate", () => {
       managed: false,
       source: "unmanaged",
       misconfigured: false,
-    allow_local_mcp_servers: false,
+      allow_local_mcp_servers: false,
     };
     // The profile starts open, then a deep-link pairing provisions it and the
     // session already satisfies the new policy.
@@ -186,7 +191,7 @@ describe("ManagedGate", () => {
         managed: false,
         source: "unmanaged",
         misconfigured: false,
-      allow_local_mcp_servers: false,
+        allow_local_mcp_servers: false,
       } satisfies ManagedPolicy)
       .mockResolvedValue(managed);
     const client = api({
@@ -270,7 +275,7 @@ describe("ManagedGate", () => {
         managed: false,
         source: "unmanaged",
         misconfigured: false,
-      allow_local_mcp_servers: false,
+        allow_local_mcp_servers: false,
       } satisfies ManagedPolicy),
     });
     const user = userEvent.setup();
@@ -449,7 +454,9 @@ describe("ManagedGate", () => {
     const user = userEvent.setup();
     mount(client);
 
-    expect(await screen.findByText(/Waiting for the browser/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Waiting for the browser/),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Start over/ }));
 
     // A fresh flow begins — a new attempt server-side, and the new page
@@ -466,7 +473,10 @@ describe("ManagedGate", () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({
         ...signedOut,
-        sign_in: { state: "failed", message: "browser authorization timed out" },
+        sign_in: {
+          state: "failed",
+          message: "browser authorization timed out",
+        },
       }),
     });
     mount(client);
@@ -482,7 +492,7 @@ describe("ManagedGate", () => {
       managed: false,
       source: "unmanaged",
       misconfigured: false,
-    allow_local_mcp_servers: false,
+      allow_local_mcp_servers: false,
     };
     const client = api({
       getPolicy: vi

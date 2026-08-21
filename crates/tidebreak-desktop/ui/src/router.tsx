@@ -42,7 +42,8 @@ const homeRoute = createRoute({
   // Home hosts panels the way a conversation does — the Apps library opens
   // beside the composer — so it reads the same layout params. Which panel
   // types home actually accepts is decided by HomeRoute, not the URL parser.
-  validateSearch: (search: Record<string, unknown>): PanelSearch => panelSearchFrom(search),
+  validateSearch: (search: Record<string, unknown>): PanelSearch =>
+    panelSearchFrom(search),
   component: HomeRoute,
 });
 
@@ -262,9 +263,7 @@ function SettingsIndexRedirect() {
   }, [managed, navigate]);
   // One frame, at most: a placeholder rather than nothing, so the settings
   // frame is never momentarily empty.
-  return (
-    <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>
-  );
+  return <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>;
 }
 
 const settingsIndexRoute = createRoute({
@@ -286,9 +285,7 @@ function McpSettingsRedirect() {
     const connectedAppsPath: string = "/settings/connected-apps";
     void navigate({ to: connectedAppsPath, replace: true });
   }, [navigate]);
-  return (
-    <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>
-  );
+  return <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>;
 }
 
 const settingsMcpRedirectRoute = createRoute({
@@ -307,9 +304,7 @@ function ExperimentalSettingsRedirect() {
     const codingHarnessesPath: string = "/settings/coding-harnesses";
     void navigate({ to: codingHarnessesPath, replace: true });
   }, [navigate]);
-  return (
-    <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>
-  );
+  return <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>;
 }
 
 const settingsExperimentalRedirectRoute = createRoute({

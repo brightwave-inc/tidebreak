@@ -74,7 +74,9 @@ describe("ChangeSummaryCard", () => {
     );
 
     expect(screen.getByText("3 files touched")).toBeInTheDocument();
-    expect(screen.getByText("2 rejected and left unchanged")).toBeInTheDocument();
+    expect(
+      screen.getByText("2 rejected and left unchanged"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(/Rejected: file changed before write-back/),
     ).toBeInTheDocument();

@@ -124,12 +124,17 @@ function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
       className="hover:bg-muted flex w-full items-center gap-3 rounded-lg border p-3 text-left"
     >
       <span className="flex size-8 shrink-0 items-center justify-center">
-        <Icon aria-hidden="true" className={`${presentation.iconClass} size-5`} />
+        <Icon
+          aria-hidden="true"
+          className={`${presentation.iconClass} size-5`}
+        />
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="flex min-w-0 items-center gap-2">
           <span className="text-sm font-medium">{presentation.label}</span>
-          <span className="text-muted-foreground truncate text-sm">{title}</span>
+          <span className="text-muted-foreground truncate text-sm">
+            {title}
+          </span>
         </span>
         <span className="text-muted-foreground text-xs">
           {presentation.description}

@@ -59,9 +59,7 @@ describe("ErrorBoundary with an inline fallback", () => {
     render(
       <div>
         <p>the conversation around it</p>
-        <ErrorBoundary
-          fallback={<p>This step could not be displayed.</p>}
-        >
+        <ErrorBoundary fallback={<p>This step could not be displayed.</p>}>
           <Boom />
         </ErrorBoundary>
       </div>,

@@ -323,7 +323,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       closedBrowserIdsRef.current.delete(browserId);
       workspaceBrowserIdsRef.current.add(browserId);
     }
-    closeBrowserPanels(removedCodeBrowserIds(previousLayoutRef.current, layout));
+    closeBrowserPanels(
+      removedCodeBrowserIds(previousLayoutRef.current, layout),
+    );
     previousLayoutRef.current = layout;
     setBrowserTitles((current) => {
       let changed = false;
@@ -623,7 +625,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     }
     setDraftAgent(false);
     setActiveSessionId(sessionId);
-    openWorkspaceTask(sessionId === conversations[0]?.id ? undefined : sessionId);
+    openWorkspaceTask(
+      sessionId === conversations[0]?.id ? undefined : sessionId,
+    );
   }
 
   /** Add a tab for an agent the reader has not filled in yet. */
@@ -860,7 +864,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onCloseAllEditors={() =>
           setWorkspaceLayout(closeAllEditorTabs(layout, "primary"))
         }
-        onCloseEveryEditor={() => setWorkspaceLayout(closeAllEditorTabs(layout))}
+        onCloseEveryEditor={() =>
+          setWorkspaceLayout(closeAllEditorTabs(layout))
+        }
         onCloseOtherEditors={(index) =>
           setWorkspaceLayout(closeOtherEditorTabs(layout, index, "primary"))
         }
@@ -871,7 +877,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         onNewTab={() => requestNewTab("primary")}
         onNewBrowser={() => openBrowser(undefined, "primary")}
         onNewDiff={() =>
-          setWorkspaceLayout(openCodeEditor(layout, { type: "diff" }, "primary"))
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "diff" }, "primary"),
+          )
         }
         onNewSourceControl={() =>
           setWorkspaceLayout(
@@ -883,7 +891,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         }
         onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
-          setWorkspaceLayout(moveEditorTab(layout, "primary", index, "secondary"))
+          setWorkspaceLayout(
+            moveEditorTab(layout, "primary", index, "secondary"),
+          )
         }
         onMoveEditor={(from, to) =>
           setWorkspaceLayout(reorderEditorTab(layout, "primary", from, to))
@@ -908,8 +918,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         <PanelLayout
           layout={chrome.panels}
           framed={false}
-          onFocusTab={(index) => setWorkspaceLayout(focusCodeChromeTab(layout, index))}
-          onCloseTab={(index) => setWorkspaceLayout(closeCodeChromeTab(layout, index))}
+          onFocusTab={(index) =>
+            setWorkspaceLayout(focusCodeChromeTab(layout, index))
+          }
+          onCloseTab={(index) =>
+            setWorkspaceLayout(closeCodeChromeTab(layout, index))
+          }
           renderChat={(visible) => (
             // The panel slot is a plain block. `.chat-pane` claims that height
             // so `.message-view` can grow and the composer stays at the bottom,
@@ -1033,11 +1047,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           )
         }
         onNewPr={() =>
-          setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, "secondary"))
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "pr" }, "secondary"),
+          )
         }
         onNewTerminal={() => setWorkspaceLayout(openTerminalLayout(layout))}
         onMoveEditorToOtherGroup={(index) =>
-          setWorkspaceLayout(moveEditorTab(layout, "secondary", index, "primary"))
+          setWorkspaceLayout(
+            moveEditorTab(layout, "secondary", index, "primary"),
+          )
         }
         onMoveEditor={(from, to) =>
           setWorkspaceLayout(reorderEditorTab(layout, "secondary", from, to))
@@ -2053,7 +2071,9 @@ function WatchTaskBar({
       <CircleDotDashed
         className={cn(
           "size-3.5 shrink-0",
-          watch?.state === "blocked" ? STATUS_MARK.warning : STATUS_MARK.pending,
+          watch?.state === "blocked"
+            ? STATUS_MARK.warning
+            : STATUS_MARK.pending,
         )}
         aria-hidden
       />

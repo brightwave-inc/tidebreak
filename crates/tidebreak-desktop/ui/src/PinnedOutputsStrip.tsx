@@ -100,7 +100,9 @@ export function PinnedOutputsStrip({
   onOpenOutput,
   onOpenOutputs,
 }: PinnedOutputsStripProps) {
-  const collapsed = useOutputsStripStore((state) => state.collapsed[chatId] ?? false);
+  const collapsed = useOutputsStripStore(
+    (state) => state.collapsed[chatId] ?? false,
+  );
   const setCollapsed = useOutputsStripStore((state) => state.setCollapsed);
 
   if (panelOpen || outputs.length === 0) return null;

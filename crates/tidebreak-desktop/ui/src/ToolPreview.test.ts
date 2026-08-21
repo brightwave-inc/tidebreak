@@ -41,7 +41,9 @@ describe("toolPreviewPresentation", () => {
         cwd: ".",
         files: ["documents/salaries.csv", "documents/q3.xlsx"],
       }).detail,
-    ).toBe("python3 analyze.py\n# staged files: documents/salaries.csv, documents/q3.xlsx");
+    ).toBe(
+      "python3 analyze.py\n# staged files: documents/salaries.csv, documents/q3.xlsx",
+    );
   });
 
   it("quotes an argument whose boundaries would otherwise be invisible", () => {
@@ -85,7 +87,13 @@ describe("how a call narrates itself", () => {
       literal: false,
     });
     expect(
-      toolPreviewHeadline({ tool: "exec", command: "rm", args: ["-rf", "/tmp/build"], cwd: ".", files: [] }),
+      toolPreviewHeadline({
+        tool: "exec",
+        command: "rm",
+        args: ["-rf", "/tmp/build"],
+        cwd: ".",
+        files: [],
+      }),
     ).toEqual({ text: "rm -rf /tmp/build", literal: true });
   });
 });

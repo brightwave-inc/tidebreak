@@ -15,10 +15,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_event: string, handler: (event: { payload: unknown }) => void) => {
-    mocks.handler = handler;
-    return mocks.stop;
-  }),
+  listen: vi.fn(
+    async (_event: string, handler: (event: { payload: unknown }) => void) => {
+      mocks.handler = handler;
+      return mocks.stop;
+    },
+  ),
 }));
 
 vi.mock("./attachments", () => ({
@@ -57,9 +59,7 @@ describe("DocumentDropTarget", () => {
         payload: { phase: "enter", accepted: true, fileCount: 1 },
       });
     });
-    expect(
-      screen.getByText("Attach this file or folder"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Attach this file or folder")).toBeInTheDocument();
     expect(dropItemCountCopy(3)).toBe("3 files or folders");
 
     act(() => {
@@ -98,8 +98,12 @@ describe("DocumentDropTarget", () => {
   });
 
   it("rejects malformed drop projections", () => {
-    expect(parseDropState({ phase: "enter", accepted: true, fileCount: -1 })).toBeNull();
-    expect(parseDropState({ phase: "enter", accepted: true, fileCount: 2 })).toEqual({
+    expect(
+      parseDropState({ phase: "enter", accepted: true, fileCount: -1 }),
+    ).toBeNull();
+    expect(
+      parseDropState({ phase: "enter", accepted: true, fileCount: 2 }),
+    ).toEqual({
       phase: "enter",
       accepted: true,
       fileCount: 2,

@@ -37,7 +37,10 @@ export function createRefreshSignalStore() {
     planApprovals: 0,
     taskPlan: 0,
     signal: (target) =>
-      set((state) => ({ [target]: state[target] + 1 }) as Partial<RefreshSignalStore>),
+      set(
+        (state) =>
+          ({ [target]: state[target] + 1 }) as Partial<RefreshSignalStore>,
+      ),
   }));
 }
 

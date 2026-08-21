@@ -140,7 +140,11 @@ export function QueueTray({
               )
             }
           >
-            {paused ? <Play className="size-3" /> : <Pause className="size-3" />}
+            {paused ? (
+              <Play className="size-3" />
+            ) : (
+              <Pause className="size-3" />
+            )}
           </Button>
         </div>
       </header>
@@ -164,7 +168,8 @@ export function QueueTray({
                     setEditing(null);
                     if (content && content !== row.content) {
                       void act(
-                        () => client.patchQueuedTurn(chatId, row.id, { content }),
+                        () =>
+                          client.patchQueuedTurn(chatId, row.id, { content }),
                         "Could not edit the queued message",
                       );
                     }
@@ -200,7 +205,10 @@ export function QueueTray({
                 disabled={busy || index === 0}
                 onClick={() =>
                   void act(
-                    () => client.patchQueuedTurn(chatId, row.id, { position: index - 1 }),
+                    () =>
+                      client.patchQueuedTurn(chatId, row.id, {
+                        position: index - 1,
+                      }),
                     "Could not reorder the queue",
                   )
                 }
@@ -216,7 +224,10 @@ export function QueueTray({
                 disabled={busy || index === queued.length - 1}
                 onClick={() =>
                   void act(
-                    () => client.patchQueuedTurn(chatId, row.id, { position: index + 1 }),
+                    () =>
+                      client.patchQueuedTurn(chatId, row.id, {
+                        position: index + 1,
+                      }),
                     "Could not reorder the queue",
                   )
                 }

@@ -3,7 +3,10 @@ import * as React from "react";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import { clearFileDownloadCache, type FileBytesSource } from "./useFileDownload";
+import {
+  clearFileDownloadCache,
+  type FileBytesSource,
+} from "./useFileDownload";
 
 const pdfMocks = vi.hoisted(() => ({
   props: null as Record<string, unknown> | null,

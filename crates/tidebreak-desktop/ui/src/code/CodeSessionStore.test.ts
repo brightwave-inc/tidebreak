@@ -30,18 +30,22 @@ describe("CodeSessionStore", () => {
 
   it("does not publish duplicate frames or unchanged external updates", () => {
     const store = createCodeSessionStore();
-    store.getState().applyEvent(
-      { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
-      deps,
-    );
+    store
+      .getState()
+      .applyEvent(
+        { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
+        deps,
+      );
     const listener = vi.fn();
     store.subscribe(listener);
 
     expect(
-      store.getState().applyEvent(
-        { seq: 1, event: { type: "assistant_delta", text: "late" } },
-        deps,
-      ),
+      store
+        .getState()
+        .applyEvent(
+          { seq: 1, event: { type: "assistant_delta", text: "late" } },
+          deps,
+        ),
     ).toEqual([]);
     store.getState().update((session) => session);
     store.getState().setConnectionState("live");

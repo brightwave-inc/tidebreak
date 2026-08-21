@@ -72,14 +72,18 @@ describe("accepted turn after the socket already painted", () => {
       nextId: () => "streamed",
       now: () => "2026-08-15T12:00:02.000Z",
     };
-    store.getState().applyEvent(
-      { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
-      deps,
-    );
-    store.getState().applyEvent(
-      { seq: 2, event: { type: "assistant_delta", text: "README.md" } },
-      deps,
-    );
+    store
+      .getState()
+      .applyEvent(
+        { seq: 1, event: { type: "turn_started", turn_id: "turn-1" } },
+        deps,
+      );
+    store
+      .getState()
+      .applyEvent(
+        { seq: 2, event: { type: "assistant_delta", text: "README.md" } },
+        deps,
+      );
     store.getState().applyEvent(
       {
         seq: 3,

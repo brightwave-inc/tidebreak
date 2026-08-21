@@ -16,7 +16,9 @@ const ids = {
 };
 const revisionId = "72cb0277-5a3c-45ee-bda8-43534f74feb2";
 
-function output(overrides: Partial<DeliverableSummary> = {}): DeliverableSummary {
+function output(
+  overrides: Partial<DeliverableSummary> = {},
+): DeliverableSummary {
   return {
     outputId: ids.brief,
     filename: "Research brief.md",
@@ -88,12 +90,18 @@ describe("OutputsView", () => {
       </>,
     );
     await user.click(
-      await screen.findByRole("button", { name: "More options for Research brief.md" }),
+      await screen.findByRole("button", {
+        name: "More options for Research brief.md",
+      }),
     );
     await user.click(await screen.findByRole("menuitem", { name: "Save as…" }));
 
-    await waitFor(() => expect(apis.export).toHaveBeenCalledWith("chat-1", ids.brief));
-    expect(await screen.findByText("Research brief.md was saved.")).toBeVisible();
+    await waitFor(() =>
+      expect(apis.export).toHaveBeenCalledWith("chat-1", ids.brief),
+    );
+    expect(
+      await screen.findByText("Research brief.md was saved."),
+    ).toBeVisible();
   });
 
   it("deletes an output and offers an undo that restores it", async () => {
@@ -107,19 +115,29 @@ describe("OutputsView", () => {
       </>,
     );
     await user.click(
-      await screen.findByRole("button", { name: "More options for Research brief.md" }),
+      await screen.findByRole("button", {
+        name: "More options for Research brief.md",
+      }),
     );
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
 
-    await waitFor(() => expect(apis.delete).toHaveBeenCalledWith("chat-1", ids.brief));
+    await waitFor(() =>
+      expect(apis.delete).toHaveBeenCalledWith("chat-1", ids.brief),
+    );
     expect(
-      await screen.findByText("Research brief.md was deleted from this conversation."),
+      await screen.findByText(
+        "Research brief.md was deleted from this conversation.",
+      ),
     ).toBeVisible();
 
     // The delete is reversible: Undo restores the exact output.
     await user.click(screen.getByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(apis.restore).toHaveBeenCalledWith("chat-1", ids.brief));
-    expect(await screen.findByText("Research brief.md was restored.")).toBeVisible();
+    await waitFor(() =>
+      expect(apis.restore).toHaveBeenCalledWith("chat-1", ids.brief),
+    );
+    expect(
+      await screen.findByText("Research brief.md was restored."),
+    ).toBeVisible();
   });
 
   it("names the reason a save failed rather than reporting it as saved", async () => {
@@ -140,7 +158,9 @@ describe("OutputsView", () => {
       </>,
     );
     await user.click(
-      await screen.findByRole("button", { name: "More options for Research brief.md" }),
+      await screen.findByRole("button", {
+        name: "More options for Research brief.md",
+      }),
     );
     await user.click(await screen.findByRole("menuitem", { name: "Save as…" }));
 
@@ -159,7 +179,9 @@ describe("OutputsView", () => {
       chatId === "chat-1"
         ? stale
         : Promise.resolve({
-            deliverables: [output({ outputId: ids.sheet, filename: "Current.csv" })],
+            deliverables: [
+              output({ outputId: ids.sheet, filename: "Current.csv" }),
+            ],
             truncated: false,
           }),
     );
@@ -173,15 +195,21 @@ describe("OutputsView", () => {
     await waitFor(() => expect(apis.list).toHaveBeenCalledWith("chat-1"));
 
     view.rerender(<OutputsView chatId="chat-2" apis={apis} />);
-    expect(await screen.findByRole("button", { name: "Open Current.csv" })).toBeVisible();
+    expect(
+      await screen.findByRole("button", { name: "Open Current.csv" }),
+    ).toBeVisible();
     await act(async () => {
       resolveStale?.({
         deliverables: [output({ filename: "Stale.md" })],
         truncated: false,
       });
     });
-    expect(screen.getByRole("button", { name: "Open Current.csv" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Open Stale.md" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open Current.csv" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Open Stale.md" }),
+    ).not.toBeInTheDocument();
   });
 
   it("says how to make the first output when there are none", async () => {

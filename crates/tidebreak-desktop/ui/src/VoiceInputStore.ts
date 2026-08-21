@@ -97,7 +97,9 @@ export function selectedLocalVoiceModel(
   return info ? localVoiceModel(info, info.local_model) : undefined;
 }
 
-export function voiceSelectionReady(info: VoiceTranscriptionInfo | null): boolean {
+export function voiceSelectionReady(
+  info: VoiceTranscriptionInfo | null,
+): boolean {
   if (!info) return false;
   if (info.model === "local") {
     return selectedLocalVoiceModel(info)?.state === "ready";
@@ -114,5 +116,8 @@ export function formatModelSize(bytes: number): string {
 
 export function localVoiceProgress(model: LocalVoiceModelInfo): number {
   if (!model.total_bytes) return 0;
-  return Math.min(100, ((model.downloaded_bytes ?? 0) / model.total_bytes) * 100);
+  return Math.min(
+    100,
+    ((model.downloaded_bytes ?? 0) / model.total_bytes) * 100,
+  );
 }

@@ -224,9 +224,7 @@ export function ConvertedOfficeViewer({
     );
   }
 
-  return (
-    <PdfViewer source={pdfSource} className={cn("min-h-0", className)} />
-  );
+  return <PdfViewer source={pdfSource} className={cn("min-h-0", className)} />;
 }
 
 /**

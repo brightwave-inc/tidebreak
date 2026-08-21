@@ -350,11 +350,7 @@ export function ToolCommandCard({
                   </p>
                 ) : null}
                 {output !== null && (
-                  <ToolOutputPreview
-                    text={output}
-                    collapsedLines={12}
-                    bare
-                  />
+                  <ToolOutputPreview text={output} collapsedLines={12} bare />
                 )}
               </TabsContent>
             </div>

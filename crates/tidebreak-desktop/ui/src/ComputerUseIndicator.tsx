@@ -110,7 +110,11 @@ export function ComputerUseIndicator() {
                     )
               }
             >
-              {snapshot.halted ? "Resume" : busy.has("control") ? "Stopping…" : "Stop"}
+              {snapshot.halted
+                ? "Resume"
+                : busy.has("control")
+                  ? "Stopping…"
+                  : "Stop"}
             </Button>
           </div>
           {errors.control && (

@@ -33,7 +33,10 @@ export function PanelFrame({
 
   return (
     <PopoverCollisionBoundaryProvider boundary={boundary}>
-      <div ref={setBoundary} className="flex h-full w-full min-w-0 flex-1 flex-col overflow-clip">
+      <div
+        ref={setBoundary}
+        className="flex h-full w-full min-w-0 flex-1 flex-col overflow-clip"
+      >
         <PanelPrimaryHeader
           breadcrumb={breadcrumb}
           rightSlot={headerRightSlot}

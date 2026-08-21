@@ -119,7 +119,9 @@ export function BootFailure({
   onWorkLocally,
   writeClipboard = copyPlainText,
 }: BootFailureProps) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const [detaching, setDetaching] = useState(false);
   const machine = attachedMachine(attachment);
 

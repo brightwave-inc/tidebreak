@@ -122,7 +122,10 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
       )}
 
       {documents !== null && documents.length > 0 && (
-        <ul className="m-0 flex list-none flex-col gap-2 p-0" aria-label="Project files">
+        <ul
+          className="m-0 flex list-none flex-col gap-2 p-0"
+          aria-label="Project files"
+        >
           {documents.map((document) => {
             const size = fileSize(document.source_byte_len);
             return (

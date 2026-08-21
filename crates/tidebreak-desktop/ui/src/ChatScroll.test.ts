@@ -39,9 +39,9 @@ describe("followScrollBehavior", () => {
 
 describe("prefersReducedMotion", () => {
   it("reads the media query and defaults to no-preference without one", () => {
-    expect(prefersReducedMotion((q) => ({ matches: q.includes("reduce") }))).toBe(
-      true,
-    );
+    expect(
+      prefersReducedMotion((q) => ({ matches: q.includes("reduce") })),
+    ).toBe(true);
     expect(prefersReducedMotion(() => ({ matches: false }))).toBe(false);
   });
 });

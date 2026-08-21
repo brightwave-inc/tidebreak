@@ -108,14 +108,13 @@ export function CodeViewer({
   const language =
     (filename && codeLanguageForFilename(filename)) ??
     codeLanguageForMediaType(mediaType);
-  const markdown = useMemo(
-    () => fence(language, content),
-    [language, content],
-  );
+  const markdown = useMemo(() => fence(language, content), [language, content]);
 
   return (
     <div className="message-markdown code-viewer">
-      <ReactMarkdown rehypePlugins={[rehypeHighlight]}>{markdown}</ReactMarkdown>
+      <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
+        {markdown}
+      </ReactMarkdown>
     </div>
   );
 }

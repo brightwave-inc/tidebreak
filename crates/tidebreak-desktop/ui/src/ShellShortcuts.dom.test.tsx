@@ -47,11 +47,7 @@ function noopHandlers(
   return { ...handlers, ...overrides };
 }
 
-function Harness({
-  handlers,
-}: {
-  handlers: ShellShortcutHandlers;
-}) {
+function Harness({ handlers }: { handlers: ShellShortcutHandlers }) {
   useShellShortcuts(handlers, () => "code");
   const client = {
     listCodeTerminals: vi.fn().mockResolvedValue([]),
@@ -85,7 +81,12 @@ function Harness({
   return <TerminalPane client={client} workspaceId="ws-1" />;
 }
 
-function chord(action: Extract<ShellShortcutAction, "toggle-code-terminal" | "toggle-code-review">) {
+function chord(
+  action: Extract<
+    ShellShortcutAction,
+    "toggle-code-terminal" | "toggle-code-review"
+  >,
+) {
   const command = usesCommandModifier(navigator.userAgent);
   return new KeyboardEvent("keydown", {
     key: action === "toggle-code-terminal" ? "j" : "i",

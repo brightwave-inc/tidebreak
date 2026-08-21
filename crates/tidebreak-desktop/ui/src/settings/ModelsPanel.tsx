@@ -237,8 +237,8 @@ function ManagedCatalogNotice({ entitled }: { entitled: ModelInfo[] }) {
   if (entitled.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
-        The gateway has not synced any models yet. They appear here as soon as
-        a sync completes.
+        The gateway has not synced any models yet. They appear here as soon as a
+        sync completes.
       </p>
     );
   }
@@ -417,7 +417,9 @@ function ModelRoleRow({
     : [];
   const canonical = canonicalModelSelection(models, info.selection);
   const selectedValue =
-    !incompatiblePin && selected?.provider === provider ? (canonical ?? "") : "";
+    !incompatiblePin && selected?.provider === provider
+      ? (canonical ?? "")
+      : "";
   const unresolvedSelection = info.selection !== null && selected === null;
   // A pin left behind by the retired additive gateway mode. The catalog has
   // no gateway models on an unmanaged profile, so it resolves to nothing —
@@ -491,9 +493,9 @@ function ModelRoleRow({
       </SettingsField>
       {retiredGatewayPin ? (
         <SettingsError>
-          The saved model “{info.selection}” came from a model gateway, and
-          this profile is not connected to one. Pick a model here, or connect
-          from your gateway&apos;s page.
+          The saved model “{info.selection}” came from a model gateway, and this
+          profile is not connected to one. Pick a model here, or connect from
+          your gateway&apos;s page.
         </SettingsError>
       ) : incompatiblePin ? (
         <SettingsError>

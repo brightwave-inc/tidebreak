@@ -56,9 +56,9 @@ export function FilesPanel({
   const [exclude, setExclude] = useState("");
   const [openDirs, setOpenDirs] = useState<Set<string>>(() => new Set());
   const [closedTop, setClosedTop] = useState<Set<string>>(() => new Set());
-  const [searchHits, setSearchHits] = useState<CodeWorkspaceSearchMatch[] | null>(
-    null,
-  );
+  const [searchHits, setSearchHits] = useState<
+    CodeWorkspaceSearchMatch[] | null
+  >(null);
   const [searchTruncated, setSearchTruncated] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
@@ -112,7 +112,9 @@ export function FilesPanel({
         })
         .catch((caught) => {
           if (cancelled) return;
-          setSearchError(friendlyErrorMessage(caught, "Could not search files"));
+          setSearchError(
+            friendlyErrorMessage(caught, "Could not search files"),
+          );
           setSearching(false);
         });
     }, 250);
@@ -398,10 +400,15 @@ function SearchResults({
         <section key={group.path} className="mb-2" aria-label={group.path}>
           <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1.5 text-[11px]">
             <CodeFileIcon path={group.path} />
-            <span className="min-w-0 flex-1 truncate font-mono" title={group.path}>
+            <span
+              className="min-w-0 flex-1 truncate font-mono"
+              title={group.path}
+            >
               {group.path}
             </span>
-            <span className="shrink-0 tabular-nums">{group.matches.length}</span>
+            <span className="shrink-0 tabular-nums">
+              {group.matches.length}
+            </span>
           </div>
           <div className="space-y-0.5">
             {group.matches.map((matched) => (

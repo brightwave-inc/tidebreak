@@ -2,11 +2,7 @@ import type { HarnessDoctorEntry, HarnessDoctorReport } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  HARNESS_LABELS,
-  HARNESS_TIER_LABELS,
-  isHarnessReady,
-} from "./labels";
+import { HARNESS_LABELS, HARNESS_TIER_LABELS, isHarnessReady } from "./labels";
 
 /**
  * The harness doctor, shared by the code-mode empty state and Settings.
@@ -121,5 +117,7 @@ function capsSummary(entry: HarnessDoctorEntry): string {
   const supported = Object.entries(entry.caps)
     .filter(([, level]) => level === "supported")
     .map(([name]) => name.replaceAll("_", " "));
-  return supported.length > 0 ? supported.join(", ") : "none stated as supported";
+  return supported.length > 0
+    ? supported.join(", ")
+    : "none stated as supported";
 }

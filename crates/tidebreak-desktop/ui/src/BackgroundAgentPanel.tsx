@@ -16,7 +16,10 @@ import {
   AgentRunProgressStream,
   useAgentRunProgress,
 } from "./AgentRunProgress";
-import { agentRunStatusDetail, RUNNING_AGENT_STATUSES } from "./AgentRunDisplay";
+import {
+  agentRunStatusDetail,
+  RUNNING_AGENT_STATUSES,
+} from "./AgentRunDisplay";
 import {
   AgentRunTaskPlanChecklist,
   AgentRunTaskPlanProgress,
@@ -141,7 +144,10 @@ export function BackgroundAgentPanel({
           onOpenOutput={(outputId) => openPanel({ type: "outputs", outputId })}
         />
       ) : agentRuns.error ? (
-        <div className="flex items-center justify-between gap-3 p-4 text-sm" role="status">
+        <div
+          className="flex items-center justify-between gap-3 p-4 text-sm"
+          role="status"
+        >
           <span>Background agent status is unavailable.</span>
           <button
             type="button"
@@ -152,7 +158,11 @@ export function BackgroundAgentPanel({
           </button>
         </div>
       ) : agentRuns.loading ? (
-        <div className="flex flex-col gap-3 p-4" role="status" aria-label="Loading agent">
+        <div
+          className="flex flex-col gap-3 p-4"
+          role="status"
+          aria-label="Loading agent"
+        >
           <Skeleton className="h-5 w-48" />
           <Skeleton className="h-4 w-64" />
           <Skeleton className="h-24 w-full" />
@@ -213,7 +223,11 @@ function BackgroundAgentDetail({
             </p>
           </div>
           <div className="mt-0.5 flex shrink-0 items-center gap-1.5">
-            <CopyAgentRunDebugButton client={client} chatId={chatId} run={run} />
+            <CopyAgentRunDebugButton
+              client={client}
+              chatId={chatId}
+              run={run}
+            />
             <AgentRunStatusBadge status={run.status} />
           </div>
         </div>
@@ -309,7 +323,11 @@ export function CopyAgentRunDebugButton({
   );
 }
 
-export function AgentRunStatusBadge({ status }: { status: AgentRun["status"] }) {
+export function AgentRunStatusBadge({
+  status,
+}: {
+  status: AgentRun["status"];
+}) {
   switch (status) {
     case "completed":
       return (
@@ -452,7 +470,8 @@ function AgentRunCheckInControls({
           {busy ? "Resuming…" : "Resume"}
         </Button>
         <span className="text-xs text-muted-foreground">
-          Grants another step window{guidance.trim() ? " with your guidance" : ""}.
+          Grants another step window
+          {guidance.trim() ? " with your guidance" : ""}.
         </span>
       </div>
     </div>

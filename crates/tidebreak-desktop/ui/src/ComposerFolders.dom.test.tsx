@@ -66,9 +66,7 @@ it("attaches and confirms revoking a folder from the ordinary chat composer", as
   expect(onAttach).toHaveBeenCalledOnce();
   expect(screen.getByText("Read and write")).toBeInTheDocument();
 
-  await user.click(
-    screen.getByRole("button", { name: "Disconnect Research" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Disconnect Research" }));
   expect(onRemove).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Disconnect" }));
   expect(onRemove).toHaveBeenCalledWith("root-1");
@@ -89,24 +87,24 @@ it("drops folder chips after send without needing a disconnect", () => {
             rootId: "root-1",
             displayName: "Downloads",
             status: "connected",
-            statements: (["read_files", "write_files", "execute_commands"] as const).map(
-              (capability, index) => ({
-                handle: {
-                  kind: "capability_grant" as const,
-                  grant_id: `grant-${index}`,
-                },
-                level: { level: "chat" as const, chat_id: "chat-1" },
-                level_title: null,
-                verb: { kind: "capability" as const, capability },
-                resource: {
-                  kind: "host_root" as const,
-                  root_id: "root-1",
-                  display_name: null,
-                },
-                method: "folder_picker" as const,
-                granted_at: "2026-07-30T12:00:00Z",
-              }),
-            ),
+            statements: (
+              ["read_files", "write_files", "execute_commands"] as const
+            ).map((capability, index) => ({
+              handle: {
+                kind: "capability_grant" as const,
+                grant_id: `grant-${index}`,
+              },
+              level: { level: "chat" as const, chat_id: "chat-1" },
+              level_title: null,
+              verb: { kind: "capability" as const, capability },
+              resource: {
+                kind: "host_root" as const,
+                root_id: "root-1",
+                display_name: null,
+              },
+              method: "folder_picker" as const,
+              granted_at: "2026-07-30T12:00:00Z",
+            })),
           },
         ],
         pendingIds: [],

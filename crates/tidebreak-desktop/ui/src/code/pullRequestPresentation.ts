@@ -16,13 +16,15 @@ import type { StatusTone } from "./statusTone";
  */
 export type PullRequestLifecycle = "draft" | "open" | "merged" | "closed";
 
-export const PULL_REQUEST_LIFECYCLE_LABEL: Record<PullRequestLifecycle, string> =
-  {
-    draft: "Draft",
-    open: "Open",
-    merged: "Merged",
-    closed: "Closed",
-  };
+export const PULL_REQUEST_LIFECYCLE_LABEL: Record<
+  PullRequestLifecycle,
+  string
+> = {
+  draft: "Draft",
+  open: "Open",
+  merged: "Merged",
+  closed: "Closed",
+};
 
 /**
  * Lifecycle color. `merged` is its own status tone rather than a borrowed
@@ -39,10 +41,7 @@ export const PULL_REQUEST_LIFECYCLE_TONE: Record<
   closed: "critical",
 };
 
-type LifecycleInput = Pick<
-  CodeDeliveryPullRequestSummary,
-  "state" | "draft"
-> &
+type LifecycleInput = Pick<CodeDeliveryPullRequestSummary, "state" | "draft"> &
   Partial<Pick<CodeDeliveryPullRequestSummary, "merged_at" | "closed_at">>;
 
 export function pullRequestLifecycle(
@@ -58,9 +57,7 @@ export function pullRequestLifecycle(
 }
 
 /** When the pull request settled, or undefined while it is still open. */
-export function pullRequestSettledAt(
-  item: LifecycleInput,
-): string | undefined {
+export function pullRequestSettledAt(item: LifecycleInput): string | undefined {
   return item.merged_at ?? item.closed_at;
 }
 
@@ -76,7 +73,8 @@ export type PullRequestReviewSummary = {
 };
 
 export function pullRequestReviewSummary(
-  item: LifecycleInput & Pick<CodeDeliveryPullRequestSummary, "review_decision">,
+  item: LifecycleInput &
+    Pick<CodeDeliveryPullRequestSummary, "review_decision">,
 ): PullRequestReviewSummary {
   const lifecycle = pullRequestLifecycle(item);
   if (lifecycle === "merged" || lifecycle === "closed") {

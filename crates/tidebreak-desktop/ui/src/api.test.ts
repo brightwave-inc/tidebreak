@@ -167,9 +167,14 @@ describe("pending chat prompt summaries", () => {
   });
 
   it("rejects detail, duplicate identities, and empty summaries", () => {
-    expect(parsePendingChatPrompt({ ...safe, questions: [{ question: "private" }] })).toBeNull();
     expect(
-      parsePendingChatPrompt({ ...safe, folder_access_call_ids: ["question-1"] }),
+      parsePendingChatPrompt({ ...safe, questions: [{ question: "private" }] }),
+    ).toBeNull();
+    expect(
+      parsePendingChatPrompt({
+        ...safe,
+        folder_access_call_ids: ["question-1"],
+      }),
     ).toBeNull();
     expect(
       parsePendingChatPrompt({
@@ -201,7 +206,9 @@ describe("pending chat prompt summaries", () => {
         outputWritebackCallIds: ["writeback-1"],
       },
     ]);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1/chats/pending-prompts");
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1/chats/pending-prompts",
+    );
   });
 });
 
@@ -411,9 +418,15 @@ describe("pending approval recovery", () => {
       grantRungs: ["whole_tool"],
       autoJudgeStatus: null,
     });
-    expect(parsePendingToolApproval({ ...safe, arguments: { query: "private" } })).toBeNull();
-    expect(parsePendingToolApproval({ ...safe, can_approve: false })).toBeNull();
-    expect(parsePendingToolApproval({ ...safe, action: "private_plugin" })).toBeNull();
+    expect(
+      parsePendingToolApproval({ ...safe, arguments: { query: "private" } }),
+    ).toBeNull();
+    expect(
+      parsePendingToolApproval({ ...safe, can_approve: false }),
+    ).toBeNull();
+    expect(
+      parsePendingToolApproval({ ...safe, action: "private_plugin" }),
+    ).toBeNull();
     expect(parsePendingToolApproval({ ...safe, grant_rungs: [] })).toBeNull();
     expect(
       parsePendingToolApproval({ ...safe, grant_rungs: ["unknown_scope"] }),
@@ -481,11 +494,19 @@ describe("pending approval recovery", () => {
       { tool: "shell", command: "rm", args: [], cwd: ".", files: [] },
       { tool: "exec", command: "", args: [], cwd: ".", files: [] },
       { tool: "exec", command: "cargo", args: "test", cwd: ".", files: [] },
-      { tool: "exec", command: "cargo", args: [{ hidden: true }], cwd: ".", files: [] },
+      {
+        tool: "exec",
+        command: "cargo",
+        args: [{ hidden: true }],
+        cwd: ".",
+        files: [],
+      },
       { tool: "exec", command: "cargo", args: [] },
       "cargo test",
     ]) {
-      expect(parsePendingToolApproval({ ...exec, preview })?.preview).toBeNull();
+      expect(
+        parsePendingToolApproval({ ...exec, preview })?.preview,
+      ).toBeNull();
     }
   });
 
@@ -651,7 +672,9 @@ describe("pending approval recovery", () => {
         }),
       ),
     );
-    await expect(client.listPendingApprovals("chat-1")).resolves.toHaveLength(1);
+    await expect(client.listPendingApprovals("chat-1")).resolves.toHaveLength(
+      1,
+    );
   });
 
   it("fails closed on malformed, duplicate, or cross-turn pages", async () => {
@@ -708,7 +731,9 @@ describe("parseToolActionPreview", () => {
   it("leaves a source search to its query alone", () => {
     // The private-source search has no filters to show, and inventing keys for
     // it would put a web search's copy on a local one.
-    expect(parseToolActionPreview({ tool: "search", query: "revenue" })).toEqual({
+    expect(
+      parseToolActionPreview({ tool: "search", query: "revenue" }),
+    ).toEqual({
       tool: "search",
       query: "revenue",
     });
@@ -750,7 +775,10 @@ describe("parseToolActionPreview", () => {
       { ...delegated, task: "" },
       { ...delegated, network: undefined },
       { ...delegated, network: { mode: "everything" } },
-      { ...delegated, network: { mode: "allowed_hosts", allowed_hosts: ["a"] } },
+      {
+        ...delegated,
+        network: { mode: "allowed_hosts", allowed_hosts: ["a"] },
+      },
       {
         ...delegated,
         network: {
@@ -767,7 +795,9 @@ describe("parseToolActionPreview", () => {
 
 describe("sending a message", () => {
   it("carries the invoked skills beside the prose the reader typed", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
@@ -797,7 +827,9 @@ describe("sending a message", () => {
 
 describe("active turn steering", () => {
   it("posts an interrupt against the exact chat, turn, and stable identity", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
@@ -826,7 +858,9 @@ describe("active turn steering", () => {
   });
 
   it("binds Code guidance to the exact active turn", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
@@ -927,22 +961,23 @@ describe("project-scoped conversation API", () => {
     // The home composer has nowhere to PATCH: its choices have to ride along
     // with creation, or the first turn runs against a chat that was created
     // before the reader's choices reached it.
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          id: "chat-1",
-          project_id: null,
-          title: null,
-          model: "anthropic::model-1",
-          reasoning_effort: "high",
-          permission_mode: "auto",
-          network_policy: { mode: "package_managers" },
-          attachment_revision: 0,
-          root_attachments: [],
-          created_at: "2026-07-29T12:00:00Z",
-        }),
-        { status: 201 },
-      ),
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "chat-1",
+            project_id: null,
+            title: null,
+            model: "anthropic::model-1",
+            reasoning_effort: "high",
+            permission_mode: "auto",
+            network_policy: { mode: "package_managers" },
+            attachment_revision: 0,
+            root_attachments: [],
+            created_at: "2026-07-29T12:00:00Z",
+          }),
+          { status: 201 },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
@@ -1019,7 +1054,9 @@ describe("project-scoped conversation API", () => {
   });
 
   it("deletes the exact project without a request body", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
@@ -1516,8 +1553,11 @@ describe("source download progress", () => {
     const client = new ApiClient("http://127.0.0.1", "token");
     const seen: number[] = [];
 
-    const file = await client.getChatDocumentFile("chat-1", "doc-1", undefined, (p) =>
-      seen.push(p.loaded),
+    const file = await client.getChatDocumentFile(
+      "chat-1",
+      "doc-1",
+      undefined,
+      (p) => seen.push(p.loaded),
     );
 
     // Every chunk but the last may be swallowed by the throttle; the last must
@@ -1531,9 +1571,7 @@ describe("source download progress", () => {
   it("stays quiet for a small file, whose bar would only flash", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        streamed(["small"], { "Content-Length": "5" }),
-      ),
+      vi.fn().mockResolvedValue(streamed(["small"], { "Content-Length": "5" })),
     );
     const client = new ApiClient("http://127.0.0.1", "token");
     const onProgress = vi.fn();
@@ -1598,9 +1636,11 @@ describe("code workspace sessions", () => {
       unrecognized_event_count: 0,
       created_at: "2026-08-15T12:00:00.000Z",
     };
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify([session]), { status: 200 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify([session]), { status: 200 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
@@ -1623,12 +1663,14 @@ describe("code workspace sessions", () => {
       started_at: "2026-08-15T12:00:00.000Z",
       ended_at: "2026-08-15T12:00:02.000Z",
     };
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify([turn]), { status: 200 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify([turn]), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
-    await expect(client.listCodeSessionTurns("sess-1")).resolves.toEqual([turn]);
+    await expect(client.listCodeSessionTurns("sess-1")).resolves.toEqual([
+      turn,
+    ]);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://127.0.0.1/code/sessions/sess-1/turns",
     );
@@ -1655,12 +1697,20 @@ describe("code workspace git flow", () => {
     };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(commit), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(push), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(digest), { status: 200 }));
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(commit), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(push), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(digest), { status: 200 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
-    await expect(client.commitCodeWorkspace("ws-1", "first change")).resolves.toEqual(commit);
+    await expect(
+      client.commitCodeWorkspace("ws-1", "first change"),
+    ).resolves.toEqual(commit);
     await expect(client.pushCodeWorkspace("ws-1")).resolves.toEqual(push);
     await expect(client.getCodeWorkspacePr("ws-1")).resolves.toEqual(digest);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
@@ -1684,11 +1734,11 @@ describe("archive force kinds", () => {
       archiveForceKind(new HttpError(409, "uncommitted", "uncommitted")),
     ).toBe("uncommitted");
     expect(
-      archiveForceKind(
-        new HttpError(409, "both", "uncommitted_and_unpushed"),
-      ),
+      archiveForceKind(new HttpError(409, "both", "uncommitted_and_unpushed")),
     ).toBe("uncommitted_and_unpushed");
-    expect(archiveForceKind(new HttpError(409, "busy", "session_running"))).toBeNull();
+    expect(
+      archiveForceKind(new HttpError(409, "busy", "session_running")),
+    ).toBeNull();
   });
 });
 
@@ -1704,9 +1754,11 @@ describe("restoring a workspace", () => {
       status: "active",
       created_at: "2026-08-15T00:00:00.000Z",
     };
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(workspace), { status: 200 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(workspace), { status: 200 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
@@ -1803,7 +1855,9 @@ describe("code delivery API", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
-    await expect(client.getCodeDeliveryRepositories()).resolves.toEqual(snapshot);
+    await expect(client.getCodeDeliveryRepositories()).resolves.toEqual(
+      snapshot,
+    );
     await expect(
       client.resolveCodeDeliveryRepositories([
         "brightwave-inc/tidebreak",
@@ -1811,7 +1865,10 @@ describe("code delivery API", () => {
       ]),
     ).resolves.toEqual(snapshot);
 
-    const [listUrl, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [listUrl, listInit] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
     expect(listUrl).toBe("http://127.0.0.1/code/delivery/repositories");
     expect(listInit.method ?? "GET").toBe("GET");
 
@@ -1866,10 +1923,15 @@ describe("code delivery API", () => {
       can_reopen: false,
       can_comment: true,
     };
-    const actionResult = { success: true, message: "Merged pull request #2248." };
+    const actionResult = {
+      success: true,
+      message: "Merged pull request #2248.",
+    };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(page), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(page), { status: 200 }),
+      )
       .mockResolvedValueOnce(
         new Response(JSON.stringify(detail), { status: 200 }),
       )
@@ -1903,13 +1965,15 @@ describe("code delivery API", () => {
       },
     };
 
-    await expect(client.queryCodeDeliveryPullRequests(query)).resolves.toEqual(page);
-    await expect(client.getCodeDeliveryPullRequestDetail(prTarget)).resolves.toEqual(
-      detail,
+    await expect(client.queryCodeDeliveryPullRequests(query)).resolves.toEqual(
+      page,
     );
-    await expect(client.runCodeDeliveryPullRequestAction(action)).resolves.toEqual(
-      actionResult,
-    );
+    await expect(
+      client.getCodeDeliveryPullRequestDetail(prTarget),
+    ).resolves.toEqual(detail);
+    await expect(
+      client.runCodeDeliveryPullRequestAction(action),
+    ).resolves.toEqual(actionResult);
 
     const expected = [
       ["/code/delivery/pull-requests/query", query],
@@ -1940,7 +2004,9 @@ describe("code delivery API", () => {
     const actionResult = { success: true, message: "Failed jobs queued." };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(page), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(page), { status: 200 }),
+      )
       .mockResolvedValueOnce(
         new Response(JSON.stringify(detail), { status: 200 }),
       )
@@ -1977,7 +2043,9 @@ describe("code delivery API", () => {
     };
 
     await expect(client.queryCodeDeliveryRuns(query)).resolves.toEqual(page);
-    await expect(client.getCodeDeliveryRunDetail(runTarget)).resolves.toEqual(detail);
+    await expect(client.getCodeDeliveryRunDetail(runTarget)).resolves.toEqual(
+      detail,
+    );
     await expect(client.runCodeDeliveryRunAction(action)).resolves.toEqual(
       actionResult,
     );

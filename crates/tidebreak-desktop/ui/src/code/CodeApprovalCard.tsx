@@ -153,7 +153,10 @@ export function CodeApprovalCard({
         </div>
       )}
       {error && (
-        <p className="text-critical-foreground text-[11px] break-words" role="alert">
+        <p
+          className="text-critical-foreground text-[11px] break-words"
+          role="alert"
+        >
           {error}
         </p>
       )}

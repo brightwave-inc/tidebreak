@@ -393,8 +393,8 @@ export function FoldersView({ chat }: { chat: Chat }) {
                   >
                     <p className="text-sm text-muted-foreground">
                       Tidebreak can’t reach this folder right now. It stays
-                      connected and returns on its own once the folder is back
-                      — or forget it to withdraw its access everywhere.
+                      connected and returns on its own once the folder is back —
+                      or forget it to withdraw its access everywhere.
                     </p>
                   </FolderCard>
                 ))}

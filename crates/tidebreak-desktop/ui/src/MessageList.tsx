@@ -19,10 +19,7 @@ import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
 import { AppCardList } from "./AppCard";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
 import { FolderAccessCard } from "./FolderAccessCard";
-import type {
-  FolderAccessDecision,
-  OutputWritebackDecision,
-} from "./host";
+import type { FolderAccessDecision, OutputWritebackDecision } from "./host";
 import { OutputWritebackCard } from "./OutputWritebackCard";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
@@ -59,10 +56,7 @@ import {
   type MessageWebSource,
 } from "./MessageWebSources";
 import { useSourceNav } from "./panel/SourceNav";
-import {
-  TurnFailureNotice,
-  turnFailureOffersRetry,
-} from "./TurnFailureNotice";
+import { TurnFailureNotice, turnFailureOffersRetry } from "./TurnFailureNotice";
 import type { TurnFailureCategory } from "./generated/wire";
 import { ChangeSummaryCard } from "./ChangeSummaryCard";
 
@@ -185,8 +179,7 @@ export function retryableTurn(
       // it carries its own invocation — so preferring the turn-level list here
       // would resend one message's text under another's skills.
       invokedSkills: message.invokedSkills ?? failure.invokedSkills ?? [],
-      voiceInputUsed:
-        failure.voiceInputUsed ?? message.voiceInputUsed ?? false,
+      voiceInputUsed: failure.voiceInputUsed ?? message.voiceInputUsed ?? false,
     };
   }
   return null;
@@ -415,7 +408,9 @@ export function MessageList({
             onDecision={(decision) =>
               onFolderAccessDecision(request.callId, decision)
             }
-            onCancel={() => onFolderAccessCancel(request.callId, request.turnId)}
+            onCancel={() =>
+              onFolderAccessCancel(request.callId, request.turnId)
+            }
           />,
           request.callId,
         ),
@@ -626,9 +621,7 @@ export function groupMessageItems(
           imageClient={imageClient}
           chatId={chatId}
           changeClient={changeClient}
-          onRetry={
-            retry?.failureId === message.id ? retry.onRetry : undefined
-          }
+          onRetry={retry?.failureId === message.id ? retry.onRetry : undefined}
         />,
       );
       // A sibling of the bubble rather than part of it: the row is built from
@@ -691,10 +684,12 @@ export function groupMessageItems(
       (entry): entry is ToolMessage =>
         entry.role === "tool" && !parked.has(entry.callId),
     );
-    const latestActivities = phase.slice(latestSnapshotStart).filter(
-      (entry): entry is ToolMessage =>
-        entry.role === "tool" && !parked.has(entry.callId),
-    );
+    const latestActivities = phase
+      .slice(latestSnapshotStart)
+      .filter(
+        (entry): entry is ToolMessage =>
+          entry.role === "tool" && !parked.has(entry.callId),
+      );
     // Phases accumulate: a turn that searched, answered a little, and searched
     // again names every page it found under the answer that closes it.
     for (const source of collectWebSources(activities)) {
@@ -917,13 +912,8 @@ function surfacedAppCards(entry: ChatMessage): ReactNode {
 
 /** The card one entry earns, or `null` when it earns none. */
 function surfacedCard(entry: ChatMessage, context: CardContext): ReactNode {
-  const {
-    parked,
-    standingCardKeys,
-    onApproval,
-    approvalState,
-    chatId,
-  } = context;
+  const { parked, standingCardKeys, onApproval, approvalState, chatId } =
+    context;
   if (entry.role === "approval") {
     if (entry.resolved) return null;
     return isolatedCard(
@@ -1105,7 +1095,8 @@ function MessageBubbleImpl({
         : undefined,
     [sourceNav],
   );
-  const sources = message.role === "assistant" ? message.sources : EMPTY_SOURCES;
+  const sources =
+    message.role === "assistant" ? message.sources : EMPTY_SOURCES;
   const citations = useMemo(
     () => ({ sources, onOpenSource: openSource }),
     [sources, openSource],
@@ -1115,7 +1106,8 @@ function MessageBubbleImpl({
     const reasoning = message.reasoning ?? "";
     // A bubble that holds only reasoning is a real transcript entry: it is what
     // the model did between two tool calls, or before the answer began.
-    if (!message.text && message.sources.length === 0 && !reasoning) return null;
+    if (!message.text && message.sources.length === 0 && !reasoning)
+      return null;
 
     if (message.superseded) {
       return (

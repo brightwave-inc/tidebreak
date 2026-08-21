@@ -325,7 +325,11 @@ export function PlanApprovalCard({
         >
           Cancel edits
         </Button>
-        <Button type="button" disabled={working} onClick={() => void requestChanges()}>
+        <Button
+          type="button"
+          disabled={working}
+          onClick={() => void requestChanges()}
+        >
           {working ? "Sending…" : "Update plan"}
           {!working && <CornerDownLeft aria-hidden="true" />}
         </Button>

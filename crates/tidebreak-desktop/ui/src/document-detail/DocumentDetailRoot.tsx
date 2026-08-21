@@ -153,11 +153,7 @@ export function DocumentDetailRoot({
   return (
     <PanelFrame
       showBorder
-      breadcrumb={
-        <DocumentDetailBreadcrumb
-          documentName={documentName}
-        />
-      }
+      breadcrumb={<DocumentDetailBreadcrumb documentName={documentName} />}
       headerRightSlot={
         <DocumentDetailActions
           canDownload={canDownload && info != null}
@@ -228,7 +224,10 @@ type LoadError = { message: string; retriable: boolean };
  */
 function describeLoadFailure(error: unknown): LoadError {
   if (error instanceof HttpError && error.status === 404) {
-    return { message: "The document is no longer available.", retriable: false };
+    return {
+      message: "The document is no longer available.",
+      retriable: false,
+    };
   }
   if (error instanceof HttpError) {
     return {
@@ -244,6 +243,10 @@ function documentTitle(info: DocumentDetail): string {
 }
 
 function friendlyDownloadError(error: unknown): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
-  return message && message.length <= 240 ? message : "Could not save that source.";
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
+  return message && message.length <= 240
+    ? message
+    : "Could not save that source.";
 }

@@ -449,9 +449,7 @@ export function prTone(pr: { state: string; draft?: boolean }): PrChipTone {
 }
 
 /** The word a badge shows for a tone; unknown tones show the raw token. */
-export function prToneLabel(
-  pr: { state: string; draft?: boolean },
-): string {
+export function prToneLabel(pr: { state: string; draft?: boolean }): string {
   switch (prTone(pr)) {
     case "open":
       return "Open";

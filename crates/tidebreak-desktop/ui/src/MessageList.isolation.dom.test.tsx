@@ -75,14 +75,26 @@ describe("a tool result that cannot render", () => {
         callId: "c2",
         name: "exec",
         status: "waiting_approval",
-        preview: { tool: "exec", command: "cargo", args: ["build"], cwd: ".", files: [] },
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["build"],
+          cwd: ".",
+          files: [],
+        },
       },
       {
         id: "a1",
         role: "approval",
         callId: "c2",
         summary: "Allow Tidebreak to run a command?",
-        preview: { tool: "exec", command: "cargo", args: ["build"], cwd: ".", files: [] },
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["build"],
+          cwd: ".",
+          files: [],
+        },
         canApprove: true,
         canRemember: true,
       },
@@ -135,9 +147,9 @@ describe("a continuation card that cannot render", () => {
 
     // Both are prompts the turn cannot get past. Sharing one boundary with the
     // transcript meant either one taking the whole surface down.
-    expect(screen.getAllByText("This step could not be displayed.").length).toBe(
-      1,
-    );
+    expect(
+      screen.getAllByText("This step could not be displayed.").length,
+    ).toBe(1);
     expect(
       screen.getByRole("button", { name: /Yes, run it once/ }),
     ).toBeTruthy();
@@ -155,7 +167,13 @@ describe("an entry that cannot be read while the cards are assembled", () => {
       role: "approval",
       callId: "c1",
       summary: "Allow Tidebreak to run a command?",
-      preview: { tool: "exec", command: "cargo", args: ["build"], cwd: ".", files: [] },
+      preview: {
+        tool: "exec",
+        command: "cargo",
+        args: ["build"],
+        cwd: ".",
+        files: [],
+      },
       canRemember: true,
       get canApprove(): never {
         throw new Error("unreadable approval projection");
@@ -170,15 +188,21 @@ describe("an entry that cannot be read while the cards are assembled", () => {
         callId: "c2",
         name: "exec",
         status: "completed",
-        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: ".", files: [] },
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["test"],
+          cwd: ".",
+          files: [],
+        },
       },
     ]);
 
     // The card that could not be built says so, and the phase's other card is
     // built and rendered as usual.
-    expect(screen.getAllByText("This step could not be displayed.").length).toBe(
-      1,
-    );
+    expect(
+      screen.getAllByText("This step could not be displayed.").length,
+    ).toBe(1);
     expect(screen.getByText(/cargo test/)).toBeTruthy();
   });
 });

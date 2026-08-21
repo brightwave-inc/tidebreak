@@ -9,7 +9,11 @@ import {
 import { Gauge, RefreshCw } from "lucide-react";
 
 import { useApp } from "@/AppContext";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { ClaudeIcon, OpenAIIcon, XaiIcon } from "@/ProviderIcons";
 import { SidebarButton } from "@/sidebar/primitives";
@@ -66,10 +70,7 @@ export function CodeSubscriptionUsage() {
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <SidebarButton
-          aria-label={summary.ariaLabel}
-          className="group/usage"
-        >
+        <SidebarButton aria-label={summary.ariaLabel} className="group/usage">
           <Gauge className={summary.toneClass} />
           <span className="min-w-0 flex-1 truncate">Usage</span>
           {summary.percent !== null ? (
@@ -80,7 +81,12 @@ export function CodeSubscriptionUsage() {
                   style={{ width: `${Math.min(100, summary.percent)}%` }}
                 />
               </span>
-              <span className={cn("w-8 text-right text-xs tabular-nums", summary.toneClass)}>
+              <span
+                className={cn(
+                  "w-8 text-right text-xs tabular-nums",
+                  summary.toneClass,
+                )}
+              >
                 {Math.round(summary.percent)}%
               </span>
             </span>
@@ -100,7 +106,9 @@ export function CodeSubscriptionUsage() {
         <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2.5">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <h2 className="truncate text-[13px] font-semibold">Subscription usage</h2>
+              <h2 className="truncate text-[13px] font-semibold">
+                Subscription usage
+              </h2>
               {report && (
                 <span className="text-muted-foreground shrink-0 text-[10px] font-medium">
                   {sourceLabel(report.source)}
@@ -118,7 +126,9 @@ export function CodeSubscriptionUsage() {
             disabled={refreshing}
             onClick={() => void refresh()}
           >
-            <RefreshCw className={cn("size-3.5", refreshing && "animate-spin")} />
+            <RefreshCw
+              className={cn("size-3.5", refreshing && "animate-spin")}
+            />
           </button>
         </div>
 
@@ -193,7 +203,11 @@ function ProviderUsage({
       </div>
       <div className="flex flex-col pl-[30px]">
         {shown.map((account, index) => (
-          <AccountUsage key={account.id} account={account} separated={index > 0} />
+          <AccountUsage
+            key={account.id}
+            account={account}
+            separated={index > 0}
+          />
         ))}
       </div>
     </section>
@@ -215,7 +229,9 @@ function AccountUsage({
       )}
     >
       <div className="flex min-w-0 items-baseline justify-between gap-2">
-        <span className="min-w-0 truncate text-[11px] font-medium">{account.label}</span>
+        <span className="min-w-0 truncate text-[11px] font-medium">
+          {account.label}
+        </span>
         <span className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-[9px] tabular-nums">
           {account.state !== "available" && (
             <span className={accountStateClass(account.state)}>
@@ -223,7 +239,9 @@ function AccountUsage({
             </span>
           )}
           {account.updated_at_unix_seconds && (
-            <span title={`Updated ${formatAge(account.updated_at_unix_seconds)}`}>
+            <span
+              title={`Updated ${formatAge(account.updated_at_unix_seconds)}`}
+            >
               {formatAge(account.updated_at_unix_seconds)}
             </span>
           )}
@@ -246,7 +264,10 @@ function UsageWindowRow({ window }: { window: CodeSubscriptionUsageWindow }) {
     : null;
   return (
     <div className="grid min-h-5 grid-cols-[minmax(72px,0.9fr)_minmax(52px,1.1fr)_auto_auto] items-center gap-x-2 text-[10px]">
-      <span className="text-muted-foreground min-w-0 truncate" title={window.label}>
+      <span
+        className="text-muted-foreground min-w-0 truncate"
+        title={window.label}
+      >
         {window.label}
       </span>
       <div
@@ -259,12 +280,18 @@ function UsageWindowRow({ window }: { window: CodeSubscriptionUsageWindow }) {
         aria-valuetext={formatPercent(percent)}
       >
         <div
-          className={cn("h-full rounded-full transition-[width] duration-300", tone.bar)}
+          className={cn(
+            "h-full rounded-full transition-[width] duration-300",
+            tone.bar,
+          )}
           style={{ width: `${Math.min(100, percent)}%` }}
         />
       </div>
       <span
-        className={cn("w-8 shrink-0 text-right font-medium tabular-nums", tone.text)}
+        className={cn(
+          "w-8 shrink-0 text-right font-medium tabular-nums",
+          tone.text,
+        )}
         title={formatPercent(percent)}
       >
         {formatPercentCompact(percent)}
@@ -283,7 +310,11 @@ function UsageWindowRow({ window }: { window: CodeSubscriptionUsageWindow }) {
 
 function UsageSkeleton() {
   return (
-    <div className="flex animate-pulse flex-col gap-4" role="status" aria-label="Loading usage">
+    <div
+      className="flex animate-pulse flex-col gap-4"
+      role="status"
+      aria-label="Loading usage"
+    >
       {[0, 1].map((index) => (
         <div key={index} className="flex gap-3">
           <div className="bg-muted size-7 shrink-0 rounded-md" />
@@ -438,6 +469,9 @@ function formatDuration(totalSeconds: number): string {
   const hours = Math.floor((minutes % 1_440) / 60);
   const remainingMinutes = minutes % 60;
   if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
-  if (hours > 0) return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+  if (hours > 0)
+    return remainingMinutes > 0
+      ? `${hours}h ${remainingMinutes}m`
+      : `${hours}h`;
   return `${remainingMinutes}m`;
 }

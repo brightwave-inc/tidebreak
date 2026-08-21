@@ -30,12 +30,17 @@ export function SubmittedOutputPills({
   const hidden = outputs.length - visible.length;
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5" aria-label="Submitted files">
+    <div
+      className="flex flex-wrap items-center gap-1.5"
+      aria-label="Submitted files"
+    >
       {visible.map((output) => (
         <SubmittedOutputPill
           key={output.output_id}
           filename={output.filename}
-          onOpen={onOpenOutput ? () => onOpenOutput(output.output_id) : undefined}
+          onOpen={
+            onOpenOutput ? () => onOpenOutput(output.output_id) : undefined
+          }
         />
       ))}
       {hidden > 0 && (

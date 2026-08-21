@@ -79,7 +79,11 @@ function draftFor(existing: RestEntry | null): Draft {
     preview: null,
     selected: [],
     mode:
-      placement === null ? "none" : placement === "bearer" ? "bearer" : "header",
+      placement === null
+        ? "none"
+        : placement === "bearer"
+          ? "bearer"
+          : "header",
     headerName:
       placement !== null && placement !== "bearer" ? placement.header : "",
     value: "",
@@ -316,9 +320,7 @@ function OperationPicker({
                   onChange(
                     checked === true
                       ? [...selected, operation.operation_id]
-                      : selected.filter(
-                          (id) => id !== operation.operation_id,
-                        ),
+                      : selected.filter((id) => id !== operation.operation_id),
                   )
                 }
               />
@@ -421,7 +423,9 @@ export function ConnectedAppsPanel({
   }, [client]);
 
   function update(change: Partial<Draft>) {
-    setDraft((current) => (current === null ? null : { ...current, ...change }));
+    setDraft((current) =>
+      current === null ? null : { ...current, ...change },
+    );
   }
 
   /** Enumerate the draft's document (URL or pasted) into the picker. */
@@ -635,7 +639,9 @@ export function ConnectedAppsPanel({
 
   const editor = draft !== null && (
     <SettingsSection
-      title={draft.existing === null ? "Add REST API" : `Edit ${draft.existing.name}`}
+      title={
+        draft.existing === null ? "Add REST API" : `Edit ${draft.existing.name}`
+      }
     >
       <SettingsField label="Name">
         <Input
@@ -843,7 +849,8 @@ export function ConnectedAppsPanel({
     </SettingsSection>
   );
 
-  const busy = saving || previewing || deleting !== null || reconnecting !== null;
+  const busy =
+    saving || previewing || deleting !== null || reconnecting !== null;
 
   return (
     <SettingsPanel
@@ -877,10 +884,7 @@ export function ConnectedAppsPanel({
                     : "No apps connected. Add a REST API here, or configure MCP servers in the editor below."}
                 </p>
               ) : (
-                <ul
-                  aria-label="Connected apps"
-                  className="flex flex-col gap-2"
-                >
+                <ul aria-label="Connected apps" className="flex flex-col gap-2">
                   {apps.map((entry) =>
                     entry.kind === "mcp_server" ? (
                       <McpAppEntry

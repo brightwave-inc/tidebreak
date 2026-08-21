@@ -229,14 +229,11 @@ export function useFileDownload<F extends FileDownloadFormat>(
 
     void (async () => {
       try {
-        const downloaded = await fetchRef.current(
-          controller.signal,
-          (next) => {
-            if (!controller.signal.aborted && request === requestRef.current) {
-              setProgress(next);
-            }
-          },
-        );
+        const downloaded = await fetchRef.current(controller.signal, (next) => {
+          if (!controller.signal.aborted && request === requestRef.current) {
+            setProgress(next);
+          }
+        });
         if (request !== requestRef.current) return;
         byteCache.set(cacheKey, downloaded);
         setFile(downloaded);
@@ -259,7 +256,13 @@ export function useFileDownload<F extends FileDownloadFormat>(
     return decode(file, parseAs);
   }, [file, parseAs]);
 
-  return { data, isLoading, error, contentType: file?.contentType ?? null, progress };
+  return {
+    data,
+    isLoading,
+    error,
+    contentType: file?.contentType ?? null,
+    progress,
+  };
 }
 
 function decode<F extends FileDownloadFormat>(

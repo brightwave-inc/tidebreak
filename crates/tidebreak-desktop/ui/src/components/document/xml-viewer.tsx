@@ -124,11 +124,11 @@ function isOnNavigatePath(currentPath: string, navigatePath: string): boolean {
 }
 
 /**
-* Resolve a simplified XPath to the element path format we use internally.
-*
-* We use path strings like "/root/items/item[2]" for both internal addressing
-* and for matching XPath highlight paths from the backend.
-*/
+ * Resolve a simplified XPath to the element path format we use internally.
+ *
+ * We use path strings like "/root/items/item[2]" for both internal addressing
+ * and for matching XPath highlight paths from the backend.
+ */
 function resolveXPathToNodePath(
   xmlDoc: Document,
   xpath: string,
@@ -211,10 +211,7 @@ export function XmlViewer({
     if (!fileDownload.data) return undefined;
     try {
       const parser = new DOMParser();
-      const doc = parser.parseFromString(
-        fileDownload.data,
-        "application/xml",
-      );
+      const doc = parser.parseFromString(fileDownload.data, "application/xml");
       // Check for parse errors
       if (doc.querySelector("parsererror")) return undefined;
       return doc;
@@ -330,9 +327,7 @@ export function XmlViewer({
         <HighlightSignalContext.Provider value={resolvedHighlightPath}>
           <HighlightRefSetterContext.Provider value={setHighlightEl}>
             <CollapseSignalContext.Provider value={collapseSignal}>
-              <NavigateSignalContext.Provider
-                value={navigateSignal}
-              >
+              <NavigateSignalContext.Provider value={navigateSignal}>
                 <XmlElementNode
                   element={xmlDoc.documentElement}
                   path={buildNodePath(xmlDoc.documentElement)}
@@ -369,10 +364,7 @@ function XmlBreadcrumbBar({
 
   const handleSelect = useCallback(
     (depth: number, element: Element, path: string) => {
-      setBreadcrumb((prev) => [
-        ...prev.slice(0, depth),
-        { element, path },
-      ]);
+      setBreadcrumb((prev) => [...prev.slice(0, depth), { element, path }]);
       onNavigate(path);
     },
     [onNavigate],
@@ -426,11 +418,7 @@ function XmlBreadcrumbBar({
       <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto">
         {segments.map((seg, i) => (
           <XmlBreadcrumbSegment
-            key={
-              i === 0
-                ? "__root"
-                : (breadcrumb[i - 1]?.path ?? "__root")
-            }
+            key={i === 0 ? "__root" : (breadcrumb[i - 1]?.path ?? "__root")}
             depth={i}
             children={seg.children}
             selectedPath={seg.selectedPath}
@@ -613,8 +601,7 @@ function XmlElementNode({
         ref={refCallback}
         className={cn(
           "py-px pl-6",
-          isHighlighted &&
-            "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
+          isHighlighted && "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
         )}
       >
         <TagOpen tagName={tagName} attrs={attrs} selfClosing />
@@ -628,8 +615,7 @@ function XmlElementNode({
         ref={refCallback}
         className={cn(
           "flex flex-wrap gap-x-0 py-px pl-6",
-          isHighlighted &&
-            "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
+          isHighlighted && "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
         )}
       >
         <TagOpen tagName={tagName} attrs={attrs} />
@@ -646,8 +632,7 @@ function XmlElementNode({
         ref={refCallback}
         className={cn(
           "hover:bg-muted/50 flex cursor-pointer items-center gap-x-1 py-px pl-1 select-none",
-          isHighlighted &&
-            "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
+          isHighlighted && "rounded bg-yellow-200/40 dark:bg-yellow-500/20",
         )}
         onClick={toggle}
       >
@@ -715,18 +700,14 @@ function TagOpen({
       {attrs.map(([name, value]) => (
         <span key={name}>
           {" "}
-          <span className="text-violet-700 dark:text-violet-400">
-            {name}
-          </span>
+          <span className="text-violet-700 dark:text-violet-400">{name}</span>
           <span className="text-foreground/60">=</span>
           <span className="text-green-700 dark:text-green-400">
             &quot;{value}&quot;
           </span>
         </span>
       ))}
-      <span className="text-foreground/60">
-        {selfClosing ? " />" : ">"}
-      </span>
+      <span className="text-foreground/60">{selfClosing ? " />" : ">"}</span>
     </span>
   );
 }

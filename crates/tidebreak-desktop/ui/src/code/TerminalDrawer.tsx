@@ -146,9 +146,13 @@ export function TerminalDrawer({
         </div>
         <header className="flex h-8 shrink-0 items-center gap-2 px-3">
           <SquareTerminal className="text-muted-foreground size-3.5 shrink-0" />
-          <h2 className="min-w-0 flex-1 truncate text-sm font-medium">Terminal</h2>
+          <h2 className="min-w-0 flex-1 truncate text-sm font-medium">
+            Terminal
+          </h2>
           <WithTooltip
-            label={shortcutHint ? `Hide terminal ${shortcutHint}` : "Hide terminal"}
+            label={
+              shortcutHint ? `Hide terminal ${shortcutHint}` : "Hide terminal"
+            }
           >
             <Button
               type="button"

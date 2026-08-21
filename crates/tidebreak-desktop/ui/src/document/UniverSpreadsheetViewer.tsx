@@ -339,7 +339,12 @@ export default function UniverSpreadsheetViewer({
     if (maxRow <= 0 || maxCol <= 0) return;
 
     const ranges = [
-      { startRow: 0, endRow: maxRow - 1, startColumn: 0, endColumn: maxCol - 1 },
+      {
+        startRow: 0,
+        endRow: maxRow - 1,
+        startColumn: 0,
+        endColumn: maxCol - 1,
+      },
     ];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -19,10 +19,7 @@ import type {
   CodeBrowserHost,
 } from "./browserHost";
 import { writeStoredBrowserSession } from "./browserPersistence";
-import {
-  beginBrowserNavigation,
-  createBrowserSession,
-} from "./browserSession";
+import { beginBrowserNavigation, createBrowserSession } from "./browserSession";
 import { CodeBrowserTab } from "./CodeBrowserTab";
 
 type CommandCall = {
@@ -161,7 +158,9 @@ describe("CodeBrowserTab", () => {
     );
 
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
 
@@ -178,7 +177,9 @@ describe("CodeBrowserTab", () => {
       title: "Local dashboard",
     });
 
-    expect(await screen.findByLabelText("Browser: Local dashboard")).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("Browser: Local dashboard"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Local")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled();
 
@@ -195,7 +196,9 @@ describe("CodeBrowserTab", () => {
       }),
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Open externally" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open externally" }),
+    );
     expect(runtime.openExternal).toHaveBeenCalledWith("https://docs.rs/tauri");
 
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -225,7 +228,9 @@ describe("CodeBrowserTab", () => {
       "Only HTTP and HTTPS addresses can open here",
     );
     expect(input).toHaveValue("file:///tmp/secret");
-    expect(runtime.calls.some(({ action }) => action.type === "navigate")).toBe(false);
+    expect(runtime.calls.some(({ action }) => action.type === "navigate")).toBe(
+      false,
+    );
   });
 
   it("hides the native surface for app overlays and restores it afterwards", async () => {
@@ -239,7 +244,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     view.rerender(
@@ -287,11 +294,15 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     runtime.calls.splice(0);
-    await userEvent.click(screen.getByRole("button", { name: /Viewport: Fit/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /Viewport: Fit/i }),
+    );
     expect(await screen.findByRole("radio", { name: "Fit" })).toBeVisible();
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
@@ -353,7 +364,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() => {
-      const createAction = runtime.calls.find(({ action }) => action.type === "create");
+      const createAction = runtime.calls.find(
+        ({ action }) => action.type === "create",
+      );
       expect(createAction?.action).toEqual({
         type: "create",
         url: expect.stringContaining("https://example.com"),
@@ -390,20 +403,20 @@ describe("CodeBrowserTab", () => {
       }> = [];
       const cancelledFrames = new Set<number>();
       let nextFrame = 1;
-      vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
-        const id = nextFrame++;
-        queuedFrames.push({ callback, id });
-        return id;
-      });
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+        (callback) => {
+          const id = nextFrame++;
+          queuedFrames.push({ callback, id });
+          return id;
+        },
+      );
       vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
         cancelledFrames.add(id);
       });
 
       const runtime = browserHost({
         existing,
-        ...(existing
-          ? { snapshotGate: readyGate }
-          : { createGate: readyGate }),
+        ...(existing ? { snapshotGate: readyGate } : { createGate: readyGate }),
       });
       const view = render(
         <CodeBrowserTab
@@ -414,9 +427,11 @@ describe("CodeBrowserTab", () => {
         />,
       );
       await waitFor(() =>
-        expect(runtime.calls.some(({ action }) =>
-          action.type === (existing ? "snapshot" : "create")
-        )).toBe(true),
+        expect(
+          runtime.calls.some(
+            ({ action }) => action.type === (existing ? "snapshot" : "create"),
+          ),
+        ).toBe(true),
       );
 
       const framesBeforeReady = queuedFrames.length;
@@ -442,8 +457,9 @@ describe("CodeBrowserTab", () => {
       );
       expect(cancelledFrames).toContain(revealFrame!.id);
       const finalHideIndex = runtime.calls
-        .map(({ action }) =>
-          action.type === "set_visible" && action.visible === false
+        .map(
+          ({ action }) =>
+            action.type === "set_visible" && action.visible === false,
         )
         .lastIndexOf(true);
 
@@ -472,7 +488,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() => {
-      const createAction = runtime.calls.find(({ action }) => action.type === "create");
+      const createAction = runtime.calls.find(
+        ({ action }) => action.type === "create",
+      );
       expect(createAction).toBeDefined();
       // The create payload itself must be hidden unconditionally.
       expect(createAction?.action).toEqual({
@@ -549,9 +567,9 @@ describe("CodeBrowserTab", () => {
         }),
       }),
     );
-    expect(screen.getByRole("textbox", { name: "Address or search" })).toHaveValue(
-      "example.com/two",
-    );
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("example.com/two");
   });
 
   it("uses persisted history after recreating a missing native webview", async () => {
@@ -610,7 +628,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     runtime.emit({
@@ -651,7 +671,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     runtime.emit({
@@ -660,7 +682,9 @@ describe("CodeBrowserTab", () => {
       type: "popup_blocked",
       url: "https://example.com/sign-in",
     });
-    expect(await screen.findByText("This page tried to open a new window")).toBeInTheDocument();
+    expect(
+      await screen.findByText("This page tried to open a new window"),
+    ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Open here" }));
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
@@ -682,7 +706,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     runtime.emit({
@@ -766,9 +792,7 @@ describe("CodeBrowserTab", () => {
     );
 
     expect(await screen.findByText("example.com shared")).toBeInTheDocument();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Stop sharing" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Stop sharing" }));
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
         workspaceId: "workspace-1",
@@ -794,7 +818,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     runtime.emit({
@@ -810,9 +836,9 @@ describe("CodeBrowserTab", () => {
     });
 
     expect(await screen.findByText("Agent paused")).toBeInTheDocument();
-    expect(screen.getByLabelText(
-      "Agent paused before https://accounts.example.org",
-    )).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Agent paused before https://accounts.example.org"),
+    ).toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "Review & resume" }),
     );
@@ -836,7 +862,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     runtime.emit({
@@ -919,7 +947,10 @@ describe("CodeBrowserTab", () => {
         exists: true,
         workspaceId,
         browserId,
-        url: "url" in action ? (action as { url: string }).url : "https://example.com/restored",
+        url:
+          "url" in action
+            ? (action as { url: string }).url
+            : "https://example.com/restored",
       } satisfies BrowserHostSnapshot;
     });
 
@@ -932,7 +963,9 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "snapshot")).toBe(true),
+      expect(
+        runtime.calls.some(({ action }) => action.type === "snapshot"),
+      ).toBe(true),
     );
 
     // Simulate ResizeObserver firing with Mobile 390 centered bounds
@@ -950,19 +983,27 @@ describe("CodeBrowserTab", () => {
     });
 
     // Let ResizeObserver run one frame (it won't set_bounds because nativeReady is still false)
-    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
     // The resize path should have skipped — no set_bounds yet
-    expect(runtime.calls.filter(({ action }) => action.type === "set_bounds")).toHaveLength(0);
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "set_bounds"),
+    ).toHaveLength(0);
 
     // Now release the snapshot
     releaseSnapshot?.();
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "set_bounds")).toBe(true),
+      expect(
+        runtime.calls.some(({ action }) => action.type === "set_bounds"),
+      ).toBe(true),
     );
 
     // The final set_bounds must use the live 390px centered surface, not the
     // 840px pre-await capture.
-    const boundsCalls = runtime.calls.filter(({ action }) => action.type === "set_bounds");
+    const boundsCalls = runtime.calls.filter(
+      ({ action }) => action.type === "set_bounds",
+    );
     expect(boundsCalls).toHaveLength(1);
     expect(boundsCalls[0].action).toEqual({
       type: "set_bounds",
@@ -981,11 +1022,13 @@ describe("CodeBrowserTab", () => {
       />,
     );
 
-    expect(await screen.findByText("This page did not open")).toBeInTheDocument();
+    expect(
+      await screen.findByText("This page did not open"),
+    ).toBeInTheDocument();
     expect(screen.getByText("native view failed")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Address or search" })).toHaveValue(
-      "example.com/docs",
-    );
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("example.com/docs");
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
@@ -1006,7 +1049,11 @@ describe("CodeBrowserTab", () => {
         "The in-app browser is available in the Tidebreak desktop app",
       ),
     ).toBeInTheDocument();
-    fireEvent.submit(screen.getByRole("textbox", { name: "Address or search" }).closest("form")!);
+    fireEvent.submit(
+      screen
+        .getByRole("textbox", { name: "Address or search" })
+        .closest("form")!,
+    );
   });
 
   it("renders the viewport control in the toolbar and disables it without a URL", async () => {
@@ -1018,7 +1065,9 @@ describe("CodeBrowserTab", () => {
         host={runtime.host}
       />,
     );
-    const viewportButton = screen.getByRole("button", { name: /Viewport: Fit/i });
+    const viewportButton = screen.getByRole("button", {
+      name: /Viewport: Fit/i,
+    });
     expect(viewportButton).toBeDisabled();
   });
 
@@ -1033,9 +1082,13 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
-    const viewportButton = await screen.findByRole("button", { name: /Viewport: Fit/i });
+    const viewportButton = await screen.findByRole("button", {
+      name: /Viewport: Fit/i,
+    });
     expect(viewportButton).toBeEnabled();
   });
 
@@ -1050,19 +1103,27 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     // Initially shows Fit
-    expect(screen.getByRole("button", { name: /Viewport: Fit/i })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: /Viewport: Fit/i }),
+    ).toBeEnabled();
 
     // Open the viewport popover and switch to mobile
-    await userEvent.click(screen.getByRole("button", { name: /Viewport: Fit/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /Viewport: Fit/i }),
+    );
     await userEvent.click(screen.getByRole("radio", { name: /Mobile/i }));
 
     // The trigger label should now show Mobile
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /Viewport: Mobile 390/i })).toBeVisible(),
+      expect(
+        screen.getByRole("button", { name: /Viewport: Mobile 390/i }),
+      ).toBeVisible(),
     );
   });
 
@@ -1077,14 +1138,20 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /Viewport: Fit/i }));
+    await userEvent.click(
+      screen.getByRole("button", { name: /Viewport: Fit/i }),
+    );
     await userEvent.click(screen.getByRole("radio", { name: /Tablet/i }));
 
     await waitFor(() => {
-      const raw = window.localStorage.getItem("tidebreak.code-browser-viewport.v1");
+      const raw = window.localStorage.getItem(
+        "tidebreak.code-browser-viewport.v1",
+      );
       expect(raw).not.toBeNull();
       const parsed = JSON.parse(raw!);
       expect(parsed.preset).toBe("tablet");
@@ -1102,11 +1169,15 @@ describe("CodeBrowserTab", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
 
     // The viewport control button should be present before obscuring
-    expect(screen.getByRole("button", { name: /Viewport: Fit/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Viewport: Fit/i }),
+    ).toBeInTheDocument();
 
     view.rerender(
       <CodeBrowserTab
@@ -1148,14 +1219,20 @@ describe("BrowserToolbar compact", () => {
       />,
     );
 
-    const share = await screen.findByRole("button", { name: "Share with agent" });
+    const share = await screen.findByRole("button", {
+      name: "Share with agent",
+    });
     expect(container.querySelector('[data-compact="true"]')).not.toBeNull();
     expect(screen.getByRole("button", { name: "Back" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Forward" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Address or search" })).toBeVisible();
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: /Viewport:/i })).toBeVisible();
     expect(screen.getByRole("button", { name: "History" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Open externally" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Open externally" }),
+    ).toBeVisible();
 
     share.focus();
     await user.keyboard("{Enter}");
@@ -1282,24 +1359,36 @@ describe("BrowserToolbar compact", () => {
     // after changing the mocked clientWidth. The global stub in setup.ts fires
     // once synchronously on observe; we replicate that and store the callback.
     const observerCallbacks: Array<ResizeObserverCallback> = [];
-    vi.stubGlobal("ResizeObserver", class {
-      constructor(callback: ResizeObserverCallback) {
-        observerCallbacks.push(callback);
-      }
-      observe(target: Element) {
-        const entry = {
-          target,
-          contentRect: { width: 1024, height: 768, top: 0, left: 0, right: 1024, bottom: 768, x: 0, y: 0 },
-          borderBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
-          contentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
-          devicePixelContentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
-        } as unknown as ResizeObserverEntry;
-        const cb = observerCallbacks.at(-1)!;
-        cb([entry], this as unknown as ResizeObserver);
-      }
-      unobserve() {}
-      disconnect() {}
-    });
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observerCallbacks.push(callback);
+        }
+        observe(target: Element) {
+          const entry = {
+            target,
+            contentRect: {
+              width: 1024,
+              height: 768,
+              top: 0,
+              left: 0,
+              right: 1024,
+              bottom: 768,
+              x: 0,
+              y: 0,
+            },
+            borderBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+            contentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+            devicePixelContentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
+          } as unknown as ResizeObserverEntry;
+          const cb = observerCallbacks.at(-1)!;
+          cb([entry], this as unknown as ResizeObserver);
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
 
     mockedClientWidth = 390;
     const runtime = browserHost({
@@ -1325,7 +1414,9 @@ describe("BrowserToolbar compact", () => {
 
     // Wait for the native surface to be created and revealed
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
@@ -1344,7 +1435,9 @@ describe("BrowserToolbar compact", () => {
     });
     await user.click(access);
     // The menu should be open
-    expect(screen.getByRole("menuitem", { name: "Stop sharing" })).toBeVisible();
+    expect(
+      screen.getByRole("menuitem", { name: "Stop sharing" }),
+    ).toBeVisible();
 
     // The native view should be hidden while the menu is open
     await waitFor(() =>
@@ -1364,7 +1457,16 @@ describe("BrowserToolbar compact", () => {
     expect(toolbarObserverCallback).toBeDefined();
     const resizeEntry = {
       target: null as unknown as Element,
-      contentRect: { width: 1024, height: 768, top: 0, left: 0, right: 1024, bottom: 768, x: 0, y: 0 },
+      contentRect: {
+        width: 1024,
+        height: 768,
+        top: 0,
+        left: 0,
+        right: 1024,
+        bottom: 768,
+        x: 0,
+        y: 0,
+      },
       borderBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
       contentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
       devicePixelContentBoxSize: [{ inlineSize: 1024, blockSize: 768 }],
@@ -1390,7 +1492,9 @@ describe("BrowserToolbar compact", () => {
 
     // The compact menu trigger should no longer be present (wide branch renders inline)
     expect(
-      screen.queryByRole("button", { name: "Shared with agent: https://example.com" }),
+      screen.queryByRole("button", {
+        name: "Shared with agent: https://example.com",
+      }),
     ).toBeNull();
     // The wide-branch inline "Stop sharing" button should be present instead
     expect(screen.getByRole("button", { name: "Stop sharing" })).toBeVisible();
@@ -1405,24 +1509,36 @@ describe("BrowserToolbar compact", () => {
     // would stay latched true, keeping the native WKWebView hidden.
 
     const observerCallbacks: Array<ResizeObserverCallback> = [];
-    vi.stubGlobal("ResizeObserver", class {
-      constructor(callback: ResizeObserverCallback) {
-        observerCallbacks.push(callback);
-      }
-      observe(target: Element) {
-        const entry = {
-          target,
-          contentRect: { width: 390, height: 768, top: 0, left: 0, right: 390, bottom: 768, x: 0, y: 0 },
-          borderBoxSize: [{ inlineSize: 390, blockSize: 768 }],
-          contentBoxSize: [{ inlineSize: 390, blockSize: 768 }],
-          devicePixelContentBoxSize: [{ inlineSize: 390, blockSize: 768 }],
-        } as unknown as ResizeObserverEntry;
-        const cb = observerCallbacks.at(-1)!;
-        cb([entry], this as unknown as ResizeObserver);
-      }
-      unobserve() {}
-      disconnect() {}
-    });
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observerCallbacks.push(callback);
+        }
+        observe(target: Element) {
+          const entry = {
+            target,
+            contentRect: {
+              width: 390,
+              height: 768,
+              top: 0,
+              left: 0,
+              right: 390,
+              bottom: 768,
+              x: 0,
+              y: 0,
+            },
+            borderBoxSize: [{ inlineSize: 390, blockSize: 768 }],
+            contentBoxSize: [{ inlineSize: 390, blockSize: 768 }],
+            devicePixelContentBoxSize: [{ inlineSize: 390, blockSize: 768 }],
+          } as unknown as ResizeObserverEntry;
+          const cb = observerCallbacks.at(-1)!;
+          cb([entry], this as unknown as ResizeObserver);
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
 
     mockedClientWidth = 390;
     const runtime = browserHost({
@@ -1448,7 +1564,9 @@ describe("BrowserToolbar compact", () => {
 
     // Wait for create and initial reveal
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
@@ -1463,7 +1581,9 @@ describe("BrowserToolbar compact", () => {
       name: "Shared with agent: https://example.com",
     });
     await user.click(access);
-    expect(screen.getByRole("menuitem", { name: "Stop sharing" })).toBeVisible();
+    expect(
+      screen.getByRole("menuitem", { name: "Stop sharing" }),
+    ).toBeVisible();
 
     // Native view should be hidden while the menu is open
     await waitFor(() =>
@@ -1496,7 +1616,9 @@ describe("BrowserToolbar compact", () => {
     // "Share with agent" button renders instead since neither paused nor
     // shared is true.
     expect(
-      screen.queryByRole("button", { name: "Shared with agent: https://example.com" }),
+      screen.queryByRole("button", {
+        name: "Shared with agent: https://example.com",
+      }),
     ).toBeNull();
 
     // The mounted-predicate effect should close agentAccessOpen, restoring
@@ -1516,9 +1638,7 @@ describe("BrowserToolbar compact", () => {
 
     vi.unstubAllGlobals();
   });
-
 });
-
 
 describe("BrowserToolbar inspect mode", () => {
   it("shows the Inspect toggle when the engine supports semantic snapshots and the page is ready", async () => {
@@ -1538,10 +1658,14 @@ describe("BrowserToolbar inspect mode", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "snapshot")).toBe(true),
+      expect(
+        runtime.calls.some(({ action }) => action.type === "snapshot"),
+      ).toBe(true),
     );
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Inspect page elements" })).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Inspect page elements" }),
+      ).toBeVisible();
     });
   });
 
@@ -1556,9 +1680,13 @@ describe("BrowserToolbar inspect mode", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(true),
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
     );
-    expect(screen.queryByRole("button", { name: "Inspect page elements" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Inspect page elements" }),
+    ).toBeNull();
   });
 
   it("remains usable in compact toolbar layouts", async () => {
@@ -1579,10 +1707,14 @@ describe("BrowserToolbar inspect mode", () => {
       />,
     );
     await waitFor(() =>
-      expect(runtime.calls.some(({ action }) => action.type === "snapshot")).toBe(true),
+      expect(
+        runtime.calls.some(({ action }) => action.type === "snapshot"),
+      ).toBe(true),
     );
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Inspect page elements" })).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Inspect page elements" }),
+      ).toBeVisible();
       expect(document.querySelector('[data-compact="true"]')).not.toBeNull();
     });
   });

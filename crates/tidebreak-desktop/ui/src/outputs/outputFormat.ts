@@ -39,5 +39,7 @@ export function outputTypeLabel(mediaType: string): string {
 }
 
 export function revisionLabel(output: DeliverableSummary): string {
-  return output.revisionCount === 1 ? "1 revision" : `${output.revisionCount} revisions`;
+  return output.revisionCount === 1
+    ? "1 revision"
+    : `${output.revisionCount} revisions`;
 }

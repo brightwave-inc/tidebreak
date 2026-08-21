@@ -9,7 +9,8 @@ const meta = {
   component: ApprovalCard,
   args: {
     callId: "call-storybook",
-    summary: "This command can access the network and the staged files listed below.",
+    summary:
+      "This command can access the network and the staged files listed below.",
     preview: execPreview,
     canApprove: true,
     canRemember: true,

@@ -104,7 +104,8 @@ function setComposerImages(
   chatId: string,
   change: (current: readonly ImageAttachment[]) => ImageAttachment[],
 ): void {
-  const current = useComposerDrafts.getState().attachments[chatId]?.images ?? [];
+  const current =
+    useComposerDrafts.getState().attachments[chatId]?.images ?? [];
   useComposerDrafts.getState().setImages(chatId, change(current));
 }
 
@@ -173,7 +174,8 @@ export function useImageAttachments(
         signal,
         path:
           scope === "code"
-            ? (id) => `/code/sessions/${encodeURIComponent(id)}/attachments/images`
+            ? (id) =>
+                `/code/sessions/${encodeURIComponent(id)}/attachments/images`
             : undefined,
       });
     }
@@ -185,7 +187,8 @@ export function useImageAttachments(
       scope === "code"
         ? await publishCodeImage(chatId, file)
         : await publishChatImage(chatId, file);
-    if (signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+    if (signal.aborted)
+      throw new DOMException("Upload cancelled", "AbortError");
     return published;
   }
 
@@ -275,7 +278,9 @@ export function useImageAttachments(
 }
 
 function failureText(error: unknown): string {
-  const message = String(error).replace(/^Error:\s*/, "").trim();
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
   return message && message.length <= 240
     ? message
     : "Could not attach that image.";

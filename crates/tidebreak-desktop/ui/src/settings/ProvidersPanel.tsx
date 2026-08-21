@@ -118,9 +118,9 @@ export function ProvidersPanel({
         <SettingsSection>
           <p className="text-sm text-muted-foreground">
             Model providers are configured by your organization&apos;s model
-            gateway. Your own API keys and endpoints are not used, and cannot
-            be added here. See the Model Gateway section for the models and
-            tools available to you.
+            gateway. Your own API keys and endpoints are not used, and cannot be
+            added here. See the Model Gateway section for the models and tools
+            available to you.
           </p>
         </SettingsSection>
       </SettingsPanel>
@@ -143,7 +143,9 @@ export function ProvidersPanel({
               info={p}
               client={client}
               onChanged={onChanged}
-              catalogModels={models.filter((model) => model.provider === p.kind)}
+              catalogModels={models.filter(
+                (model) => model.provider === p.kind,
+              )}
               expanded={expanded[p.kind] === true}
               onExpandedChange={(open) => setExpandedFor(p.kind, open)}
               deepLinked={expandProvider === p.kind}
@@ -316,7 +318,9 @@ function ProviderRow({
           provider={info.kind}
           className={cn("size-4 shrink-0", !connected && "opacity-60")}
         />
-        <span className="text-sm font-semibold">{providerLabel(info.kind)}</span>
+        <span className="text-sm font-semibold">
+          {providerLabel(info.kind)}
+        </span>
         {summary && (
           <span className="text-xs text-muted-foreground">{summary}</span>
         )}
@@ -470,7 +474,9 @@ function ProviderRow({
                                 itemIndex === index
                                   ? {
                                       ...item,
-                                      context_window: Number(event.target.value),
+                                      context_window: Number(
+                                        event.target.value,
+                                      ),
                                     }
                                   : item,
                               ),
@@ -491,7 +497,9 @@ function ProviderRow({
                                 itemIndex === index
                                   ? {
                                       ...item,
-                                      max_output_tokens: Number(event.target.value),
+                                      max_output_tokens: Number(
+                                        event.target.value,
+                                      ),
                                     }
                                   : item,
                               ),
@@ -628,7 +636,8 @@ function OpenAiCredentialSection({
   onSaveApiKey: () => void;
   onClear: () => void;
 }) {
-  const signedInWithChatgpt = info.auth_mode === "chatgpt" && info.has_credential;
+  const signedInWithChatgpt =
+    info.auth_mode === "chatgpt" && info.has_credential;
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const pollDeadlineRef = useRef<number | null>(null);

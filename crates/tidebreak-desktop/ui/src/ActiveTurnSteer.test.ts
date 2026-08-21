@@ -103,9 +103,9 @@ describe("ActiveTurnSteerFence", () => {
     const first = fence.begin(target, "change course", createId)!;
     fence.fail(first);
 
-    expect(
-      fence.begin(target, "change course", createId, true)?.steerId,
-    ).toBe("steer-2");
+    expect(fence.begin(target, "change course", createId, true)?.steerId).toBe(
+      "steer-2",
+    );
   });
 
   it("accepts a response only for the exact selected chat and active turn", () => {
@@ -149,11 +149,7 @@ describe("ActiveTurnSteerFence", () => {
     const fence = new ActiveTurnSteerFence();
 
     expect(
-      fence.begin(
-        target,
-        "🌊".repeat(MAX_STEER_CHARACTERS),
-        () => "steer-1",
-      ),
+      fence.begin(target, "🌊".repeat(MAX_STEER_CHARACTERS), () => "steer-1"),
     ).not.toBeNull();
   });
 
@@ -161,7 +157,11 @@ describe("ActiveTurnSteerFence", () => {
     const fence = new ActiveTurnSteerFence();
     const request = fence.begin(target, "first direction", () => "steer-1")!;
 
-    expect(shouldClearAcceptedSteerDraft(request, "first direction")).toBe(true);
-    expect(shouldClearAcceptedSteerDraft(request, "next direction")).toBe(false);
+    expect(shouldClearAcceptedSteerDraft(request, "first direction")).toBe(
+      true,
+    );
+    expect(shouldClearAcceptedSteerDraft(request, "next direction")).toBe(
+      false,
+    );
   });
 });

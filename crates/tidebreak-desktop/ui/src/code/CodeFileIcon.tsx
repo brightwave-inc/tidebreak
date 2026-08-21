@@ -47,13 +47,7 @@ const CODE_EXTENSIONS = new Set([
   "vue",
 ]);
 
-const TEXT_EXTENSIONS = new Set([
-  "md",
-  "mdx",
-  "rst",
-  "txt",
-  "adoc",
-]);
+const TEXT_EXTENSIONS = new Set(["md", "mdx", "rst", "txt", "adoc"]);
 
 const CONFIG_EXTENSIONS = new Set([
   "env",

@@ -13,7 +13,11 @@ const meta = {
   component: CodeToolCard,
   args: {
     name: "Bash",
-    detail: { kind: "command", cmd: "cargo test -p tidebreak-core", cwd: "/repo" },
+    detail: {
+      kind: "command",
+      cmd: "cargo test -p tidebreak-core",
+      cwd: "/repo",
+    },
     status: "succeeded",
     preview: "",
     startedAt: "2026-08-15T12:00:00.000Z",
@@ -54,7 +58,8 @@ export const Running: Story = {
   args: {
     status: "running",
     durationMs: null,
-    preview: "Compiling tidebreak-core v0.4.2\nCompiling tidebreak-harness v0.4.2\n",
+    preview:
+      "Compiling tidebreak-core v0.4.2\nCompiling tidebreak-harness v0.4.2\n",
   },
 };
 
@@ -79,7 +84,10 @@ export const Denied: Story = {
 export const FileRead: Story = {
   args: {
     name: "Read",
-    detail: { kind: "file_read", path: "crates/tidebreak-desktop/ui/src/code/CodeTranscript.tsx" },
+    detail: {
+      kind: "file_read",
+      path: "crates/tidebreak-desktop/ui/src/code/CodeTranscript.tsx",
+    },
     durationMs: 300,
   },
 };

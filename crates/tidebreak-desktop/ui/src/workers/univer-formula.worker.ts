@@ -3,9 +3,9 @@ import { UniverSheetsCoreWorkerPreset } from "@univerjs/preset-sheets-core/worke
 import { createUniver, LocaleType } from "@univerjs/presets";
 
 createUniver({
-    locale: LocaleType.EN_US,
-    locales: {
-        [LocaleType.EN_US]: sheetsCoreEnUS,
-    },
-    presets: [UniverSheetsCoreWorkerPreset()],
+  locale: LocaleType.EN_US,
+  locales: {
+    [LocaleType.EN_US]: sheetsCoreEnUS,
+  },
+  presets: [UniverSheetsCoreWorkerPreset()],
 });

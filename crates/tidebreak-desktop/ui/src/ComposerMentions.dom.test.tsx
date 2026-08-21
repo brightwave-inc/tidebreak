@@ -4,11 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
-import {
-  Composer,
-  type ComposerFiles,
-  type ComposerFolders,
-} from "./Composer";
+import { Composer, type ComposerFiles, type ComposerFolders } from "./Composer";
 
 afterEach(cleanup);
 
@@ -138,9 +134,7 @@ it("leaves an at-sign inside ordinary text alone, and closes on escape", async (
 it("falls back to the pickers when nothing is within reach", async () => {
   const user = userEvent.setup();
   const onAttach = vi.fn();
-  render(
-    <ComposerHarness files={composerFiles({ recent: [], onAttach })} />,
-  );
+  render(<ComposerHarness files={composerFiles({ recent: [], onAttach })} />);
 
   await user.click(screen.getByRole("textbox", { name: "Message" }));
   await user.keyboard("@");

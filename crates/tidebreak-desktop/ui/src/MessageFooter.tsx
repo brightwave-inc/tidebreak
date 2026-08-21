@@ -30,9 +30,10 @@ export function MessageFooter({
 }: MessageFooterProps) {
   if (role === "assistant" && !sequenceEnd) return null;
   const hasContent = text.trim().length > 0;
-  const timestamp = createdAt && (role === "user" || (settled && hasContent))
-    ? formatMessageTimestamp(createdAt, new Date())
-    : null;
+  const timestamp =
+    createdAt && (role === "user" || (settled && hasContent))
+      ? formatMessageTimestamp(createdAt, new Date())
+      : null;
   const canCopy = role === "assistant" && settled && hasContent;
 
   if (!canCopy && !timestamp) return null;
@@ -53,9 +54,7 @@ export function MessageFooter({
       <span className="message-footer-spacer" />
       {timestamp && (
         <WithTooltip label={timestamp.full}>
-          <time dateTime={createdAt}>
-            {timestamp.short}
-          </time>
+          <time dateTime={createdAt}>{timestamp.short}</time>
         </WithTooltip>
       )}
     </footer>

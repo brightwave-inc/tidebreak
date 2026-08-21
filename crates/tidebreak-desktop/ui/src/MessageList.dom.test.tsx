@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./ApprovalCard";
@@ -84,7 +90,11 @@ describe("approval card interactions", () => {
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", null);
 
     await user.click(options[1]!);
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
+    expect(onDecide).toHaveBeenLastCalledWith(
+      "call-1",
+      "approve",
+      "whole_tool",
+    );
 
     await user.click(options[2]!);
     expect(onDecide).toHaveBeenLastCalledWith("call-1", "reject", null);
@@ -123,7 +133,11 @@ describe("approval card interactions", () => {
     await user.keyboard("{ArrowDown}");
     expect(onDecide).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
-    expect(onDecide).toHaveBeenLastCalledWith("call-1", "approve", "whole_tool");
+    expect(onDecide).toHaveBeenLastCalledWith(
+      "call-1",
+      "approve",
+      "whole_tool",
+    );
 
     approvalChoices()[1]?.focus();
     await user.keyboard("3");
@@ -170,17 +184,18 @@ describe("approval card interactions", () => {
   it("offers only rejection when the action kind is not approvable", () => {
     render(card({ canApprove: false }));
 
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual(["1.No, don't allow this"]);
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
+      "1.No, don't allow this",
+    ]);
   });
 
   it("offers one-shot approval but no remembered grant for MCP", () => {
     render(card({ canRemember: false }));
 
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual([ONCE, "2.No, don't allow this"]);
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
+      ONCE,
+      "2.No, don't allow this",
+    ]);
   });
 
   it("offers an interpreter command once when policy supplies no grant rung", () => {
@@ -198,9 +213,10 @@ describe("approval card interactions", () => {
       }),
     );
 
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual(["1.Yes, run it once", "2.No, don't allow this"]);
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
+      "1.Yes, run it once",
+      "2.No, don't allow this",
+    ]);
   });
 
   it("hides the broader grants behind one more keystroke", async () => {
@@ -227,9 +243,7 @@ describe("approval card interactions", () => {
 
     // Every option on screen is one keystroke away, so the narrowest grants are
     // inline and the widest ones are not.
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual([
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
       "3.Yes, and always allow any \u201ccargo test\u201d command",
@@ -238,9 +252,7 @@ describe("approval card interactions", () => {
     ]);
 
     await user.click(screen.getByText(MORE));
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual([
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
       "3.Yes, and always allow any \u201ccargo test\u201d command",
@@ -274,9 +286,7 @@ describe("approval card interactions", () => {
       }),
     );
 
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual([
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
       "1.Yes, run it once",
       "2.Yes, and always allow exactly \u201ccargo test\u201d",
       "3.Yes, and always allow any \u201ccargo test\u201d command",
@@ -289,9 +299,11 @@ describe("approval card interactions", () => {
   it("names the project when a remembered answer will reach past this chat", async () => {
     render(card({ grantScope: "project" }));
 
-    expect(
-      approvalChoices().map((row) => row.textContent),
-    ).toEqual([ONCE, REMEMBER_IN_PROJECT, "3.No, don't allow this"]);
+    expect(approvalChoices().map((row) => row.textContent)).toEqual([
+      ONCE,
+      REMEMBER_IN_PROJECT,
+      "3.No, don't allow this",
+    ]);
     // And says once, in full, what the rows cannot say without becoming
     // three long lines.
     screen.getByText(/Saved answers apply to all work in this project/);
@@ -303,7 +315,13 @@ describe("approval card interactions", () => {
     render(
       card({
         onDecide,
-        preview: { tool: "exec", command: "cargo", args: ["test"], cwd: ".", files: [] },
+        preview: {
+          tool: "exec",
+          command: "cargo",
+          args: ["test"],
+          cwd: ".",
+          files: [],
+        },
         grantRungs: [
           "exact_action",
           { command_prefix: { tokens: 2 } },
@@ -316,10 +334,7 @@ describe("approval card interactions", () => {
     // "More options" sat at row 4; expanding puts a broader grant there. A
     // stray Enter must not commit whatever moved under the cursor.
     await user.keyboard("4{Enter}");
-    expect(approvalChoices()[0]).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(approvalChoices()[0]).toHaveAttribute("aria-pressed", "true");
     expect(onDecide).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
     expect(onDecide).toHaveBeenCalledWith("call-1", "approve", null);
@@ -345,9 +360,7 @@ describe("approval card interactions", () => {
 
     // The ladder used to be exec-shaped, so this card's only standing option
     // was the widest rung there is.
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual([
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
       ONCE,
       "2.Yes, and always allow exactly “quarterly filings”",
       "3.Yes, and don't ask again in this work",
@@ -391,9 +404,11 @@ describe("approval card interactions", () => {
     render(card());
 
     expect(screen.queryByText(MORE)).not.toBeInTheDocument();
-    expect(
-      approvalChoices().map((option) => option.textContent),
-    ).toEqual([ONCE, REMEMBER, "3.No, don't allow this"]);
+    expect(approvalChoices().map((option) => option.textContent)).toEqual([
+      ONCE,
+      REMEMBER,
+      "3.No, don't allow this",
+    ]);
     await user.click(approvalChoices()[1]!);
   });
 
@@ -423,9 +438,7 @@ describe("approval card interactions", () => {
     ).toBeInTheDocument();
     // The class-of-egress sentence becomes the subheading, not the ask.
     expect(screen.getByText(/may reach the network/)).toBeInTheDocument();
-    expect(approvalChoices()[0]).toHaveTextContent(
-      "Yes, run it once",
-    );
+    expect(approvalChoices()[0]).toHaveTextContent("Yes, run it once");
   });
 });
 
@@ -462,9 +475,27 @@ describe("activity phases", () => {
   it("keeps a run of calls behind one line and reveals them on demand", async () => {
     const user = userEvent.setup();
     list([
-      { id: "t1", role: "tool", callId: "c1", name: "search", status: "completed" },
-      { id: "t2", role: "tool", callId: "c2", name: "read_file", status: "completed" },
-      { id: "t3", role: "tool", callId: "c3", name: "web_search", status: "completed" },
+      {
+        id: "t1",
+        role: "tool",
+        callId: "c1",
+        name: "search",
+        status: "completed",
+      },
+      {
+        id: "t2",
+        role: "tool",
+        callId: "c2",
+        name: "read_file",
+        status: "completed",
+      },
+      {
+        id: "t3",
+        role: "tool",
+        callId: "c3",
+        name: "web_search",
+        status: "completed",
+      },
     ]);
 
     const trigger = screen.getByRole("button", {
@@ -481,7 +512,13 @@ describe("activity phases", () => {
   it("surfaces a command row outside the collapsed region", async () => {
     const user = userEvent.setup();
     list([
-      { id: "t1", role: "tool", callId: "c1", name: "search", status: "completed" },
+      {
+        id: "t1",
+        role: "tool",
+        callId: "c1",
+        name: "search",
+        status: "completed",
+      },
       {
         id: "t2",
         role: "tool",
@@ -524,9 +561,9 @@ describe("activity phases", () => {
 
     // One copy of the command, on the card that can act on it, and no rail
     // line announcing the same pending action a second time.
-    expect(screen.getAllByText(/cargo build/, { selector: "pre" })).toHaveLength(
-      1,
-    );
+    expect(
+      screen.getAllByText(/cargo build/, { selector: "pre" }),
+    ).toHaveLength(1);
     expect(
       screen.queryByRole("button", { name: /Running a command/ }),
     ).toBeNull();
@@ -543,8 +580,8 @@ describe("historical image attachments", () => {
       createObjectURL: createObjectUrl,
       revokeObjectURL: revokeObjectUrl,
     });
-    const getChatImageAttachment = vi.fn(async () =>
-      new Blob(["pixels"], { type: "image/png" }),
+    const getChatImageAttachment = vi.fn(
+      async () => new Blob(["pixels"], { type: "image/png" }),
     );
     const { unmount } = render(
       <MessageBubble
@@ -600,7 +637,14 @@ describe("card order", () => {
     const { container } = render(
       <MessageList
         messages={[
-          { id: "t1", role: "tool", callId: "c1", name: "exec", status: "completed", preview },
+          {
+            id: "t1",
+            role: "tool",
+            callId: "c1",
+            name: "exec",
+            status: "completed",
+            preview,
+          },
           {
             id: "a1",
             role: "approval",
@@ -610,7 +654,13 @@ describe("card order", () => {
             canApprove: true,
             canRemember: true,
           },
-          { id: "t2", role: "tool", callId: "c2", name: "web_search", status: "waiting_approval" },
+          {
+            id: "t2",
+            role: "tool",
+            callId: "c2",
+            name: "web_search",
+            status: "waiting_approval",
+          },
         ]}
         folderAccessRequests={[]}
         nativeHost={false}
@@ -694,7 +744,9 @@ describe("command output", () => {
     expect(screen.getByText(/two tests passed/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "command" }));
-    expect(screen.getByText(/cargo build/, { selector: "pre" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/cargo build/, { selector: "pre" }),
+    ).toBeInTheDocument();
   });
 
   it("drops the tab pair for a command that finished silently", async () => {
@@ -703,7 +755,9 @@ describe("command output", () => {
 
     await user.click(screen.getByRole("button", { name: /cargo build/ }));
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
-    expect(screen.getByText(/cargo build/, { selector: "pre" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/cargo build/, { selector: "pre" }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -771,8 +825,24 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 3,
               entries: [
-                { kind: "file", label: "notes.md", detail: null, meta: "1.2 KB", mediaType: null, targetId: null, url: null },
-                { kind: "folder", label: "reports", detail: null, meta: null, mediaType: null, targetId: null, url: null },
+                {
+                  kind: "file",
+                  label: "notes.md",
+                  detail: null,
+                  meta: "1.2 KB",
+                  mediaType: null,
+                  targetId: null,
+                  url: null,
+                },
+                {
+                  kind: "folder",
+                  label: "reports",
+                  detail: null,
+                  meta: null,
+                  mediaType: null,
+                  targetId: null,
+                  url: null,
+                },
               ],
               failures: [],
             },
@@ -828,7 +898,8 @@ describe("mcp app views", () => {
                   detail: "Pages 3, 7",
                   meta: "2 matches",
                   mediaType: "application/pdf",
-                  targetId: null, url: null,
+                  targetId: null,
+                  url: null,
                 },
               ],
               failures: [],
@@ -875,7 +946,15 @@ describe("mcp app views", () => {
               tool: "entries",
               elided: 0,
               entries: [
-                { kind: "file", label: "q3.md", detail: null, meta: null, mediaType: null, targetId: null, url: null },
+                {
+                  kind: "file",
+                  label: "q3.md",
+                  detail: null,
+                  meta: null,
+                  mediaType: null,
+                  targetId: null,
+                  url: null,
+                },
               ],
               failures: [
                 { label: "q4.md", error: "file is not valid UTF-8" },
@@ -906,7 +985,9 @@ describe("mcp app views", () => {
     expect(screen.getByText("q3.md")).toBeInTheDocument();
     expect(screen.getByText("file is not valid UTF-8")).toBeInTheDocument();
     // A failure the tool could not name still gets a row rather than vanishing.
-    expect(screen.getByText("the folder is no longer available")).toBeInTheDocument();
+    expect(
+      screen.getByText("the folder is no longer available"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Item")).toBeInTheDocument();
   });
 });
@@ -941,7 +1022,8 @@ describe("actionable tool results", () => {
             detail: null,
             meta: "v1 · created",
             mediaType: CHART_MEDIA_TYPE,
-            targetId: "output-2", url: null,
+            targetId: "output-2",
+            url: null,
           },
         ],
       },
@@ -981,7 +1063,8 @@ describe("actionable tool results", () => {
                   meta: "v1 · created",
                   mediaType:
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                  targetId: "output-1", url: null,
+                  targetId: "output-1",
+                  url: null,
                 },
               ],
             },
@@ -1129,7 +1212,8 @@ describe("actionable tool results", () => {
                   detail: null,
                   meta: "revision 1",
                   mediaType: null,
-                  targetId: "app-1", url: null,
+                  targetId: "app-1",
+                  url: null,
                 },
               ],
             },
@@ -1321,9 +1405,7 @@ describe("file attachment chips", () => {
     const user = userEvent.setup();
     const openDocument = vi.fn();
     render(
-      <SourceNavProvider
-        value={{ openCitation: vi.fn(), openDocument }}
-      >
+      <SourceNavProvider value={{ openCitation: vi.fn(), openDocument }}>
         <MessageBubble
           busy={false}
           message={{
@@ -1346,7 +1428,6 @@ describe("file attachment chips", () => {
     expect(openDocument).toHaveBeenCalledWith("document-1");
   });
 });
-
 
 describe("web sources", () => {
   it("names the pages a turn's searches found and opens one externally", async () => {
@@ -1427,7 +1508,9 @@ describe("web sources", () => {
     await user.click(within(row).getByRole("button", { name: "+1 more" }));
     expect(within(row).getByText("apnews.com")).toBeInTheDocument();
 
-    await user.click(within(row).getByRole("button", { name: "sec.gov report" }));
+    await user.click(
+      within(row).getByRole("button", { name: "sec.gov report" }),
+    );
     expect(opened).toEqual(["https://sec.gov/report"]);
   });
 });

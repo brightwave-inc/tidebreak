@@ -22,7 +22,9 @@ export function splitCodeChromeLayout(layout: LayoutState): {
     | Extract<PanelContent, { type: "terminal" }>
     | undefined;
   const active = layout.tabs[layout.activeIndex];
-  const side = layout.tabs.filter((tab) => !isDrawerTab(tab) && !isEditorTab(tab));
+  const side = layout.tabs.filter(
+    (tab) => !isDrawerTab(tab) && !isEditorTab(tab),
+  );
   const editors = layout.tabs.filter(isEditorTab);
   const splitTabs = layout.editorSplit?.tabs.filter(isEditorTab) ?? [];
   const splitActive = layout.editorSplit?.tabs[layout.editorSplit.activeIndex];
@@ -107,11 +109,7 @@ export type CodeEditorRegion = "primary" | "secondary";
 export function closeFocusedCodeTab(layout: LayoutState): LayoutState | null {
   const chrome = splitCodeChromeLayout(layout);
   if (layout.editorSplit?.focused && chrome.splitEditors.tabs.length > 0) {
-    return closeEditorTab(
-      layout,
-      chrome.splitEditors.activeIndex,
-      "secondary",
-    );
+    return closeEditorTab(layout, chrome.splitEditors.activeIndex, "secondary");
   }
   if (!chrome.editors.conversationFocused && chrome.editors.tabs.length > 0) {
     return closeEditorTab(layout, chrome.editors.activeIndex, "primary");
@@ -218,7 +216,9 @@ export function focusEditorTab(
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
   if (!target) return layout;
-  const index = layout.tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
+  const index = layout.tabs.findIndex(
+    (tab) => panelKey(tab) === panelKey(target),
+  );
   if (index < 0) return layout;
   return {
     ...layout,
@@ -258,7 +258,9 @@ export function closeEditorTab(
   const editors = layout.tabs.filter(isEditorTab);
   const target = editors[editorIndex];
   if (!target) return layout;
-  const index = layout.tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
+  const index = layout.tabs.findIndex(
+    (tab) => panelKey(tab) === panelKey(target),
+  );
   if (index < 0) return layout;
   const next = closeLayoutTab(layout, index);
   if (next.tabs.filter(isEditorTab).length === 0) {
@@ -300,9 +302,13 @@ export function closeAllEditorTabs(
   }
 
   const active = layout.tabs[layout.activeIndex];
-  const activeIndex = active && !isEditorTab(active)
-    ? Math.max(0, tabs.findIndex((tab) => panelKey(tab) === panelKey(active)))
-    : 0;
+  const activeIndex =
+    active && !isEditorTab(active)
+      ? Math.max(
+          0,
+          tabs.findIndex((tab) => panelKey(tab) === panelKey(active)),
+        )
+      : 0;
   return {
     ...layout,
     tabs,
@@ -374,9 +380,10 @@ export function closeEditorTabsToRight(
   );
   const active = layout.tabs[layout.activeIndex];
   const activeKey = active ? panelKey(active) : null;
-  const activeIndex = activeKey && !closingKeys.has(activeKey)
-    ? tabs.findIndex((tab) => panelKey(tab) === activeKey)
-    : tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
+  const activeIndex =
+    activeKey && !closingKeys.has(activeKey)
+      ? tabs.findIndex((tab) => panelKey(tab) === activeKey)
+      : tabs.findIndex((tab) => panelKey(tab) === panelKey(target));
   return {
     ...layout,
     tabs,
@@ -400,9 +407,8 @@ export function openCodeEditor(
     tabs[urlIndex] = panel;
     return focusEditorTab({ ...layout, tabs }, primaryIndex, "primary");
   }
-  const splitIndex = layout.editorSplit?.tabs.findIndex(
-    (tab) => panelKey(tab) === key,
-  ) ?? -1;
+  const splitIndex =
+    layout.editorSplit?.tabs.findIndex((tab) => panelKey(tab) === key) ?? -1;
   if (splitIndex >= 0 && layout.editorSplit) {
     const tabs = layout.editorSplit.tabs.slice();
     tabs[splitIndex] = panel;
@@ -535,11 +541,7 @@ export function moveEditorTab(
   }
 
   const without = closeEditorTab(layout, editorIndex, "secondary");
-  return openCodeEditor(
-    without,
-    target as CodeEditorPanel,
-    "primary",
-  );
+  return openCodeEditor(without, target as CodeEditorPanel, "primary");
 }
 
 /**
@@ -578,11 +580,7 @@ export function mergeEditorSplit(layout: LayoutState): LayoutState {
   if (splitTabs.length === 0) return { ...layout, editorSplit: undefined };
   let next: LayoutState = { ...layout, editorSplit: undefined };
   for (const tab of splitTabs) {
-    next = openCodeEditor(
-      next,
-      tab as CodeEditorPanel,
-      "primary",
-    );
+    next = openCodeEditor(next, tab as CodeEditorPanel, "primary");
   }
   return next;
 }
@@ -617,14 +615,20 @@ function codeChromeUrlIndex(layout: LayoutState, stripIndex: number): number {
 }
 
 /** Bring the side-region tab at `stripIndex` forward, leaving the drawer in place. */
-export function focusCodeChromeTab(layout: LayoutState, stripIndex: number): LayoutState {
+export function focusCodeChromeTab(
+  layout: LayoutState,
+  stripIndex: number,
+): LayoutState {
   const urlIndex = codeChromeUrlIndex(layout, stripIndex);
   if (urlIndex < 0 || urlIndex === layout.activeIndex) return layout;
   return { ...layout, activeIndex: urlIndex };
 }
 
 /** Close the side-region tab at `stripIndex` and keep the terminal in the URL. */
-export function closeCodeChromeTab(layout: LayoutState, stripIndex: number): LayoutState {
+export function closeCodeChromeTab(
+  layout: LayoutState,
+  stripIndex: number,
+): LayoutState {
   const { panels, editors, terminal } = splitCodeChromeLayout(layout);
   const nextPanels = closeLayoutTab(panels, stripIndex);
   return combineChrome(nextPanels, editors, terminal, layout.editorSplit);
@@ -644,7 +648,10 @@ function combineChrome(
       ? editors.tabs[editors.activeIndex]
       : panels.tabs[panels.activeIndex];
   const activeIndex = focused
-    ? Math.max(0, tabs.findIndex((tab) => panelKey(tab) === panelKey(focused)))
+    ? Math.max(
+        0,
+        tabs.findIndex((tab) => panelKey(tab) === panelKey(focused)),
+      )
     : 0;
   return {
     tabs,

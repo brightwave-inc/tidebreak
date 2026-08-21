@@ -25,9 +25,9 @@ const signedIn: GatewayStatus = {
 function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
   return {
     getGatewayStatus: vi.fn().mockResolvedValue(signedOut),
-    gatewaySignIn: vi
-      .fn()
-      .mockResolvedValue({ authorization_url: "http://gw/oauth/authorize?x=1" }),
+    gatewaySignIn: vi.fn().mockResolvedValue({
+      authorization_url: "http://gw/oauth/authorize?x=1",
+    }),
     gatewaySignOut: vi.fn().mockResolvedValue(signedOut),
     syncGatewayModels: vi.fn().mockResolvedValue(signedIn),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
@@ -195,9 +195,7 @@ describe("GatewayPanel", () => {
     // A gateway that predates the JSON apps surface: no section, no error.
     const older = api({
       getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
-      getGatewayApps: vi
-        .fn()
-        .mockResolvedValue({ supported: false, apps: [] }),
+      getGatewayApps: vi.fn().mockResolvedValue({ supported: false, apps: [] }),
     });
     render(managedPanel(older));
     expect(await screen.findByText("Signed in")).toBeInTheDocument();
@@ -269,7 +267,10 @@ describe("GatewayPanel", () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue({
         ...signedOut,
-        sign_in: { state: "failed", message: "browser authorization timed out" },
+        sign_in: {
+          state: "failed",
+          message: "browser authorization timed out",
+        },
       }),
     });
     render(managedPanel(client));

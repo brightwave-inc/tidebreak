@@ -61,9 +61,9 @@ const models: ModelInfo[] = [
 
 describe("typed model selection", () => {
   it("resolves provider-qualified keys exactly", () => {
-    expect(modelForSelection(models, "openai_compatible::shared")?.provider).toBe(
-      "openai_compatible",
-    );
+    expect(
+      modelForSelection(models, "openai_compatible::shared")?.provider,
+    ).toBe("openai_compatible");
     expect(modelForSelection(models, "anthropic::shared")).toBeNull();
   });
 
@@ -79,10 +79,12 @@ describe("typed model selection", () => {
     expect(modelForChat(models, null, "anthropic::unique")?.key).toBe(
       "anthropic::unique",
     );
-    expect(modelForChat(models, "openai::shared", "anthropic::unique")?.key).toBe(
-      "openai::shared",
-    );
-    expect(modelForChat(models, "missing::model", "anthropic::unique")).toBeNull();
+    expect(
+      modelForChat(models, "openai::shared", "anthropic::unique")?.key,
+    ).toBe("openai::shared");
+    expect(
+      modelForChat(models, "missing::model", "anthropic::unique"),
+    ).toBeNull();
   });
 
   it("uses product-facing provider labels", () => {

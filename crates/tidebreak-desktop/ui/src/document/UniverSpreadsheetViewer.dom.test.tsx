@@ -12,7 +12,10 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-import { clearFileDownloadCache, type FileBytesSource } from "./useFileDownload";
+import {
+  clearFileDownloadCache,
+  type FileBytesSource,
+} from "./useFileDownload";
 
 const univerMocks = vi.hoisted(() => {
   const univer = { dispose: vi.fn() };
@@ -60,7 +63,10 @@ vi.mock("@/workers/univer-parser.worker?worker&inline", () => ({
       if (type === "message") this.listeners.add(listener);
     }
 
-    removeEventListener(_type: string, listener: (event: MessageEvent) => void) {
+    removeEventListener(
+      _type: string,
+      listener: (event: MessageEvent) => void,
+    ) {
       this.listeners.delete(listener);
     }
 
@@ -121,7 +127,9 @@ afterEach(cleanup);
 
 it("keeps one Univer instance while the composer beside it is typed into", async () => {
   render(<PaneWithViewer />);
-  await waitFor(() => expect(univerMocks.createUniver).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(univerMocks.createUniver).toHaveBeenCalledTimes(1),
+  );
 
   const message = screen.getByLabelText("Message");
   await userEvent.type(message, "summarize the sheet");

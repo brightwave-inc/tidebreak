@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import type {
@@ -138,7 +144,9 @@ export function resourceLabel(statement: ConsentStatementSnapshot): string {
     case "host_subject":
       return "Connected folders";
     case "host_root":
-      return resource.display_name ?? `Folder ${shortOpaqueId(resource.root_id)}`;
+      return (
+        resource.display_name ?? `Folder ${shortOpaqueId(resource.root_id)}`
+      );
     case "host_path_subtree": {
       const folder =
         resource.display_name ?? `Folder ${shortOpaqueId(resource.root_id)}`;
@@ -218,7 +226,9 @@ export function statementsForChat(
     if (statement.level.level === "chat") {
       return statement.level.chat_id === chat.id;
     }
-    return chat.project_id != null && statement.level.project_id === chat.project_id;
+    return (
+      chat.project_id != null && statement.level.project_id === chat.project_id
+    );
   });
 }
 
@@ -376,7 +386,9 @@ export function PermissionsPanel({
   const reload = useCallback(async () => {
     const generation = ++reloadGenerationRef.current;
     try {
-      const chatScope = chatId ? { id: chatId, project_id: chatProjectId } : null;
+      const chatScope = chatId
+        ? { id: chatId, project_id: chatProjectId }
+        : null;
       const [tool, capability, folders] = await Promise.all([
         client.listConsentStatements(),
         listCapabilityConsents(),
@@ -448,7 +460,9 @@ export function PermissionsPanel({
         hostErrorMessage(caught, "The folder could not be granted access."),
       );
     } finally {
-      useNativePickerLatch.getState().release(PICKER_HOLDERS.grantFolderCapability);
+      useNativePickerLatch
+        .getState()
+        .release(PICKER_HOLDERS.grantFolderCapability);
       if (scopeKeyRef.current === startingScope) setBusyId(null);
     }
   }

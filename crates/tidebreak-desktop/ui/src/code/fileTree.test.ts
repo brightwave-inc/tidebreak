@@ -16,9 +16,16 @@ describe("buildFileTree", () => {
       "src/code/mod.rs",
       "Cargo.toml",
     ]);
-    expect(tree.map((node) => node.name)).toEqual(["src", "Cargo.toml", "README.md"]);
+    expect(tree.map((node) => node.name)).toEqual([
+      "src",
+      "Cargo.toml",
+      "README.md",
+    ]);
     expect(tree[0]).toMatchObject({ kind: "dir", path: "src" });
-    expect(tree[0].children?.map((node) => node.name)).toEqual(["code", "lib.rs"]);
+    expect(tree[0].children?.map((node) => node.name)).toEqual([
+      "code",
+      "lib.rs",
+    ]);
     expect(tree[0].children?.[0].children?.[0]).toEqual({
       kind: "file",
       name: "mod.rs",

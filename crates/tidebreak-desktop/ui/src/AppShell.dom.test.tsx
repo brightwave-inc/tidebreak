@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -120,7 +126,7 @@ const unmanaged: import("./api").ManagedPolicy = {
   managed: false,
   source: "unmanaged",
   misconfigured: false,
-allow_local_mcp_servers: false,
+  allow_local_mcp_servers: false,
 };
 const getPolicy = vi.fn(async () => unmanaged);
 /** The catalog fetch — the boot step a failing remote machine takes down. */
@@ -169,7 +175,9 @@ vi.mock("./api", () => ({
   ApiClient: class {
     getPolicy = getPolicy;
     getGatewayStatus = getGatewayStatus;
-    gatewaySignIn = vi.fn(async () => ({ authorization_url: "http://gw/authorize" }));
+    gatewaySignIn = vi.fn(async () => ({
+      authorization_url: "http://gw/authorize",
+    }));
     listModels = listModels;
     listProviders = vi.fn(async () => ({ providers: [] }));
     getSettings = getSettings;
@@ -263,9 +271,9 @@ vi.mock("./settings/ProvidersPanel", () => ({
 }));
 
 vi.mock("./ChatApprovalHydration", async () => {
-  const actual = await vi.importActual<typeof import("./ChatApprovalHydration")>(
-    "./ChatApprovalHydration",
-  );
+  const actual = await vi.importActual<
+    typeof import("./ChatApprovalHydration")
+  >("./ChatApprovalHydration");
   return {
     ...actual,
     loadChatApprovalHydration: vi.fn(async () => ({
@@ -285,7 +293,9 @@ vi.mock("./ChatApprovalHydration", async () => {
 // arrangement it is handed is covered by the panelSizes tests; what matters
 // here is which panels the shell composes, so the group is a plain container.
 vi.mock("react-resizable-panels", () => ({
-  PanelGroup: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  PanelGroup: ({ children }: { children: React.ReactNode }) => (
+    <div>{children}</div>
+  ),
   Panel: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   PanelResizeHandle: () => <div />,
 }));
@@ -339,7 +349,10 @@ beforeEach(() => {
   remoteMachineState.mockReset();
   remoteMachineState.mockResolvedValue({ attachment: "local", baseUrl: null });
   disconnectRemoteMachine.mockReset();
-  disconnectRemoteMachine.mockResolvedValue({ attachment: "local", baseUrl: null });
+  disconnectRemoteMachine.mockResolvedValue({
+    attachment: "local",
+    baseUrl: null,
+  });
   listChats.mockClear();
   listChats.mockResolvedValue(chats);
   createChat.mockClear();
@@ -379,10 +392,18 @@ beforeEach(() => {
     addRepoOpen: false,
     reviewSidebarOpen: true,
   });
-  usePendingPrompts.setState({ chatId: null, userQuestions: [], folderAccess: [] });
+  usePendingPrompts.setState({
+    chatId: null,
+    userQuestions: [],
+    folderAccess: [],
+  });
   // The stores outlive a test file's renders, so a chat list left behind would
   // decide the next test's routing before its own boot ever ran.
-  useChatListStore.setState({ chats: [], chatsLoaded: false, chatsError: null });
+  useChatListStore.setState({
+    chats: [],
+    chatsLoaded: false,
+    chatsError: null,
+  });
   useProjectListStore.setState({
     projects: [],
     projectsLoaded: false,
@@ -393,11 +414,18 @@ beforeEach(() => {
     savingProjectTitle: false,
     expandedProjectIds: [],
   });
-  useUiStore.setState({ sidebarCollapsed: false, sidebarWidth: SIDEBAR_DEFAULT_WIDTH });
+  useUiStore.setState({
+    sidebarCollapsed: false,
+    sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
+  });
   hasNativeHost.mockReturnValue(false);
   // Module-level chrome state survives a render, so a test that collapsed or
   // filtered the list would otherwise decide the next one's rail.
-  useChatsSectionState.setState({ collapsed: false, filtering: false, query: "" });
+  useChatsSectionState.setState({
+    collapsed: false,
+    filtering: false,
+    query: "",
+  });
 });
 afterEach(() => {
   cleanup();
@@ -408,12 +436,16 @@ describe("app shell", () => {
   // The first mount pays the one-time import of the route tree, which now
   // includes the All chats grid — comfortably over the default timeout on a
   // loaded machine.
-  it("opens on home rather than on a conversation", { timeout: 15000 }, async () => {
+  it("opens on home rather than on a conversation", {
+    timeout: 15000,
+  }, async () => {
     const { router } = await mountApp();
 
     expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/");
-    expect(screen.getByRole("radiogroup", { name: "App mode" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("radiogroup", { name: "App mode" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
     // Home used to create a chat on every cold start, leaving an empty one
     // behind whenever the reader did not use it.
@@ -442,8 +474,12 @@ describe("app shell", () => {
     // folded rail cannot hide that something is waiting. (`expanded` singles
     // out the section toggle from the header breadcrumb, which is also
     // named "Work".)
-    await user.click(screen.getByRole("button", { name: "Work", expanded: true }));
-    expect(screen.queryByLabelText("New work needs attention")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Work", expanded: true }),
+    );
+    expect(
+      screen.queryByLabelText("New work needs attention"),
+    ).not.toBeInTheDocument();
     expect(
       await screen.findByLabelText("Work needs attention"),
     ).toBeInTheDocument();
@@ -485,7 +521,9 @@ describe("app shell", () => {
       attachment: "local",
       gatewayAuth: false,
     });
-    await user.click(screen.getByRole("button", { name: /Work on this computer/ }));
+    await user.click(
+      screen.getByRole("button", { name: /Work on this computer/ }),
+    );
 
     await waitFor(() => expect(disconnectRemoteMachine).toHaveBeenCalledOnce());
     expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
@@ -526,9 +564,7 @@ describe("app shell", () => {
     // rather than wait on a fetch that already failed.
     expect(await screen.findByText("Welcome to Tidebreak")).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.pathname).toBe("/"));
-    expect(
-      await screen.findByText(/Could not load work/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Could not load work/)).toBeInTheDocument();
 
     listChats.mockResolvedValue(chats);
     await user.click(screen.getByRole("button", { name: "Retry" }));
@@ -551,7 +587,9 @@ describe("app shell", () => {
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(createChat).toHaveBeenCalledOnce());
-    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-1"),
+    );
     // Home writes the message but does not post it — the chat route does, so
     // there is only one send path.
     await waitFor(() =>
@@ -565,9 +603,7 @@ describe("app shell", () => {
         false,
       ),
     );
-    expect(
-      await screen.findByText("summarise the filing"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("summarise the filing")).toBeInTheDocument();
   });
 
   it("opens a conversation from the sidebar", async () => {
@@ -581,7 +617,9 @@ describe("app shell", () => {
       .filter((button) => chatList.contains(button));
     await user.click(row);
 
-    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-1"),
+    );
     expect(await screen.findByTestId("transcript")).toBeInTheDocument();
   });
 
@@ -597,7 +635,9 @@ describe("app shell", () => {
     expect(await screen.findByTestId("folders")).toBeInTheDocument();
     // The conversation stays mounted beside it rather than being replaced.
     expect(screen.getByTestId("transcript")).toBeInTheDocument();
-    await waitFor(() => expect(router.state.location.search).toEqual({ tabs: "folders" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toEqual({ tabs: "folders" }),
+    );
 
     // A second place joins the strip and comes forward without closing the
     // first.
@@ -668,19 +708,27 @@ describe("app shell", () => {
     // The filter lives behind the list's own options — there is no separate
     // page to go find a chat on.
     await user.click(screen.getByRole("button", { name: "Work list options" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Filter work" }));
-    const search = await screen.findByRole("searchbox", { name: "Filter work" });
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Filter work" }),
+    );
+    const search = await screen.findByRole("searchbox", {
+      name: "Filter work",
+    });
 
     await user.type(search, "roadmap");
     const chatList = screen.getByLabelText("Work list");
-    expect(within(chatList).getByRole("button", { name: "Roadmap" })).toBeInTheDocument();
+    expect(
+      within(chatList).getByRole("button", { name: "Roadmap" }),
+    ).toBeInTheDocument();
     expect(
       within(chatList).queryByRole("button", { name: "New work" }),
     ).not.toBeInTheDocument();
 
     await user.clear(search);
     await user.type(search, "nothing matches this");
-    expect(await screen.findByText("No work title contains that.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("No work title contains that."),
+    ).toBeInTheDocument();
   });
 
   it("keeps chat-scoped places with the conversation", async () => {
@@ -694,7 +742,9 @@ describe("app shell", () => {
     await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
     expect(screen.getByLabelText("Work activity")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: /Outputs/ })).toBeEnabled();
+    expect(
+      await screen.findByRole("button", { name: /Outputs/ }),
+    ).toBeEnabled();
     expect(screen.getByRole("button", { name: /Folders/ })).toBeEnabled();
   });
 
@@ -710,9 +760,13 @@ describe("app shell", () => {
       within(chatList).getByRole("button", { name: "Roadmap" }),
     ).toHaveAttribute("aria-current", "page");
 
-    await user.click(within(chatList).getByRole("button", { name: "New work" }));
+    await user.click(
+      within(chatList).getByRole("button", { name: "New work" }),
+    );
 
-    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-2"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-2"),
+    );
   });
 
   it("remembers the collapsed rail across a restart", async () => {
@@ -723,7 +777,9 @@ describe("app shell", () => {
     await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
 
     expect(useUiStore.getState().sidebarCollapsed).toBe(true);
-    expect(window.localStorage.getItem("tidebreak.sidebar-collapsed")).toBe("true");
+    expect(window.localStorage.getItem("tidebreak.sidebar-collapsed")).toBe(
+      "true",
+    );
   });
 
   it("publishes the restored sidebar width when the shell appears after boot", async () => {
@@ -734,10 +790,12 @@ describe("app shell", () => {
     await screen.findByText("Welcome to Tidebreak");
 
     const shell = document.querySelector<HTMLElement>(".app-shell");
-    expect(shell?.style.getPropertyValue("--sidebar-expanded-width")).toBe("216px");
-    expect(document.querySelector<HTMLElement>("[data-sidebar]")?.style.width).toBe(
+    expect(shell?.style.getPropertyValue("--sidebar-expanded-width")).toBe(
       "216px",
     );
+    expect(
+      document.querySelector<HTMLElement>("[data-sidebar]")?.style.width,
+    ).toBe("216px");
   });
 
   it("unmounts the titlebar with the rail, and Cmd/Ctrl+B brings both back", async () => {
@@ -756,8 +814,12 @@ describe("app shell", () => {
 
     expect(useUiStore.getState().sidebarCollapsed).toBe(true);
     expect(document.querySelector("[data-sidebar]")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Back" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Expand sidebar" }),
+    ).toBeInTheDocument();
 
     // Ctrl is the command modifier under jsdom's non-mac user agent.
     await user.keyboard("{Control>}b{/Control}");
@@ -765,7 +827,9 @@ describe("app shell", () => {
     expect(useUiStore.getState().sidebarCollapsed).toBe(false);
     expect(document.querySelector("[data-sidebar]")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Expand sidebar" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Expand sidebar" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps watching for the agent's questions while settings is open", async () => {
@@ -810,7 +874,7 @@ describe("app shell", () => {
       gateway_url: "https://gateway.example/",
       source: "os",
       misconfigured: false,
-    allow_local_mcp_servers: false,
+      allow_local_mcp_servers: false,
     });
     const user = userEvent.setup();
     await mountApp();
@@ -845,7 +909,9 @@ describe("app shell", () => {
 
     await user.click(screen.getByRole("button", { name: "Back to app" }));
 
-    await waitFor(() => expect(router.state.location.pathname).toBe("/c/chat-1"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-1"),
+    );
   });
 
   it("confirms the sidebar restart and repeats the pre-v1 data warning", async () => {
@@ -896,42 +962,42 @@ describe("app shell", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/p/project-1/c/chat-new"),
     );
-    expect(screen.getByRole("button", { name: "Research" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Research" }),
+    ).toBeInTheDocument();
   });
 
-  it(
-    "opens a workspace rather than a chat for Cmd+N in code mode",
-    { timeout: 15000 },
-    async () => {
-      // Shell shortcuts are mode-scoped, and the mode is the route family. The
-      // regression this pins is Cmd+N on a /code route creating a chat and
-      // navigating the reader out of the mode they were working in.
-      const user = userEvent.setup();
-      const { router } = await mountApp({ at: "/code" });
+  it("opens a workspace rather than a chat for Cmd+N in code mode", {
+    timeout: 15000,
+  }, async () => {
+    // Shell shortcuts are mode-scoped, and the mode is the route family. The
+    // regression this pins is Cmd+N on a /code route creating a chat and
+    // navigating the reader out of the mode they were working in.
+    const user = userEvent.setup();
+    const { router } = await mountApp({ at: "/code" });
 
-      // The registered repo means the rail and the catalog are both up: the
-      // rail's empty state renders its "New workspace" line (beside the
-      // toolbar button of the same name) only once repos have loaded.
-      await waitFor(() =>
-        expect(
-          screen.getAllByRole("button", { name: "New workspace" }),
-        ).toHaveLength(2),
-      );
-
-      // jsdom reports a non-mac user agent, so the platform's command modifier
-      // here is Ctrl — the same chord the app takes as Cmd on macOS.
-      await user.keyboard("{Control>}n{/Control}");
-
-      const dialog = await screen.findByRole("dialog");
+    // The registered repo means the rail and the catalog are both up: the
+    // rail's empty state renders its "New workspace" line (beside the
+    // toolbar button of the same name) only once repos have loaded.
+    await waitFor(() =>
       expect(
-        within(dialog).getByText(
-          "One worktree and one session on the selected repo.",
-        ),
-      ).toBeInTheDocument();
-      expect(createChat).not.toHaveBeenCalled();
-      expect(router.state.location.pathname).toBe("/code");
-    },
-  );
+        screen.getAllByRole("button", { name: "New workspace" }),
+      ).toHaveLength(2),
+    );
+
+    // jsdom reports a non-mac user agent, so the platform's command modifier
+    // here is Ctrl — the same chord the app takes as Cmd on macOS.
+    await user.keyboard("{Control>}n{/Control}");
+
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        "One worktree and one session on the selected repo.",
+      ),
+    ).toBeInTheDocument();
+    expect(createChat).not.toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe("/code");
+  });
 
   it("redirects the retired experimental settings link to coding harnesses", async () => {
     const { router } = await mountApp({ at: "/settings/experimental" });

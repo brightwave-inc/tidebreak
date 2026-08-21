@@ -68,5 +68,4 @@ describe("ComputerUseIndicator", () => {
     await userEvent.click(screen.getByRole("button", { name: "Resume" }));
     expect(mocks.resume).toHaveBeenCalledOnce();
   });
-
 });

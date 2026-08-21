@@ -34,7 +34,10 @@ function normalizeMediaType(mediaType: string): string {
 export function OutputCardList({ outputs }: { outputs: ResultEntry[] }) {
   if (outputs.length === 0) return null;
   return (
-    <div className="flex flex-col items-start gap-2" aria-label="Created outputs">
+    <div
+      className="flex flex-col items-start gap-2"
+      aria-label="Created outputs"
+    >
       {outputs.map((entry) => (
         <OutputCard key={`${entry.targetId ?? entry.label}`} entry={entry} />
       ))}
@@ -65,7 +68,10 @@ function OpenOutputCard({
 function OutputCardBody({ entry }: { entry: ResultEntry }) {
   return (
     <>
-      <span className="grid size-9 shrink-0 place-items-center" aria-hidden="true">
+      <span
+        className="grid size-9 shrink-0 place-items-center"
+        aria-hidden="true"
+      >
         <DocumentIcon mediaType={entry.mediaType} className="size-5" />
       </span>
       <span className="flex min-w-0 flex-col">
@@ -113,9 +119,15 @@ function OutputCard({ entry }: { entry: ResultEntry }) {
 function useVisiblePreview(
   chatId: string | null,
   outputId: string,
-): { ref: React.RefObject<HTMLDivElement | null>; preview: DeliverablePreview | null; failed: boolean } {
+): {
+  ref: React.RefObject<HTMLDivElement | null>;
+  preview: DeliverablePreview | null;
+  failed: boolean;
+} {
   const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(typeof IntersectionObserver !== "function");
+  const [visible, setVisible] = useState(
+    typeof IntersectionObserver !== "function",
+  );
   const [preview, setPreview] = useState<DeliverablePreview | null>(null);
   const [failed, setFailed] = useState(false);
 

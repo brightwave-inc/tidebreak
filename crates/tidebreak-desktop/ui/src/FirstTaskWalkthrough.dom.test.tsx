@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -184,7 +190,9 @@ describe("FirstTaskWalkthrough", () => {
       return (
         <>
           <div data-first-task-target="model-menu">Model menu</div>
-          {ready && <div data-first-task-target="model-choice">Selected model</div>}
+          {ready && (
+            <div data-first-task-target="model-choice">Selected model</div>
+          )}
           <textarea data-composer-input aria-label="Message" />
         </>
       );
@@ -200,8 +208,18 @@ describe("FirstTaskWalkthrough", () => {
     await waitFor(() =>
       expect(screen.getByText("Selected model")).toBeInTheDocument(),
     );
-    mockTargetRect("model-menu", { top: 40, left: 20, width: 320, height: 280 });
-    mockTargetRect("model-choice", { top: 80, left: 28, width: 240, height: 36 });
+    mockTargetRect("model-menu", {
+      top: 40,
+      left: 20,
+      width: 320,
+      height: 280,
+    });
+    mockTargetRect("model-choice", {
+      top: 80,
+      left: 28,
+      width: 240,
+      height: 36,
+    });
     fireEvent(window, new Event("resize"));
 
     await waitFor(() => {
@@ -212,8 +230,18 @@ describe("FirstTaskWalkthrough", () => {
 
   it("spotlights the specific box that opened, not the trigger or the whole menu", async () => {
     render(<WalkthroughHarness onClose={vi.fn()} />);
-    mockTargetRect("model-menu", { top: 40, left: 20, width: 320, height: 280 });
-    mockTargetRect("model-choice", { top: 80, left: 28, width: 240, height: 36 });
+    mockTargetRect("model-menu", {
+      top: 40,
+      left: 20,
+      width: 320,
+      height: 280,
+    });
+    mockTargetRect("model-choice", {
+      top: 80,
+      left: 28,
+      width: 240,
+      height: 36,
+    });
     fireEvent(window, new Event("resize"));
 
     await waitFor(() => {

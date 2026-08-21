@@ -1,10 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AssistantWorkingIndicator } from "./AssistantWorkingIndicator";
-import {
-  shouldShowAssistantWorking,
-  type ChatMessage,
-} from "./MessageList";
+import { shouldShowAssistantWorking, type ChatMessage } from "./MessageList";
 
 describe("AssistantWorkingIndicator", () => {
   it("carries the default status for assistive tech without a visible label", () => {

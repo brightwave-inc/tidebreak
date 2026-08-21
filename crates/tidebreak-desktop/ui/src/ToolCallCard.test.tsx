@@ -88,7 +88,12 @@ describe("toolCallPresentation", () => {
 describe("ToolCommandCard", () => {
   it("titles itself with the command instead of a generic phrase", () => {
     const markup = renderToStaticMarkup(
-      <ToolCommandCard name="exec" status="completed" preview={preview} result={null} />,
+      <ToolCommandCard
+        name="exec"
+        status="completed"
+        preview={preview}
+        result={null}
+      />,
     );
 
     expect(visibleText(markup)).toContain("cargo test --workspace");
@@ -101,12 +106,22 @@ describe("ToolCommandCard", () => {
     const narrated = { ...preview, summary: "Running the workspace tests" };
     const collapsed = visibleText(
       renderToStaticMarkup(
-        <ToolCommandCard name="exec" status="completed" preview={narrated} result={null} />,
+        <ToolCommandCard
+          name="exec"
+          status="completed"
+          preview={narrated}
+          result={null}
+        />,
       ),
     );
     const open = visibleText(
       renderToStaticMarkup(
-        <ToolCommandCard name="exec" status="running" preview={narrated} result={null} />,
+        <ToolCommandCard
+          name="exec"
+          status="running"
+          preview={narrated}
+          result={null}
+        />,
       ),
     );
 
@@ -122,10 +137,20 @@ describe("ToolCommandCard", () => {
 
   it("opens while the command is running and closes once it has settled", () => {
     const running = renderToStaticMarkup(
-      <ToolCommandCard name="exec" status="running" preview={preview} result={null} />,
+      <ToolCommandCard
+        name="exec"
+        status="running"
+        preview={preview}
+        result={null}
+      />,
     );
     const done = renderToStaticMarkup(
-      <ToolCommandCard name="exec" status="completed" preview={preview} result={null} />,
+      <ToolCommandCard
+        name="exec"
+        status="completed"
+        preview={preview}
+        result={null}
+      />,
     );
 
     expect(running).toContain('aria-expanded="true"');
@@ -302,9 +327,9 @@ describe("command output", () => {
   it("labels each captured stream and keeps them in order", () => {
     // Each stream's own trailing newline is trimmed, so the two sections are
     // separated by exactly one blank line rather than three.
-    expect(
-      commandOutput({ ...ran, stdout: "one\n", stderr: "boom\n" }),
-    ).toBe("$ stdout\none\n\n$ stderr\nboom");
+    expect(commandOutput({ ...ran, stdout: "one\n", stderr: "boom\n" })).toBe(
+      "$ stdout\none\n\n$ stderr\nboom",
+    );
   });
 
   it("says nothing at all when nothing was captured", () => {
@@ -377,9 +402,9 @@ describe("outcome badges", () => {
       );
 
     expect(badge({ ...ran, exitCode: 101 }, "failed")).toContain("Exit 101");
-    expect(badge({ ...ran, exitCode: null, timedOut: true }, "failed")).toContain(
-      "Timed out",
-    );
+    expect(
+      badge({ ...ran, exitCode: null, timedOut: true }, "failed"),
+    ).toContain("Timed out");
     expect(badge(ran, "completed")).not.toContain("Done");
     // No result to be specific about yet.
     expect(badge(null, "failed")).toContain("Failed");

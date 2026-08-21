@@ -1,10 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 
-import {
-  attachDroppedChatFiles,
-  type AttachedFiles,
-} from "./attachments";
+import { attachDroppedChatFiles, type AttachedFiles } from "./attachments";
 import { hasNativeHost } from "./host";
 
 type DropPhase = "enter" | "leave" | "dropped";

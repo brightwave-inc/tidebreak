@@ -113,7 +113,9 @@ export function filterPaths(
   exclude: string,
 ): string[] {
   return paths.filter(
-    (path) => matchesAnyGlob(path, include, true) && !matchesAnyGlob(path, exclude, false),
+    (path) =>
+      matchesAnyGlob(path, include, true) &&
+      !matchesAnyGlob(path, exclude, false),
   );
 }
 

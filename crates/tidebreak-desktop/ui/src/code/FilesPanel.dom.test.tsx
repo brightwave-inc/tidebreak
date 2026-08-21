@@ -54,12 +54,14 @@ function makeClient(tree = TREE) {
           ].filter((row) =>
             row.line.toLowerCase().includes(opts.query.toLowerCase()),
           );
-          const included = opts.include === "*.rs"
-            ? rows.filter((row) => row.path.endsWith(".rs"))
-            : rows;
-          const matches = opts.exclude === "*.md"
-            ? included.filter((row) => !row.path.endsWith(".md"))
-            : included;
+          const included =
+            opts.include === "*.rs"
+              ? rows.filter((row) => row.path.endsWith(".rs"))
+              : rows;
+          const matches =
+            opts.exclude === "*.md"
+              ? included.filter((row) => !row.path.endsWith(".md"))
+              : included;
           return Promise.resolve({ matches, truncated: false });
         },
       ),
@@ -71,21 +73,21 @@ describe("FilesPanel", () => {
     const onOpenFile = vi.fn();
     const client = makeClient();
     render(
-      <FilesPanel
-        client={client}
-        workspaceId="ws-1"
-        onOpenFile={onOpenFile}
-      />,
+      <FilesPanel client={client} workspaceId="ws-1" onOpenFile={onOpenFile} />,
     );
     expect(await screen.findByText("README.md")).toBeInTheDocument();
     expect(screen.getByText("src")).toBeInTheDocument();
     expect(screen.getByText("lib.rs")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Files to include" })).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Files to exclude" })).toBeVisible();
     expect(
-      screen.getByRole("treeitem", { name: "lib.rs" }).querySelector(
-        '[data-file-icon="code"]',
-      ),
+      screen.getByRole("textbox", { name: "Files to include" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("textbox", { name: "Files to exclude" }),
+    ).toBeVisible();
+    expect(
+      screen
+        .getByRole("treeitem", { name: "lib.rs" })
+        .querySelector('[data-file-icon="code"]'),
     ).not.toBeNull();
     expect(screen.queryByText("Changes")).not.toBeInTheDocument();
     expect(screen.queryByText("+3")).not.toBeInTheDocument();
@@ -188,20 +190,20 @@ describe("FilesPanel", () => {
     const onOpenFile = vi.fn();
     const client = makeClient();
     render(
-      <FilesPanel
-        client={client}
-        workspaceId="ws-1"
-        onOpenFile={onOpenFile}
-      />,
+      <FilesPanel client={client} workspaceId="ws-1" onOpenFile={onOpenFile} />,
     );
     expect(await screen.findByText("README.md")).toBeInTheDocument();
-    await userEvent.setup().type(
-      screen.getByRole("searchbox", { name: "Search file contents" }),
-      "crisp",
-    );
+    await userEvent
+      .setup()
+      .type(
+        screen.getByRole("searchbox", { name: "Search file contents" }),
+        "crisp",
+      );
 
     expect(await screen.findByText("A ", { exact: false })).toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "File content matches" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: "File content matches" }),
+    ).toBeInTheDocument();
     expect(client.searchCodeWorkspace).toHaveBeenLastCalledWith("ws-1", {
       query: "crisp",
       include: undefined,
@@ -224,7 +226,9 @@ describe("FilesPanel", () => {
     // The find chord is a flag raised by the shell keymap, not a key this
     // panel listens for: that is what lets Cmd+F work with the rail closed.
     act(() => useCodeUiStore.getState().requestFilesSearch());
-    const search = screen.getByRole("searchbox", { name: "Search file contents" });
+    const search = screen.getByRole("searchbox", {
+      name: "Search file contents",
+    });
     expect(search).toHaveFocus();
     await userEvent.setup().type(search, "crisp");
     const include = screen.getByRole("textbox", { name: "Files to include" });
@@ -237,7 +241,9 @@ describe("FilesPanel", () => {
         limit: 200,
       }),
     );
-    expect(await screen.findByText("fn ", { exact: false })).toBeInTheDocument();
+    expect(
+      await screen.findByText("fn ", { exact: false }),
+    ).toBeInTheDocument();
 
     const exclude = screen.getByRole("textbox", { name: "Files to exclude" });
     await userEvent.setup().type(exclude, "*.md");

@@ -322,7 +322,10 @@ function WorkspaceStateLine({
             <span className="min-w-0 truncate text-muted-foreground">
               {stateLabel}
             </span>
-            <ExternalLink className="size-2.5 shrink-0 opacity-55" aria-hidden />
+            <ExternalLink
+              className="size-2.5 shrink-0 opacity-55"
+              aria-hidden
+            />
           </button>
           {primary &&
             primary !== "open_pr" &&

@@ -186,7 +186,9 @@ export function parseInboxItem(value: unknown): InboxItem | null {
   };
 }
 
-export function parsePendingChatPrompt(value: unknown): PendingChatPrompt | null {
+export function parsePendingChatPrompt(
+  value: unknown,
+): PendingChatPrompt | null {
   if (
     !isRecord(value) ||
     !onlyKeys<{
@@ -433,7 +435,11 @@ export function parsePendingUserQuestions(
     for (const option of item.options) {
       if (
         !isRecord(option) ||
-        !onlyKeys<WireUserQuestionOption>(option, ["id", "label", "description"]) ||
+        !onlyKeys<WireUserQuestionOption>(option, [
+          "id",
+          "label",
+          "description",
+        ]) ||
         !nonEmptyBounded(option.id, 64) ||
         optionIds.has(option.id) ||
         !nonEmptyBounded(option.label, 80) ||
@@ -824,7 +830,7 @@ export function parsePendingToolApproval(
     !Array.isArray(value.grant_rungs) ||
     value.grant_rungs.some((rung) => parseApprovalGrantRung(rung) === null) ||
     (value.grant_rungs.length > 0 && !isRememberableKind(value.approval)) ||
-    value.can_remember !== (value.grant_rungs.length > 0) ||
+    value.can_remember !== value.grant_rungs.length > 0 ||
     !(
       value.auto_judge_status === undefined ||
       value.auto_judge_status === "judging" ||
@@ -893,7 +899,9 @@ export function parseToolActionPreview(
       typeof query !== "string" ||
       query.length === 0 ||
       !Array.isArray(domains) ||
-      !domains.every((domain): domain is string => typeof domain === "string") ||
+      !domains.every(
+        (domain): domain is string => typeof domain === "string",
+      ) ||
       !isOptionalString(start_published_at) ||
       !isOptionalString(end_published_at)
     ) {
@@ -949,7 +957,14 @@ export function parseToolActionPreview(
   ) {
     return null;
   }
-  return { tool: "exec", command, args, cwd, files: staged, ...narration(value) };
+  return {
+    tool: "exec",
+    command,
+    args,
+    cwd,
+    files: staged,
+    ...narration(value),
+  };
 }
 
 /**
@@ -1026,15 +1041,24 @@ type UncheckedEntriesResult = Partial<
 >;
 
 type UncheckedUserQuestionsResult = Partial<
-  Record<keyof Extract<WireToolResultPreview, { tool: "user_questions" }>, unknown>
+  Record<
+    keyof Extract<WireToolResultPreview, { tool: "user_questions" }>,
+    unknown
+  >
 >;
 
 type UncheckedPlanDecisionResult = Partial<
-  Record<keyof Extract<WireToolResultPreview, { tool: "plan_decision" }>, unknown>
+  Record<
+    keyof Extract<WireToolResultPreview, { tool: "plan_decision" }>,
+    unknown
+  >
 >;
 
 type UncheckedScreenCaptureResult = Partial<
-  Record<keyof Extract<WireToolResultPreview, { tool: "screen_capture" }>, unknown>
+  Record<
+    keyof Extract<WireToolResultPreview, { tool: "screen_capture" }>,
+    unknown
+  >
 >;
 
 /** One image reference shared by the exec and screen-capture previews. The
@@ -1149,7 +1173,11 @@ function parseResultFailure(value: unknown): ResultFailure | null {
   if (!isRecord(value)) return null;
   const { error } = value;
   const label = value.label ?? null;
-  if (typeof error !== "string" || error.length === 0 || !isOptionalString(label)) {
+  if (
+    typeof error !== "string" ||
+    error.length === 0 ||
+    !isOptionalString(label)
+  ) {
     return null;
   }
   return { label, error };
@@ -1167,7 +1195,8 @@ function parseAnsweredUserQuestion(
   value: unknown,
 ): AnsweredUserQuestion | null {
   if (!isRecord(value)) return null;
-  const { question, selected, custom_answer }: UncheckedAnsweredUserQuestion = value;
+  const { question, selected, custom_answer }: UncheckedAnsweredUserQuestion =
+    value;
   const labels = selected ?? [];
   const custom = custom_answer ?? null;
   if (
@@ -1237,7 +1266,10 @@ export function parseToolResultPreview(
   }
   if (value.tool === "user_questions") {
     const { answers, additional_context }: UncheckedUserQuestionsResult = value;
-    if (!Array.isArray(answers) || !isOptionalString(additional_context ?? null)) {
+    if (
+      !Array.isArray(answers) ||
+      !isOptionalString(additional_context ?? null)
+    ) {
       return null;
     }
     const parsed = answers
@@ -1253,7 +1285,8 @@ export function parseToolResultPreview(
     };
   }
   if (value.tool === "plan_decision") {
-    const { title, plan, accepted, feedback }: UncheckedPlanDecisionResult = value;
+    const { title, plan, accepted, feedback }: UncheckedPlanDecisionResult =
+      value;
     if (
       typeof title !== "string" ||
       typeof plan !== "string" ||
@@ -1278,7 +1311,11 @@ export function parseToolResultPreview(
     if (!Number.isInteger(mark_count) || Number(mark_count) < 0) return null;
     const parsedImage = parseImageRef(image);
     if (parsedImage === null) return null;
-    return { tool: "screen_capture", image: parsedImage, markCount: Number(mark_count) };
+    return {
+      tool: "screen_capture",
+      image: parsedImage,
+      markCount: Number(mark_count),
+    };
   }
   if (value.tool !== "exec") return null;
   const {
@@ -1382,8 +1419,7 @@ const RENDERER_APPROVAL_KINDS = {
 
 function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
   return (
-    typeof value === "string" &&
-    Object.hasOwn(RENDERER_APPROVAL_KINDS, value)
+    typeof value === "string" && Object.hasOwn(RENDERER_APPROVAL_KINDS, value)
   );
 }
 

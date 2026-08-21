@@ -8,7 +8,10 @@ const formulaEngine = vi.hoisted(() => ({
     (
       source: ArrayBuffer,
       cells: ReadonlyArray<{ address: string; sheetIndex: number }>,
-    ) => Promise<Record<string, { type: string; value: boolean | number | string }> | null>
+    ) => Promise<Record<
+      string,
+      { type: string; value: boolean | number | string }
+    > | null>
   >(async () => null),
 }));
 
@@ -155,16 +158,14 @@ describe("projectWorkbookForReadOnlyDisplay", () => {
       stylesXml,
       "application/xml",
     );
-    const borders = Array.from(
-      document.getElementsByTagNameNS("*", "border"),
-    );
+    const borders = Array.from(document.getElementsByTagNameNS("*", "border"));
 
-    expect(Array.from(borders[0]!.children, (child) => child.localName)).toEqual(
-      ["left", "right", "top", "bottom", "diagonal"],
-    );
-    expect(Array.from(borders[1]!.children, (child) => child.localName)).toEqual(
-      ["bottom"],
-    );
+    expect(
+      Array.from(borders[0]!.children, (child) => child.localName),
+    ).toEqual(["left", "right", "top", "bottom", "diagonal"]);
+    expect(
+      Array.from(borders[1]!.children, (child) => child.localName),
+    ).toEqual(["bottom"]);
   });
 
   it("makes inherited workbook-theme chart series colors explicit", async () => {
@@ -184,16 +185,18 @@ describe("projectWorkbookForReadOnlyDisplay", () => {
     const chartXml = await projectedZip
       .file("xl/drawings/charts/chart1.xml")!
       .async("string");
-    const document = new DOMParser().parseFromString(chartXml, "application/xml");
+    const document = new DOMParser().parseFromString(
+      chartXml,
+      "application/xml",
+    );
     const series = Array.from(document.getElementsByTagNameNS("*", "ser"));
 
     expect(
-      series.map(
-        (item) =>
-          item
-            .getElementsByTagNameNS("*", "spPr")[0]
-            ?.getElementsByTagNameNS("*", "srgbClr")[0]
-            ?.getAttribute("val"),
+      series.map((item) =>
+        item
+          .getElementsByTagNameNS("*", "spPr")[0]
+          ?.getElementsByTagNameNS("*", "srgbClr")[0]
+          ?.getAttribute("val"),
       ),
     ).toEqual(["156082", "E97132", "196B24"]);
   });

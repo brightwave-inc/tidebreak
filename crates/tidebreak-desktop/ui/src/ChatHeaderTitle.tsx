@@ -29,7 +29,9 @@ import { WithTooltip } from "@/components/ui/tooltip";
 export function ChatHeaderTitle({ chat }: { chat: Chat }) {
   const navigate = useNavigate();
   const { startRename, commitRename, cancelRename, deleteChat } = useApp();
-  const renaming = useChatListStore((state) => state.renamingChatId === chat.id);
+  const renaming = useChatListStore(
+    (state) => state.renamingChatId === chat.id,
+  );
   const renameDraft = useChatListStore((state) => state.renameChatDraft);
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const setRenameDraft = useChatListStore((state) => state.setRenameDraft);
@@ -129,7 +131,10 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
             </>
           )}
           <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onSelect={() => deleteChat(chat)}>
+          <DropdownMenuItem
+            variant="destructive"
+            onSelect={() => deleteChat(chat)}
+          >
             <Trash2 />
             Delete
           </DropdownMenuItem>

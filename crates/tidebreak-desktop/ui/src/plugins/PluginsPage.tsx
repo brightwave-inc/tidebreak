@@ -39,7 +39,10 @@ export function PluginsPage({ pluginId }: { pluginId?: string }) {
             state={state}
             loadInstructions={apis.instructions}
             onOpen={(id) =>
-              void navigate({ to: "/plugins/$pluginId", params: { pluginId: id } })
+              void navigate({
+                to: "/plugins/$pluginId",
+                params: { pluginId: id },
+              })
             }
           />
         )}

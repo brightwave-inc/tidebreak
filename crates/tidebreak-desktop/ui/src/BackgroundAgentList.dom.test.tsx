@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -37,15 +43,12 @@ function run(status: AgentRun["status"]): AgentRun {
     started_at: "2026-08-05T18:35:00Z",
     finished_at: status === "completed" ? "2026-08-05T18:37:00Z" : null,
     last_error_code: null,
-    activity:
-      status === "running" ? { kind: "exec", status: "running" } : null,
+    activity: status === "running" ? { kind: "exec", status: "running" } : null,
     submitted_outputs: [],
     terminal_text: status === "completed" ? "Report complete" : null,
     created_at: "2026-08-05T18:35:00Z",
     updated_at:
-      status === "completed"
-        ? "2026-08-05T18:37:00Z"
-        : "2026-08-05T18:36:00Z",
+      status === "completed" ? "2026-08-05T18:37:00Z" : "2026-08-05T18:36:00Z",
   };
 }
 
@@ -96,9 +99,7 @@ describe("BackgroundAgentList activity disclosure", () => {
     ];
     rerender(list(run("completed")));
 
-    expect(
-      screen.getByRole("button", { name: "Hide activity" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide activity" })).toBeTruthy();
     const settledTrigger = await screen.findByRole("button", {
       name: "Ran 1 tool call",
     });

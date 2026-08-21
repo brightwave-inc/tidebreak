@@ -52,7 +52,9 @@ const MODE_OPTIONS: { mode: WebSearchMode; label: string }[] = [
 
 export function WebSearchPanel({ client }: { client: ApiClient }) {
   const [config, setConfig] = useState<WebSearchConfigInfo | null>(null);
-  const [credentials, setCredentials] = useState<WebSearchCredentialReadiness[]>([]);
+  const [credentials, setCredentials] = useState<
+    WebSearchCredentialReadiness[]
+  >([]);
   const [mode, setMode] = useState<WebSearchMode>("automatic");
   const [provider, setProvider] = useState<WebSearchProviderKind | "">("");
   const [timeoutSeconds, setTimeoutSeconds] = useState("");
@@ -286,7 +288,11 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
               and the selection together, so a provider cannot go active in a
               pass that failed to save its key. */}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={working} onClick={() => void save()}>
+            <Button
+              type="button"
+              disabled={working}
+              onClick={() => void save()}
+            >
               {saving ? "Saving…" : "Save settings"}
             </Button>
           </div>

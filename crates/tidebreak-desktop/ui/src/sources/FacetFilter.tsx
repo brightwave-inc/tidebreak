@@ -4,7 +4,11 @@ import { SearchInput } from "@/components/SearchInput";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import type { Facet } from "@/lib/facets";
 
 /**
@@ -19,8 +23,9 @@ export function FacetFilter({ label, facet }: { label: string; facet: Facet }) {
   const search = facet.search.trim().toLocaleLowerCase();
   const values = Object.entries(facet.counts)
     .filter(([value]) => value.toLocaleLowerCase().includes(search))
-    .sort(([leftValue, left], [rightValue, right]) =>
-      right - left || leftValue.localeCompare(rightValue),
+    .sort(
+      ([leftValue, left], [rightValue, right]) =>
+        right - left || leftValue.localeCompare(rightValue),
     );
 
   return (
@@ -36,7 +41,10 @@ export function FacetFilter({ label, facet }: { label: string; facet: Facet }) {
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-60 bg-background text-foreground">
+      <PopoverContent
+        align="start"
+        className="w-60 bg-background text-foreground"
+      >
         <div className="space-y-4">
           <SearchInput
             size="sm"
@@ -49,7 +57,10 @@ export function FacetFilter({ label, facet }: { label: string; facet: Facet }) {
               <p className="text-sm text-muted-foreground">No matches.</p>
             ) : (
               values.map(([value, count]) => (
-                <label key={value} className="flex cursor-pointer items-center gap-2">
+                <label
+                  key={value}
+                  className="flex cursor-pointer items-center gap-2"
+                >
                   <Checkbox
                     checked={facet.selected.has(value)}
                     onCheckedChange={() => facet.toggle(value)}

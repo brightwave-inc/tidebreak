@@ -21,11 +21,16 @@ function model(
   };
 }
 
-function info(overrides: Partial<VoiceTranscriptionInfo> = {}): VoiceTranscriptionInfo {
+function info(
+  overrides: Partial<VoiceTranscriptionInfo> = {},
+): VoiceTranscriptionInfo {
   return {
     model: "local",
     local_model: "tiny.en-q5_1",
-    local_models: [model("tiny.en-q5_1", "ready"), model("small.en-q5_1", "not_installed")],
+    local_models: [
+      model("tiny.en-q5_1", "ready"),
+      model("small.en-q5_1", "not_installed"),
+    ],
     openai_ready: false,
     gemini_ready: false,
     ...overrides,
@@ -37,16 +42,20 @@ describe("voice input selection", () => {
     expect(voiceSelectionReady(info())).toBe(true);
     // Selecting a catalog entry that has not been downloaded must still send
     // the mic to settings rather than start a recording nothing can transcribe.
-    expect(voiceSelectionReady(info({ local_model: "small.en-q5_1" }))).toBe(false);
-    expect(voiceSelectionReady(info({ local_model: "removed-from-catalog" }))).toBe(
+    expect(voiceSelectionReady(info({ local_model: "small.en-q5_1" }))).toBe(
       false,
     );
+    expect(
+      voiceSelectionReady(info({ local_model: "removed-from-catalog" })),
+    ).toBe(false);
   });
 
   it("keeps the local model out of the provider choice", () => {
     expect(voiceSelectionValue(info({ local_model: "small.en-q5_1" }))).toBe(
       "local:small.en-q5_1",
     );
-    expect(voiceSelectionValue(info({ model: "gemini_flash" }))).toBe("gemini_flash");
+    expect(voiceSelectionValue(info({ model: "gemini_flash" }))).toBe(
+      "gemini_flash",
+    );
   });
 });

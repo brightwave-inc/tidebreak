@@ -152,9 +152,10 @@ async function logicalBrowserAction(
 
   try {
     const cssViewportWidth = window.innerWidth;
-    let browserZoomScale = cachedZoom?.cssViewportWidth === cssViewportWidth
-      ? cachedZoom.browserZoomScale
-      : undefined;
+    let browserZoomScale =
+      cachedZoom?.cssViewportWidth === cssViewportWidth
+        ? cachedZoom.browserZoomScale
+        : undefined;
     if (browserZoomScale === undefined) {
       const current = getCurrentWindow();
       const [physical, scaleFactor] = await Promise.all([
@@ -162,9 +163,8 @@ async function logicalBrowserAction(
         current.scaleFactor(),
       ]);
       const logicalWidth = physical.width / scaleFactor;
-      browserZoomScale = cssViewportWidth > 0
-        ? logicalWidth / cssViewportWidth
-        : 1;
+      browserZoomScale =
+        cssViewportWidth > 0 ? logicalWidth / cssViewportWidth : 1;
       cachedZoom = { cssViewportWidth, browserZoomScale };
     }
     if (!Number.isFinite(browserZoomScale) || browserZoomScale <= 0) {

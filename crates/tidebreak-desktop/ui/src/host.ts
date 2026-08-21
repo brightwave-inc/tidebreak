@@ -160,7 +160,9 @@ export function forgetFolder(rootId: string): Promise<boolean> {
  * subject are leftover authority with no product surface left. No-op outside
  * the native host.
  */
-export function purgeDeletedConversationSubject(chatId: string): Promise<boolean> {
+export function purgeDeletedConversationSubject(
+  chatId: string,
+): Promise<boolean> {
   if (!isTauri()) return Promise.resolve(false);
   return invoke("purge_deleted_conversation_subject", {
     request: { chatId },

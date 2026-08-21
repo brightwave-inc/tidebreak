@@ -17,7 +17,14 @@ describe("background-agent display vocabulary", () => {
       "Failed",
     ]);
     expect(RUNNING_AGENT_STATUSES).toEqual(
-      new Set(["active", "queued", "running", "waiting", "retry_wait", "cancelling"]),
+      new Set([
+        "active",
+        "queued",
+        "running",
+        "waiting",
+        "retry_wait",
+        "cancelling",
+      ]),
     );
   });
 

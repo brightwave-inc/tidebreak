@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  parseImportedDocument,
-  parseLibraryImportBatch,
-} from "./documents";
+import { parseImportedDocument, parseLibraryImportBatch } from "./documents";
 
 const documentId = "6c3df6af-bc62-4a66-a34e-29f327eaef41";
 const document = {

@@ -28,7 +28,10 @@ export function MiddleTruncate({
       </span>
     );
   }
-  const tail = Math.min(TAIL_MAX, Math.max(TAIL_MIN, Math.ceil(text.length / 3)));
+  const tail = Math.min(
+    TAIL_MAX,
+    Math.max(TAIL_MIN, Math.ceil(text.length / 3)),
+  );
   return (
     <span className={cn("flex min-w-0", className)} title={text}>
       <span className="truncate">{text.slice(0, -tail)}</span>

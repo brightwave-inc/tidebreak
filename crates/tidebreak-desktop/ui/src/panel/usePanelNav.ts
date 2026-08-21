@@ -1,8 +1,17 @@
 import { useMemo } from "react";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 
-import { EMPTY_LAYOUT, panelKey, type LayoutState, type PanelContent } from "./panelTypes";
-import { layoutFromSearch, searchFromLayout, type PanelSearch } from "./panelUrl";
+import {
+  EMPTY_LAYOUT,
+  panelKey,
+  type LayoutState,
+  type PanelContent,
+} from "./panelTypes";
+import {
+  layoutFromSearch,
+  searchFromLayout,
+  type PanelSearch,
+} from "./panelUrl";
 
 /** The layout the URL currently describes. */
 export function useLayoutState(): LayoutState {
@@ -115,7 +124,11 @@ export function usePanelNav() {
      */
     closeTab(target?: PanelContent | number) {
       const index =
-        typeof target === "number" ? target : target ? indexOf(target) : layout.activeIndex;
+        typeof target === "number"
+          ? target
+          : target
+            ? indexOf(target)
+            : layout.activeIndex;
       if (index < 0 || index >= layout.tabs.length) return;
 
       const tabs = layout.tabs.filter((_, at) => at !== index);
@@ -136,7 +149,12 @@ export function usePanelNav() {
     /** Bring one of the open tabs forward. */
     focusTab(target: PanelContent | number) {
       const index = typeof target === "number" ? target : indexOf(target);
-      if (index < 0 || index >= layout.tabs.length || index === layout.activeIndex) return;
+      if (
+        index < 0 ||
+        index >= layout.tabs.length ||
+        index === layout.activeIndex
+      )
+        return;
       go({ ...layout, activeIndex: index });
     },
 

@@ -7,9 +7,7 @@ class FakeSocket {
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
 
-  constructor(
-    readonly emit: (frame: SequencedCodeEventFrame) => void,
-  ) {}
+  constructor(readonly emit: (frame: SequencedCodeEventFrame) => void) {}
 
   close() {}
 }

@@ -65,7 +65,9 @@ describe("reconcilePendingApprovalCards", () => {
       ],
       [],
     );
-    expect(stale).toEqual([{ id: "message-new", role: "user", text: "new chat" }]);
+    expect(stale).toEqual([
+      { id: "message-new", role: "user", text: "new chat" },
+    ]);
   });
 
   it("moves a hydrated card behind earlier events when its live frame replays", () => {
@@ -84,17 +86,19 @@ describe("reconcilePendingApprovalCards", () => {
       },
     ];
 
-    expect(upsertPendingApprovalCard(withEarlierReplay, pending, true)).toEqual([
-      { id: "user", role: "user", text: "run it" },
-      {
-        id: "thought",
-        role: "assistant",
-        text: "",
-        reasoning: "checking the command",
-        sources: [],
-      },
-      expect.objectContaining({ role: "tool", callId: "call-search" }),
-      expect.objectContaining({ role: "approval", callId: "call-search" }),
-    ]);
+    expect(upsertPendingApprovalCard(withEarlierReplay, pending, true)).toEqual(
+      [
+        { id: "user", role: "user", text: "run it" },
+        {
+          id: "thought",
+          role: "assistant",
+          text: "",
+          reasoning: "checking the command",
+          sources: [],
+        },
+        expect.objectContaining({ role: "tool", callId: "call-search" }),
+        expect.objectContaining({ role: "approval", callId: "call-search" }),
+      ],
+    );
   });
 });

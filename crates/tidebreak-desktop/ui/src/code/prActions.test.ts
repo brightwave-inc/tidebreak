@@ -167,7 +167,9 @@ describe("prWorkflowPrompt", () => {
     expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/actions\/runs\/7/);
     expect(prWorkflowPrompt("fix_errors", digest)).toMatch(/failing checks/);
     expect(prWorkflowPrompt("resolve_conflicts", digest)).toMatch(/conflicts/);
-    expect(prWorkflowPrompt("update_branch", digest)).toMatch(/Update pull request/);
+    expect(prWorkflowPrompt("update_branch", digest)).toMatch(
+      /Update pull request/,
+    );
     expect(prWorkflowPrompt("address_feedback", digest)).toMatch(
       /requested changes/,
     );

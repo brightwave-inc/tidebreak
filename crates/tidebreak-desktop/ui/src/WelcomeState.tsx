@@ -7,11 +7,7 @@ import {
   Scale,
   Sparkles,
 } from "lucide-react";
-import type {
-  ApiClient,
-  ExecConfigInfo,
-  PluginPromptInfo,
-} from "./api";
+import type { ApiClient, ExecConfigInfo, PluginPromptInfo } from "./api";
 import {
   MANAGED_EXECUTION_DISCLOSURE,
   requiresManagedExecutionDisclosure,
@@ -209,9 +205,8 @@ export function WelcomeState({
     };
   }, [promptLibrary]);
 
-  const managedExecutionOnly = requiresManagedExecutionDisclosure(
-    executionProviders,
-  );
+  const managedExecutionOnly =
+    requiresManagedExecutionDisclosure(executionProviders);
 
   function insertLibraryPrompt(name: string) {
     if (!onSelectPrompt || !promptLibrary) return;
@@ -236,9 +231,7 @@ export function WelcomeState({
           <h2>{heading}</h2>
           <p>{description}</p>
           {managedExecutionOnly && (
-            <p className="welcome-disclosure">
-              {MANAGED_EXECUTION_DISCLOSURE}
-            </p>
+            <p className="welcome-disclosure">{MANAGED_EXECUTION_DISCLOSURE}</p>
           )}
         </div>
       </div>
@@ -267,13 +260,7 @@ export function WelcomeState({
               ))
             : STARTER_PROMPTS.map(
                 (
-                  {
-                    icon,
-                    label,
-                    description,
-                    prompt,
-                    enableInternet,
-                  },
+                  { icon, label, description, prompt, enableInternet },
                   index,
                 ) => (
                   <PromptCard

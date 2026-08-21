@@ -8,7 +8,8 @@ import { createContext, useContext } from "react";
  */
 const TranscriptVisibilityContext = createContext(true);
 
-export const TranscriptVisibilityProvider = TranscriptVisibilityContext.Provider;
+export const TranscriptVisibilityProvider =
+  TranscriptVisibilityContext.Provider;
 
 export function useTranscriptVisible(): boolean {
   return useContext(TranscriptVisibilityContext);

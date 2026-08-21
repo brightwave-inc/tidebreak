@@ -77,12 +77,14 @@ describe("delivery pull request list", () => {
   it("labels merged and closed pull requests by their outcome", async () => {
     renderList();
     expect(
-      within(await rowFor("Cache the workspace digest between polls")).getByText(
-        "Merged",
-      ),
+      within(
+        await rowFor("Cache the workspace digest between polls"),
+      ).getByText("Merged"),
     ).toBeInTheDocument();
     expect(
-      within(await rowFor("Rewrite the deployment runbook")).getByText("Closed"),
+      within(await rowFor("Rewrite the deployment runbook")).getByText(
+        "Closed",
+      ),
     ).toBeInTheDocument();
     // Merged, but the host reported CLOSED. Only the merge timestamp says so.
     expect(
@@ -111,12 +113,14 @@ describe("delivery pull request list", () => {
   it("names the lifecycle for a screen reader on every row", async () => {
     renderList();
     expect(
-      within(await rowFor("Cache the workspace digest between polls")).getByText(
-        "Merged:",
-      ),
+      within(
+        await rowFor("Cache the workspace digest between polls"),
+      ).getByText("Merged:"),
     ).toBeInTheDocument();
     expect(
-      within(await rowFor("Rewrite the deployment runbook")).getByText("Closed:"),
+      within(await rowFor("Rewrite the deployment runbook")).getByText(
+        "Closed:",
+      ),
     ).toBeInTheDocument();
   });
 

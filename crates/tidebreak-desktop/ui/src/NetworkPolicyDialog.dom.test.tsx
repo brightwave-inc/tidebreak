@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -21,9 +27,7 @@ describe("NetworkPolicyDialog", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("radio", { name: /Package installs/i }),
-    );
+    await user.click(screen.getByRole("radio", { name: /Package installs/i }));
     expect(onChange).not.toHaveBeenCalled();
     await user.click(
       screen.getByRole("button", { name: "Apply network policy" }),
@@ -91,7 +95,9 @@ describe("NetworkPolicyDialog", () => {
     expect(
       screen.queryByRole("button", { name: "Close" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Saving network policy");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Saving network policy",
+    );
 
     await act(async () => {
       rejectUpdate(new Error("The network policy could not be saved."));

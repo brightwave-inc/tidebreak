@@ -58,7 +58,10 @@ describe("CodeSessionRegistry", () => {
 
   it("shares one store across two acquires and closes the socket on last release", () => {
     const sockets: FakeSocket[] = [];
-    const openSocket = (after: number, onFrame: (frame: SequencedCodeEventFrame) => void) => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
       const socket = new FakeSocket(after, onFrame);
       sockets.push(socket);
       return socket as unknown as WebSocket;
@@ -70,10 +73,12 @@ describe("CodeSessionRegistry", () => {
     expect(peekCodeSession("s1")?.refCount).toBe(2);
     expect(sockets).toHaveLength(1);
 
-    first.getState().applyEvent(
-      { seq: 1, event: { type: "turn_started", turn_id: "t1" } },
-      { nextId: () => "id", now: () => "2026-08-15T00:00:00.000Z" },
-    );
+    first
+      .getState()
+      .applyEvent(
+        { seq: 1, event: { type: "turn_started", turn_id: "t1" } },
+        { nextId: () => "id", now: () => "2026-08-15T00:00:00.000Z" },
+      );
     expect(second.getState().busy).toBe(true);
 
     releaseCodeSession("s1");
@@ -87,7 +92,10 @@ describe("CodeSessionRegistry", () => {
 
   it("reopen hydrates user prompts before the journal replays from after=0", async () => {
     const sockets: FakeSocket[] = [];
-    const openSocket = (after: number, onFrame: (frame: SequencedCodeEventFrame) => void) => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
       const socket = new FakeSocket(after, onFrame);
       sockets.push(socket);
       return socket as unknown as WebSocket;
@@ -137,10 +145,12 @@ describe("CodeSessionRegistry", () => {
       },
       { nextId: () => "a1", now: () => "2026-08-15T12:00:02.500Z" },
     );
-    expect(store.getState().items.filter((item) => item.kind === "user")).toHaveLength(
-      1,
-    );
-    expect(store.getState().items.find((item) => item.kind === "assistant")).toMatchObject({
+    expect(
+      store.getState().items.filter((item) => item.kind === "user"),
+    ).toHaveLength(1);
+    expect(
+      store.getState().items.find((item) => item.kind === "assistant"),
+    ).toMatchObject({
       text: "README.md",
     });
   });
@@ -172,7 +182,10 @@ describe("CodeSessionRegistry", () => {
     // A queued follow-up is promoted by the worker, so the client never sees
     // a turn snapshot for it; the same is true of any turn started elsewhere.
     const sockets: FakeSocket[] = [];
-    const openSocket = (after: number, onFrame: (frame: SequencedCodeEventFrame) => void) => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
       const socket = new FakeSocket(after, onFrame);
       sockets.push(socket);
       return socket as unknown as WebSocket;
@@ -202,7 +215,10 @@ describe("CodeSessionRegistry", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    sockets[0]?.emit({ seq: 1, event: { type: "turn_started", turn_id: "t2" } });
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t2" },
+    });
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();

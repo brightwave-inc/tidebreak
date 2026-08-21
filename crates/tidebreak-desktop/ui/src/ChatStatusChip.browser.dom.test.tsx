@@ -28,9 +28,7 @@ describe("ChatStatusChip browser row", () => {
 
   it("shows the browser row when onOpenBrowser is passed", () => {
     const onOpenBrowser = vi.fn();
-    render(
-      <ChatStatusChip {...baseProps()} onOpenBrowser={onOpenBrowser} />,
-    );
+    render(<ChatStatusChip {...baseProps()} onOpenBrowser={onOpenBrowser} />);
 
     const browserButton = screen.getByRole("button", { name: /Browser/ });
     expect(browserButton).toBeInTheDocument();
@@ -38,18 +36,14 @@ describe("ChatStatusChip browser row", () => {
 
   it("calls onOpenBrowser when the row is clicked", () => {
     const onOpenBrowser = vi.fn();
-    render(
-      <ChatStatusChip {...baseProps()} onOpenBrowser={onOpenBrowser} />,
-    );
+    render(<ChatStatusChip {...baseProps()} onOpenBrowser={onOpenBrowser} />);
 
     fireEvent.click(screen.getByRole("button", { name: /Browser/ }));
     expect(onOpenBrowser).toHaveBeenCalledOnce();
   });
 
   it("displays 'Open shared tab' as the summary", () => {
-    render(
-      <ChatStatusChip {...baseProps()} onOpenBrowser={vi.fn()} />,
-    );
+    render(<ChatStatusChip {...baseProps()} onOpenBrowser={vi.fn()} />);
 
     expect(
       screen.getByRole("button", { name: /Browser.*Open shared tab/ }),

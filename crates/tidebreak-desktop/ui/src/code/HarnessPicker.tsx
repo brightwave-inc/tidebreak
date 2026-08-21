@@ -15,10 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  HARNESS_LABELS,
-  harnessUnusableReason,
-} from "./labels";
+import { HARNESS_LABELS, harnessUnusableReason } from "./labels";
 
 export const HARNESS_ICONS: Record<
   HarnessKind,
@@ -68,7 +65,9 @@ export function HarnessPicker({
             {selected && SelectedIcon && (
               <span className="flex items-center gap-2">
                 <SelectedIcon className="size-4 shrink-0" />
-                <span className="truncate">{HARNESS_LABELS[selected.kind]}</span>
+                <span className="truncate">
+                  {HARNESS_LABELS[selected.kind]}
+                </span>
               </span>
             )}
           </SelectValue>

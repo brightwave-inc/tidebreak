@@ -87,7 +87,9 @@ describe("voice composer", () => {
 
     await act(async () => result.current.start());
     expect(result.current.state).toBe("recording");
-    expect(FakeMediaRecorder.latest?.options).toEqual({ mimeType: "audio/webm" });
+    expect(FakeMediaRecorder.latest?.options).toEqual({
+      mimeType: "audio/webm",
+    });
     expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
 
     act(() => result.current.stop());

@@ -70,11 +70,14 @@ export function StartSessionPrompt({
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const root = useRef<HTMLDivElement>(null);
-  const ensureHarnessModels = useCodeCatalogStore((state) => state.ensureHarnessModels);
+  const ensureHarnessModels = useCodeCatalogStore(
+    (state) => state.ensureHarnessModels,
+  );
   const ready = harnesses.filter((entry) => !harnessUnusableReason(entry));
   const selected =
-    harnesses.find((entry) => entry.kind === picked && !harnessUnusableReason(entry)) ??
-    ready[0];
+    harnesses.find(
+      (entry) => entry.kind === picked && !harnessUnusableReason(entry),
+    ) ?? ready[0];
   const availableModes = selected ? createPermissionModes(selected.caps) : [];
   const mode: CodePermissionMode =
     selectedMode && availableModes.includes(selectedMode)
@@ -122,7 +125,13 @@ export function StartSessionPrompt({
     return () => {
       cancelled = true;
     };
-  }, [catalogModels, client, defaultModelKey, ensureHarnessModels, selectedKind]);
+  }, [
+    catalogModels,
+    client,
+    defaultModelKey,
+    ensureHarnessModels,
+    selectedKind,
+  ]);
 
   return (
     <div
@@ -152,7 +161,9 @@ export function StartSessionPrompt({
           }}
         />
         {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
-          <p className="text-muted-foreground text-xs">{UNSUPERVISED_AUTO_NOTE}</p>
+          <p className="text-muted-foreground text-xs">
+            {UNSUPERVISED_AUTO_NOTE}
+          </p>
         )}
         {mode === "allow" && (
           <p className="text-muted-foreground text-xs">{ALLOW_ALL_NOTE}</p>

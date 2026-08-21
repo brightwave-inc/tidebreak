@@ -131,7 +131,9 @@ export function createMcpAppBridge(options: {
     post({
       jsonrpc: "2.0",
       method: "ui/notifications/tool-input",
-      params: { arguments: isRecord(payload.arguments) ? payload.arguments : {} },
+      params: {
+        arguments: isRecord(payload.arguments) ? payload.arguments : {},
+      },
     });
     post({
       jsonrpc: "2.0",
@@ -201,7 +203,9 @@ export function createMcpAppBridge(options: {
             break;
           }
           const operationId =
-            typeof params.operation_id === "string" ? params.operation_id : null;
+            typeof params.operation_id === "string"
+              ? params.operation_id
+              : null;
           if (!operationId) {
             post({
               jsonrpc: "2.0",
@@ -231,7 +235,8 @@ export function createMcpAppBridge(options: {
               );
           void call.then(
             (result) => post({ jsonrpc: "2.0", id, result }),
-            (error: unknown) => post({ jsonrpc: "2.0", id, error: rpcError(error) }),
+            (error: unknown) =>
+              post({ jsonrpc: "2.0", id, error: rpcError(error) }),
           );
           break;
         }
@@ -248,18 +253,27 @@ export function createMcpAppBridge(options: {
             break;
           }
           const params = isRecord(message.params) ? message.params : {};
-          const folder = typeof params.folder === "string" ? params.folder : null;
+          const folder =
+            typeof params.folder === "string" ? params.folder : null;
           if (!folder) {
             post({
               jsonrpc: "2.0",
               id,
-              error: { code: -32602, message: `${method} needs a string folder` },
+              error: {
+                code: -32602,
+                message: `${method} needs a string folder`,
+              },
             });
             break;
           }
           const op =
-            method === "fs/list" ? "list" : method === "fs/read" ? "read" : "write";
-          const path = typeof params.path === "string" ? params.path : undefined;
+            method === "fs/list"
+              ? "list"
+              : method === "fs/read"
+                ? "read"
+                : "write";
+          const path =
+            typeof params.path === "string" ? params.path : undefined;
           const contentBase64 =
             typeof params.content_base64 === "string"
               ? params.content_base64
@@ -271,7 +285,8 @@ export function createMcpAppBridge(options: {
           // asynchronous; `post` already refuses after dispose.
           void invoke(folder, op, path, contentBase64, replace).then(
             (result) => post({ jsonrpc: "2.0", id, result }),
-            (error: unknown) => post({ jsonrpc: "2.0", id, error: rpcError(error) }),
+            (error: unknown) =>
+              post({ jsonrpc: "2.0", id, error: rpcError(error) }),
           );
           break;
         }
@@ -298,7 +313,10 @@ export function createMcpAppBridge(options: {
           : undefined;
         if (typeof height === "number" && Number.isFinite(height)) {
           options.onHeight?.(
-            Math.min(MAX_FRAME_HEIGHT, Math.max(MIN_FRAME_HEIGHT, Math.ceil(height))),
+            Math.min(
+              MAX_FRAME_HEIGHT,
+              Math.max(MIN_FRAME_HEIGHT, Math.ceil(height)),
+            ),
           );
         }
         break;

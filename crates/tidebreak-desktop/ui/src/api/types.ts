@@ -334,7 +334,10 @@ export type ProviderInfo = WireProviderInfo;
 export type ProviderAuthMode = WireProviderAuthMode;
 export type ChatGptSignInStatus = WireChatGptSignInStatus;
 
-export type VoiceTranscriptionModel = "local" | "gpt4o_transcribe" | "gemini_flash";
+export type VoiceTranscriptionModel =
+  | "local"
+  | "gpt4o_transcribe"
+  | "gemini_flash";
 export type LocalVoiceState =
   | "not_installed"
   | "downloading"
@@ -445,8 +448,7 @@ export type ExecProviderKind = WireExecProviderKind;
 export type ExecConfigInfo = WireExecConfigInfo;
 
 /** Readiness only: the API never returns a saved managed-provider key. */
-export type ExecCredentialReadiness =
-  WireExecCredentialReadiness;
+export type ExecCredentialReadiness = WireExecCredentialReadiness;
 
 /**
  * Host-owned egress policy for the managed sandboxes. Never a secret: only
@@ -623,8 +625,6 @@ export type AgentRunProgress = {
   nextSequence: number;
 };
 
-
-
 /**
  * What a call produced.
  *
@@ -755,7 +755,10 @@ export type ResultFailure = {
 };
 
 /** The entries-shaped result the list card renders. */
-export type EntriesResultPreview = Extract<ToolResultPreview, { tool: "entries" }>;
+export type EntriesResultPreview = Extract<
+  ToolResultPreview,
+  { tool: "entries" }
+>;
 
 /** The exec-shaped result the command card renders. */
 export type ExecResultPreview = Extract<ToolResultPreview, { tool: "exec" }>;
@@ -903,7 +906,6 @@ export class AppInvokeRefusalError extends Error {
     this.name = "AppInvokeRefusalError";
   }
 }
-
 
 /**
  * Approval kinds a human may approve from the renderer.
@@ -1089,7 +1091,8 @@ export type CodeDeliveryPullRequestsPage = WireCodeDeliveryPullRequestsPage;
 export type CodeDeliveryPullRequestTarget = WireCodeDeliveryPullRequestTarget;
 export type CodeDeliveryPullRequestFile = WireCodeDeliveryPullRequestFile;
 export type CodeDeliveryPullRequestAction = WireCodeDeliveryPullRequestAction;
-export type CodeDeliveryPullRequestActionBody = WireCodeDeliveryPullRequestActionBody;
+export type CodeDeliveryPullRequestActionBody =
+  WireCodeDeliveryPullRequestActionBody;
 export type CodeDeliveryRunKind = WireCodeDeliveryRunKind;
 export type CodeDeliveryRunAttentionReason = WireCodeDeliveryRunAttentionReason;
 export type CodeDeliveryRunSummary = WireCodeDeliveryRunSummary;
@@ -1101,7 +1104,8 @@ export type CodeDeliveryRunAction = WireCodeDeliveryRunAction;
 export type CodeDeliveryRunActionBody = WireCodeDeliveryRunActionBody;
 export type CodeDeliveryWorkflowJob = WireCodeDeliveryWorkflowJob;
 export type CodeDeliveryDeploymentStatus = WireCodeDeliveryDeploymentStatus;
-export type CodeDeliveryRepositoriesSnapshot = WireCodeDeliveryRepositoriesSnapshot;
+export type CodeDeliveryRepositoriesSnapshot =
+  WireCodeDeliveryRepositoriesSnapshot;
 export type CodeDeliveryActionResult = WireCodeDeliveryActionResult;
 
 /** One isolated worktree + branch on a repo. */

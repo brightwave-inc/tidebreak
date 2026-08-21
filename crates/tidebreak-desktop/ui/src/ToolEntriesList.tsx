@@ -175,7 +175,10 @@ function EntryIcon({ entry }: { entry: ResultEntry }) {
   }
   const Icon = ENTRY_ICONS[entry.kind];
   return (
-    <Icon className="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+    <Icon
+      className="text-muted-foreground size-4 shrink-0"
+      aria-hidden="true"
+    />
   );
 }
 

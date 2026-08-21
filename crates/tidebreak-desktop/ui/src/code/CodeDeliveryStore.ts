@@ -98,26 +98,27 @@ export type CodeDeliveryNotification = {
   target: CodeDeliveryNotificationTarget;
 };
 
-export const DEFAULT_DELIVERY_NOTIFICATION_RULES: CodeDeliveryNotificationRule[] = [
-  {
-    id: "pull_request_attention",
-    enabled: true,
-    repositoryKeys: [],
-    tidebreakLinkedOnly: false,
-  },
-  {
-    id: "pull_request_ready",
-    enabled: true,
-    repositoryKeys: [],
-    tidebreakLinkedOnly: false,
-  },
-  {
-    id: "run_failure",
-    enabled: true,
-    repositoryKeys: [],
-    tidebreakLinkedOnly: false,
-  },
-];
+export const DEFAULT_DELIVERY_NOTIFICATION_RULES: CodeDeliveryNotificationRule[] =
+  [
+    {
+      id: "pull_request_attention",
+      enabled: true,
+      repositoryKeys: [],
+      tidebreakLinkedOnly: false,
+    },
+    {
+      id: "pull_request_ready",
+      enabled: true,
+      repositoryKeys: [],
+      tidebreakLinkedOnly: false,
+    },
+    {
+      id: "run_failure",
+      enabled: true,
+      repositoryKeys: [],
+      tidebreakLinkedOnly: false,
+    },
+  ];
 
 type PersistedCodeDeliveryState = {
   version: 1;
@@ -271,12 +272,18 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
     });
     persist(get());
   },
-  ingestDeliveryPoll: (pullRequests, runs, receivedAt = new Date().toISOString()) => {
+  ingestDeliveryPoll: (
+    pullRequests,
+    runs,
+    receivedAt = new Date().toISOString(),
+  ) => {
     const now = Date.parse(receivedAt);
     const cutoff = now - MAX_NOTIFICATION_AGE_MS;
     const seen = { ...get().seenFingerprints };
     const incoming: CodeDeliveryNotification[] = [];
-    const rules = new Map(get().notificationRules.map((rule) => [rule.id, rule]));
+    const rules = new Map(
+      get().notificationRules.map((rule) => [rule.id, rule]),
+    );
 
     for (const pullRequest of pullRequests) {
       if (Date.parse(pullRequest.updated_at) < cutoff) continue;
@@ -324,7 +331,10 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
     }
 
     for (const run of runs) {
-      if (Date.parse(run.updated_at) < cutoff || run.attention_reasons.length === 0) {
+      if (
+        Date.parse(run.updated_at) < cutoff ||
+        run.attention_reasons.length === 0
+      ) {
         continue;
       }
       const fingerprint = [
@@ -419,7 +429,13 @@ function maybeAddNotification(
     detail: string;
   },
 ): void {
-  if (!ruleApplies(rule, pullRequest.repository, pullRequest.workspace_links.length > 0)) {
+  if (
+    !ruleApplies(
+      rule,
+      pullRequest.repository,
+      pullRequest.workspace_links.length > 0,
+    )
+  ) {
     return;
   }
   if (seen[fingerprint]) return;
@@ -453,7 +469,8 @@ function maybeAddRunNotification(
   fingerprint: string,
   receivedAt: string,
 ): void {
-  if (!ruleApplies(rule, run.repository, run.workspace_links.length > 0)) return;
+  if (!ruleApplies(rule, run.repository, run.workspace_links.length > 0))
+    return;
   if (seen[fingerprint]) return;
   seen[fingerprint] = receivedAt;
   incoming.push({
@@ -511,9 +528,7 @@ export function trackedCodeDeliveryRepositories(
   discovered: readonly CodeGitHubRepositoryRef[],
   state: Pick<
     CodeDeliveryStore,
-    | "manualRepositories"
-    | "excludedRegisteredRepoIds"
-    | "pinnedRepositoryKeys"
+    "manualRepositories" | "excludedRegisteredRepoIds" | "pinnedRepositoryKeys"
   >,
 ): CodeGitHubRepositoryRef[] {
   const repositories = new Map<string, CodeGitHubRepositoryRef>();
@@ -535,9 +550,13 @@ export function trackedCodeDeliveryRepositories(
     const leftPinned = pinned.has(codeDeliveryRepositoryKey(left));
     const rightPinned = pinned.has(codeDeliveryRepositoryKey(right));
     if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
-    return left.name_with_owner.localeCompare(right.name_with_owner, undefined, {
-      sensitivity: "base",
-    });
+    return left.name_with_owner.localeCompare(
+      right.name_with_owner,
+      undefined,
+      {
+        sensitivity: "base",
+      },
+    );
   });
 }
 
@@ -550,7 +569,9 @@ export function unreadCodeDeliveryNotifications(
   );
 }
 
-function parsePersistedState(value: unknown): PersistedCodeDeliveryState | null {
+function parsePersistedState(
+  value: unknown,
+): PersistedCodeDeliveryState | null {
   if (!isRecord(value) || value.version !== STORAGE_VERSION) return null;
   const manualRepositories = parseRepositoryRefs(value.manualRepositories);
   const savedViews = parseSavedViews(value.savedViews);
@@ -596,9 +617,14 @@ function parseRepositoryRefs(value: unknown): CodeGitHubRepositoryRef[] | null {
       !nonEmpty(item.name) ||
       !nonEmpty(item.name_with_owner) ||
       !nonEmpty(item.url) ||
-      !(item.default_branch === undefined || typeof item.default_branch === "string") ||
-      !(item.tidebreak_repo_id === undefined ||
-        typeof item.tidebreak_repo_id === "string")
+      !(
+        item.default_branch === undefined ||
+        typeof item.default_branch === "string"
+      ) ||
+      !(
+        item.tidebreak_repo_id === undefined ||
+        typeof item.tidebreak_repo_id === "string"
+      )
     ) {
       return null;
     }
@@ -659,7 +685,9 @@ function parseSavedViews(value: unknown): CodeDeliverySavedView[] | null {
   return views;
 }
 
-function parsePrFilters(value: Record<string, unknown>): CodeDeliveryPrViewFilters | null {
+function parsePrFilters(
+  value: Record<string, unknown>,
+): CodeDeliveryPrViewFilters | null {
   if (
     typeof value.search !== "string" ||
     !stringArray(value.repositoryKeys) ||
@@ -669,8 +697,10 @@ function parsePrFilters(value: Record<string, unknown>): CodeDeliveryPrViewFilte
     !stringArray(value.authors) ||
     typeof value.attentionOnly !== "boolean" ||
     typeof value.readyOnly !== "boolean" ||
-    !(value.tidebreakLinked === undefined ||
-      typeof value.tidebreakLinked === "boolean")
+    !(
+      value.tidebreakLinked === undefined ||
+      typeof value.tidebreakLinked === "boolean"
+    )
   ) {
     return null;
   }
@@ -689,12 +719,16 @@ function parsePrFilters(value: Record<string, unknown>): CodeDeliveryPrViewFilte
   };
 }
 
-function parseRunFilters(value: Record<string, unknown>): CodeDeliveryRunViewFilters | null {
+function parseRunFilters(
+  value: Record<string, unknown>,
+): CodeDeliveryRunViewFilters | null {
   if (
     typeof value.search !== "string" ||
     !stringArray(value.repositoryKeys) ||
     !Array.isArray(value.kinds) ||
-    !value.kinds.every((kind) => kind === "workflow_run" || kind === "deployment") ||
+    !value.kinds.every(
+      (kind) => kind === "workflow_run" || kind === "deployment",
+    ) ||
     !stringArray(value.statuses) ||
     !stringArray(value.conclusions) ||
     !stringArray(value.workflows) ||
@@ -703,8 +737,10 @@ function parseRunFilters(value: Record<string, unknown>): CodeDeliveryRunViewFil
     !stringArray(value.events) ||
     !stringArray(value.actors) ||
     typeof value.attentionOnly !== "boolean" ||
-    !(value.tidebreakLinked === undefined ||
-      typeof value.tidebreakLinked === "boolean")
+    !(
+      value.tidebreakLinked === undefined ||
+      typeof value.tidebreakLinked === "boolean"
+    )
   ) {
     return null;
   }
@@ -726,7 +762,9 @@ function parseRunFilters(value: Record<string, unknown>): CodeDeliveryRunViewFil
   };
 }
 
-function parseNotificationRules(value: unknown): CodeDeliveryNotificationRule[] | null {
+function parseNotificationRules(
+  value: unknown,
+): CodeDeliveryNotificationRule[] | null {
   if (!Array.isArray(value)) return null;
   const rules: CodeDeliveryNotificationRule[] = [];
   for (const item of value) {
@@ -765,7 +803,9 @@ function parseNotifications(value: unknown): CodeDeliveryNotification[] | null {
       !nonEmpty(item.receivedAt) ||
       !(item.readAt === undefined || typeof item.readAt === "string") ||
       !nonEmpty(item.url) ||
-      !(item.workspaceId === undefined || typeof item.workspaceId === "string") ||
+      !(
+        item.workspaceId === undefined || typeof item.workspaceId === "string"
+      ) ||
       !isRecord(item.target)
     ) {
       return null;
@@ -840,7 +880,9 @@ function isRuleKind(value: unknown): value is CodeDeliveryNotificationRuleKind {
 }
 
 function stringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

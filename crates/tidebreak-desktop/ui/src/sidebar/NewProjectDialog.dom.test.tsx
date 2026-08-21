@@ -22,7 +22,10 @@ describe("NewProjectDialog", () => {
       />,
     );
 
-    await user.type(screen.getByRole("textbox", { name: "Project name" }), "  Research  ");
+    await user.type(
+      screen.getByRole("textbox", { name: "Project name" }),
+      "  Research  ",
+    );
     await user.keyboard("{Meta>}{Enter}{/Meta}");
 
     await waitFor(() =>
@@ -63,7 +66,10 @@ describe("NewProjectDialog", () => {
       />,
     );
 
-    await user.type(screen.getByRole("textbox", { name: "Project name" }), "Research");
+    await user.type(
+      screen.getByRole("textbox", { name: "Project name" }),
+      "Research",
+    );
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() =>

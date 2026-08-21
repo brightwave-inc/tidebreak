@@ -63,8 +63,16 @@ describe("formatAgentRunDebugReport", () => {
       run: run(),
       activity,
       progress: [
-        { sequence: 1, text: "Reading the spreadsheet", at: "2026-08-01T10:00:30Z" },
-        { sequence: 2, text: "Analysis script failed, retrying", at: "2026-08-01T10:01:30Z" },
+        {
+          sequence: 1,
+          text: "Reading the spreadsheet",
+          at: "2026-08-01T10:00:30Z",
+        },
+        {
+          sequence: 2,
+          text: "Analysis script failed, retrying",
+          at: "2026-08-01T10:01:30Z",
+        },
       ],
     });
 
@@ -75,16 +83,24 @@ describe("formatAgentRunDebugReport", () => {
     expect(report).toContain("- Task: Summarize the quarterly report");
 
     expect(report).toContain("## Activity");
-    expect(report).toContain("1. **A command failed** — failed · 2026-08-01T10:01:00Z");
+    expect(report).toContain(
+      "1. **A command failed** — failed · 2026-08-01T10:01:00Z",
+    );
     expect(report).toContain("- Command: `python analyze.py`");
     expect(report).toContain("- Exit code: 1");
     expect(report).toContain("Traceback: boom");
-    expect(report).toContain("2. **Searched the web** — completed · 2026-08-01T10:02:00Z");
+    expect(report).toContain(
+      "2. **Searched the web** — completed · 2026-08-01T10:02:00Z",
+    );
     expect(report).toContain("- Query: quarterly revenue figures");
 
     expect(report).toContain("## Progress");
-    expect(report).toContain("- 2026-08-01T10:00:30Z — Reading the spreadsheet");
-    expect(report).toContain("- 2026-08-01T10:01:30Z — Analysis script failed, retrying");
+    expect(report).toContain(
+      "- 2026-08-01T10:00:30Z — Reading the spreadsheet",
+    );
+    expect(report).toContain(
+      "- 2026-08-01T10:01:30Z — Analysis script failed, retrying",
+    );
   });
 
   it("notes a failed fetch in place of each section that could not load", () => {
@@ -100,7 +116,11 @@ describe("formatAgentRunDebugReport", () => {
 
   it("includes the terminal result only when the run settled with one", () => {
     const settled = formatAgentRunDebugReport({
-      run: run({ status: "completed", last_error_code: null, terminal_text: "Done." }),
+      run: run({
+        status: "completed",
+        last_error_code: null,
+        terminal_text: "Done.",
+      }),
       activity: [],
       progress: [],
     });
@@ -131,7 +151,10 @@ describe("fetchAgentRunProgress", () => {
         };
       }
       if (afterSequence === 2) {
-        return { entries: [{ sequence: 3, text: "three", at: "t3" }], nextSequence: 3 };
+        return {
+          entries: [{ sequence: 3, text: "three", at: "t3" }],
+          nextSequence: 3,
+        };
       }
       return { entries: [], nextSequence: 3 };
     });

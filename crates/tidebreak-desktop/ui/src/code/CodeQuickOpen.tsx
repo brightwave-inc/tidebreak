@@ -93,7 +93,9 @@ export function CodeQuickOpen({
       })
       .catch((caught) => {
         if (cancelled) return;
-        setError(friendlyErrorMessage(caught, "Could not load workspace files"));
+        setError(
+          friendlyErrorMessage(caught, "Could not load workspace files"),
+        );
         setLoading(false);
       });
     return () => {
@@ -225,7 +227,10 @@ export function rankQuickOpenPaths(
       return { path, score };
     })
     .filter((entry) => entry.score >= 0)
-    .sort((left, right) => right.score - left.score || pathSort(left.path, right.path))
+    .sort(
+      (left, right) =>
+        right.score - left.score || pathSort(left.path, right.path),
+    )
     .map((entry) => entry.path);
 }
 
@@ -260,5 +265,7 @@ function parentPath(path: string): string {
 }
 
 function pathSort(left: string, right: string): number {
-  return fileName(left).localeCompare(fileName(right)) || left.localeCompare(right);
+  return (
+    fileName(left).localeCompare(fileName(right)) || left.localeCompare(right)
+  );
 }

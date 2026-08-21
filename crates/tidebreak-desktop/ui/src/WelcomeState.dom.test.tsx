@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PluginCatalog } from "@/api";
@@ -30,9 +36,10 @@ const CATALOG: PluginCatalog = {
 function libraryWith(catalog: PluginCatalog): PromptLibraryApis {
   return {
     list: vi.fn().mockResolvedValue(catalog),
-    promptBody: vi
-      .fn()
-      .mockResolvedValue({ name: "weekly-update", body: "Write my weekly update covering " }),
+    promptBody: vi.fn().mockResolvedValue({
+      name: "weekly-update",
+      body: "Write my weekly update covering ",
+    }),
   };
 }
 
@@ -50,7 +57,9 @@ describe("WelcomeState starters", () => {
     );
 
     const card = await screen.findByRole("button", { name: /Weekly update/ });
-    expect(screen.getByText("Draft this week's status note.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Draft this week's status note."),
+    ).toBeInTheDocument();
     // A prompt whose bundle is off is not on offer, and the static openers
     // step aside once the library has something to say.
     expect(screen.queryByText(/Retired brief/)).not.toBeInTheDocument();

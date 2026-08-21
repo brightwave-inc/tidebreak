@@ -89,17 +89,12 @@ export function PermissionModePicker({
   // wrapper the reader can still hover and focus.
   return (
     <WithTooltip label={SESSION_PERMISSION_MODE_LOCKED}>
-      <span className="inline-flex">
-        {menu}
-      </span>
+      <span className="inline-flex">{menu}</span>
     </WithTooltip>
   );
 }
 
-const HARNESS_ICONS: Record<
-  HarnessKind,
-  typeof ClaudeIcon
-> = {
+const HARNESS_ICONS: Record<HarnessKind, typeof ClaudeIcon> = {
   claude_code: ClaudeIcon,
   codex: OpenAIIcon,
   opencode: OpenCodeIcon,
@@ -283,7 +278,11 @@ export function HarnessModelMenu({
           variant === "field" && "z-[60]",
         )}
         onKeyDownCapture={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key >= "1" && event.key <= "9") {
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            event.key >= "1" &&
+            event.key <= "9"
+          ) {
             const option = visible[Number(event.key) - 1];
             if (option) {
               event.preventDefault();
@@ -629,7 +628,10 @@ export function CodeComposer({
     if (!typed || disabled) return;
     // The chips ride out with the message: the engine reads the paths from
     // its own working directory, so nothing is uploaded.
-    const message = messageWithWorkspaceFiles(typed, workspaceFiles?.items ?? []);
+    const message = messageWithWorkspaceFiles(
+      typed,
+      workspaceFiles?.items ?? [],
+    );
     const pending = images.attachments.filter(
       (item) => item.status === "queued" || item.status === "uploading",
     );
@@ -643,7 +645,12 @@ export function CodeComposer({
     }
     const attachments = images.attachments.flatMap((item) =>
       item.attachmentId
-        ? [{ blob_id: item.attachmentId, media_type: item.mediaType ?? "image/png" }]
+        ? [
+            {
+              blob_id: item.attachmentId,
+              media_type: item.mediaType ?? "image/png",
+            },
+          ]
         : [],
     );
     const held = images.attachments;
