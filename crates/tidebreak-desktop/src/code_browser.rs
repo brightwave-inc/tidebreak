@@ -22,13 +22,11 @@ use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 use crate::browser_control::BROWSER_DATA_STORE_IDENTIFIER;
-use crate::browser_semantics::{
-    browser_inject_inspect_overlay, browser_remove_inspect_overlay,
-};
 use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
     BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
 };
+use crate::browser_semantics::{browser_inject_inspect_overlay, browser_remove_inspect_overlay};
 
 const BROWSER_LABEL_PREFIX: &str = "code-browser-";
 const CODE_BROWSER_EVENT: &str = "code-browser:event";

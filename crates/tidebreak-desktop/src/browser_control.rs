@@ -545,11 +545,7 @@ impl BrowserRegistry {
         Ok(())
     }
 
-    pub(crate) fn clear_inspect(
-        &self,
-        browser_id: &str,
-        workspace_id: &str,
-    ) -> Result<(), String> {
+    pub(crate) fn clear_inspect(&self, browser_id: &str, workspace_id: &str) -> Result<(), String> {
         let mut state = self.lock();
         let record = state
             .records

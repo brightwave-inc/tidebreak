@@ -1858,7 +1858,6 @@ pub(crate) async fn browser_remove_inspect_overlay(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
