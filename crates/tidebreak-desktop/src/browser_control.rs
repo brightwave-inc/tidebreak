@@ -1332,43 +1332,16 @@ impl BrowserRegistry {
             .targets
             .get(target_ref)
             .cloned()
-           .ok_or(BrowserTargetError::StaleTarget)
-   }
+            .ok_or(BrowserTargetError::StaleTarget)
+    }
 
-    /// Validate that `snapshot_id` matches the latest stored semantic
-    /// snapshot for this browser.  Returns `Err` if the snapshot is stale,
-    /// missing, or belongs to a different document epoch.
-    pub(crate) fn validate_snapshot_id(
+    pub(crate) fn invalidate_semantic_snapshot(
         &self,
         browser_id: &str,
         workspace_id: &str,
         snapshot_id: &str,
-        document_epoch: u64,
-    ) -> Result<(), String> {
-        let state = self.lock();
-        let Some(record) = state.records.get(browser_id) else {
-            return Err("browser session is not registered".to_owned());
-        };
-        ensure_workspace(browser_id, workspace_id, record)?;
-        if record.document_epoch != Some(document_epoch) {
-            return Err("browser document changed since the snapshot was taken".to_owned());
-        }
-        let Some(snapshot) = &record.semantic_snapshot else {
-            return Err("no semantic snapshot is available — take a new snapshot".to_owned());
-        };
-        if snapshot.snapshot_id != snapshot_id || snapshot.document_epoch != document_epoch {
-            return Err("snapshot is stale — take a new snapshot".to_owned());
-        }
-        Ok(())
-    }
-
-   pub(crate) fn invalidate_semantic_snapshot(
-       &self,
-       browser_id: &str,
-       workspace_id: &str,
-       snapshot_id: &str,
-   ) {
-       let mut state = self.lock();
+    ) {
+        let mut state = self.lock();
         let Some(record) = state.records.get_mut(browser_id) else {
             return;
         };
