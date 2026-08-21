@@ -533,12 +533,49 @@ test("merge queue groups re-run required CI", () => {
   assert.match(prTitle, /github\.event_name == 'merge_group'/);
 });
 
-test("native Windows CI is an explicit PR opt-in with a main backstop", () => {
-  const windows = workflowJob(workflows["ci.yml"], "windows-check");
+test("native Windows CI is scope-triggered, label-overridable, with a main backstop", () => {
+  const ci = workflows["ci.yml"];
+  const windows = workflowJob(ci, "windows-check");
+  const changes = workflowJob(ci, "changes");
   const windowsCiGate =
     /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\)/;
 
   assert.match(windows, windowsCiGate);
+  // The label was the only trigger until two Windows-only breaks reached
+  // main from unlabeled pull requests (#2307, #2403). A change to a path this
+  // lane tests must now run it without anyone remembering to ask.
+  assert.match(
+    windows,
+    /\|\| needs\.changes\.outputs\.windows == 'true'/,
+    "a Windows-boundary change must trigger the lane on its own",
+  );
+  assert.match(changes, /windows: \$\{\{ steps\.scope\.outputs\.windows \}\}/);
+  assert.match(changes, /echo "windows=\$windows"/);
+  assert.match(changes, /echo "windows=true"/);
+  // The scope must imply the Rust one, for the same reason `workspace` does:
+  // the lane is gated on both, so a scope the Rust gate never admits is dead.
+  assert.match(
+    changes,
+    /if \[\[ "\$windows" == true && "\$rust" != true \]\]; then/,
+  );
+  // Every crate or module the lane runs tests for. Dropping one silently
+  // returns that boundary to label-only coverage.
+  for (const boundary of [
+    "crates/tidebreak-code-execution/\\*",
+    "crates/tidebreak-harness/\\*",
+    "crates/tidebreak-host-broker/\\*",
+    "crates/tidebreak-server/src/code/\\*",
+    "crates/tidebreak-server/src/tests/code\\*",
+    "crates/tidebreak-server/src/desktop_schema\\.rs",
+    "crates/tidebreak-core/src/keychain\\.rs",
+    "crates/tidebreak-desktop/scripts/prepare-sidecar\\.mjs",
+  ]) {
+    assert.match(
+      changes,
+      new RegExp(`${boundary}[^\\n]*\\n?[^\\n]*windows=true`),
+      `${boundary} must set the Windows scope`,
+    );
+  }
   assert.match(
     windows,
     /group: \$\{\{ github\.event_name == 'push' && 'windows-check-main' \|\| format\('windows-check-run-\{0\}', github\.run_id\) \}\}/,
