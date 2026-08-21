@@ -4468,9 +4468,27 @@ fn code_routes_go_through_the_owner_scoped_view() {
         // `types.rs` declare and shape, and serve nothing.
         let serves_data = text.contains("pub async fn") && name != "mod.rs";
         if serves_data && !text.contains("ScopedCode") {
-            findings.push(format!(
-                "{name} defines route handlers but never extracts `ScopedCode`"
-            ));
+            // The browser channel is the sole capability-bearer route: it
+            // authenticates with a session-private browser capability token
+            // (resolved into a `BrowserSubject` owner/workspace/session scope)
+            // rather than the app-token `ScopedCode` extractor. Require its
+            // own authorization path instead of the scoped extractor.
+            if name == "browser.rs" {
+                if !text.contains("fn authorize(")
+                    || !text.contains("BrowserSubject")
+                    || !text.contains("bearer_token")
+                {
+                    findings.push(format!(
+                        "{name} is the capability-bearer browser route but is \
+                         missing its `authorize` / `BrowserSubject` / \
+                         `bearer_token` authorization path"
+                    ));
+                }
+            } else {
+                findings.push(format!(
+                    "{name} defines route handlers but never extracts `ScopedCode`"
+                ));
+            }
         }
     }
     assert!(
