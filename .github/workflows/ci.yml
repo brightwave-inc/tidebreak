@@ -125,6 +125,7 @@ jobs:
       notices: ${{ steps.scope.outputs.notices }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
+      windows: ${{ steps.scope.outputs.windows }}
       workspace: ${{ steps.scope.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -148,6 +149,7 @@ jobs:
               echo "notices=true"
               echo "rust=true"
               echo "ui=true"
+              echo "windows=true"
               echo "workspace=true"
             } >> "$GITHUB_OUTPUT"
           }
@@ -197,6 +199,7 @@ jobs:
           notices=false
           rust=false
           ui=false
+          windows=false
           workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
@@ -239,6 +242,24 @@ jobs:
                 notices=true; rust=true; workspace=true ;;
               *) rust=true; workspace=true ;;
             esac
+            # A second, independent question about the same file: can it
+            # break on Windows in a way no Linux lane can see? These are the
+            # paths the Windows lane runs tests for. NTFS path shapes, the
+            # Windows process APIs, and the native credential store decide
+            # those results, and a cross-target `cargo check` proves none of
+            # them.
+            case "$file" in
+              # This file decides what every lane runs, including this one.
+              .github/workflows/ci.yml) windows=true ;;
+              crates/tidebreak-code-execution/*|crates/tidebreak-harness/*|crates/tidebreak-host-broker/*)
+                windows=true ;;
+              crates/tidebreak-server/src/code/*|crates/tidebreak-server/src/tests/code*)
+                windows=true ;;
+              crates/tidebreak-server/src/desktop_schema.rs|crates/tidebreak-core/src/keychain.rs)
+                windows=true ;;
+              crates/tidebreak-desktop/scripts/prepare-sidecar.mjs)
+                windows=true ;;
+            esac
           done < "$RUNNER_TEMP/changed-files"
 
           # Keep narrower scopes honest here, before conditional jobs consume
@@ -248,6 +269,10 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
+          if [[ "$windows" == true && "$rust" != true ]]; then
+            echo "Windows scope without Rust scope; the detector is wrong." >&2
+            exit 1
+          fi
 
           {
             echo "docs_site=$docs_site"
@@ -255,6 +280,7 @@ jobs:
             echo "notices=$notices"
             echo "rust=$rust"
             echo "ui=$ui"
+            echo "windows=$windows"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
 
@@ -494,12 +520,15 @@ jobs:
     name: Windows cargo check
     needs: changes
     # A native runner keeps the Windows SDK and MSVC available for native
-    # dependencies such as ring and SQLite. Native Windows validation stays an
-    # explicit pre-merge choice even though every other lane runs by default:
-    # add `windows-ci` when the change reaches a Windows boundary; main and
-    # scheduled/manual runs retain the automatic backstop.
+    # dependencies such as ring and SQLite. This lane is expensive, so it
+    # stays off the default pull-request path. Asking authors to remember the
+    # label did not hold: two Windows-only breaks reached main from unlabeled
+    # pull requests (#2307, #2403). The `windows` scope now runs the lane for
+    # the paths it tests. The label stays as the manual override for a change
+    # the scope cannot see. Main, scheduled, and manual runs retain the
+    # automatic backstop.
     #
-    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci')) }}
+    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci') || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-latest
     # Every Rust-scoped main push contains the prior main state, so the newest
     # Windows run proves everything an older in-progress one would have proven.
