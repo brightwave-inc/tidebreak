@@ -213,6 +213,46 @@ describe("parseCodeSubscriptionUsage", () => {
   });
 });
 
+/**
+ * Every state the server can send must parse.
+ *
+ * The parser is a runtime string switch, so a new variant on the Rust side is
+ * invisible to `tsc` — and `parseCodeSessionList` returns null when any single
+ * row fails, so one unparsed state blanks the whole session list rather than
+ * degrading. `idle` shipped without landing here and did exactly that.
+ *
+ * Keep this list in step with `AttentionState` in `generated/wire.ts`.
+ */
+describe("parseCodeSession attention states", () => {
+  const STATES = [
+    { type: "working" },
+    { type: "idle" },
+    { type: "done_unreviewed" },
+    { type: "needs_you", prompt: "approve this", source: "structured" },
+    { type: "stalled", idle_secs: 42 },
+    { type: "fenced", reason: { type: "orphan_alive" } },
+    { type: "manual", note: "later" },
+  ];
+
+  it.each(STATES)("accepts %o", (state) => {
+    const parsed = parseCodeSession({
+      ...SESSION,
+      attention: { state, source: "lifecycle" },
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.attention.state.type).toBe(state.type);
+  });
+
+  it("still rejects a state the server cannot send", () => {
+    expect(
+      parseCodeSession({
+        ...SESSION,
+        attention: { state: { type: "napping" }, source: "lifecycle" },
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("parseCodeSessionList", () => {
   it("accepts GET /code/workspaces/{id}/sessions", () => {
     const ended = {
