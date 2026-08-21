@@ -799,6 +799,8 @@ fn every_code_table_carries_an_owner_column() {
             "code_event",
             "code_repo",
             "code_session",
+            "code_trigger",
+            "code_trigger_fire",
             "code_turn",
             "code_turn_attachment",
             "code_watch",
@@ -1135,4 +1137,161 @@ async fn a_cloned_repo_records_where_it_came_from() {
         .unwrap()
         .cloned_from
         .is_none());
+}
+
+/// Arming the same condition twice is an edit, not a second rule. Without the
+/// upsert the unique index would turn a re-arm into a store error the user
+/// would see as "already exists" on a switch they just flipped.
+#[tokio::test]
+async fn arming_a_condition_twice_edits_the_rule() {
+    use crate::code::{CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId};
+    use crate::db::code::{list_repos, list_triggers_for_repo, save_trigger};
+
+    let (_dir, store, _session_id, _turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let repo_id = list_repos(&store, &owner).await.unwrap()[0].id;
+
+    let armed = CodeTrigger {
+        id: CodeTriggerId::new(),
+        owner: owner.clone(),
+        repo_id,
+        condition: CodeTriggerCondition::ChecksFailed,
+        action: CodeTriggerAction::Notify,
+        enabled: true,
+        created_at: now(),
+        updated_at: now(),
+    };
+    save_trigger(&store, &armed).await.unwrap();
+
+    let rearmed = CodeTrigger {
+        id: CodeTriggerId::new(),
+        action: CodeTriggerAction::Deliver,
+        updated_at: now() + chrono::Duration::minutes(1),
+        ..armed.clone()
+    };
+    save_trigger(&store, &rearmed).await.unwrap();
+
+    let stored = list_triggers_for_repo(&store, &owner, repo_id)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1, "re-arming created a second rule");
+    assert_eq!(stored[0].action, CodeTriggerAction::Deliver);
+    assert_eq!(stored[0].id, armed.id, "the identity moved on an edit");
+}
+
+/// The fire fingerprint is what makes a trigger fire on an edge. Two sweeps
+/// finding the same condition against the same head must produce one fire, and
+/// a new head must produce another — a wrong implementation that keys only on
+/// the trigger fires once and then never again.
+#[tokio::test]
+async fn a_trigger_fires_once_per_head_and_again_on_the_next() {
+    use crate::code::{
+        CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerFire, CodeTriggerId,
+    };
+    use crate::db::code::{
+        insert_trigger_fire, list_fires_for_workspace, list_repos, save_trigger,
+    };
+
+    let (_dir, store, session_id, _turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let repo_id = list_repos(&store, &owner).await.unwrap()[0].id;
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+
+    let trigger = CodeTrigger {
+        id: CodeTriggerId::new(),
+        owner: owner.clone(),
+        repo_id,
+        condition: CodeTriggerCondition::ChecksFailed,
+        action: CodeTriggerAction::Deliver,
+        enabled: true,
+        created_at: now(),
+        updated_at: now(),
+    };
+    save_trigger(&store, &trigger).await.unwrap();
+
+    let fire = CodeTriggerFire {
+        trigger_id: trigger.id,
+        owner: owner.clone(),
+        workspace_id,
+        pr_number: 42,
+        head_sha: "aaaa1111".to_owned(),
+        fired_at: now(),
+    };
+    assert!(insert_trigger_fire(&store, &fire).await.unwrap());
+    assert!(
+        !insert_trigger_fire(&store, &fire).await.unwrap(),
+        "the same head fired twice"
+    );
+
+    let next_head = CodeTriggerFire {
+        head_sha: "bbbb2222".to_owned(),
+        fired_at: now() + chrono::Duration::minutes(1),
+        ..fire.clone()
+    };
+    assert!(
+        insert_trigger_fire(&store, &next_head).await.unwrap(),
+        "a new head did not fire"
+    );
+
+    let fires = list_fires_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(fires.len(), 2);
+}
+
+/// Deleting a trigger takes its fire rows with it. Leaving them would let a
+/// re-armed trigger inherit the old one's suppression and stay silent on a
+/// head it never actually fired for.
+#[tokio::test]
+async fn deleting_a_trigger_clears_its_fires() {
+    use crate::code::{
+        CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerFire, CodeTriggerId,
+    };
+    use crate::db::code::{
+        delete_trigger, insert_trigger_fire, list_fires_for_workspace, list_repos, save_trigger,
+    };
+
+    let (_dir, store, session_id, _turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let repo_id = list_repos(&store, &owner).await.unwrap()[0].id;
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+
+    let trigger = CodeTrigger {
+        id: CodeTriggerId::new(),
+        owner: owner.clone(),
+        repo_id,
+        condition: CodeTriggerCondition::Conflicts,
+        action: CodeTriggerAction::Deliver,
+        enabled: true,
+        created_at: now(),
+        updated_at: now(),
+    };
+    save_trigger(&store, &trigger).await.unwrap();
+    insert_trigger_fire(
+        &store,
+        &CodeTriggerFire {
+            trigger_id: trigger.id,
+            owner: owner.clone(),
+            workspace_id,
+            pr_number: 42,
+            head_sha: "aaaa1111".to_owned(),
+            fired_at: now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(delete_trigger(&store, &owner, trigger.id).await.unwrap());
+    assert!(list_fires_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .is_empty());
 }

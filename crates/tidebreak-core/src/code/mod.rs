@@ -101,6 +101,10 @@ code_id_type!(
     /// Identifies one durable watch task on a workspace's pull request.
     CodeWatchId
 );
+code_id_type!(
+    /// Identifies one durable trigger rule bound to a repository.
+    CodeTriggerId
+);
 
 /// Which external agent engine a session is bound to.
 ///
@@ -903,6 +907,255 @@ pub struct CodeApproval {
     pub decided_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// A pull-request fact a trigger fires on.
+///
+/// The vocabulary is the watch classifier's, minus the states nothing can act
+/// on. A trigger fires on the *transition* into one of these, once per head
+/// SHA — see [`CodeTriggerFire`] (decision 60).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeTriggerCondition {
+    /// At least one check reported a failure.
+    ChecksFailed,
+    /// The host reports the branch conflicting with its base.
+    Conflicts,
+    /// A reviewer requested changes.
+    ChangesRequested,
+    /// A review or repository requirement is outstanding.
+    ReviewRequired,
+    /// The branch is behind its base.
+    Behind,
+    /// Mergeable and clean: nothing is outstanding.
+    ReadyToMerge,
+    /// The pull request merged.
+    Merged,
+    /// The pull request closed without merging.
+    Closed,
+}
+
+impl CodeTriggerCondition {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChecksFailed => "checks_failed",
+            Self::Conflicts => "conflicts",
+            Self::ChangesRequested => "changes_requested",
+            Self::ReviewRequired => "review_required",
+            Self::Behind => "behind",
+            Self::ReadyToMerge => "ready_to_merge",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "checks_failed" => Some(Self::ChecksFailed),
+            "conflicts" => Some(Self::Conflicts),
+            "changes_requested" => Some(Self::ChangesRequested),
+            "review_required" => Some(Self::ReviewRequired),
+            "behind" => Some(Self::Behind),
+            "ready_to_merge" => Some(Self::ReadyToMerge),
+            "merged" => Some(Self::Merged),
+            "closed" => Some(Self::Closed),
+            _ => None,
+        }
+    }
+
+    /// Every condition, for enumerating the arming surface.
+    #[must_use]
+    pub const fn all() -> [Self; 8] {
+        [
+            Self::ChecksFailed,
+            Self::Conflicts,
+            Self::ChangesRequested,
+            Self::ReviewRequired,
+            Self::Behind,
+            Self::ReadyToMerge,
+            Self::Merged,
+            Self::Closed,
+        ]
+    }
+
+    /// One clause naming the fact, for the message a fire composes.
+    ///
+    /// Content discipline follows `fix_turn_instruction`: name the fact, not
+    /// the logs.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::ChecksFailed => "checks are failing",
+            Self::Conflicts => "the branch conflicts with its base",
+            Self::ChangesRequested => "a reviewer requested changes",
+            Self::ReviewRequired => "a review or repository requirement is outstanding",
+            Self::Behind => "the branch is behind its base",
+            Self::ReadyToMerge => "the pull request is ready to merge",
+            Self::Merged => "the pull request merged",
+            Self::Closed => "the pull request closed without merging",
+        }
+    }
+
+    /// True when the condition ends the pull request's life.
+    ///
+    /// A terminal condition fires once and the trigger stops tracking that
+    /// pull request; there is no later head SHA to fire against.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Merged | Self::Closed)
+    }
+}
+
+/// What a trigger does when its condition fires.
+///
+/// Two actions in v1. Merge, auto-merge, and mark-ready stay with the user
+/// (decision 42), and shell commands and webhooks need their own record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeTriggerAction {
+    /// Deliver a bounded message to the workspace's active session.
+    Deliver,
+    /// Raise a notification and leave the session alone.
+    Notify,
+}
+
+impl CodeTriggerAction {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deliver => "deliver",
+            Self::Notify => "notify",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "deliver" => Some(Self::Deliver),
+            "notify" => Some(Self::Notify),
+            _ => None,
+        }
+    }
+}
+
+/// A standing rule binding one pull-request condition to one action.
+///
+/// Triggers bind per repository rather than per workspace: a trigger is a
+/// preference about how the user wants to be reached, not a decision about one
+/// pull request the way a watch is (decision 60). Every workspace on the
+/// repository that has a pull request is in scope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeTrigger {
+    /// Stable id.
+    pub id: CodeTriggerId,
+    /// Principal this trigger belongs to.
+    pub owner: crate::OwnerId,
+    /// Repository whose workspaces are in scope.
+    pub repo_id: RepoId,
+    /// The fact this trigger fires on.
+    pub condition: CodeTriggerCondition,
+    /// What firing does.
+    pub action: CodeTriggerAction,
+    /// False while the user has the trigger switched off; rows are kept so the
+    /// scoping survives a toggle.
+    pub enabled: bool,
+    /// Creation time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Last write.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One trigger's firing record against one pull request head.
+///
+/// The fingerprint that makes a trigger fire on an edge rather than on every
+/// sweep. A row exists once the trigger has fired for that `(pull request,
+/// head SHA)`; finding one is what suppresses the next sweep's fire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeTriggerFire {
+    /// Trigger that fired.
+    pub trigger_id: CodeTriggerId,
+    /// Principal the fire belongs to, denormalized from its trigger.
+    pub owner: crate::OwnerId,
+    /// Workspace whose pull request it fired against.
+    pub workspace_id: WorkspaceId,
+    /// Pull request number on the host.
+    pub pr_number: u64,
+    /// Head SHA the fire was fingerprinted against.
+    ///
+    /// A digest with no head SHA never fires: without it the fire cannot be
+    /// bounded, and re-firing every sweep is worse than not firing.
+    pub head_sha: String,
+    /// When it fired.
+    pub fired_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Classify a digest into the condition a trigger would fire on, if any.
+///
+/// Generalizes the watch's `assess` over the same digest and the same host
+/// tokens, and keeps its precedence: the most actionable fact wins, so a
+/// conflicting branch reports conflicts rather than the failing checks that
+/// conflict caused. Returns `None` for a digest nothing is armed for — a draft,
+/// or a pull request merely waiting on pending checks.
+#[must_use]
+pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerCondition> {
+    let state = pr.state.trim().to_ascii_lowercase();
+    if pr.merged == Some(true) || state == "merged" {
+        return Some(CodeTriggerCondition::Merged);
+    }
+    if state == "closed" {
+        return Some(CodeTriggerCondition::Closed);
+    }
+    // A draft is the author's "not yet". Nothing fires on it, the way the
+    // watch parks rather than acting.
+    if pr.draft == Some(true) {
+        return None;
+    }
+    let mergeable = pr.mergeable.as_deref().map(str::trim).unwrap_or("");
+    let merge_state = pr
+        .merge_state_status
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    if mergeable == "conflicting" || merge_state == "dirty" {
+        return Some(CodeTriggerCondition::Conflicts);
+    }
+    let review = pr.review_decision.as_deref().map(str::trim).unwrap_or("");
+    if review == "changes_requested" {
+        return Some(CodeTriggerCondition::ChangesRequested);
+    }
+    let checks = pr.checks.as_deref().unwrap_or(&[]);
+    if checks
+        .iter()
+        .any(|check| check.bucket == PullRequestCheckBucket::Fail)
+    {
+        return Some(CodeTriggerCondition::ChecksFailed);
+    }
+    if merge_state == "behind" {
+        return Some(CodeTriggerCondition::Behind);
+    }
+    if merge_state == "blocked" || merge_state == "unstable" || review == "review_required" {
+        return Some(CodeTriggerCondition::ReviewRequired);
+    }
+    // Pending checks are the "not yet" the watch waits through. Reporting
+    // ready here would fire before the checks that decide it have reported.
+    if checks
+        .iter()
+        .any(|check| check.bucket == PullRequestCheckBucket::Pending)
+    {
+        return None;
+    }
+    if mergeable == "mergeable" && merge_state == "clean" {
+        return Some(CodeTriggerCondition::ReadyToMerge);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,5 +1174,114 @@ mod tests {
         assert_eq!(HarnessKind::ClaudeCode.as_str(), "claude_code");
         assert_eq!(HarnessKind::from_str("grok"), Some(HarnessKind::Grok));
         assert_eq!(HarnessKind::ClaudeCode.tier(), HarnessTier::Reference);
+    }
+
+    fn digest() -> PullRequestDigest {
+        PullRequestDigest {
+            number: 1,
+            url: None,
+            state: "open".to_owned(),
+            title: None,
+            checks_summary: None,
+            checks: None,
+            draft: None,
+            merged: None,
+            review_decision: None,
+            mergeable: None,
+            merge_state_status: None,
+            head_branch: None,
+            base_branch: None,
+            head_sha: Some("abc123".to_owned()),
+            auto_merge_enabled: None,
+            in_merge_queue: None,
+        }
+    }
+
+    fn check(bucket: PullRequestCheckBucket) -> PullRequestCheck {
+        PullRequestCheck {
+            name: "ci".to_owned(),
+            bucket,
+            detail: None,
+            url: None,
+        }
+    }
+
+    #[test]
+    fn trigger_condition_tokens_round_trip() {
+        for condition in CodeTriggerCondition::all() {
+            assert_eq!(
+                CodeTriggerCondition::from_str(condition.as_str()),
+                Some(condition),
+                "{} did not round-trip",
+                condition.as_str()
+            );
+        }
+    }
+
+    /// Conflicts outrank the failing checks a conflict causes. Classifying on
+    /// checks first would wake an agent to fix tests that pass once the
+    /// conflict is resolved.
+    #[test]
+    fn conflicts_outrank_failing_checks() {
+        let pr = PullRequestDigest {
+            mergeable: Some("conflicting".to_owned()),
+            checks: Some(vec![check(PullRequestCheckBucket::Fail)]),
+            ..digest()
+        };
+        assert_eq!(
+            classify_trigger_condition(&pr),
+            Some(CodeTriggerCondition::Conflicts)
+        );
+    }
+
+    /// A draft is the author's "not yet". Nothing fires on it, however bad the
+    /// checks look.
+    #[test]
+    fn a_draft_fires_nothing() {
+        let pr = PullRequestDigest {
+            draft: Some(true),
+            checks: Some(vec![check(PullRequestCheckBucket::Fail)]),
+            ..digest()
+        };
+        assert_eq!(classify_trigger_condition(&pr), None);
+    }
+
+    /// Ready must wait for the checks that decide it. A classifier that
+    /// reported ready while checks were still pending would fire on every
+    /// pull request seconds after it opened.
+    #[test]
+    fn pending_checks_are_not_ready() {
+        let pr = PullRequestDigest {
+            mergeable: Some("mergeable".to_owned()),
+            merge_state_status: Some("clean".to_owned()),
+            checks: Some(vec![check(PullRequestCheckBucket::Pending)]),
+            ..digest()
+        };
+        assert_eq!(classify_trigger_condition(&pr), None);
+
+        let settled = PullRequestDigest {
+            checks: Some(vec![check(PullRequestCheckBucket::Pass)]),
+            ..pr
+        };
+        assert_eq!(
+            classify_trigger_condition(&settled),
+            Some(CodeTriggerCondition::ReadyToMerge)
+        );
+    }
+
+    /// A merged pull request classifies as merged even while the host still
+    /// reports the stale open state it had a moment ago.
+    #[test]
+    fn merged_wins_over_a_stale_open_state() {
+        let pr = PullRequestDigest {
+            merged: Some(true),
+            ..digest()
+        };
+        assert_eq!(
+            classify_trigger_condition(&pr),
+            Some(CodeTriggerCondition::Merged)
+        );
+        assert!(CodeTriggerCondition::Merged.is_terminal());
+        assert!(!CodeTriggerCondition::ChecksFailed.is_terminal());
     }
 }

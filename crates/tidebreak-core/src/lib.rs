@@ -173,16 +173,18 @@ pub use client_tools::{
     READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 pub use code::{
-    bound_subagents, ApprovalDecisionKind, BoundedError, CapLevel, CheckpointHint, CodeApproval,
-    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeRepo, CodeSession,
-    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeSubagentSummary, CodeTerminalId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
-    CodeUsage, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus,
-    Diffstat, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
-    HarnessTier, PullRequestCheck, PullRequestCheckBucket, PullRequestComment,
-    PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail,
-    ToolOutcome, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
-    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
+    bound_subagents, classify_trigger_condition, ApprovalDecisionKind, BoundedError, CapLevel,
+    CheckpointHint, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent,
+    CodeRepo, CodeSession, CodeSessionActivity, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTerminalId, CodeTrigger,
+    CodeTriggerAction, CodeTriggerCondition, CodeTriggerFire, CodeTriggerId, CodeTurn,
+    CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatch, CodeWatchId,
+    CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FileChangeKind, HarnessCaps,
+    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, PullRequestCheck,
+    PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind, PullRequestDigest,
+    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS,
+    MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

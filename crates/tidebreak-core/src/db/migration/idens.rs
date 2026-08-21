@@ -922,3 +922,27 @@ pub(crate) enum CodeWatch {
     UpdatedAt,
     Owner,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeTrigger {
+    Table,
+    Id,
+    RepoId,
+    Condition,
+    Action,
+    Enabled,
+    CreatedAt,
+    UpdatedAt,
+    Owner,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeTriggerFire {
+    Table,
+    TriggerId,
+    WorkspaceId,
+    PrNumber,
+    HeadSha,
+    FiredAt,
+    Owner,
+}

@@ -1365,6 +1365,36 @@ CREATE TABLE "code_watch" (
 
 CREATE INDEX "idx_code_watch_workspace" ON "code_watch" ("workspace_id");
 
+CREATE TABLE "code_trigger" (
+    "id" uuid NOT NULL PRIMARY KEY,
+    "owner" text NOT NULL DEFAULT 'local',
+    "repo_id" uuid NOT NULL,
+    "condition" text NOT NULL,
+    "action" text NOT NULL,
+    "enabled" bool NOT NULL DEFAULT TRUE,
+    "created_at" timestamp with time zone NOT NULL,
+    "updated_at" timestamp with time zone NOT NULL, CONSTRAINT "fk_code_trigger_repo" FOREIGN KEY ("repo_id") REFERENCES "code_repo" ("id"),
+    CHECK ("condition" IN ('checks_failed', 'conflicts', 'changes_requested', 'review_required', 'behind', 'ready_to_merge', 'merged', 'closed')),
+    CHECK ("action" IN ('deliver', 'notify'))
+);
+
+CREATE INDEX "idx_code_trigger_repo" ON "code_trigger" ("repo_id");
+CREATE UNIQUE INDEX "uq_code_trigger_rule" ON "code_trigger" ("owner", "repo_id", "condition");
+
+CREATE TABLE "code_trigger_fire" (
+    "owner" text NOT NULL DEFAULT 'local',
+    "trigger_id" uuid NOT NULL,
+    "workspace_id" uuid NOT NULL,
+    "head_sha" text NOT NULL,
+    "pr_number" bigint NOT NULL,
+    "fired_at" timestamp with time zone NOT NULL, PRIMARY KEY ("trigger_id",
+    "workspace_id",
+    "head_sha"), CONSTRAINT "fk_code_trigger_fire_trigger" FOREIGN KEY ("trigger_id") REFERENCES "code_trigger" ("id") ON DELETE CASCADE, CONSTRAINT "fk_code_trigger_fire_workspace" FOREIGN KEY ("workspace_id") REFERENCES "code_workspace" ("id"),
+    CHECK ("pr_number" >= 1)
+);
+
+CREATE INDEX "idx_code_trigger_fire_workspace" ON "code_trigger_fire" ("workspace_id");
+
 INSERT INTO advisory_lock (name) VALUES ('turn_claim') ON CONFLICT DO NOTHING;
 INSERT INTO advisory_lock (name) VALUES ('agent_run_claim') ON CONFLICT DO NOTHING;
 INSERT INTO advisory_lock (name) VALUES ('turn_agent_run_wait') ON CONFLICT DO NOTHING;
