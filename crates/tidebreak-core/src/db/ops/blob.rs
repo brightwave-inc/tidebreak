@@ -229,20 +229,22 @@ pub(in crate::db) async fn claim(
             "blob retirement lease expiry must be after claim time".into(),
         ));
     }
+
+    // Idle fast path. The locked scan below is still authoritative, but a scan
+    // with no claimable retirement has nothing it can decide. Taking the no-op
+    // write lock first makes every idle worker poll join SQLite's single-writer
+    // queue and hold a pooled connection while it waits. A candidate that
+    // appears after this read is handled by the worker wake or the next bounded
+    // poll.
+    if !any_claimable_on(&store.conn, now).await? {
+        return Ok(None);
+    }
+
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_write_lock(&transaction).await?;
         let due = entities::blob_retirement::Entity::find()
-            .filter(entities::blob_retirement::Column::Status.is_in([
-                BlobRetirementStatus::Queued.as_str(),
-                BlobRetirementStatus::RetryWait.as_str(),
-            ]))
-            .filter(entities::blob_retirement::Column::AvailableAt.lte(now))
-            .filter(
-                sea_orm::sea_query::Expr::col(entities::blob_retirement::Column::AttemptCount).lt(
-                    sea_orm::sea_query::Expr::col(entities::blob_retirement::Column::MaxAttempts),
-                ),
-            )
+            .filter(due_candidate_condition(now))
             .order_by_asc(entities::blob_retirement::Column::AvailableAt)
             .order_by_asc(entities::blob_retirement::Column::CreatedAt)
             .order_by_asc(entities::blob_retirement::Column::BlobId)
@@ -250,11 +252,7 @@ pub(in crate::db) async fn claim(
             .await
             .map_err(store_err)?;
         let expired = entities::blob_retirement::Entity::find()
-            .filter(
-                entities::blob_retirement::Column::Status
-                    .eq(BlobRetirementStatus::Running.as_str()),
-            )
-            .filter(entities::blob_retirement::Column::LeaseExpiresAt.lte(now))
+            .filter(expired_candidate_condition(now))
             .order_by_asc(entities::blob_retirement::Column::LeaseExpiresAt)
             .order_by_asc(entities::blob_retirement::Column::CreatedAt)
             .order_by_asc(entities::blob_retirement::Column::BlobId)
@@ -424,6 +422,42 @@ pub(in crate::db) async fn claim(
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(claimed));
     }
+}
+
+fn due_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(entities::blob_retirement::Column::Status.is_in([
+            BlobRetirementStatus::Queued.as_str(),
+            BlobRetirementStatus::RetryWait.as_str(),
+        ]))
+        .add(entities::blob_retirement::Column::AvailableAt.lte(now))
+        .add(
+            sea_orm::sea_query::Expr::col(entities::blob_retirement::Column::AttemptCount).lt(
+                sea_orm::sea_query::Expr::col(entities::blob_retirement::Column::MaxAttempts),
+            ),
+        )
+}
+
+fn expired_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(entities::blob_retirement::Column::Status.eq(BlobRetirementStatus::Running.as_str()))
+        .add(entities::blob_retirement::Column::LeaseExpiresAt.lte(now))
+}
+
+async fn any_claimable_on<C>(conn: &C, now: chrono::DateTime<Utc>) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    Ok(entities::blob_retirement::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(due_candidate_condition(now))
+                .add(expired_candidate_condition(now)),
+        )
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some())
 }
 
 pub(in crate::db) async fn heartbeat(
