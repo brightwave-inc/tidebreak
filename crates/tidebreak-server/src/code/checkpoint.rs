@@ -17,6 +17,11 @@
 //! session reaches turn 1; a workspace-keyed ref let one sibling's snapshot
 //! overwrite another's.
 //!
+//! Ordinal 0 is the session's start baseline: the worktree as it stood when
+//! that session was created. A first turn diffs against the baseline rather
+//! than against the repo's base ref, so whatever a sibling session already
+//! changed in the shared worktree stays out of this session's turn 1.
+//!
 //! Diffs are produced here, bounded in bytes and file count, with truncation
 //! marked on the payload. The renderer never runs git.
 
@@ -48,6 +53,15 @@ pub(crate) const MAX_DIFF_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_DIFF_FILES: usize = 64;
 
 const REF_PREFIX: &str = "refs/tidebreak/checkpoints";
+
+/// Ordinal of a session's start baseline, one below its first turn.
+///
+/// Numbering the baseline keeps it in the same ref path as the session's
+/// checkpoints, so [`previous_checkpoint_oid`] resolves `ordinal - 1` for
+/// turn 1 the way it does for every later turn, and both
+/// [`delete_workspace_refs`] and [`sweep_orphaned_refs`] reap it by prefix
+/// along with the rest of the workspace's refs.
+const BASELINE_ORDINAL: i64 = 0;
 
 /// Byte and file-count caps for a produced diff or file list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +144,32 @@ pub(crate) fn checkpoint_ref(
     ordinal: i64,
 ) -> String {
     format!("{REF_PREFIX}/{workspace_id}/{session_id}/{ordinal}")
+}
+
+/// Hidden ref for where one session started.
+pub(crate) fn session_baseline_ref(workspace_id: WorkspaceId, session_id: CodeSessionId) -> String {
+    checkpoint_ref(workspace_id, session_id, BASELINE_ORDINAL)
+}
+
+/// Record where a session starts: the worktree as it stood at that moment.
+///
+/// A workspace holds several sessions over one worktree (decision 0055), so
+/// the base branch is the wrong `from` for a session's first turn — it credits
+/// this session with every edit a sibling made before it existed. The baseline
+/// is that `from`.
+///
+/// Call this before the session can take a turn. Failure is not fatal: a
+/// session with no baseline falls back to `merge_base(base_ref)`, which is
+/// what every first turn used to diff against and is still the same tree for
+/// the only session in a fresh workspace.
+pub(crate) async fn record_session_baseline(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    session_id: CodeSessionId,
+) -> Result<String, CheckpointError> {
+    let r#ref = session_baseline_ref(workspace_id, session_id);
+    write_snapshot_ref(worktree, &r#ref, None, "session baseline").await?;
+    Ok(r#ref)
 }
 
 /// After a turn reaches any terminal status, snapshot the worktree and
@@ -238,31 +278,11 @@ pub(crate) async fn record_checkpoint(
     base_ref: &str,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
     let r#ref = checkpoint_ref(workspace_id, session_id, ordinal);
-    let tree = snapshot_tree(worktree).await?;
-    let parent = match previous_oid {
-        Some(oid) => oid.to_owned(),
-        None => git_text(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
-            .await
-            .map_err(CheckpointError::internal)?,
-    };
     // `checkpoint turn <n>` stays the leading shape; the status is appended so
     // `git log` on the hidden refs distinguishes a completed turn from one
     // that failed or was interrupted. Nothing parses this message.
     let message = format!("checkpoint turn {ordinal} ({})", status.as_str());
-    let commit = git_text(
-        worktree,
-        &["commit-tree", &tree, "-p", &parent, "-m", &message],
-        GIT_TIMEOUT,
-    )
-    .await
-    .map_err(CheckpointError::internal)?;
-    git_text(
-        worktree,
-        &["update-ref", "--no-deref", &r#ref, &commit],
-        GIT_TIMEOUT,
-    )
-    .await
-    .map_err(CheckpointError::internal)?;
+    let commit = write_snapshot_ref(worktree, &r#ref, previous_oid, &message).await?;
 
     let from = match previous_oid {
         Some(oid) => oid.to_owned(),
@@ -273,6 +293,41 @@ pub(crate) async fn record_checkpoint(
         checkpoint_ref: r#ref,
         diffstat: files.stat,
     })
+}
+
+/// Snapshot the worktree, commit it, and move `r#ref` onto the commit.
+///
+/// The commit's parent is `parent_oid`, or `HEAD` when there is none, so a
+/// session's refs form a chain: baseline, then one commit per turn. Returns
+/// the commit oid.
+async fn write_snapshot_ref(
+    worktree: &Path,
+    r#ref: &str,
+    parent_oid: Option<&str>,
+    message: &str,
+) -> Result<String, CheckpointError> {
+    let tree = snapshot_tree(worktree).await?;
+    let parent = match parent_oid {
+        Some(oid) => oid.to_owned(),
+        None => git_text(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await
+            .map_err(CheckpointError::internal)?,
+    };
+    let commit = git_text(
+        worktree,
+        &["commit-tree", &tree, "-p", &parent, "-m", message],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    git_text(
+        worktree,
+        &["update-ref", "--no-deref", r#ref, &commit],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    Ok(commit)
 }
 
 /// Changed files between two trees or a tree and the live worktree snapshot.
@@ -470,6 +525,9 @@ pub(crate) async fn merge_base(worktree: &Path, base_ref: &str) -> Result<String
 }
 
 /// Delete every checkpoint ref belonging to one workspace.
+///
+/// The workspace stays first in the ref path, so one prefix covers every
+/// session's turns and its start baseline.
 pub(crate) async fn delete_workspace_refs(
     repo_root: &Path,
     workspace_id: WorkspaceId,
@@ -569,13 +627,23 @@ pub(crate) async fn resolve_diff_range(
     }
 }
 
+/// The oid a turn chains from: its diff base and its checkpoint's parent.
+///
+/// Turn `n` resolves turn `n - 1` in the same session, and turn 1 resolves
+/// ordinal 0 — the session's start baseline — so its diff holds what this
+/// session changed rather than everything sitting in the shared worktree.
+///
+/// `None` means no ref answered and the caller falls back to
+/// `merge_base(base_ref)`: a session created before baselines were recorded
+/// has none, and for the only session in a fresh workspace the baseline and
+/// the merge base are the same tree.
 async fn previous_checkpoint_oid(
     worktree: &Path,
     workspace: &CodeWorkspace,
     db: &DbStore,
     turn: &CodeTurn,
 ) -> Result<Option<String>, CheckpointError> {
-    if turn.ordinal <= 1 {
+    if turn.ordinal <= BASELINE_ORDINAL {
         return Ok(None);
     }
     let previous_ref = checkpoint_ref(workspace.id, turn.session_id, turn.ordinal - 1);
@@ -590,6 +658,8 @@ async fn previous_checkpoint_oid(
             return Ok(Some(oid));
         }
     }
+    // The ref is gone: fall back to the last turn row that still names a
+    // checkpoint. Turn 1 has no earlier turn, so it lands on the base ref.
     let turns = list_turns(db, &workspace.owner, turn.session_id)
         .await
         .map_err(|err| CheckpointError::internal(err.to_string()))?;
@@ -1644,6 +1714,200 @@ mod tests {
             !diff.diff.contains("from-failed.txt"),
             "the failed turn's edits belong to the failed turn: {}",
             diff.diff
+        );
+    }
+
+    /// A second session over the same worktree, the shape record 55 allows.
+    async fn seed_sibling_session(db: &Arc<DbStore>, sibling: &CodeSession) -> CodeSession {
+        let session = CodeSession {
+            id: CodeSessionId::new(),
+            harness_kind: HarnessKind::Codex,
+            created_at: chrono::Utc::now(),
+            ..sibling.clone()
+        };
+        insert_session(db, &session).await.unwrap();
+        session
+    }
+
+    async fn oid_of(worktree: &Path, revision: &str) -> String {
+        git_text(worktree, &["rev-parse", revision], GIT_TIMEOUT)
+            .await
+            .unwrap()
+    }
+
+    /// A workspace holds several sessions over one worktree (record 55), so a
+    /// session's first turn cannot mean "the worktree against the base
+    /// branch": that credits this session with whatever a sibling already
+    /// changed. Measured before the baseline existed — a session that edited
+    /// one file reported `{files: 2, insertions: 11, deletions: 1}`.
+    #[tokio::test]
+    async fn a_siblings_edits_stay_out_of_a_later_sessions_first_turn() {
+        let (_dir, repo) = init_repo();
+        std::fs::create_dir_all(repo.join("receipts")).unwrap();
+        std::fs::write(repo.join("receipts/__init__.py"), "").unwrap();
+        std::fs::write(
+            repo.join("receipts/parser.py"),
+            "def parse(line):\n    return line\n",
+        )
+        .unwrap();
+        run(&repo, &["git", "add", "receipts"]);
+        run(&repo, &["git", "commit", "-m", "receipts"]);
+        let tree = add_worktree(&repo, "shared");
+        let (db, bus, earlier) = seed_session(&repo, &tree).await;
+        record_session_baseline(&tree, earlier.workspace_id, earlier.id)
+            .await
+            .unwrap();
+
+        // The session already in the workspace takes a turn: one line.
+        std::fs::write(
+            tree.join("receipts/__init__.py"),
+            "from .parser import parse\n",
+        )
+        .unwrap();
+        let mut theirs = seed_turn(&db, &earlier, 1, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &earlier, &mut theirs).await;
+
+        // A second session starts on the worktree the first one has edited.
+        let later = seed_sibling_session(&db, &earlier).await;
+        record_session_baseline(&tree, later.workspace_id, later.id)
+            .await
+            .unwrap();
+
+        // Its first turn rewrites one file: ten lines in, one out.
+        let body: String = (1..=10).map(|i| format!("    step {i}\n")).collect();
+        std::fs::write(
+            tree.join("receipts/parser.py"),
+            format!("def parse(line):\n{body}"),
+        )
+        .unwrap();
+        let mut mine = seed_turn(&db, &later, 1, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &later, &mut mine).await;
+
+        let stat = mine.diffstat.clone().expect("turn 1 records a diffstat");
+        assert_eq!(
+            (stat.files, stat.insertions, stat.deletions),
+            (1, 10, 1),
+            "turn 1 must count only this session's edit: {stat:?}"
+        );
+
+        // The read path agrees: `code diff --turn` resolves the same range.
+        let workspace = get_workspace(&db, &later.owner, later.workspace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, from, to, _) = resolve_diff_range(&db, &workspace, Some(mine.id))
+            .await
+            .unwrap();
+        let diff = produce_diff(&tree, &from, &to, None, DiffBounds::default())
+            .await
+            .unwrap();
+        assert!(diff.diff.contains("receipts/parser.py"), "{}", diff.diff);
+        assert!(
+            !diff.diff.contains("__init__.py"),
+            "the sibling's file belongs to the sibling: {}",
+            diff.diff
+        );
+
+        // The sibling keeps its own turn, unchanged.
+        let theirs = theirs.diffstat.clone().unwrap();
+        assert_eq!((theirs.files, theirs.insertions), (1, 1), "{theirs:?}");
+    }
+
+    /// The only session in a fresh workspace is unchanged: its baseline and
+    /// the merge base are the same tree, so turn 1 still reports everything
+    /// between the base branch and the worktree.
+    #[tokio::test]
+    async fn a_lone_sessions_first_turn_still_covers_the_workspace() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "lone");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        record_session_baseline(&tree, session.workspace_id, session.id)
+            .await
+            .unwrap();
+
+        std::fs::write(tree.join("README.md"), "hello world\n").unwrap();
+        std::fs::write(tree.join("new.txt"), "untracked\n").unwrap();
+        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut turn).await;
+
+        let stat = turn.diffstat.clone().unwrap();
+        let against_base = list_changed_files(
+            &tree,
+            &merge_base(&tree, "main").await.unwrap(),
+            turn.checkpoint_ref.as_ref().unwrap(),
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stat, against_base.stat, "{stat:?}");
+        assert_eq!(stat.files, 2);
+    }
+
+    /// A session created before baselines were recorded has none. Turn 1
+    /// falls back to the base ref rather than failing.
+    #[tokio::test]
+    async fn a_session_without_a_baseline_falls_back_to_the_base_ref() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "no-baseline");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+
+        std::fs::write(tree.join("a.txt"), "one\n").unwrap();
+        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut turn).await;
+
+        let r#ref = turn.checkpoint_ref.clone().expect("turn 1 keeps its ref");
+        let baseline = session_baseline_ref(session.workspace_id, session.id);
+        assert!(
+            git_text(&tree, &["rev-parse", "--verify", &baseline], GIT_TIMEOUT)
+                .await
+                .is_err(),
+            "this session has no baseline"
+        );
+        assert_eq!(turn.diffstat.clone().unwrap().files, 1);
+        assert_eq!(
+            oid_of(&tree, &format!("{ref}^")).await,
+            oid_of(&tree, "HEAD").await,
+            "with no baseline the checkpoint parents off HEAD"
+        );
+    }
+
+    /// Turns after the first are untouched: each one chains off the previous
+    /// turn's checkpoint, which itself chains off the baseline.
+    #[tokio::test]
+    async fn later_turns_chain_off_the_previous_checkpoint() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "chain-from-baseline");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let baseline = record_session_baseline(&tree, session.workspace_id, session.id)
+            .await
+            .unwrap();
+
+        std::fs::write(tree.join("one.txt"), "one\n").unwrap();
+        let mut first = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut first).await;
+        let first_ref = first.checkpoint_ref.clone().unwrap();
+
+        std::fs::write(tree.join("two.txt"), "two\n").unwrap();
+        let mut second = seed_turn(&db, &session, 2, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut second).await;
+        let second_ref = second.checkpoint_ref.clone().unwrap();
+
+        assert_eq!(second.diffstat.clone().unwrap().files, 1);
+        let diff = produce_diff(&tree, &first_ref, &second_ref, None, DiffBounds::default())
+            .await
+            .unwrap();
+        assert!(diff.diff.contains("two.txt"), "{}", diff.diff);
+        assert!(!diff.diff.contains("one.txt"), "{}", diff.diff);
+
+        assert_eq!(
+            oid_of(&tree, &format!("{second_ref}^")).await,
+            oid_of(&tree, &first_ref).await,
+            "turn 2 parents off turn 1"
+        );
+        assert_eq!(
+            oid_of(&tree, &format!("{first_ref}^")).await,
+            oid_of(&tree, &baseline).await,
+            "turn 1 parents off the baseline"
         );
     }
 
