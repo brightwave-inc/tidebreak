@@ -38,11 +38,10 @@ use crate::model::{
     AgentRunTier, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
     BlobRetirementStatus, Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, PermissionMode, Project, QueuedTurn,
-    ReasoningEffort, RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall,
-    SandboxToolCallParkEntry, SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution,
-    TurnAdmissionLease, TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun,
-    MAX_ROOT_ATTACHMENTS,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedTurn, ReasoningEffort,
+    RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
+    SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnAdmissionLease,
+    TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(test)]
 use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
@@ -66,6 +65,7 @@ use crate::storage::{
     ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, Store,
     SubmitAgentRunResultOutcome, TurnLeaseFence,
 };
+use crate::PermissionMode;
 
 mod ops;
 

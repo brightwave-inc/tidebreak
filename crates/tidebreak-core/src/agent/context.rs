@@ -11,7 +11,7 @@ use crate::context;
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, MessageId};
 use crate::image::{ImageAttachments, ImageData};
-use crate::model::{Chat, PermissionMode, Role};
+use crate::model::{Chat, Role};
 use crate::provider::{ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage};
 use crate::semantic_checkpoint::{
     merge_original_requests, original_requests_from_content, ContextCheckpoint,
@@ -19,6 +19,7 @@ use crate::semantic_checkpoint::{
     MAX_CONTEXT_CHECKPOINT_BYTES,
 };
 use crate::tool::ToolSpec;
+use crate::PermissionMode;
 
 use super::transcript::{
     checkpoint_is_projectable, project_checkpoint, rebuild_transcript_with_boundary,

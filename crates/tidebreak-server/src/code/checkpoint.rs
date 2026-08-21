@@ -945,8 +945,8 @@ mod tests {
         insert_repo, insert_session, insert_turn, insert_workspace, list_events, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
-        Attention, AttentionSource, CodePermissionMode, CodeRepo, CodeSessionKind,
-        CodeSessionLifecycle, CodeTurnId, CodeWorkspaceStatus, HarnessKind, OwnerId, RepoId,
+        Attention, AttentionSource, CodeRepo, CodeSessionKind, CodeSessionLifecycle, CodeTurnId,
+        CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, RepoId,
     };
 
     fn init_repo() -> (TempDir, PathBuf) {
@@ -1503,7 +1503,7 @@ mod tests {
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Running,

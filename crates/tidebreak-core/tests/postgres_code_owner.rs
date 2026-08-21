@@ -20,9 +20,9 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
-    DbStore, HarnessKind, OwnerId, RepoId, WorkspaceId,
+    CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
+    CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, DbStore, HarnessKind,
+    OwnerId, PermissionMode, RepoId, WorkspaceId,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -86,7 +86,7 @@ async fn seed_owner(
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
-            permission_mode: CodePermissionMode::Ask,
+            permission_mode: PermissionMode::Ask,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,

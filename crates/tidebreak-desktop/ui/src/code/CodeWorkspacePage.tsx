@@ -30,7 +30,7 @@ import type {
   Attention,
   CodeApprovalSnapshot,
   CodeForkTranscript,
-  CodePermissionMode,
+  PermissionMode,
   CodeRepoSnapshot,
   CodeSessionSnapshot,
   CodeSubagentStatus,
@@ -277,7 +277,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     useSensor(TabPointerSensor, { activationConstraint: { distance: 4 } }),
   );
   const [starting, setStarting] = useState(false);
-  const [createMode, setCreateMode] = useState<CodePermissionMode | null>(null);
+  const [createMode, setCreateMode] = useState<PermissionMode | null>(null);
   const [fileReveal, setFileReveal] = useState<{
     path: string;
     line: number;
@@ -446,7 +446,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   async function startSession(
     harness: HarnessKind,
-    permissionMode: CodePermissionMode,
+    permissionMode: PermissionMode,
     message: string,
     model?: string,
   ) {
@@ -1674,7 +1674,7 @@ function CodeSessionPane({
   );
   // Doctor caps decide what this engine's picker offers; without a doctor
   // row yet, show everything and let the server refuse.
-  const availableModes: CodePermissionMode[] = doctorEntry
+  const availableModes: PermissionMode[] = doctorEntry
     ? createPermissionModes(doctorEntry.caps)
     : ["plan", "ask", "auto", "allow"];
   const steeringSupported = doctorEntry?.caps.mid_turn_steering === "supported";
@@ -1773,7 +1773,7 @@ function CodeSessionPane({
     });
   }
 
-  async function changePermissionMode(mode: CodePermissionMode) {
+  async function changePermissionMode(mode: PermissionMode) {
     const previous = settings.permissionMode;
     setSettings((current) => ({ ...current, permissionMode: mode }));
     try {

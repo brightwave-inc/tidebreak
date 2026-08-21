@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 
 import type {
-  CodePermissionMode,
+  PermissionMode,
   CodeRepoSnapshot,
   CodeSessionSnapshot,
   CodeWorkspaceSnapshot,
@@ -124,8 +124,9 @@ export function NewWorkspaceDialog({
   const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
   const [pickedHarness, setPickedHarness] = useState<HarnessKind | null>(null);
-  const [permissionMode, setPermissionMode] =
-    useState<CodePermissionMode | null>(null);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode | null>(
+    null,
+  );
   const [creating, setCreating] = useState(false);
   const [model, setModel] = useState<string | undefined>();
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
@@ -427,7 +428,7 @@ export function NewWorkspaceDialog({
             <Select
               value={postedMode}
               onValueChange={(next) =>
-                setPermissionMode(next as CodePermissionMode)
+                setPermissionMode(next as PermissionMode)
               }
               disabled={creating || availableModes.length === 0}
             >

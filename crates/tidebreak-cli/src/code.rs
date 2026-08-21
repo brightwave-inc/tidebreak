@@ -14,8 +14,8 @@ use std::str::FromStr;
 use futures::StreamExt as _;
 use tidebreak_core::{
     AgentError, ApprovalDecisionKind, Attention, AttentionState, CapLevel, CodeApprovalId,
-    CodeApprovalKind, CodeEvent, CodePermissionMode, CodeSessionId, CodeSessionLifecycle,
-    CodeTurnId, HarnessCaps, HarnessKind, RepoId, Result, WorkspaceId,
+    CodeApprovalKind, CodeEvent, CodeSessionId, CodeSessionLifecycle, CodeTurnId, HarnessCaps,
+    HarnessKind, PermissionMode, RepoId, Result, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -138,7 +138,7 @@ pub enum Command {
         /// `None` means the doctor-driven default: ask when this engine's
         /// structured approvals are Supported, otherwise plan. An explicit
         /// `--mode` is passed through verbatim.
-        mode: Option<CodePermissionMode>,
+        mode: Option<PermissionMode>,
         format: OutputFormat,
     },
     SessionShow {
@@ -147,7 +147,7 @@ pub enum Command {
     },
     SessionMode {
         id: CodeSessionId,
-        mode: CodePermissionMode,
+        mode: PermissionMode,
         format: OutputFormat,
     },
     SessionReap {
@@ -781,20 +781,20 @@ async fn resolve_run_session(
 
 /// Desktop create default: Ask when the engine can honor it, otherwise the
 /// most autonomous non-bypass mode. Allow is an explicit `--mode`.
-fn default_create_permission_mode(caps: Option<&HarnessCaps>) -> CodePermissionMode {
+fn default_create_permission_mode(caps: Option<&HarnessCaps>) -> PermissionMode {
     match caps {
-        Some(caps) if caps.structured_approvals == CapLevel::Supported => CodePermissionMode::Ask,
-        Some(caps) if caps.auto_mode == CapLevel::Supported => CodePermissionMode::Auto,
-        Some(caps) if caps.plan_mode == CapLevel::Supported => CodePermissionMode::Plan,
-        _ => CodePermissionMode::Plan,
+        Some(caps) if caps.structured_approvals == CapLevel::Supported => PermissionMode::Ask,
+        Some(caps) if caps.auto_mode == CapLevel::Supported => PermissionMode::Auto,
+        Some(caps) if caps.plan_mode == CapLevel::Supported => PermissionMode::Plan,
+        _ => PermissionMode::Plan,
     }
 }
 
 async fn resolve_start_mode(
     client: &Client,
     harness: HarnessKind,
-    explicit: Option<CodePermissionMode>,
-) -> Result<(CodePermissionMode, Option<&'static str>)> {
+    explicit: Option<PermissionMode>,
+) -> Result<(PermissionMode, Option<&'static str>)> {
     if let Some(mode) = explicit {
         return Ok((mode, None));
     }
@@ -806,16 +806,16 @@ async fn resolve_start_mode(
         .map(|entry| &entry.caps);
     let mode = default_create_permission_mode(caps);
     let note = match mode {
-        CodePermissionMode::Plan => {
+        PermissionMode::Plan => {
             Some("starting in plan mode — approvals unavailable on this engine")
         }
-        CodePermissionMode::Auto => Some(
+        PermissionMode::Auto => Some(
             "starting in auto mode — this engine has no approval channel; every action proceeds without asking",
         ),
-        CodePermissionMode::Allow => Some(
+        PermissionMode::Allow => Some(
             "starting in allow mode — this engine's permission system is off; every action runs without asking",
         ),
-        CodePermissionMode::Ask => None,
+        PermissionMode::Ask => None,
     };
     Ok((mode, note))
 }
@@ -2014,7 +2014,7 @@ fn parse_session(cursor: &mut Cursor) -> std::result::Result<Command, String> {
             let raw = cursor
                 .next()
                 .ok_or_else(|| "expected plan|ask|auto|allow".to_owned())?;
-            let mode = CodePermissionMode::from_str(&raw)
+            let mode = PermissionMode::from_str(&raw)
                 .ok_or_else(|| format!("unknown permission mode {raw:?}"))?;
             let mut flags = SharedFlags {
                 format: OutputFormat::Text,
@@ -2382,8 +2382,8 @@ fn parse_harness(value: &str) -> std::result::Result<HarnessKind, String> {
         .ok_or_else(|| "expected a harness kind: claude_code, codex, opencode, or grok".to_owned())
 }
 
-fn parse_mode(value: &str) -> std::result::Result<CodePermissionMode, String> {
-    CodePermissionMode::from_str(value)
+fn parse_mode(value: &str) -> std::result::Result<PermissionMode, String> {
+    PermissionMode::from_str(value)
         .ok_or_else(|| "--mode expects plan, ask, auto, or allow".to_owned())
 }
 
@@ -2493,7 +2493,7 @@ mod tests {
         {
             Command::SessionStart { mode, harness, .. } => {
                 assert_eq!(harness, HarnessKind::Grok);
-                assert_eq!(mode, Some(CodePermissionMode::Ask));
+                assert_eq!(mode, Some(PermissionMode::Ask));
             }
             other => panic!("{other:?}"),
         }
@@ -2700,7 +2700,7 @@ mod tests {
                 CapLevel::Supported,
                 CapLevel::Supported,
             ))),
-            CodePermissionMode::Ask
+            PermissionMode::Ask
         );
         assert_eq!(
             default_create_permission_mode(Some(&caps(
@@ -2709,7 +2709,7 @@ mod tests {
                 CapLevel::Unsupported,
                 CapLevel::Unsupported,
             ))),
-            CodePermissionMode::Plan
+            PermissionMode::Plan
         );
         assert_eq!(
             default_create_permission_mode(Some(&caps(
@@ -2718,7 +2718,7 @@ mod tests {
                 CapLevel::Supported,
                 CapLevel::Unsupported,
             ))),
-            CodePermissionMode::Auto
+            PermissionMode::Auto
         );
         assert_eq!(
             default_create_permission_mode(Some(&caps(
@@ -2727,12 +2727,9 @@ mod tests {
                 CapLevel::Unknown,
                 CapLevel::Unknown,
             ))),
-            CodePermissionMode::Plan
+            PermissionMode::Plan
         );
-        assert_eq!(
-            default_create_permission_mode(None),
-            CodePermissionMode::Plan
-        );
+        assert_eq!(default_create_permission_mode(None), PermissionMode::Plan);
     }
 
     fn turn(n: u128) -> CodeTurnId {

@@ -29,9 +29,9 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
-    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodePermissionMode,
-    CodeSession, CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary,
-    CodeTurn, CodeTurnId, CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId,
+    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
+    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId,
+    CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId, PermissionMode,
     ReasoningEffort, ToolOutcome,
 };
 use tidebreak_harness::{
@@ -50,7 +50,7 @@ pub(crate) enum WorkerCommand {
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
     },
     SetPermissionMode {
-        mode: CodePermissionMode,
+        mode: PermissionMode,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Decide {
@@ -703,7 +703,7 @@ async fn apply_control(
 /// thing the caller can do about it.
 async fn set_permission_mode(
     engine: &dyn HarnessSession,
-    mode: CodePermissionMode,
+    mode: PermissionMode,
 ) -> Result<(), WorkerError> {
     match engine.set_permission_mode(mode).await {
         Ok(()) => Ok(()),
@@ -1710,8 +1710,8 @@ mod tests {
     use chrono::Utc;
     use tidebreak_core::db::code::{get_session, insert_repo, insert_session, insert_workspace};
     use tidebreak_core::{
-        CodePermissionMode, CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace,
-        CodeWorkspaceStatus, HarnessKind, RepoId, ToolDetail, WorkspaceId,
+        CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
+        PermissionMode, RepoId, ToolDetail, WorkspaceId,
     };
 
     fn subagent(call_id: &str, status: CodeSubagentStatus) -> CodeSubagentSummary {
@@ -1818,7 +1818,7 @@ mod tests {
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.237".into()),
                 harness_resume_ref: None,
-                permission_mode: CodePermissionMode::Plan,
+                permission_mode: PermissionMode::Plan,
                 model: None,
                 reasoning_effort: None,
                 lifecycle: CodeSessionLifecycle::Running,

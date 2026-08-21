@@ -27,7 +27,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::{CodePermissionMode, ReasoningEffort};
+use tidebreak_core::{PermissionMode, ReasoningEffort};
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -44,12 +44,12 @@ const STDERR_SETTLE: Duration = Duration::from_millis(250);
 /// `--allow-dangerously-skip-permissions` is required for print mode to honor
 /// the skip flag.
 #[must_use]
-pub(crate) fn permission_mode_flags(mode: CodePermissionMode) -> Vec<String> {
+pub(crate) fn permission_mode_flags(mode: PermissionMode) -> Vec<String> {
     match mode {
-        CodePermissionMode::Plan => vec!["--permission-mode".into(), "plan".into()],
-        CodePermissionMode::Ask => vec!["--permission-mode".into(), "manual".into()],
-        CodePermissionMode::Auto => vec!["--permission-mode".into(), "acceptEdits".into()],
-        CodePermissionMode::Allow => vec![
+        PermissionMode::Plan => vec!["--permission-mode".into(), "plan".into()],
+        PermissionMode::Ask => vec!["--permission-mode".into(), "manual".into()],
+        PermissionMode::Auto => vec!["--permission-mode".into(), "acceptEdits".into()],
+        PermissionMode::Allow => vec![
             "--dangerously-skip-permissions".into(),
             "--allow-dangerously-skip-permissions".into(),
         ],
@@ -111,20 +111,20 @@ pub(crate) fn turn_text(input: &TurnInput) -> String {
 /// composing that flag on a session that did not choose Allow is exactly what
 /// decision 0033 forbids. Moving to or from Allow relaunches instead.
 #[must_use]
-pub(crate) fn live_mode_token(mode: CodePermissionMode) -> Option<&'static str> {
+pub(crate) fn live_mode_token(mode: PermissionMode) -> Option<&'static str> {
     match mode {
-        CodePermissionMode::Plan => Some("plan"),
-        CodePermissionMode::Ask => Some("manual"),
-        CodePermissionMode::Auto => Some("acceptEdits"),
-        CodePermissionMode::Allow => None,
+        PermissionMode::Plan => Some("plan"),
+        PermissionMode::Ask => Some("manual"),
+        PermissionMode::Auto => Some("acceptEdits"),
+        PermissionMode::Allow => None,
     }
 }
 
 #[must_use]
-pub(crate) fn bypass_policy(mode: CodePermissionMode) -> BypassPolicy {
+pub(crate) fn bypass_policy(mode: PermissionMode) -> BypassPolicy {
     match mode {
-        CodePermissionMode::Allow => BypassPolicy::Permitted,
-        CodePermissionMode::Plan | CodePermissionMode::Ask | CodePermissionMode::Auto => {
+        PermissionMode::Allow => BypassPolicy::Permitted,
+        PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Auto => {
             BypassPolicy::Forbidden
         }
     }
@@ -170,7 +170,7 @@ struct EngineChannel {
     /// from retiring a child that already took the new mode. Only the launch
     /// flags decide the bypass posture, and a live switch never crosses it —
     /// see [`live_mode_token`] — so this can move without argv being wrong.
-    mode: Mutex<CodePermissionMode>,
+    mode: Mutex<PermissionMode>,
 }
 
 impl EngineChannel {
@@ -239,7 +239,7 @@ pub struct ClaudeSession {
     spec: SessionSpec,
     /// The session's current permission mode, which a live switch moves.
     /// `spec.permission_mode` is only what it started on.
-    permission_mode: Mutex<CodePermissionMode>,
+    permission_mode: Mutex<PermissionMode>,
     resume_ref: Mutex<Option<String>>,
     channel: AsyncMutex<Option<Arc<EngineChannel>>>,
     pid: ChildPid,
@@ -294,7 +294,7 @@ impl ClaudeSession {
     }
 
     /// The mode in force right now.
-    fn permission_mode(&self) -> CodePermissionMode {
+    fn permission_mode(&self) -> PermissionMode {
         *self.permission_mode.lock().expect("claude permission mode")
     }
 
@@ -663,7 +663,7 @@ impl HarnessSession for ClaudeSession {
     /// starts as fast as any other. It does not work for `Allow` — see
     /// [`live_mode_token`] — and with no child up there is nothing to tell, so
     /// both cases record the mode and let the next launch compose it.
-    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+    async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
         let current = self.permission_mode();
         if current == mode {
             return Ok(());
@@ -913,7 +913,7 @@ mod tests {
     ) -> ClaudeSession {
         ClaudeSession::new(SessionSpec {
             worktree: worktree.to_path_buf(),
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             resume_ref: None,
@@ -999,7 +999,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
-            permission_mode: CodePermissionMode::Ask,
+            permission_mode: PermissionMode::Ask,
             model: None,
             reasoning_effort: Some(ReasoningEffort::Ultra),
             resume_ref: None,
@@ -1026,13 +1026,10 @@ mod tests {
     /// `Allow` is the bypass flag, which only a fresh child can carry.
     #[test]
     fn a_live_switch_covers_every_mode_except_the_bypass() {
-        assert_eq!(live_mode_token(CodePermissionMode::Plan), Some("plan"));
-        assert_eq!(live_mode_token(CodePermissionMode::Ask), Some("manual"));
-        assert_eq!(
-            live_mode_token(CodePermissionMode::Auto),
-            Some("acceptEdits")
-        );
-        assert_eq!(live_mode_token(CodePermissionMode::Allow), None);
+        assert_eq!(live_mode_token(PermissionMode::Plan), Some("plan"));
+        assert_eq!(live_mode_token(PermissionMode::Ask), Some("manual"));
+        assert_eq!(live_mode_token(PermissionMode::Auto), Some("acceptEdits"));
+        assert_eq!(live_mode_token(PermissionMode::Allow), None);
     }
 
     /// With no child up there is nothing to tell, so the mode is recorded and
@@ -1047,7 +1044,7 @@ mod tests {
             Arc::new(Discard),
         );
         session
-            .set_permission_mode(CodePermissionMode::Auto)
+            .set_permission_mode(PermissionMode::Auto)
             .await
             .unwrap();
         let plan = session.compose_plan_for(None, None).unwrap();
@@ -1059,12 +1056,12 @@ mod tests {
         assert_eq!(plan.argv[index + 1], "acceptEdits");
 
         assert!(matches!(
-            session.set_permission_mode(CodePermissionMode::Allow).await,
+            session.set_permission_mode(PermissionMode::Allow).await,
             Err(HarnessError::PermissionModeSwitchUnsupported)
         ));
         // Refused means unchanged: the session must not be left claiming a
         // posture its argv would not compose.
-        assert_eq!(session.permission_mode(), CodePermissionMode::Auto);
+        assert_eq!(session.permission_mode(), PermissionMode::Auto);
     }
 
     #[test]
@@ -1081,7 +1078,7 @@ mod tests {
         );
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             resume_ref: None,
@@ -1133,7 +1130,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             resume_ref: None,
@@ -1182,7 +1179,7 @@ done
         let pid = session.child_pid().expect("the child outlives its turn");
 
         session
-            .set_permission_mode(CodePermissionMode::Auto)
+            .set_permission_mode(PermissionMode::Auto)
             .await
             .unwrap();
         session.run_turn(turn("second")).await.unwrap();

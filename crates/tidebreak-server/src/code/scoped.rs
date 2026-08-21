@@ -22,8 +22,8 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use tidebreak_core::{
-    CodeApproval, CodeApprovalId, CodeApprovalState, CodePermissionMode, CodeRepo, CodeSession,
-    CodeSessionId, CodeTurn, CodeTurnId, CodeWorkspace, Diffstat, HarnessKind, OwnerId,
+    CodeApproval, CodeApprovalId, CodeApprovalState, CodeRepo, CodeSession, CodeSessionId,
+    CodeTurn, CodeTurnId, CodeWorkspace, Diffstat, HarnessKind, OwnerId, PermissionMode,
     ReasoningEffort, RepoId, SequencedCodeEvent, WorkspaceId,
 };
 use tidebreak_harness::ApprovalDecision;
@@ -523,7 +523,7 @@ impl ScopedCode {
     pub(crate) async fn set_permission_mode(
         &self,
         id: CodeSessionId,
-        mode: CodePermissionMode,
+        mode: PermissionMode,
     ) -> Result<CodeSession, ServerError> {
         self.runtime
             .set_permission_mode(&self.owner, id, mode)

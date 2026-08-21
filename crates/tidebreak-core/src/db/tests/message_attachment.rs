@@ -708,9 +708,9 @@ impl ReferenceClass {
 
 async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     use crate::code::{
-        Attention, AttentionSource, CodePermissionMode, CodeRepo, CodeSession, CodeSessionId,
-        CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnAttachment, CodeTurnId,
-        CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+        Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
+        CodeSessionLifecycle, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus,
+        CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
     };
     use crate::db::code::{insert_repo, insert_session, insert_turn, insert_workspace};
 
@@ -768,7 +768,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("scripted".into()),
             harness_resume_ref: None,
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,

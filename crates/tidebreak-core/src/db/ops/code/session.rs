@@ -4,12 +4,12 @@ use sea_orm::{
 };
 
 use crate::code::{
-    Attention, AttentionSource, AttentionState, CodePermissionMode, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary, FenceReason, HarnessKind,
-    WorkspaceId,
+    Attention, AttentionSource, AttentionState, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeSubagentSummary, FenceReason, HarnessKind, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
+use crate::PermissionMode;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::acquire_code_session_write_lock;
@@ -341,7 +341,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
             row.id, row.harness_kind
         ))
     })?;
-    let permission_mode = CodePermissionMode::from_str(&row.permission_mode).ok_or_else(|| {
+    let permission_mode = PermissionMode::from_str(&row.permission_mode).ok_or_else(|| {
         AgentError::Store(format!(
             "code_session {} has unknown permission_mode {}",
             row.id, row.permission_mode

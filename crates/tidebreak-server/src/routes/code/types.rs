@@ -5,11 +5,11 @@ use ts_rs::TS;
 
 use tidebreak_core::{
     Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePermissionMode, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle,
-    CodeSubagentSummary, CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch,
-    CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
-    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PullRequestDigest, QuickAction,
-    ReasoningEffort, RepoId, WorkspaceId,
+    CodeEvent, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
+    CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch, CodeWatchId, CodeWatchState,
+    CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
+    HarnessKind, HarnessTier, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort,
+    RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -110,7 +110,7 @@ pub struct CodeSessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub harness_resume_ref: Option<String>,
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model: Option<String>,
@@ -1065,7 +1065,7 @@ pub struct CodeActionSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionBody {
     pub harness: HarnessKind,
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -1076,7 +1076,7 @@ pub struct CreateSessionBody {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPermissionModeBody {
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
 }
 
 /// Body of `POST /code/sessions/{id}/effort`.

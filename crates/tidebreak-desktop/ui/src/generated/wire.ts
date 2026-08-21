@@ -1206,14 +1206,6 @@ export type CodeHarnessInstallSnapshot = { kind: HarnessKind,
 version?: string, phase: string, done: boolean, error?: string, };
 
 /**
- * How an external agent-engine session handles mutations and approvals.
- *
- * Each adapter maps these onto the engine's native flags. A mode the
- * engine cannot honor is refused at session creation — never approximated.
- */
-export type CodePermissionMode = "plan" | "ask" | "auto" | "allow";
-
-/**
  * `GET /code/workspaces/{id}/pr/comments`: the PR conversation, read live
  * from the host and never persisted.
  */
@@ -1287,7 +1279,7 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 /**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: CodePermissionMode, model?: string, 
+export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string, 
 /**
  * Absent means the engine's own default, which is not any level.
  */
@@ -2802,29 +2794,19 @@ export type PendingPlanApproval = { call_id: CallId, turn_id: TurnId, title: str
 export type PendingUserQuestions = { call_id: CallId, turn_id: TurnId, questions: Array<UserQuestion>, asked_at: string, };
 
 /**
- * How much a chat lets the agent do between approvals.
+ * How a conversation handles mutations and approvals.
  *
- * The mode is the fallback, not the whole decision: a standing grant the
- * reader has already made covers its calls in every mode, and `ReadOnly`
- * tools never ask in any mode. The mode only decides what happens to a
- * mutating call that no grant covers — ask the reader, or proceed.
- *
- * Persisted per chat as the token from [`Self::as_str`] and read at turn
- * start, like the model selection: changing it mid-turn applies from the
- * next turn, and a reopened chat runs the way it ran before.
- *
- * The declaration order is ascending autonomy, and the derived `Ord` relies
- * on it: `Plan < Ask < Auto < Allow`, matching [`Self::ALL`]. Managed-policy
- * ceilings compare modes with it, so a new variant must slot into this
- * scale, not just onto the end of the list.
- *
- * The mode governs the server-side approval gate, which is where all but one
- * mutating call lives. Client-executed tools run in the trusted desktop under
- * their own consent — a folder grant the reader picked, a card the native side
- * raises — and do not re-enter that gate. The one client call that mutates
- * something the reader owns, publishing an output into a connected folder,
- * consults the mode itself: see
+ * For the internal engine the mode governs the server-side approval gate,
+ * which is where all but one mutating call lives. Client-executed tools run
+ * in the trusted desktop under their own consent — a folder grant the reader
+ * picked, a card the native side raises — and do not re-enter that gate. The
+ * one client call that mutates something the reader owns, publishing an
+ * output into a connected folder, consults the mode itself: see
  * [`crate::OutputWriteMode::requires_user_decision`].
+ *
+ * For an external agent engine each adapter maps these onto the engine's
+ * native flags. A mode the engine cannot honor is refused at session
+ * creation — never approximated.
  */
 export type PermissionMode = "plan" | "ask" | "auto" | "allow";
 

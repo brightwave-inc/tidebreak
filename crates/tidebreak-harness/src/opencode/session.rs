@@ -22,7 +22,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::CodePermissionMode;
+use tidebreak_core::PermissionMode;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -250,10 +250,10 @@ pub(crate) fn compose_serve_plan(
 /// (disallows edit tools). Ask parks bash/edit. Auto allows workspace
 /// edits and still asks for bash.
 #[must_use]
-pub(crate) fn session_create_body(mode: CodePermissionMode, model: Option<&str>) -> Value {
+pub(crate) fn session_create_body(mode: PermissionMode, model: Option<&str>) -> Value {
     let mut body = match mode {
-        CodePermissionMode::Plan => json!({ "agent": "plan" }),
-        CodePermissionMode::Ask => json!({
+        PermissionMode::Plan => json!({ "agent": "plan" }),
+        PermissionMode::Ask => json!({
             "agent": "build",
             "permission": [
                 {"permission": "bash", "pattern": "*", "action": "ask"},
@@ -261,7 +261,7 @@ pub(crate) fn session_create_body(mode: CodePermissionMode, model: Option<&str>)
                 {"permission": "read", "pattern": "*", "action": "allow"}
             ]
         }),
-        CodePermissionMode::Auto => json!({
+        PermissionMode::Auto => json!({
             "agent": "build",
             "permission": [
                 {"permission": "edit", "pattern": "*", "action": "allow"},
@@ -269,7 +269,7 @@ pub(crate) fn session_create_body(mode: CodePermissionMode, model: Option<&str>)
                 {"permission": "bash", "pattern": "*", "action": "ask"}
             ]
         }),
-        CodePermissionMode::Allow => json!({
+        PermissionMode::Allow => json!({
             "agent": "build",
             "permission": [
                 {"permission": "bash", "pattern": "*", "action": "allow"},
@@ -583,7 +583,7 @@ impl OpencodeSession {
                 *self.resume_ref.lock().expect("opencode resume") = Some(resume.clone());
             }
             if let HarnessEvent::ApprovalRequested { harness_ref, .. } = event {
-                if self.spec.permission_mode == CodePermissionMode::Allow {
+                if self.spec.permission_mode == PermissionMode::Allow {
                     // Allow already grants every known rule. A request that
                     // still arrives must not park a card.
                     let _ = self
@@ -867,23 +867,23 @@ mod tests {
     #[test]
     fn permission_mode_mapping_matches_0033() {
         assert_eq!(
-            session_create_body(CodePermissionMode::Plan, None)["agent"],
+            session_create_body(PermissionMode::Plan, None)["agent"],
             "plan"
         );
         assert_eq!(
-            session_create_body(CodePermissionMode::Ask, None)["agent"],
+            session_create_body(PermissionMode::Ask, None)["agent"],
             "build"
         );
         assert_eq!(
-            session_create_body(CodePermissionMode::Auto, None)["agent"],
+            session_create_body(PermissionMode::Auto, None)["agent"],
             "build"
         );
-        let ask = session_create_body(CodePermissionMode::Ask, None);
+        let ask = session_create_body(PermissionMode::Ask, None);
         let rules = ask["permission"].as_array().unwrap();
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let auto = session_create_body(CodePermissionMode::Auto, None);
+        let auto = session_create_body(PermissionMode::Auto, None);
         let rules = auto["permission"].as_array().unwrap();
         assert!(rules
             .iter()
@@ -891,7 +891,7 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| { rule["permission"] == "bash" && rule["action"] == "ask" }));
-        let allow = session_create_body(CodePermissionMode::Allow, None);
+        let allow = session_create_body(PermissionMode::Allow, None);
         assert_eq!(allow["agent"], "build");
         let rules = allow["permission"].as_array().unwrap();
         assert!(rules.iter().all(|rule| rule["action"] == "allow"));
@@ -905,34 +905,32 @@ mod tests {
 
     #[test]
     fn session_model_uses_provider_and_id() {
-        let slash = session_create_body(CodePermissionMode::Plan, Some("anthropic/claude-opus-5"));
+        let slash = session_create_body(PermissionMode::Plan, Some("anthropic/claude-opus-5"));
         assert_eq!(slash["model"]["providerID"], "anthropic");
         assert_eq!(slash["model"]["id"], "claude-opus-5");
         assert!(slash["model"].get("modelID").is_none());
 
-        let bare = session_create_body(CodePermissionMode::Allow, Some("gpt-5.6-sol"));
+        let bare = session_create_body(PermissionMode::Allow, Some("gpt-5.6-sol"));
         assert_eq!(bare["model"]["providerID"], "openai");
         assert_eq!(bare["model"]["id"], "gpt-5.6-sol");
 
-        let grok = session_create_body(CodePermissionMode::Ask, Some("grok-4.5"));
+        let grok = session_create_body(PermissionMode::Ask, Some("grok-4.5"));
         assert_eq!(grok["model"]["providerID"], "xai");
         assert_eq!(grok["model"]["id"], "grok-4.5");
 
-        let gemini = session_create_body(CodePermissionMode::Plan, Some("gemini-3-pro"));
+        let gemini = session_create_body(PermissionMode::Plan, Some("gemini-3-pro"));
         assert_eq!(gemini["model"]["providerID"], "google");
 
-        let pickle = session_create_body(CodePermissionMode::Plan, Some("big-pickle"));
+        let pickle = session_create_body(PermissionMode::Plan, Some("big-pickle"));
         assert_eq!(pickle["model"]["providerID"], "opencode");
         assert_eq!(pickle["model"]["id"], "big-pickle");
 
-        let gateway = session_create_body(
-            CodePermissionMode::Plan,
-            Some("model-gateway/claude-opus-5"),
-        );
+        let gateway =
+            session_create_body(PermissionMode::Plan, Some("model-gateway/claude-opus-5"));
         assert_eq!(gateway["model"]["providerID"], "anthropic");
         assert_eq!(gateway["model"]["id"], "claude-opus-5");
 
-        let unknown = session_create_body(CodePermissionMode::Plan, Some("mystery-weights"));
+        let unknown = session_create_body(PermissionMode::Plan, Some("mystery-weights"));
         assert!(unknown.get("model").is_none());
     }
 

@@ -22,7 +22,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::{CodePermissionMode, ReasoningEffort};
+use tidebreak_core::{PermissionMode, ReasoningEffort};
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -32,7 +32,7 @@ pub struct GrokSession {
     spec: SessionSpec,
     /// The session's current permission mode. Each turn is a fresh child, so
     /// a switch is composed into the next launch and needs nothing else.
-    permission_mode: Mutex<CodePermissionMode>,
+    permission_mode: Mutex<PermissionMode>,
     resume_ref: Mutex<Option<String>>,
     version: String,
     child: AsyncMutex<Option<ProcessTreeChild>>,
@@ -80,7 +80,7 @@ impl GrokSession {
     }
 
     /// The mode in force right now.
-    fn permission_mode(&self) -> CodePermissionMode {
+    fn permission_mode(&self) -> PermissionMode {
         *self.permission_mode.lock().expect("grok permission mode")
     }
 }
@@ -93,7 +93,7 @@ pub(crate) struct PrintLaunch<'a> {
     pub extra_env: &'a [(String, String)],
     pub resume_ref: Option<&'a str>,
     pub prompt_file: &'a Path,
-    pub mode: CodePermissionMode,
+    pub mode: PermissionMode,
     pub model: Option<&'a str>,
     pub effort: Option<ReasoningEffort>,
 }
@@ -111,10 +111,10 @@ pub(crate) struct PrintLaunch<'a> {
 /// turns. Composing `--deny` rules as a stand-in for Plan would
 /// approximate a posture the engine's own plan/read-only flags did not
 /// honor.
-pub(crate) fn refuse_unhonored_mode(mode: CodePermissionMode) -> Result<(), HarnessError> {
+pub(crate) fn refuse_unhonored_mode(mode: PermissionMode) -> Result<(), HarnessError> {
     match mode {
-        CodePermissionMode::Auto | CodePermissionMode::Allow => Ok(()),
-        CodePermissionMode::Plan | CodePermissionMode::Ask => {
+        PermissionMode::Auto | PermissionMode::Allow => Ok(()),
+        PermissionMode::Plan | PermissionMode::Ask => {
             Err(HarnessError::PermissionModeUnsupported(mode))
         }
     }
@@ -133,7 +133,7 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
         launch.cwd.to_string_lossy().into_owned(),
         "--no-auto-update".into(),
     ];
-    if launch.mode == CodePermissionMode::Allow {
+    if launch.mode == PermissionMode::Allow {
         argv.push("--always-approve".into());
     }
     if let Some(model) = launch.model {
@@ -157,8 +157,8 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     let mut env = launch.extra_env.to_vec();
     env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
     let policy = match launch.mode {
-        CodePermissionMode::Allow => BypassPolicy::Permitted,
-        CodePermissionMode::Plan | CodePermissionMode::Ask | CodePermissionMode::Auto => {
+        PermissionMode::Allow => BypassPolicy::Permitted,
+        PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Auto => {
             BypassPolicy::Forbidden
         }
     };
@@ -296,7 +296,7 @@ impl HarnessSession for GrokSession {
     /// so the switch is entirely a matter of what the next launch says. Modes
     /// the engine cannot honor are refused here for the same reason launch
     /// refuses them, rather than silently running the old posture.
-    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+    async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
         refuse_unhonored_mode(mode)?;
         *self.permission_mode.lock().expect("grok permission mode") = mode;
         Ok(())

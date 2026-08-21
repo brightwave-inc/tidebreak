@@ -2,9 +2,8 @@ import { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { Check, ChevronDown, Gauge, Search, Sparkles } from "lucide-react";
 
 import type {
-  CodePermissionMode,
-  HarnessKind,
   PermissionMode,
+  HarnessKind,
   ReasoningEffort,
 } from "../api/types";
 import { useApp } from "@/AppContext";
@@ -45,7 +44,7 @@ import {
   SESSION_PERMISSION_MODE_LOCKED,
 } from "./labels";
 
-const MODES: CodePermissionMode[] = ["plan", "ask", "auto", "allow"];
+const MODES: PermissionMode[] = ["plan", "ask", "auto", "allow"];
 
 /**
  * The look the top effort rung wears wherever it appears.
@@ -76,10 +75,10 @@ export function PermissionModePicker({
   onChange,
   scopeKey = "code-create",
 }: {
-  value: CodePermissionMode;
-  availableModes?: readonly CodePermissionMode[];
+  value: PermissionMode;
+  availableModes?: readonly PermissionMode[];
   unavailableReason?: string;
-  onChange?: (mode: CodePermissionMode) => void;
+  onChange?: (mode: PermissionMode) => void;
   scopeKey?: string;
 }) {
   const locked = !onChange;
@@ -516,8 +515,8 @@ export function CodeComposer({
 }: {
   disabled?: boolean;
   running: boolean;
-  permissionMode: CodePermissionMode;
-  availableModes?: readonly CodePermissionMode[];
+  permissionMode: PermissionMode;
+  availableModes?: readonly PermissionMode[];
   unavailableReason?: string;
   harness?: HarnessKind;
   model?: string;
@@ -543,7 +542,7 @@ export function CodeComposer({
    */
   engineEfforts?: readonly ReasoningEffort[];
   onModelChange?: (model: string) => void;
-  onModeChange?: (mode: CodePermissionMode) => void;
+  onModeChange?: (mode: PermissionMode) => void;
   /** Absent hides the effort control, as an empty ladder does. */
   onEffortChange?: (effort: ReasoningEffort | null) => void;
   /** Same meter as chat: the last turn's reading in the send cluster. */

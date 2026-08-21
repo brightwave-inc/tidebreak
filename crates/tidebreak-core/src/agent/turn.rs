@@ -17,8 +17,8 @@ use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::id::{CallId, ChatId, MessageId, TurnId};
 use crate::model::{
-    Chat, Message, PermissionMode, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnRunStatus,
+    Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
+    TurnRunStatus,
 };
 use crate::preview::ToolResultPreview;
 use crate::provider::{
@@ -32,6 +32,7 @@ use crate::storage::{
     TurnLeaseFence,
 };
 use crate::tool::{ToolErrorCategory, ToolOutput};
+use crate::PermissionMode;
 
 use super::events::{AgentProgress, AssistantStreamEventFilter, ClaimedAgentEvent, EventSink};
 use super::registry::ToolRegistry;

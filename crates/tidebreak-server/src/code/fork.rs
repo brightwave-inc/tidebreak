@@ -368,8 +368,8 @@ fn harness_label(kind: HarnessKind) -> &'static str {
 mod tests {
     use super::*;
     use tidebreak_core::{
-        Attention, AttentionSource, BoundedError, CodePermissionMode, CodeSessionId,
-        CodeSessionKind, CodeSessionLifecycle, CodeTurnStatus, OwnerId, WorkspaceId,
+        Attention, AttentionSource, BoundedError, CodeSessionId, CodeSessionKind,
+        CodeSessionLifecycle, CodeTurnStatus, OwnerId, PermissionMode, WorkspaceId,
     };
 
     fn session() -> CodeSession {
@@ -381,7 +381,7 @@ mod tests {
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
-            permission_mode: CodePermissionMode::Plan,
+            permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
             lifecycle: CodeSessionLifecycle::Idle,

@@ -10,7 +10,6 @@
 mod attention;
 mod caps;
 mod event;
-mod permission;
 
 pub use attention::{
     should_replace, Attention, AttentionSource, AttentionState, FenceReason, MAX_ATTENTION_NOTE,
@@ -22,8 +21,8 @@ pub use event::{
     FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
-pub use permission::CodePermissionMode;
 
+use crate::PermissionMode;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -726,7 +725,7 @@ pub struct CodeSession {
     /// Engine-native resume token, when the stream has reported one.
     pub harness_resume_ref: Option<String>,
     /// Permission mode for this session.
-    pub permission_mode: CodePermissionMode,
+    pub permission_mode: PermissionMode,
     /// Engine model id for this session, when the user chose one.
     pub model: Option<String>,
     /// Reasoning effort for this session. `None` leaves the engine's own

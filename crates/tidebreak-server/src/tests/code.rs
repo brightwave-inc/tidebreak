@@ -20,9 +20,9 @@ use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent,
-    CodePermissionMode, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus,
-    CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, ReasoningEffort, WorkspaceId,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent, CodeSessionId,
+    CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason,
+    HarnessKind, PermissionMode, ReasoningEffort, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
@@ -1853,7 +1853,7 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
     assert_eq!(body["permission_mode"], "auto", "{body}");
     assert_eq!(
         engine.live_modes(),
-        vec![CodePermissionMode::Auto],
+        vec![PermissionMode::Auto],
         "the engine was told, not replaced",
     );
 
@@ -1881,7 +1881,7 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
     assert_eq!(reread["session"]["permission_mode"], "auto", "{reread}");
     assert_eq!(
         engine.live_modes(),
-        vec![CodePermissionMode::Auto],
+        vec![PermissionMode::Auto],
         "one switch, and no relaunch behind it: {reread}",
     );
 }
@@ -2228,7 +2228,7 @@ async fn a_workspace_still_holds_only_one_watch_session() {
             tidebreak_core::CodeSessionKind::Watch,
             HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings {
-                permission_mode: CodePermissionMode::Plan,
+                permission_mode: PermissionMode::Plan,
                 ..Default::default()
             },
         )
@@ -6009,7 +6009,7 @@ fn _types(
     _status: CodeWorkspaceStatus,
     _turn: CodeTurnStatus,
     _db: Option<DbStore>,
-    _mode: CodePermissionMode,
+    _mode: PermissionMode,
     _kind: HarnessKind,
 ) {
 }

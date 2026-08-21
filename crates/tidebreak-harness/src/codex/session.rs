@@ -22,7 +22,7 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::{CodePermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
+use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,7 +34,7 @@ pub struct CodexSession {
     /// The session's current permission mode. `turn/start` re-postures a
     /// thread for "this turn and subsequent turns", so a switch lands here and
     /// rides out on the next turn rather than relaunching the child.
-    permission_mode: Mutex<CodePermissionMode>,
+    permission_mode: Mutex<PermissionMode>,
     /// Whether the mode has moved since the last turn told the engine about
     /// it. The first turn on a fresh thread does not need to: `thread/start`
     /// already carried the posture.
@@ -165,7 +165,7 @@ impl CodexSession {
     }
 
     /// The mode in force right now.
-    fn permission_mode(&self) -> CodePermissionMode {
+    fn permission_mode(&self) -> PermissionMode {
         *self.permission_mode.lock().expect("codex permission mode")
     }
 
@@ -510,12 +510,12 @@ pub(crate) fn compose_app_server_plan(
 
 /// `thread/start` sandbox + approvalPolicy for a permission mode.
 #[must_use]
-pub(crate) fn thread_start_policy(mode: CodePermissionMode) -> (&'static str, &'static str) {
+pub(crate) fn thread_start_policy(mode: PermissionMode) -> (&'static str, &'static str) {
     match mode {
-        CodePermissionMode::Plan => ("read-only", "untrusted"),
-        CodePermissionMode::Ask => ("workspace-write", "untrusted"),
-        CodePermissionMode::Auto => ("workspace-write", "on-request"),
-        CodePermissionMode::Allow => ("danger-full-access", "never"),
+        PermissionMode::Plan => ("read-only", "untrusted"),
+        PermissionMode::Ask => ("workspace-write", "untrusted"),
+        PermissionMode::Auto => ("workspace-write", "on-request"),
+        PermissionMode::Allow => ("danger-full-access", "never"),
     }
 }
 
@@ -524,7 +524,7 @@ pub(crate) fn thread_start_policy(mode: CodePermissionMode) -> (&'static str, &'
 /// `thread/start` accepts. Both fields apply to this turn and every later one,
 /// which is what lets a mode switch land without a new child.
 #[must_use]
-pub(crate) fn turn_start_policy(mode: CodePermissionMode) -> (Value, &'static str) {
+pub(crate) fn turn_start_policy(mode: PermissionMode) -> (Value, &'static str) {
     let (sandbox, approval) = thread_start_policy(mode);
     let sandbox = match sandbox {
         "read-only" => json!({ "type": "readOnly" }),
@@ -798,7 +798,7 @@ impl CodexSession {
                         .expect("codex approvals")
                         .insert(harness_ref.call_id.clone(), id.clone());
                 }
-                if self.spec.permission_mode == CodePermissionMode::Allow {
+                if self.spec.permission_mode == PermissionMode::Allow {
                     // Allow is the engine's unsupervised posture. A request
                     // that still arrives must not park a card.
                     let _ = self
@@ -884,7 +884,7 @@ impl HarnessSession for CodexSession {
     /// `turn/start`'s `approvalPolicy` and `sandboxPolicy` are documented as
     /// applying to this turn and subsequent turns, so this is the engine's own
     /// channel for re-posturing a thread — the child and its context stay.
-    async fn set_permission_mode(&self, mode: CodePermissionMode) -> Result<(), HarnessError> {
+    async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
         if self.permission_mode() == mode {
             return Ok(());
         }
@@ -1259,19 +1259,19 @@ mod tests {
     #[test]
     fn permission_mode_mapping_matches_0033() {
         assert_eq!(
-            thread_start_policy(CodePermissionMode::Plan),
+            thread_start_policy(PermissionMode::Plan),
             ("read-only", "untrusted")
         );
         assert_eq!(
-            thread_start_policy(CodePermissionMode::Ask),
+            thread_start_policy(PermissionMode::Ask),
             ("workspace-write", "untrusted")
         );
         assert_eq!(
-            thread_start_policy(CodePermissionMode::Auto),
+            thread_start_policy(PermissionMode::Auto),
             ("workspace-write", "on-request")
         );
         assert_eq!(
-            thread_start_policy(CodePermissionMode::Allow),
+            thread_start_policy(PermissionMode::Allow),
             ("danger-full-access", "never")
         );
         let _ = PathBuf::from("/workspace");
@@ -1387,7 +1387,7 @@ done
     fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         CodexSession::new(SessionSpec {
             worktree: PathBuf::from("."),
-            permission_mode: CodePermissionMode::Auto,
+            permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,
             resume_ref: Some("THREAD-1".into()),
@@ -1437,7 +1437,7 @@ done
     ) -> SessionSpec {
         SessionSpec {
             worktree: dir.to_path_buf(),
-            permission_mode: CodePermissionMode::Auto,
+            permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,
             resume_ref,

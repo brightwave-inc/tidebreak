@@ -18,7 +18,7 @@ pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
-pub use chat_settings::{NetworkPolicy, PermissionMode, ReasoningEffort, Role};
+pub use chat_settings::{NetworkPolicy, ReasoningEffort, Role};
 pub use documents::{
     BlobRetirement, BlobRetirementStatus, DocumentBlob, DocumentListCursor, DocumentReadiness,
     DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert,

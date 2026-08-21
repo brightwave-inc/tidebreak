@@ -183,7 +183,7 @@ mod tests {
     use crate::grok::session::{compose_print_plan, refuse_unhonored_mode, PrintLaunch};
     use crate::HarnessEvent;
     use std::path::{Path, PathBuf};
-    use tidebreak_core::CodePermissionMode;
+    use tidebreak_core::PermissionMode;
 
     fn fixture_dir(version: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/grok/{version}"))
@@ -457,9 +457,9 @@ mod tests {
 
     #[test]
     fn auto_and_allow_are_honored_and_plan_and_ask_are_refused() {
-        assert!(refuse_unhonored_mode(CodePermissionMode::Auto).is_ok());
-        assert!(refuse_unhonored_mode(CodePermissionMode::Allow).is_ok());
-        for mode in [CodePermissionMode::Plan, CodePermissionMode::Ask] {
+        assert!(refuse_unhonored_mode(PermissionMode::Auto).is_ok());
+        assert!(refuse_unhonored_mode(PermissionMode::Allow).is_ok());
+        for mode in [PermissionMode::Plan, PermissionMode::Ask] {
             let err = refuse_unhonored_mode(mode).unwrap_err();
             assert!(matches!(err, HarnessError::PermissionModeUnsupported(m) if m == mode));
         }
@@ -474,7 +474,7 @@ mod tests {
             extra_env: &[],
             resume_ref: None,
             prompt_file: Path::new("/tmp/prompt.txt"),
-            mode: CodePermissionMode::Auto,
+            mode: PermissionMode::Auto,
             model: None,
             effort: None,
         })
@@ -506,7 +506,7 @@ mod tests {
             extra_env: &[],
             resume_ref: None,
             prompt_file: Path::new("/tmp/prompt.txt"),
-            mode: CodePermissionMode::Allow,
+            mode: PermissionMode::Allow,
             model: None,
             effort: None,
         })

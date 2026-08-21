@@ -78,7 +78,6 @@ import {
   type PendingChatPrompt,
   type TaskPlan,
   type CodeApprovalSnapshot,
-  type CodePermissionMode,
   type CodeRepoSnapshot,
   type CodeSessionSnapshot,
   type CodeTurnSnapshot,
@@ -2141,7 +2140,7 @@ export class ApiClient {
     workspaceId: string,
     body: {
       harness: HarnessKind;
-      permission_mode: CodePermissionMode;
+      permission_mode: PermissionMode;
       model?: string;
       reasoning_effort?: ReasoningEffort;
     },
@@ -2226,7 +2225,7 @@ export class ApiClient {
    */
   async setCodeSessionPermissionMode(
     sessionId: string,
-    permissionMode: CodePermissionMode,
+    permissionMode: PermissionMode,
   ): Promise<CodeSessionSnapshot> {
     return requireParsed(
       parseCodeSession(

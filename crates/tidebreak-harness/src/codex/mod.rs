@@ -352,7 +352,7 @@ mod tests {
     use crate::codex::session::{compose_app_server_plan, thread_start_policy};
     use crate::{ApprovalDecision, HarnessEvent};
     use std::path::PathBuf;
-    use tidebreak_core::CodePermissionMode;
+    use tidebreak_core::PermissionMode;
 
     fn fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex/0.147.0")
@@ -631,16 +631,16 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("dangerously-bypass")));
         for mode in [
-            CodePermissionMode::Plan,
-            CodePermissionMode::Ask,
-            CodePermissionMode::Auto,
+            PermissionMode::Plan,
+            PermissionMode::Ask,
+            PermissionMode::Auto,
         ] {
             let (sandbox, approval) = thread_start_policy(mode);
             assert_ne!(sandbox, "danger-full-access");
             assert_ne!(approval, "never");
         }
         assert_eq!(
-            thread_start_policy(CodePermissionMode::Allow),
+            thread_start_policy(PermissionMode::Allow),
             ("danger-full-access", "never")
         );
     }
