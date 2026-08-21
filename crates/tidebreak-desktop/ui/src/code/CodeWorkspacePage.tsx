@@ -61,6 +61,7 @@ import { followScrollBehavior } from "@/ChatScroll";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import {
   SHELL_SHORTCUTS,
   shortcutKeycaps,
@@ -201,7 +202,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const closedBrowserIdsRef = useRef(new Set<string>());
   const workspaceBrowserIdsRef = useRef(new Set<string>());
   const chrome = splitCodeChromeLayout(layout);
-  const workspaceOverlayOpen = useWorkspaceOverlayOpen();
+  const workspaceOverlayOpen = usePortalOverlayOpen();
   const navigate = useNavigate();
   const workspaceSearch = useSearch({ strict: false }) as {
     task?: string;
@@ -1316,45 +1317,6 @@ function storedBrowserTitles(layout: LayoutState): Record<string, string> {
 }
 
 /** Native child webviews must yield whenever a portaled app surface overlaps them. */
-function useWorkspaceOverlayOpen(): boolean {
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    const selector = [
-      '[role="dialog"][data-state="open"]',
-      '[role="alertdialog"][data-state="open"]',
-      '[role="menu"][data-state="open"]',
-      '[role="listbox"][data-state="open"]',
-    ].join(",");
-    let frame: number | null = null;
-    const update = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        setOpen(document.querySelector(selector) !== null);
-      });
-    };
-    const stateObserver = new MutationObserver(update);
-    stateObserver.observe(document.body, {
-      attributes: true,
-      attributeFilter: ["data-state", "role"],
-      subtree: true,
-    });
-    // Radix portals are direct body children. Keep transcript and editor DOM
-    // churn out of this observer so streaming content does not trigger global
-    // overlay queries.
-    const portalObserver = new MutationObserver(update);
-    portalObserver.observe(document.body, { childList: true });
-    update();
-    return () => {
-      stateObserver.disconnect();
-      portalObserver.disconnect();
-      if (frame !== null) window.cancelAnimationFrame(frame);
-    };
-  }, []);
-
-  return open;
-}
 
 function shortcutHint(id: ShellShortcutAction, command: boolean): string {
   const def = SHELL_SHORTCUTS.find((item) => item.id === id);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 
@@ -45,6 +45,11 @@ import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { warmPresentationConverter } from "./document/officePdf";
 import { FoldersView } from "./FoldersView";
 import { hasNativeHost } from "./host";
+import { Skeleton } from "@/components/ui/skeleton";
+import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
+import { foregroundBrowserScope } from "./code/browser/foregroundBrowserScope";
+import { seedBrowserSession } from "./code/browser/browserPersistence";
+
 import { friendlyErrorMessage } from "./lib/utils";
 import { attachChatFiles, type AttachedFiles } from "./attachments";
 import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
@@ -80,6 +85,12 @@ import { useDeliverableCatalog } from "./useDeliverableCatalog";
 import { backgroundAgentSpawnKeys, useAgentRuns } from "./useAgentRuns";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
+
+
+const CodeBrowserTab = lazy(async () => {
+  const module = await import("./code/browser/CodeBrowserTab");
+  return { default: module.CodeBrowserTab };
+});
 
 let msgSeq = 0;
 
@@ -170,6 +181,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     [agentRuns.runs, spawnKeys],
   );
   const deliverables = useDeliverableCatalog(chatId);
+  const overlayOpen = usePortalOverlayOpen();
+  const [browserTitles, setBrowserTitles] = useState<Record<string, string>>({});
+
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame. The
@@ -582,6 +596,32 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * message only has to name it again. That is why no size comes with it — the
    * transcript records what a document is, not how many bytes it was.
    */
+  /**
+   * Open a chat-scoped browser tab.  If one is already in the strip,
+   * focus it rather than opening a duplicate.  One default browser tab
+   * per chat, seeded with a fresh browser id and a foreground workspace
+   * scope the native executor derives identically from the chat id.
+   */
+  function openBrowser() {
+    const existingIndex = layout.tabs.findIndex(
+      (tab) => tab.type === "browser",
+    );
+    if (existingIndex !== -1) {
+      openPanel(layout.tabs[existingIndex]);
+      return;
+    }
+    const browserId = crypto.randomUUID();
+    const session = seedBrowserSession({
+      browserId,
+      workspaceId: foregroundBrowserScope(chatId),
+    });
+    setBrowserTitles((current) => ({
+      ...current,
+      [browserId]: session.title || "Browser",
+    }));
+    openPanel({ type: "browser", browserId });
+  }
+
   function onReattachFile(file: TranscriptFileAttachment) {
     if (files.some((current) => current.documentId === file.documentId)) return;
     if (images.attachments.length + files.length >= MAX_IMAGE_ATTACHMENTS) {
@@ -875,8 +915,27 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onOpenRun={(runId) => openPanel({ type: "agent", runId })}
           />
         );
+      case "browser":
+        return browserTitles[panel.browserId];
       case "agent":
         return <BackgroundAgentPanel chatId={chatId} runId={panel.runId} />;
+      case "browser":
+        return (
+          <Suspense fallback={<Skeleton className="h-full w-full" />}>
+            <CodeBrowserTab
+              workspaceId={foregroundBrowserScope(chatId)}
+              browserId={panel.browserId}
+              obscured={overlayOpen}
+              onTitleChange={(title) =>
+                setBrowserTitles((current) =>
+                  current[panel.browserId] === title
+                    ? current
+                    : { ...current, [panel.browserId]: title },
+                )
+              }
+            />
+          </Suspense>
+        );
       case "terminal":
         return null;
     }
@@ -893,6 +952,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         return panel.outputId
           ? deliverables.find((d) => d.outputId === panel.outputId)?.filename
           : undefined;
+      case "browser":
+        return browserTitles[panel.browserId];
       case "agent":
         return (
           chatAgentRuns.find((run) => run.id === panel.runId)?.task ?? undefined
@@ -917,6 +978,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onOpenFolders={() => openPanel({ type: "folders" })}
               onOpenPermissions={() => openPanel({ type: "permissions" })}
               onOpenAgents={() => openPanel({ type: "agents" })}
+              onOpenBrowser={nativeHost ? () => openBrowser() : undefined}
+
             />
           </div>
         </header>
