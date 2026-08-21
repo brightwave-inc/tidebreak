@@ -2937,7 +2937,10 @@ struct FixedWebSearchResolver {
 
 #[async_trait]
 impl WebSearchResolver for FixedWebSearchResolver {
-    async fn resolve(&self) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
+    async fn resolve(
+        &self,
+        _chat: Option<tidebreak_core::ChatId>,
+    ) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
         Ok(Some(self.provider.clone()))
     }
 }

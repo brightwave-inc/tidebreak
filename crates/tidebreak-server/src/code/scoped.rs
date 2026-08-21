@@ -427,6 +427,13 @@ impl ScopedCode {
         self.runtime.list_session_turns(&self.owner, id).await
     }
 
+    pub(crate) async fn fork_transcript(
+        &self,
+        id: CodeSessionId,
+    ) -> Result<super::fork::WrittenTranscript, ServerError> {
+        self.runtime.fork_transcript(&self.owner, id).await
+    }
+
     pub(crate) async fn session_debug(
         &self,
         id: CodeSessionId,

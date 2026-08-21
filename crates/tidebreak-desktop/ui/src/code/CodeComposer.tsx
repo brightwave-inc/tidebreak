@@ -9,7 +9,8 @@ import type {
 } from "../api/types";
 import { useApp } from "@/AppContext";
 import { HttpError } from "../api/client";
-import { Composer } from "../Composer";
+import { Composer, type ComposerWorkspaceFiles } from "../Composer";
+import { messageWithWorkspaceFiles } from "./fork";
 import { IMAGE_MEDIA_TYPES } from "../ImageAttachments";
 import { useImageAttachments } from "../useImageAttachments";
 import { reasoningEffortOptions } from "../ModelMenu";
@@ -461,6 +462,7 @@ export function CodeComposer({
   slashCommands,
   searchPaths,
   imageInput = false,
+  workspaceFiles,
   onSend,
   onSteer,
   onInterrupt,
@@ -503,6 +505,11 @@ export function CodeComposer({
   searchPaths?: (query: string) => Promise<readonly string[]>;
   /** The doctor said this engine consumes images on its input path. */
   imageInput?: boolean;
+  /**
+   * Files already in the worktree, shown as chips and named after the
+   * message. A fork's transcript arrives this way.
+   */
+  workspaceFiles?: ComposerWorkspaceFiles;
   onSend: (
     message: string,
     attachments?: readonly { blob_id: string; media_type: string }[],
@@ -622,8 +629,11 @@ export function CodeComposer({
   }, [lastTurnBeganId]);
 
   async function submit() {
-    const message = draft.trim();
-    if (!message || disabled) return;
+    const typed = draft.trim();
+    if (!typed || disabled) return;
+    // The chips ride out with the message: the engine reads the paths from
+    // its own working directory, so nothing is uploaded.
+    const message = messageWithWorkspaceFiles(typed, workspaceFiles?.items ?? []);
     const pending = images.attachments.filter(
       (item) => item.status === "queued" || item.status === "uploading",
     );
@@ -821,6 +831,7 @@ export function CodeComposer({
               }
             : undefined
         }
+        workspaceFiles={workspaceFiles}
         onDraftChange={(value) => {
           draftRef.current = value;
           setSteerError(null);
