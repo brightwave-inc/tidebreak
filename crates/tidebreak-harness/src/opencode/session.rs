@@ -1343,17 +1343,19 @@ mod tests {
             .iter()
             .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT))
             .map(|(_, value)| value.as_str());
+        let config: serde_json::Value = serde_json::from_str(
+            config_str.expect("browser config must be emitted with the canonical key"),
+        )
+        .unwrap();
         if cfg!(windows) {
-            let config: serde_json::Value =
-                serde_json::from_str(config_str.expect("case-insensitive match on Windows"))
-                    .unwrap();
             assert_eq!(config["theme"], "dark");
         } else {
             assert!(
-                config_str.is_none(),
-                "on case-sensitive platforms a differently-cased snapshot key must not be treated as OPENCODE_CONFIG_CONTENT"
+                config.get("theme").is_none(),
+                "on case-sensitive platforms a differently-cased snapshot key must not be merged as OPENCODE_CONFIG_CONTENT"
             );
         }
+        assert!(config["mcp"].get("tb-browser").is_some());
     }
 
     #[cfg(unix)]
@@ -1398,7 +1400,7 @@ mod tests {
             &[],
             std::path::Path::new("/workspace"),
             &[],
-            &[entry.clone()],
+            std::slice::from_ref(&entry),
             4096,
             None,
         )
