@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 
 import type { ApiClient } from "../api/client";
@@ -26,15 +27,28 @@ import { requestUserAttention } from "../host";
  * cheap.
  */
 
+/** Digests for one kind of session, keyed workspace → session. */
+export type DigestsByWorkspace = Record<
+  string,
+  Record<string, CodeSessionDigest>
+>;
+
 export type CodeUpdatesState = {
-  /** The interactive session's digest, one per workspace. Never a watch. */
-  byWorkspace: Record<string, CodeSessionDigest>;
+  /**
+   * Conversation digests, keyed workspace → session. Never a watch.
+   *
+   * A workspace runs several agents (record 55), so it names a set rather
+   * than one digest. List surfaces collapse the set through
+   * `workspaceDigest`; the workspace page reads all of it to label its
+   * conversation tabs.
+   */
+  conversationsByWorkspace: DigestsByWorkspace;
   /**
    * Watch digests, keyed workspace → session. Children beside the
-   * conversation, never in its slot — ADR 0050's rule, kept by construction:
+   * conversations, never among them — ADR 0050's rule, kept by construction:
    * the two maps have disjoint sources.
    */
-  childrenByWorkspace: Record<string, Record<string, CodeSessionDigest>>;
+  childrenByWorkspace: DigestsByWorkspace;
   cloneJobs: Record<string, CodeCloneJobSnapshot>;
   /**
    * Warm harness installs, keyed by engine. The New Workspace dialog starts
@@ -55,7 +69,7 @@ export type CodeUpdatesAction =
   | { type: "reset" };
 
 const EMPTY: CodeUpdatesState = {
-  byWorkspace: {},
+  conversationsByWorkspace: {},
   childrenByWorkspace: {},
   cloneJobs: {},
   harnessInstalls: {},
@@ -70,37 +84,40 @@ export function reduceCodeUpdates(
     case "snapshot": {
       // The snapshot restates every live session, so both maps rebuild from
       // scratch — a reconnect self-heals a missed end notice.
-      const byWorkspace: Record<string, CodeSessionDigest> = {};
-      const childrenByWorkspace: Record<
-        string,
-        Record<string, CodeSessionDigest>
-      > = {};
+      const conversationsByWorkspace: DigestsByWorkspace = {};
+      const childrenByWorkspace: DigestsByWorkspace = {};
       for (const digest of action.sessions) {
-        if (digest.kind === "watch") {
-          (childrenByWorkspace[digest.workspace] ??= {})[digest.session] =
-            digest;
-        } else {
-          byWorkspace[digest.workspace] = digest;
-        }
+        const map =
+          digest.kind === "watch"
+            ? childrenByWorkspace
+            : conversationsByWorkspace;
+        (map[digest.workspace] ??= {})[digest.session] = digest;
       }
-      return { ...state, byWorkspace, childrenByWorkspace };
+      return { ...state, conversationsByWorkspace, childrenByWorkspace };
     }
     case "digest": {
       if (action.digest.kind === "watch") {
         return {
           ...state,
-          childrenByWorkspace: upsertChild(
+          // An ended watch leaves the rail. The snapshot on reconnect would
+          // drop it anyway; this does it without waiting for one.
+          childrenByWorkspace: upsertDigest(
             state.childrenByWorkspace,
             action.digest,
+            true,
           ),
         };
       }
       return {
         ...state,
-        byWorkspace: {
-          ...state.byWorkspace,
-          [action.digest.workspace]: action.digest,
-        },
+        // An ended conversation stays. Its tab is already gone — the strip
+        // reads the session list, not this map — and the workspace header
+        // keeps a title and a PR from it until the next snapshot.
+        conversationsByWorkspace: upsertDigest(
+          state.conversationsByWorkspace,
+          action.digest,
+          false,
+        ),
       };
     }
     case "clone_progress":
@@ -126,24 +143,112 @@ export function reduceCodeUpdates(
   }
 }
 
-function upsertChild(
-  children: CodeUpdatesState["childrenByWorkspace"],
+function upsertDigest(
+  map: DigestsByWorkspace,
   digest: CodeSessionDigest,
-): CodeUpdatesState["childrenByWorkspace"] {
-  const forWorkspace = { ...children[digest.workspace] };
-  if (digest.lifecycle === "ended") {
-    // An ended watch leaves the rail; the snapshot on reconnect would drop
-    // it anyway, this just does it without waiting for one.
+  dropEnded: boolean,
+): DigestsByWorkspace {
+  const forWorkspace = { ...map[digest.workspace] };
+  if (dropEnded && digest.lifecycle === "ended") {
     delete forWorkspace[digest.session];
   } else {
     forWorkspace[digest.session] = digest;
   }
   if (Object.keys(forWorkspace).length === 0) {
-    const next = { ...children };
+    const next = { ...map };
     delete next[digest.workspace];
     return next;
   }
-  return { ...children, [digest.workspace]: forWorkspace };
+  return { ...map, [digest.workspace]: forWorkspace };
+}
+
+/**
+ * The one digest a list surface should show for a workspace.
+ *
+ * A card is a row per workspace, not per agent, so several conversations
+ * collapse to the one that most wants a person: a need first, then a running
+ * engine, then anything still live. Title and PR state come from the
+ * workspace itself, so every sibling agrees on them and this choice only
+ * decides whose attention the card reports.
+ */
+export function workspaceDigest(
+  state: Pick<CodeUpdatesState, "conversationsByWorkspace">,
+  workspaceId: string,
+): CodeSessionDigest | undefined {
+  const conversations = state.conversationsByWorkspace[workspaceId];
+  if (!conversations) return undefined;
+  let best: CodeSessionDigest | undefined;
+  for (const digest of Object.values(conversations)) {
+    if (!best || digestUrgency(digest) < digestUrgency(best)) best = digest;
+  }
+  return best;
+}
+
+function digestUrgency(digest: CodeSessionDigest): number {
+  if (digest.lifecycle === "ended") return 4;
+  if (digest.attention.state.type === "needs_you") return 0;
+  if (digest.lifecycle === "running") return 1;
+  if (digest.attention.state.type === "done_unreviewed") return 2;
+  return 3;
+}
+
+/** One digest per workspace, for the rail and the card lists. */
+export function useWorkspaceDigests(): Record<string, CodeSessionDigest> {
+  const conversations = useCodeUpdatesStore(
+    (state) => state.conversationsByWorkspace,
+  );
+  return useMemo(() => {
+    const digests: Record<string, CodeSessionDigest> = {};
+    for (const workspaceId of Object.keys(conversations)) {
+      const digest = workspaceDigest(
+        { conversationsByWorkspace: conversations },
+        workspaceId,
+      );
+      if (digest) digests[workspaceId] = digest;
+    }
+    return digests;
+  }, [conversations]);
+}
+
+/** The digest that speaks for one workspace, for a header or an inspector. */
+export function useWorkspaceDigest(
+  workspaceId: string,
+): CodeSessionDigest | undefined {
+  return useCodeUpdatesStore((state) => workspaceDigest(state, workspaceId));
+}
+
+/**
+ * The live digest for one session, whichever map holds it.
+ *
+ * A workspace page shows one session at a time and may be showing a watch
+ * child, so it asks by id rather than taking the workspace's representative.
+ */
+export function useSessionDigest(
+  workspaceId: string,
+  sessionId: string | null,
+): CodeSessionDigest | undefined {
+  return useCodeUpdatesStore((state) =>
+    sessionId
+      ? (state.conversationsByWorkspace[workspaceId]?.[sessionId] ??
+        state.childrenByWorkspace[workspaceId]?.[sessionId])
+      : undefined,
+  );
+}
+
+const NO_DIGESTS: Record<string, CodeSessionDigest> = {};
+
+/**
+ * Every conversation digest in one workspace, keyed by session.
+ *
+ * The workspace page labels a tab per agent, so it needs each agent's own
+ * state rather than the one the card collapses to.
+ */
+export function useConversationDigests(
+  workspaceId: string,
+): Record<string, CodeSessionDigest> {
+  return useCodeUpdatesStore(
+    (state) => state.conversationsByWorkspace[workspaceId] ?? NO_DIGESTS,
+  );
 }
 
 /** A workspace's watch digests, in a stable order for rendering. */
@@ -261,7 +366,9 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
 }));
 
 function maybeNotify(previous: CodeUpdatesState, digest: CodeSessionDigest): void {
-  const prior = previous.byWorkspace[digest.workspace]?.attention;
+  const prior =
+    previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
+      ?.attention;
   if (
     shouldRequestOsAttention(
       prior,

@@ -5,8 +5,8 @@ use chrono::Utc;
 use serde_json::Value;
 use thiserror::Error;
 use tidebreak_core::{
-    ApprovalClass, ResultEntry, ResultEntryKind, Tool, ToolCtx, ToolErrorCategory, ToolOutput,
-    ToolSpec, WebExtractArgs, WebSearchArgs,
+    ApprovalClass, ChatId, ResultEntry, ResultEntryKind, Tool, ToolCtx, ToolErrorCategory,
+    ToolOutput, ToolSpec, WebExtractArgs, WebSearchArgs,
 };
 use url::Url;
 
@@ -30,9 +30,17 @@ pub struct WebSearchResolverError;
 /// Resolve the provider selected by current host policy without performing
 /// egress. Implementations may load settings and credentials on every call so
 /// configuration changes take effect without rebuilding the tool registry.
+///
+/// The chat is part of the question, not context for logging: one backend
+/// searches through the chat's own model provider, so which provider answers
+/// depends on which model the chat is on. `None` means the caller cannot name a
+/// chat, which resolves to the configured engine or to nothing.
 #[async_trait]
 pub trait WebSearchResolver: Send + Sync {
-    async fn resolve(&self) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError>;
+    async fn resolve(
+        &self,
+        chat: Option<ChatId>,
+    ) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError>;
 }
 
 /// Decode and validate the one canonical model-facing argument shape.
@@ -77,12 +85,12 @@ impl Tool for WebSearchTool {
         ApprovalClass::Sensitive
     }
 
-    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> tidebreak_core::Result<ToolOutput> {
+    async fn execute(&self, ctx: &ToolCtx, args: Value) -> tidebreak_core::Result<ToolOutput> {
         let request = match request_from_tool_arguments(args) {
             Ok(request) => request,
             Err(_) => return Ok(ToolOutput::error("Web search arguments are invalid.")),
         };
-        let provider = match self.resolver.resolve().await {
+        let provider = match self.resolver.resolve(Some(ctx.chat_id)).await {
             Ok(Some(provider)) => provider,
             Ok(None) => {
                 return Ok(ToolOutput::failed(
@@ -218,7 +226,7 @@ impl Tool for WebExtractTool {
                 ))
             }
         };
-        let provider = match self.resolver.resolve().await {
+        let provider = match self.resolver.resolve(Some(ctx.chat_id)).await {
             Ok(provider) => provider,
             Err(_) => return Ok(ToolOutput::error("Web page extraction could not complete.")),
         };
@@ -324,6 +332,7 @@ mod tests {
     impl WebSearchResolver for FakeResolver {
         async fn resolve(
             &self,
+            _chat: Option<ChatId>,
         ) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
             if self.fail {
                 Err(WebSearchResolverError)

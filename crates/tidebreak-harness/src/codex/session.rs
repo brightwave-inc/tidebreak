@@ -442,6 +442,7 @@ pub(crate) fn compose_app_server_plan(
     extra_argv: &[String],
     cwd: &std::path::Path,
     extra_env: &[(String, String)],
+    browser: Option<&BrowserChannelSpec>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
@@ -449,6 +450,24 @@ pub(crate) fn compose_app_server_plan(
         "--stdio".into(),
     ];
     argv.extend(extra_argv.iter().cloned());
+    if let Some(spec) = browser {
+        argv.push("-c".into());
+        // Use serde_json to escape the bridge path: backslashes, quotes,
+        // and control characters in a Windows or unusual path are turned
+        // into valid JSON string characters. Reject non-UTF-8 paths
+        // explicitly rather than silently replacing characters.
+        let bridge_path = spec.bridge_command().to_str().ok_or_else(|| {
+            HarnessError::Other(format!(
+                "browser bridge command path is not valid UTF-8: {}",
+                spec.bridge_command().display()
+            ))
+        })?;
+        let escaped = serde_json::to_string(bridge_path)
+            .expect("serializing a valid &str to JSON cannot fail");
+        argv.push(
+            format!("mcp_servers.tb-browser={{command={escaped},args=[\"browser-mcp\"],env_vars=[\"TIDEBREAK_BROWSER_CAPFILE\"]}}"),
+        );
+    }
     let mut env = extra_env.to_vec();
     env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
     let plan = LaunchPlan {
@@ -479,6 +498,7 @@ pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessErr
         &session.spec.extra_argv,
         &session.spec.worktree,
         &session.spec.extra_env,
+        session.spec.browser.as_ref(),
     )?;
     let mut command = Command::new(&plan.argv[0]);
     command
@@ -1141,6 +1161,7 @@ mod tests {
             &[],
             std::path::Path::new("/workspace"),
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -1154,6 +1175,7 @@ mod tests {
             &["--dangerously-bypass-approvals-and-sandbox".into()],
             std::path::Path::new("/workspace"),
             &[],
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
@@ -1767,5 +1789,211 @@ done
             })
             .collect();
         assert_eq!(steers, ["try the other file"]);
+    }
+
+    // ── Browser MCP advertisement contract tests ──
+
+    #[test]
+    fn browser_absent_produces_same_argv_as_before() {
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
+    }
+
+    #[test]
+    fn browser_present_appends_exactly_one_trusted_config_override() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let overrides: Vec<_> = plan
+            .argv
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "-c")
+            .collect();
+        assert_eq!(overrides.len(), 1);
+        let idx = overrides[0].0;
+        let value = &plan.argv[idx + 1];
+        assert!(value.contains("mcp_servers.tb-browser"));
+        assert!(value.contains("command=\"/usr/local/bin/tidebreak\""));
+        assert!(value.contains(r#"args=["browser-mcp"]"#));
+        assert!(value.contains(r#"env_vars=["TIDEBREAK_BROWSER_CAPFILE"]"#));
+        // The override names the env var but must not contain a capfile path or token value.
+        let capfile_str = spec.capability_file.to_string_lossy();
+        assert!(!value.contains(capfile_str.as_ref()));
+    }
+
+    #[test]
+    fn browser_override_is_after_extra_argv() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &["--extra".into(), "--flag".into()],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let browser_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
+        let extra_flag_idx = plan.argv.iter().position(|arg| arg == "--extra").unwrap();
+        assert!(extra_flag_idx < browser_idx);
+    }
+
+    #[test]
+    fn browser_capfile_path_is_never_in_argv() {
+        let capfile = std::path::PathBuf::from("/tmp/tidebreak-browser-abc123.json");
+        let spec = BrowserChannelSpec::new(
+            capfile.clone(),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let capfile_str = capfile.to_string_lossy();
+        assert!(!plan
+            .argv
+            .iter()
+            .any(|arg| arg.contains(capfile_str.as_ref())));
+    }
+
+    #[test]
+    fn browser_env_key_is_stripped_from_plan_even_when_browser_is_some() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into())],
+            Some(&spec),
+        )
+        .unwrap();
+        let has_reserved = plan
+            .env
+            .iter()
+            .any(|(key, _)| BrowserChannelSpec::is_reserved_env_key(key));
+        assert!(!has_reserved);
+    }
+
+    #[test]
+    fn bridge_command_with_spaces_remains_one_command_value() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
+        let value = &plan.argv[override_idx + 1];
+        // The command must appear as one quoted value, not split on spaces.
+        assert!(value.contains("command=\"/Applications/Tidebreak.app/Contents/bin/tidebreak\""));
+        // args must still be exactly ["browser-mcp"].
+        assert!(value.contains(r#"args=["browser-mcp"]"#));
+    }
+
+    #[test]
+    fn bridge_command_with_backslashes_is_escaped() {
+        // A Windows path like C:\bin\tidebreak.exe must have its backslashes
+        // JSON-escaped so the config string remains valid.
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from(r"C:\Program Files\Tidebreak\tidebreak.exe"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
+        let value = &plan.argv[override_idx + 1];
+        // The backslashes must be escaped as \\, not left raw.
+        assert!(value.contains("\\\\"));
+        // The original \t in Tidebreak must not become a tab character.
+        assert!(!value.contains('\t'));
+        // The command must still parse as one value.
+        assert!(value.contains("command=\""));
+        assert!(value.contains(r#"args=["browser-mcp"]"#));
+    }
+
+    #[test]
+    fn bridge_command_with_embedded_quote_is_escaped() {
+        // A path containing a double-quote (unlikely but defensive) must
+        // escape it with a backslash so the config value remains valid.
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/tmp/tidebreak-\"-binary"),
+        );
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .unwrap();
+        let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
+        let value = &plan.argv[override_idx + 1];
+        // The embedded " must be escaped as \", not raw.
+        assert!(value.contains("\\\""));
+        // The surrounding command="..." delimiter must still close properly.
+        assert!(value.starts_with("mcp_servers.tb-browser="));
+        assert!(value.contains("command=\""));
+        assert!(value.ends_with("]}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_bridge_command_is_rejected_instead_of_changed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from(OsString::from_vec(b"/tmp/tidebreak-\xff".to_vec())),
+        );
+        let error = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            Some(&spec),
+        )
+        .expect_err("non-UTF-8 bridge paths must fail closed");
+
+        assert!(error.to_string().contains("not valid UTF-8"));
     }
 }

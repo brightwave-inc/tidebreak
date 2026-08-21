@@ -185,11 +185,11 @@ export function WebSearchPanel({ client }: { client: ApiClient }) {
 
           <SettingsSection
             title="Search mode"
-            description="Which search work gets. Automatic uses your model provider's built-in search when the selected model supports it, and the provider configured below otherwise."
+            description="Which search work gets. Automatic prefers the provider configured below, and falls back to the model's own search when no provider here is ready."
           >
             <SettingsField
               label="Search mode"
-              hint="Built-in search runs inside the model provider's own infrastructure and is billed through that provider's API key, not through the providers below."
+              hint="Built-in search runs on the model's own provider and is billed through that provider's key or subscription, not through the providers below. Claude, GPT, and Gemini models can search this way."
             >
               <Select
                 value={mode}
@@ -319,6 +319,10 @@ function providerLabel(provider: WebSearchProviderKind): string {
       return "Brave Search";
     case "searxng":
       return "SearXNG";
+    case "model_provider":
+      // Never selectable here — it follows the chat's model rather than this
+      // configuration — but a hand-edited setting should still read as prose.
+      return "your model provider";
     default:
       return provider;
   }
@@ -343,16 +347,16 @@ function webSearchState(config: WebSearchConfigInfo | null): {
       kind: "ready",
       label: "Built-in search",
       description:
-        "Work searches through the model provider. A model without built-in search cannot search at all.",
+        "Work searches through the model it is running on. Claude, GPT, and Gemini models can; a model on another provider cannot search at all.",
     };
   }
   if (!config?.provider) {
     return config?.mode === "automatic"
       ? {
-          kind: "not-configured",
+          kind: "ready",
           label: "Built-in search only",
           description:
-            "No provider is selected here, so only models with built-in search can search.",
+            "No provider is selected here, so work searches through the model it is running on. Claude, GPT, and Gemini models can.",
         }
       : {
           kind: "disabled",
@@ -370,16 +374,22 @@ function webSearchState(config: WebSearchConfigInfo | null): {
       label: "Ready",
       description:
         config.mode === "automatic"
-          ? `${selected} Models with built-in search use that instead.`
+          ? `${selected} Automatic prefers it over any model's built-in search.`
           : selected,
     };
   }
+  const missing =
+    config.provider === SEARXNG_PROVIDER
+      ? `${providerLabel(config.provider)} is selected but needs an instance URL.`
+      : `${providerLabel(config.provider)} is selected but needs an API key.`;
   return {
-    kind: "not-configured",
-    label: "Not configured",
+    // Automatic still searches: it falls back to the model's own provider
+    // rather than leaving work with a tool nothing answers.
+    kind: config.mode === "automatic" ? "ready" : "not-configured",
+    label: config.mode === "automatic" ? "Built-in search" : "Not configured",
     description:
-      config.provider === SEARXNG_PROVIDER
-        ? `${providerLabel(config.provider)} is selected but needs an instance URL.`
-        : `${providerLabel(config.provider)} is selected but needs an API key.`,
+      config.mode === "automatic"
+        ? `${missing} Until then, work searches through the model it is running on.`
+        : missing,
   };
 }

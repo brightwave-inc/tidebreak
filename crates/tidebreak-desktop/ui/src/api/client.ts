@@ -99,6 +99,7 @@ import {
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
   type CodeWorktreeRoot,
+  type CodeForkTranscript,
   type CodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot,
   type CodeSubscriptionUsage,
@@ -137,6 +138,7 @@ import {
   parseCodeApproval,
   parseCodeCloneDefaults,
   parseCodeWorktreeRoot,
+  parseCodeForkTranscript,
   parseCodeCloneJob,
   parseCodeHarnessInstall,
   parseCodeRepo,
@@ -2459,6 +2461,25 @@ export class ApiClient {
         ),
       ),
       "code workspace diff",
+    );
+  }
+
+  /**
+   * Write one session's transcript into its worktree, for a fork to read.
+   *
+   * The child session is created separately: this call only produces the
+   * file, so the reader still picks the engine and edits the framing before
+   * anything is sent.
+   */
+  async forkCodeSession(sessionId: string): Promise<CodeForkTranscript> {
+    return requireParsed(
+      parseCodeForkTranscript(
+        await this.json(`/code/sessions/${encodeURIComponent(sessionId)}/fork`, {
+          method: "POST",
+          headers: this.headers(),
+        }),
+      ),
+      "code fork transcript",
     );
   }
 

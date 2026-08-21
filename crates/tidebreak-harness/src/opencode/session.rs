@@ -27,6 +27,10 @@ use tidebreak_core::CodePermissionMode;
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 const AUTO_FLAG: &str = "--auto";
+/// Environment key for the OpenCode config JSON override.
+const OPENCODE_CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
+/// MCP server name used in the OpenCode config for the browser tool bridge.
+const BROWSER_MCP_SERVER: &str = "tb-browser";
 
 /// Live opencode session: one `serve` child for the session lifetime.
 pub struct OpencodeSession {
@@ -56,13 +60,138 @@ impl OpencodeSession {
     }
 }
 
+/// Build the OpenCode MCP server entry for the browser bridge.
+///
+/// `bridge_command` is the absolute path from [`BrowserChannelSpec::bridge_command`].
+/// The capfile is NOT in the JSON — it's inherited through the process
+/// environment via `TIDEBREAK_BROWSER_CAPFILE`.
+fn browser_mcp_config_json(
+    bridge_command: &std::path::Path,
+) -> Result<serde_json::Value, HarnessError> {
+    let bridge_command = bridge_command.to_str().ok_or_else(|| {
+        HarnessError::Other(
+            "browser bridge command path is not valid UTF-8 and cannot be emitted in the OpenCode config"
+                .into(),
+        )
+    })?;
+    Ok(serde_json::json!({
+        "type": "local",
+        "command": [bridge_command, "browser-mcp"],
+    }))
+}
+
+/// Merge the browser MCP server entry into an optional existing
+/// `OPENCODE_CONFIG_CONTENT` JSON string.
+///
+/// If `config_content` is `None` or empty, a fresh config object is created.
+/// If it parses as a JSON object, the browser entry is merged into its `mcp`
+/// key, preserving all unrelated entries. A conflicting `tb-browser` entry
+/// (different content) is rejected. An identical entry is idempotent.
+/// Malformed or non-object JSON is rejected with a clear error.
+fn merge_browser_mcp(
+    config_content: Option<&str>,
+    bridge_command: &std::path::Path,
+) -> Result<String, HarnessError> {
+    let browser_entry = browser_mcp_config_json(bridge_command)?;
+    match config_content.map(str::trim).filter(|s| !s.is_empty()) {
+        None => {
+            let config = serde_json::json!({
+                "mcp": { BROWSER_MCP_SERVER: browser_entry }
+            });
+            Ok(config.to_string())
+        }
+        Some(raw) => {
+            let mut config: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
+                HarnessError::Other(format!("OPENCODE_CONFIG_CONTENT is not valid JSON: {err}"))
+            })?;
+            let obj = config.as_object_mut().ok_or_else(|| {
+                HarnessError::Other("OPENCODE_CONFIG_CONTENT must be a JSON object".into())
+            })?;
+            let mcp = obj
+                .entry("mcp".to_owned())
+                .or_insert_with(|| serde_json::json!({}));
+            let mcp_obj = mcp.as_object_mut().ok_or_else(|| {
+                HarnessError::Other(
+                    "OPENCODE_CONFIG_CONTENT `mcp` key must be a JSON object".into(),
+                )
+            })?;
+            if let Some(existing) = mcp_obj.get(BROWSER_MCP_SERVER) {
+                if existing != &browser_entry {
+                    return Err(HarnessError::Other(format!(
+                        "OPENCODE_CONFIG_CONTENT already has a conflicting `{BROWSER_MCP_SERVER}` MCP entry"
+                    )));
+                }
+                // Identical entry — idempotent, no change needed.
+            } else {
+                mcp_obj.insert(BROWSER_MCP_SERVER.to_owned(), browser_entry);
+            }
+            Ok(config.to_string())
+        }
+    }
+}
+
+/// Case-insensitive environment-key equality on the same platforms the child
+/// environment treats keys case-insensitively; exact equality elsewhere.
+fn env_key_eq_case(left: &str, right: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn env_key_eq(left: &str, right: &str) -> bool {
+    env_key_eq_case(left, right, cfg!(windows))
+}
+
+fn os_env_key_eq(left: &std::ffi::OsStr, right: &str) -> bool {
+    if cfg!(windows) {
+        left.to_string_lossy().eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+/// The effective existing `OPENCODE_CONFIG_CONTENT` before browser merging.
+///
+/// The explicit settings overlay (`extra_env`) wins over the probed snapshot,
+/// mirroring `apply_child_env_tokio`, which restores the snapshot first and
+/// then applies the sanitized plan environment.
+fn effective_existing_config_str<'a>(
+    snapshot_env: &'a [(std::ffi::OsString, std::ffi::OsString)],
+    extra_env: &'a [(String, String)],
+) -> Result<Option<&'a str>, HarnessError> {
+    let overlay = extra_env
+        .iter()
+        .rev()
+        .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT));
+    if let Some((_, value)) = overlay {
+        return Ok(Some(value.as_str()));
+    }
+    let Some((_, value)) = snapshot_env
+        .iter()
+        .rev()
+        .find(|(key, _)| os_env_key_eq(key.as_os_str(), OPENCODE_CONFIG_CONTENT))
+    else {
+        return Ok(None);
+    };
+    let value = value.to_str().ok_or_else(|| {
+        HarnessError::Other(
+            "OPENCODE_CONFIG_CONTENT in the probed environment is not valid UTF-8".into(),
+        )
+    })?;
+    Ok(Some(value))
+}
+
 /// Argv for the long-lived serve child. Prompt never appears here.
 pub(crate) fn compose_serve_plan(
     binary: &std::path::Path,
     extra_argv: &[String],
     cwd: &std::path::Path,
+    snapshot_env: &[(std::ffi::OsString, std::ffi::OsString)],
     extra_env: &[(String, String)],
     port: u16,
+    browser: Option<&BrowserChannelSpec>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
@@ -82,7 +211,30 @@ pub(crate) fn compose_serve_plan(
         )));
     }
     let mut env = extra_env.to_vec();
-    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
+    env.retain(|(key, _)| {
+        !BrowserChannelSpec::is_reserved_env_key(key)
+            && key != "PWD"
+            && !env_key_eq(key, OPENCODE_CONFIG_CONTENT)
+    });
+    let extra_config = extra_env
+        .iter()
+        .rev()
+        .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT));
+    if let Some(spec) = browser {
+        // Snapshot-only config takes the merge path only when a browser
+        // channel is present. With no browser, apply_child_env_tokio already
+        // preserves the snapshot unchanged, so plan.env must not copy it or
+        // reject it (including non-UTF-8 values).
+        let existing_config = effective_existing_config_str(snapshot_env, extra_env)?;
+        let merged = merge_browser_mcp(existing_config, spec.bridge_command())?;
+        env.push((OPENCODE_CONFIG_CONTENT.to_owned(), merged));
+    } else if let Some(existing) = extra_config {
+        // Explicit overlay without a browser channel: preserve it. The
+        // overlay is the only precedence source, so a differently-cased key
+        // survives verbatim on case-sensitive platforms rather than being
+        // normalized into the canonical spelling.
+        env.push(existing.clone());
+    }
     let plan = LaunchPlan {
         argv,
         cwd: cwd.to_path_buf(),
@@ -206,12 +358,15 @@ fn pick_loopback_port() -> Result<u16, HarnessError> {
 pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, HarnessError> {
     let mut session = OpencodeSession::new(spec);
     let port = pick_loopback_port()?;
+
     let plan = compose_serve_plan(
         &session.spec.binary,
         &session.spec.extra_argv,
         &session.spec.worktree,
+        &session.spec.env,
         &session.spec.extra_env,
         port,
+        session.spec.browser.as_ref(),
     )?;
     let mut command = Command::new(&plan.argv[0]);
     command
@@ -659,7 +814,9 @@ mod tests {
             &[],
             std::path::Path::new("/workspace"),
             &[],
+            &[],
             4096,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -684,7 +841,9 @@ mod tests {
             &["--auto".into()],
             std::path::Path::new("/workspace"),
             &[],
+            &[],
             4096,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
@@ -697,7 +856,9 @@ mod tests {
             &["--dangerously-skip-permissions".into()],
             std::path::Path::new("/workspace"),
             &[],
+            &[],
             4096,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, HarnessError::LaunchRejected(_)));
@@ -773,5 +934,513 @@ mod tests {
 
         let unknown = session_create_body(CodePermissionMode::Plan, Some("mystery-weights"));
         assert!(unknown.get("model").is_none());
+    }
+
+    #[test]
+    fn browser_present_adds_opencode_config_with_tb_browser() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.as_str())
+            .expect("OPENCODE_CONFIG_CONTENT must be set");
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        assert_eq!(config["mcp"]["tb-browser"]["type"], "local");
+        let cmd = config["mcp"]["tb-browser"]["command"].as_array().unwrap();
+        assert_eq!(cmd[0], "/usr/local/bin/tidebreak");
+        assert_eq!(cmd[1], "browser-mcp");
+    }
+
+    #[test]
+    fn browser_absent_does_not_add_opencode_config() {
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !plan
+                .env
+                .iter()
+                .any(|(key, _)| key == OPENCODE_CONFIG_CONTENT),
+            "no OPENCODE_CONFIG_CONTENT when browser is absent"
+        );
+    }
+
+    #[test]
+    fn merge_preserves_existing_mcp_entries() {
+        let existing = serde_json::json!({
+            "mcp": { "other-server": { "type": "local", "command": ["foo"] } }
+        })
+        .to_string();
+        let merged = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert!(config["mcp"].get("other-server").is_some());
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn merge_rejects_malformed_config() {
+        let result = merge_browser_mcp(
+            Some("not valid json"),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_rejects_non_object_config() {
+        let result = merge_browser_mcp(
+            Some("[1, 2, 3]"),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_rejects_conflicting_tb_browser() {
+        let existing = serde_json::json!({
+            "mcp": { "tb-browser": { "type": "local", "command": ["different"] } }
+        })
+        .to_string();
+        let result = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_idempotent_for_identical_tb_browser() {
+        let bridge = std::path::Path::new("/usr/local/bin/tidebreak");
+        let first = merge_browser_mcp(None, bridge).unwrap();
+        let second = merge_browser_mcp(Some(&first), bridge).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn bridge_command_with_spaces_remains_one_array_element() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/Applications/Tidebreak.app/Contents/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.as_str())
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        let cmd = config["mcp"]["tb-browser"]["command"].as_array().unwrap();
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], "/Applications/Tidebreak.app/Contents/bin/tidebreak");
+        assert_eq!(cmd[1], "browser-mcp");
+    }
+
+    #[test]
+    fn capfile_path_is_not_in_config_json() {
+        let capfile = std::path::PathBuf::from("/tmp/secret-cap-abc123.json");
+        let spec = BrowserChannelSpec::new(
+            capfile.clone(),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.as_str())
+            .unwrap();
+        let capfile_str = capfile.to_string_lossy();
+        assert!(
+            !config_str.contains(capfile_str.as_ref()),
+            "capfile path must not appear in config JSON"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_non_object_mcp_value() {
+        let existing = serde_json::json!({
+            "mcp": "not an object"
+        })
+        .to_string();
+        let result = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_preserves_unrelated_top_level_keys() {
+        let existing = serde_json::json!({
+            "theme": "dark",
+            "model": "claude-sonnet-5",
+            "mcp": {
+                "existing-server": {
+                    "type": "local",
+                    "command": ["existing"]
+                }
+            }
+        })
+        .to_string();
+        let merged = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert_eq!(config["model"], "claude-sonnet-5");
+        assert!(config["mcp"].get("existing-server").is_some());
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn merge_creates_mcp_key_when_absent() {
+        let existing = serde_json::json!({
+            "theme": "dark"
+        })
+        .to_string();
+        let merged = merge_browser_mcp(
+            Some(&existing),
+            std::path::Path::new("/usr/local/bin/tidebreak"),
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn existing_config_passthrough_when_browser_none() {
+        let existing = serde_json::json!({
+            "mcp": { "other-server": { "type": "local", "command": ["foo"] } }
+        })
+        .to_string();
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[("OPENCODE_CONFIG_CONTENT".to_owned(), existing.clone())],
+            4096,
+            None,
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| key == OPENCODE_CONFIG_CONTENT)
+            .map(|(_, value)| value.as_str())
+            .expect("existing config must survive when browser is None");
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        assert!(config["mcp"].get("other-server").is_some());
+        assert!(config["mcp"].get("tb-browser").is_none());
+    }
+
+    #[test]
+    fn bridge_command_with_windows_backslash_path() {
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("C:\\Temp\\browser-cap.json"),
+            std::path::PathBuf::from("C:\\Program Files\\Tidebreak\\tidebreak.exe"),
+        );
+        let entry = browser_mcp_config_json(spec.bridge_command()).unwrap();
+        let cmd = entry["command"].as_array().unwrap();
+        assert_eq!(cmd.len(), 2);
+        assert_eq!(cmd[0], "C:\\Program Files\\Tidebreak\\tidebreak.exe");
+        assert_eq!(cmd[1], "browser-mcp");
+        assert_eq!(entry["type"], "local");
+    }
+
+    #[test]
+    fn browser_present_preserves_snapshot_only_config() {
+        let existing = serde_json::json!({
+            "theme": "dark",
+            "mcp": {
+                "inherited-server": {
+                    "type": "local",
+                    "command": ["inherited"]
+                }
+            }
+        })
+        .to_string();
+        let snapshot = vec![(
+            std::ffi::OsString::from(OPENCODE_CONFIG_CONTENT),
+            std::ffi::OsString::from(existing),
+        )];
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &snapshot,
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT))
+            .map(|(_, value)| value.as_str())
+            .expect("OPENCODE_CONFIG_CONTENT must be emitted when browser is present");
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert!(
+            config["mcp"].get("inherited-server").is_some(),
+            "snapshot-only config must survive the browser merge"
+        );
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn extra_env_wins_over_snapshot_before_browser_merge() {
+        let snapshot_config = serde_json::json!({
+            "mcp": { "snapshot-server": { "type": "local", "command": ["snapshot"] } }
+        })
+        .to_string();
+        let overlay_config = serde_json::json!({
+            "theme": "dark",
+            "mcp": { "overlay-server": { "type": "local", "command": ["overlay"] } }
+        })
+        .to_string();
+        let snapshot = vec![(
+            std::ffi::OsString::from(OPENCODE_CONFIG_CONTENT),
+            std::ffi::OsString::from(snapshot_config),
+        )];
+        let extra_env = vec![(OPENCODE_CONFIG_CONTENT.to_owned(), overlay_config)];
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &snapshot,
+            &extra_env,
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT))
+            .map(|(_, value)| value.as_str())
+            .expect("OPENCODE_CONFIG_CONTENT must be emitted when browser is present");
+        let config: serde_json::Value = serde_json::from_str(config_str).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert!(
+            config["mcp"].get("overlay-server").is_some(),
+            "extra_env config must be the merge base"
+        );
+        assert!(
+            config["mcp"].get("snapshot-server").is_none(),
+            "snapshot config must not leak through when extra_env overrides it"
+        );
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[test]
+    fn browser_absent_leaves_snapshot_only_config_out_of_plan_env() {
+        let existing = serde_json::json!({
+            "mcp": { "inherited-server": { "type": "local", "command": ["inherited"] } }
+        })
+        .to_string();
+        let snapshot = vec![(
+            std::ffi::OsString::from(OPENCODE_CONFIG_CONTENT),
+            std::ffi::OsString::from(existing),
+        )];
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &snapshot,
+            &[],
+            4096,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !plan
+                .env
+                .iter()
+                .any(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT)),
+            "snapshot-only config must stay out of plan.env when browser is absent; apply_child_env_tokio already preserves the snapshot"
+        );
+    }
+
+    #[test]
+    fn env_key_matching_is_case_insensitive_only_on_windows() {
+        let snapshot = vec![(
+            std::ffi::OsString::from("opencode_config_content"),
+            std::ffi::OsString::from(r#"{"theme":"dark"}"#),
+        )];
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &snapshot,
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap();
+        let config_str = plan
+            .env
+            .iter()
+            .find(|(key, _)| env_key_eq(key, OPENCODE_CONFIG_CONTENT))
+            .map(|(_, value)| value.as_str());
+        let config: serde_json::Value = serde_json::from_str(
+            config_str.expect("browser config must be emitted with the canonical key"),
+        )
+        .unwrap();
+        if cfg!(windows) {
+            assert_eq!(config["theme"], "dark");
+        } else {
+            assert!(
+                config.get("theme").is_none(),
+                "on case-sensitive platforms a differently-cased snapshot key must not be merged as OPENCODE_CONFIG_CONTENT"
+            );
+        }
+        assert!(config["mcp"].get("tb-browser").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_snapshot_config_with_browser_is_rejected() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let snapshot = vec![(
+            OsString::from(OPENCODE_CONFIG_CONTENT),
+            OsString::from_vec(b"not-utf8-\xff".to_vec()),
+        )];
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from("/usr/local/bin/tidebreak"),
+        );
+        let err = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &snapshot,
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("not valid UTF-8"),
+            "non-UTF-8 snapshot config must fail clearly when browser merging needs it: {message}"
+        );
+    }
+
+    #[test]
+    fn browser_absent_preserves_extra_env_config_verbatim() {
+        let overlay = serde_json::json!({
+            "mcp": { "overlay-server": { "type": "local", "command": ["overlay"] } }
+        })
+        .to_string();
+        let entry = ("opencode_config_content".to_owned(), overlay);
+        let plan = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            std::slice::from_ref(&entry),
+            4096,
+            None,
+        )
+        .unwrap();
+        let preserved = plan
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == &entry.0)
+            .expect("explicit overlay must survive when browser is absent");
+        if cfg!(windows) {
+            assert_eq!(preserved.0, entry.0);
+        }
+        assert_eq!(preserved.1, entry.1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_bridge_command_is_rejected() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bridge = OsString::from_vec(b"/tmp/tidebreak-\xff".to_vec());
+        let spec = BrowserChannelSpec::new(
+            std::path::PathBuf::from("/tmp/browser-cap.json"),
+            std::path::PathBuf::from(bridge),
+        );
+        let err = compose_serve_plan(
+            std::path::Path::new("/usr/bin/opencode"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[],
+            &[],
+            4096,
+            Some(&spec),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("not valid UTF-8"),
+            "non-UTF-8 bridge path must fail clearly: {message}"
+        );
     }
 }

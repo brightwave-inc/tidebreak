@@ -1,4 +1,7 @@
 import {
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useRef,
@@ -17,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
+import { BrowserViewportControl } from "./BrowserViewportControl";
 import {
   type BrowserBounds,
   type BrowserHostAction,
@@ -35,6 +39,12 @@ import {
   restoreOrCreateBrowserSession,
   writeStoredBrowserSession,
 } from "./browserPersistence";
+import {
+  type BrowserViewport,
+  restoreOrDefaultViewport,
+  viewportTargetWidth,
+  writeStoredViewport,
+} from "./browserViewport";
 import {
   beginBrowserNavigation,
   canBrowserGoBack,
@@ -95,6 +105,8 @@ function CodeBrowserTabSession({
   const [address, setAddress] = useState(session.address);
   const [addressError, setAddressError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [agentAccessOpen, setAgentAccessOpen] = useState(false);
+  const [viewportOpen, setViewportOpen] = useState(false);
   const [slow, setSlow] = useState(false);
   const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -102,13 +114,38 @@ function CodeBrowserTabSession({
   const nativeReady = useRef(false);
   const nativeHistoryAvailable = useRef(false);
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
+  const nativeRevealFrame = useRef<number | null>(null);
   const persistTimer = useRef<number | null>(null);
   const sessionRef = useRef(session);
-  const visible = !obscured && !historyOpen && session.loadState !== "failed";
+  const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
+  const viewportSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const [renderedViewportWidth, setRenderedViewportWidth] = useState<number | null>(
+    null,
+  );
+  const visible =
+    !obscured &&
+    !historyOpen &&
+    !agentAccessOpen &&
+    !viewportOpen &&
+    session.loadState !== "failed";
   const visibleRef = useRef(visible);
 
   sessionRef.current = session;
   visibleRef.current = visible;
+
+  // Reset agentAccessOpen when agent access is revoked or becomes unavailable
+  // while its compact menu is open. Mirror BrowserAgentAccessControl's render
+  // guard: Radix does not call onOpenChange(false) when the control returns
+  // null, so without this the native WKWebView would stay hidden permanently.
+  const agentAccessAvailable = Boolean(
+    runtime?.engine?.capabilities.semanticSnapshot &&
+      runtime?.agentAccess?.origin,
+  );
+  useEffect(() => {
+    if (agentAccessOpen && !agentAccessAvailable) {
+      setAgentAccessOpen(false);
+    }
+  }, [agentAccessAvailable, agentAccessOpen]);
 
   const updateSession = useCallback(
     (update: (current: BrowserSession) => BrowserSession) => {
@@ -133,27 +170,101 @@ function CodeBrowserTabSession({
     [browserId, workspaceId],
   );
 
-  const settleCreatedNativeView = useCallback(async () => {
+  const cancelNativeReveal = useCallback(() => {
+    if (nativeRevealFrame.current === null) return;
+    const frame = nativeRevealFrame.current;
+    nativeRevealFrame.current = null;
+    window.cancelAnimationFrame(frame);
+  }, []);
+
+  const scheduleNativeReveal = useCallback(() => {
+    cancelNativeReveal();
+    if (
+      !mountedRef.current ||
+      !nativeReady.current ||
+      !visibleRef.current ||
+      !host.available()
+    ) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (nativeRevealFrame.current !== frame) return;
+      nativeRevealFrame.current = null;
+      if (
+        !mountedRef.current ||
+        !nativeReady.current ||
+        !visibleRef.current ||
+        !host.available()
+      ) {
+        return;
+      }
+      void host
+        .command(workspaceId, browserId, { type: "set_visible", visible: true })
+        .catch(() => undefined);
+    });
+    nativeRevealFrame.current = frame;
+  }, [browserId, cancelNativeReveal, host, workspaceId]);
+
+  /**
+   * Shared post-ready reconciliation for create and existing-view paths.
+   *
+   * Reads the live viewport-surface bounds (not a stale pre-await capture),
+   * applies them, then reveals the native surface through the existing
+   * cancellable one-animation-frame mechanism so an in-flight overlay
+   * handoff is never overpainted.  Hides immediately when the tab is
+   * unmounted or obscured.
+   */
+  const reconcileAfterNativeReady = useCallback(async () => {
+    if (!mountedRef.current) {
+      nativeReady.current = false;
+      cancelNativeReveal();
+      await host.command(workspaceId, browserId, {
+        type: "set_visible",
+        visible: false,
+      });
+      return;
+    }
     nativeReady.current = true;
-    recordRuntime(await host.command(workspaceId, browserId, {
-      type: "set_visible",
-      visible: mountedRef.current && visibleRef.current,
-    }));
-    const bounds = readBrowserBounds(surfaceRef.current);
+    const bounds = readBrowserBounds(viewportSurfaceRef.current);
     if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
       lastNativeBounds.current = bounds;
       recordRuntime(
         await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
       );
     }
-  }, [browserId, host, recordRuntime, workspaceId]);
+    if (!mountedRef.current || !visibleRef.current) {
+      if (!mountedRef.current) nativeReady.current = false;
+      cancelNativeReveal();
+      recordRuntime(await host.command(workspaceId, browserId, {
+        type: "set_visible",
+        visible: false,
+      }));
+      return;
+    }
+    scheduleNativeReveal();
+  }, [
+    browserId,
+    cancelNativeReveal,
+    host,
+    recordRuntime,
+    scheduleNativeReveal,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      cancelNativeReveal();
+      nativeReady.current = false;
+      if (host.available()) {
+        void host
+          .command(workspaceId, browserId, { type: "set_visible", visible: false })
+          .catch(() => undefined);
+      }
     };
-  }, []);
+  }, [browserId, cancelNativeReveal, host, workspaceId]);
 
   useEffect(() => {
     onTitleChange?.(session.title);
@@ -186,6 +297,10 @@ function CodeBrowserTabSession({
     },
     [browserId],
   );
+
+  useEffect(() => {
+    writeStoredViewport(viewport);
+  }, [viewport]);
 
   useEffect(() => {
     if (session.loadState !== "loading") {
@@ -241,7 +356,7 @@ function CodeBrowserTabSession({
       }
 
       if (!current.url) return;
-      const bounds = readBrowserBounds(surfaceRef.current);
+      const bounds = readBrowserBounds(viewportSurfaceRef.current);
       if (!bounds) return;
 
       try {
@@ -267,23 +382,16 @@ function CodeBrowserTabSession({
             });
             setAddress(browserDisplayAddress(snapshot.url));
           }
-          recordRuntime(
-            await host.command(workspaceId, browserId, { type: "set_bounds", bounds }),
-          );
-          lastNativeBounds.current = bounds;
-          recordRuntime(await host.command(workspaceId, browserId, {
-            type: "set_visible",
-            visible: visibleRef.current,
-          }));
+          await reconcileAfterNativeReady();
         } else {
           recordRuntime(await host.command(workspaceId, browserId, {
             type: "create",
             url: current.url,
             bounds,
-            visible: visibleRef.current,
+            visible: false,
           }));
           lastNativeBounds.current = bounds;
-          await settleCreatedNativeView();
+          await reconcileAfterNativeReady();
           nativeHistoryAvailable.current = current.history.length <= 1;
         }
       } catch (error) {
@@ -370,16 +478,11 @@ function CodeBrowserTabSession({
     return () => {
       cancelled = true;
       unsubscribe?.();
-      if (nativeReady.current && host.available()) {
-        void host
-          .command(workspaceId, browserId, { type: "set_visible", visible: false })
-          .catch(() => undefined);
-      }
     };
-  }, [browserId, host, recordRuntime, settleCreatedNativeView, updateSession, workspaceId]);
+  }, [browserId, host, recordRuntime, reconcileAfterNativeReady, updateSession, workspaceId]);
 
   useEffect(() => {
-    const surface = surfaceRef.current;
+    const surface = viewportSurfaceRef.current;
     if (!surface || !host.available()) return;
     let frame: number | null = null;
 
@@ -419,10 +522,17 @@ function CodeBrowserTabSession({
 
   useEffect(() => {
     if (!nativeReady.current || !host.available()) return;
-    void host
-      .command(workspaceId, browserId, { type: "set_visible", visible })
-      .catch(() => undefined);
-  }, [browserId, host, visible, workspaceId]);
+    if (!visible) {
+      cancelNativeReveal();
+      void host
+        .command(workspaceId, browserId, { type: "set_visible", visible: false })
+        .catch(() => undefined);
+      return;
+    }
+
+    scheduleNativeReveal();
+    return cancelNativeReveal;
+  }, [cancelNativeReveal, host, scheduleNativeReveal, visible]);
 
   async function navigate(input = address) {
     const target = browserTarget(input);
@@ -453,16 +563,16 @@ function CodeBrowserTabSession({
         );
         return;
       }
-      const bounds = readBrowserBounds(surfaceRef.current);
+      const bounds = readBrowserBounds(viewportSurfaceRef.current);
       if (!bounds) throw new Error("The browser surface is not ready");
       recordRuntime(await host.command(workspaceId, browserId, {
         type: "create",
         url: target.url,
         bounds,
-        visible,
+        visible: false,
       }));
       lastNativeBounds.current = bounds;
-      await settleCreatedNativeView();
+      await reconcileAfterNativeReady();
       nativeHistoryAvailable.current = sessionRef.current.history.length <= 1;
     } catch (error) {
       if (mountedRef.current) {
@@ -615,6 +725,17 @@ function CodeBrowserTabSession({
         onSelectHistory={(index) => void selectHistory(index)}
         onOpenExternal={() => void openExternal()}
         onOverlayOpenChange={setHistoryOpen}
+        onAgentAccessOpenChange={setAgentAccessOpen}
+        agentAccessOpen={agentAccessOpen}
+        viewportControl={
+          <BrowserViewportControl
+            viewport={viewport}
+            renderedWidth={renderedViewportWidth}
+            onViewportChange={setViewport}
+            onOverlayOpenChange={setViewportOpen}
+            disabled={!session.url}
+          />
+        }
       />
       {notice && (
         <BrowserNoticeRow
@@ -637,14 +758,21 @@ function CodeBrowserTabSession({
         />
       )}
       <div ref={surfaceRef} className="relative min-h-0 flex-1 overflow-hidden">
-        {!showNative && (
-          <BrowserFallback
-            error={session.error}
-            hasUrl={Boolean(session.url)}
-            onRetry={session.url ? () => void navigate() : undefined}
-            onOpenExternal={session.url ? () => void openExternal() : undefined}
-          />
-        )}
+        <ViewportSurface
+          viewport={viewport}
+          showNative={showNative}
+          surfaceRef={viewportSurfaceRef}
+          onViewportBoundsChange={setRenderedViewportWidth}
+        >
+          {!showNative && (
+            <BrowserFallback
+              error={session.error}
+              hasUrl={Boolean(session.url)}
+              onRetry={session.url ? () => void navigate() : undefined}
+              onOpenExternal={session.url ? () => void openExternal() : undefined}
+            />
+          )}
+        </ViewportSurface>
       </div>
     </section>
   );
@@ -721,6 +849,80 @@ export function BrowserFallback({
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Centers and clips the native webview column inside the browser surface.
+ *
+ * For Fit, the column fills the surface. For fixed presets and custom widths,
+ * the column is constrained to the target width (clamped to the surface),
+ * centered horizontally, and reports its actual rendered width so the toolbar
+ * can display it without a second control. The native webview is positioned
+ * at the column's bounds so it visually matches the simulated viewport.
+ *
+ * A muted backdrop fills the gutter on either side of a fixed/custom column so
+ * the simulated device frame reads as a deliberate inset, not a broken layout.
+ */
+function ViewportSurface({
+  viewport,
+  showNative,
+  surfaceRef,
+  onViewportBoundsChange,
+  children,
+}: {
+  viewport: BrowserViewport;
+  showNative: boolean;
+  surfaceRef: RefObject<HTMLDivElement | null>;
+  onViewportBoundsChange: (width: number | null) => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const el = surfaceRef.current;
+    if (!el) return;
+    let frame: number | null = null;
+    const sync = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const rect = surfaceRef.current?.getBoundingClientRect();
+        onViewportBoundsChange(rect && rect.width > 0 ? rect.width : null);
+      });
+    };
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    sync();
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [surfaceRef, onViewportBoundsChange]);
+
+  const isFit = viewport.preset === "fit";
+  const targetWidth = isFit ? null : viewportTargetWidth(viewport);
+  const style: CSSProperties = isFit
+    ? {}
+    : { width: targetWidth ? `${targetWidth}px` : undefined, maxWidth: "100%" };
+
+  return (
+    <div className="absolute inset-0 flex justify-center overflow-hidden">
+      {!isFit && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 bg-muted/30"
+        />
+      )}
+      <div
+        ref={surfaceRef}
+        className={cn(
+          "relative min-h-0",
+          isFit ? "flex-1 w-full" : "h-full shrink-0",
+        )}
+        style={style}
+      >
+        {showNative ? null : children}
       </div>
     </div>
   );

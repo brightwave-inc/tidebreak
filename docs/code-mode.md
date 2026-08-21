@@ -35,7 +35,7 @@ eventually including Tidebreak's own internal loop, sits behind
 |---|---|
 | repo | A registered local git repository: root path, default base ref, branch prefix, setup/archive scripts, quick actions. |
 | workspace | One isolated unit of work on a repo. Owns exactly one git worktree and one branch for life; carries PR state. |
-| session | One durable conversation with one harness inside a workspace. V1: one active session per workspace. |
+| session | One durable conversation with one harness inside a workspace. A workspace holds several, plus at most one watch session; their turns are serialized on the shared worktree ([`0055`](decisions/0055-multiple-sessions-per-workspace.md)). |
 | turn | One user→agent cycle in a session, ending in a checkpoint. |
 | harness | The external coding-agent CLI being driven (never "provider"). |
 

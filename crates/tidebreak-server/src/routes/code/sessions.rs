@@ -12,7 +12,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::types::{
-    CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
+    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
     SequencedCodeEventFrame, SetAttentionBody, SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::SubmitTurnOutcome;
@@ -82,6 +82,27 @@ pub async fn submit_turn(
         )
             .into_response()),
     }
+}
+
+/// `POST /code/sessions/{id}/fork` — write this session's transcript into the
+/// worktree and report where it landed.
+///
+/// Creating the child session is a separate call: forking is a file, and the
+/// reader picks the engine and edits the framing before anything is sent.
+pub async fn fork_session(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+) -> Result<(StatusCode, Json<CodeForkTranscript>), ServerError> {
+    let written = code.fork_transcript(id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CodeForkTranscript {
+            path: written.path,
+            byte_len: written.byte_len,
+            turns: written.turns,
+            truncated: written.truncated,
+        }),
+    ))
 }
 
 pub async fn get_session_debug(

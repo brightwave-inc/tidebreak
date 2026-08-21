@@ -3,23 +3,38 @@ import { DndContext } from "@dnd-kit/core";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import { CodeCenterTabs } from "@/code/CodeCenterTabs";
+import {
+  CodeCenterTabs,
+  type CodeConversationTab,
+} from "@/code/CodeCenterTabs";
 import type { PanelContent } from "@/panel/panelTypes";
 
+import {
+  attentionDoneUnreviewed,
+  attentionNeedsYou,
+  attentionWorking,
+} from "./fixtures";
+
+const MAIN_AGENT: CodeConversationTab[] = [
+  { id: "session-1", label: "Main agent", harness: "claude_code" },
+];
+
 /**
- * The center tab strip: the persistent Main agent tab, editor tabs, and the
- * single `+` that offers everything the center can open — a file, the
- * all-changes diff, a browser, or the terminal — instead of jumping straight
- * into the file picker.
+ * The center tab strip: one tab per agent in the workspace, then editor tabs,
+ * then the single `+` that offers everything the center can open — another
+ * agent, a file, the all-changes diff, a browser, or the terminal — instead of
+ * jumping straight into the file picker.
  */
 function TabStrip({
   editorTabs,
+  conversations = MAIN_AGENT,
   withBrowser = true,
   withDiff = true,
   withTerminal = true,
   region = "primary" as const,
 }: {
   editorTabs: PanelContent[];
+  conversations?: CodeConversationTab[];
   withBrowser?: boolean;
   withDiff?: boolean;
   withTerminal?: boolean;
@@ -27,6 +42,9 @@ function TabStrip({
 }) {
   const [active, setActive] = useState(editorTabs.length > 0 ? 0 : -1);
   const [chatFocused, setChatFocused] = useState(editorTabs.length === 0);
+  const [conversation, setConversation] = useState<string | null>(
+    conversations[0]?.id ?? null,
+  );
   // Tabs drag through dnd-kit, which addresses everything from the context the
   // page provides. Without one here the strip would render but sit inert.
   return (
@@ -35,7 +53,15 @@ function TabStrip({
         editorTabs={editorTabs}
         editorActiveIndex={active}
         conversationFocused={chatFocused}
-        onSelectChat={() => setChatFocused(true)}
+        conversations={region === "primary" ? conversations : []}
+        activeConversationId={conversation}
+        onSelectConversation={(id) => {
+          setChatFocused(true);
+          setConversation(id);
+        }}
+        onNewConversation={region === "primary" ? fn() : undefined}
+        onCloseConversation={fn()}
+        onForkConversation={fn()}
         onSelectEditor={(index) => {
           setChatFocused(false);
           setActive(index);
@@ -53,11 +79,9 @@ function TabStrip({
         onNewTerminal={withTerminal ? fn() : undefined}
         onSplitActive={fn()}
         region={region}
-        showMainAgent={region === "primary"}
         browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
       />
-    </DndContext>
-  );
+    </DndContext>  );
 }
 
 const meta = {
@@ -79,8 +103,56 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Conversation alone; the `+` menu is the whole affordance. */
+/** One agent alone; the `+` menu is the whole affordance. */
 export const ConversationOnly: Story = {};
+
+/**
+ * Several agents in one worktree, each showing its own state: one waiting on a
+ * reply, one still working, one idle. The dots are the agents' states, so they
+ * stay readable on the tabs nobody is looking at.
+ */
+export const ManyConversations: Story = {
+  args: {
+    conversations: [
+      {
+        id: "session-1",
+        label: "Main agent",
+        harness: "claude_code",
+        attention: attentionNeedsYou,
+      },
+      {
+        id: "session-2",
+        label: "Codex",
+        harness: "codex",
+        attention: attentionWorking,
+      },
+      {
+        id: "session-3",
+        label: "opencode",
+        harness: "opencode",
+        attention: attentionDoneUnreviewed,
+      },
+    ],
+  },
+};
+
+/**
+ * Right-click an agent's tab to fork it: the transcript goes into the
+ * worktree and a new agent opens on it. A draft has nothing to fork yet.
+ */
+export const ForkFromTabMenu: Story = {
+  args: { conversations: MAIN_AGENT },
+};
+
+/** A new agent the reader has opened but not started: the one closable tab. */
+export const DraftConversation: Story = {
+  args: {
+    conversations: [
+      ...MAIN_AGENT,
+      { id: null, label: "New agent", closable: true },
+    ],
+  },
+};
 
 export const FilesOpen: Story = {
   args: {
@@ -112,7 +184,7 @@ export const WithBrowserTab: Story = {
   },
 };
 
-/** A split's right-hand group: no Main agent tab, close-group affordance. */
+/** A split's right-hand group: no agent tabs, close-group affordance. */
 export const SecondaryGroup: Story = {
   args: {
     region: "secondary",
