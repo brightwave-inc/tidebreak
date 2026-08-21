@@ -482,6 +482,16 @@ impl ScopedCode {
         self.runtime.reap(&self.owner, id).await
     }
 
+    pub(crate) async fn set_permission_mode(
+        &self,
+        id: CodeSessionId,
+        mode: CodePermissionMode,
+    ) -> Result<CodeSession, ServerError> {
+        self.runtime
+            .set_permission_mode(&self.owner, id, mode)
+            .await
+    }
+
     pub(crate) async fn set_attention(
         &self,
         id: CodeSessionId,

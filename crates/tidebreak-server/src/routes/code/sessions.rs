@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::types::{
     CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
-    SequencedCodeEventFrame, SetAttentionBody, SteerBody, SubmitTurnBody,
+    SequencedCodeEventFrame, SetAttentionBody, SetPermissionModeBody, SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::SubmitTurnOutcome;
 use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
@@ -174,6 +174,20 @@ pub async fn reap_session(
     Path(id): Path<CodeSessionId>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     let session = code.reap(id).await?;
+    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+}
+
+/// `POST /code/sessions/{id}/mode` — change a session's permission mode.
+///
+/// The engine is relaunched against the new posture, so this is refused
+/// while a turn is running and while the session has ended. A mode the
+/// engine cannot honor is refused here rather than approximated.
+pub async fn set_session_permission_mode(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+    Json(body): Json<SetPermissionModeBody>,
+) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+    let session = code.set_permission_mode(id, body.permission_mode).await?;
     Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
 }
 
