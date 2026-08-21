@@ -2935,6 +2935,21 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// One attention value per conversation that has something to say,
+    /// derived from the same rows the inbox projects (decision 48 step 3).
+    ///
+    /// Absent means [`crate::AttentionState::Idle`]. Chat derives rather than
+    /// stores: its liveness lives on `turn_run` and its waiting work is the
+    /// inbox, so a stored copy would be a duplicate needing a write at every
+    /// transition to stay true.
+    async fn chat_attention_scoped(
+        &self,
+        _owner: &OwnerId,
+        _items: &[InboxItem],
+    ) -> Result<std::collections::HashMap<crate::ChatId, crate::Attention>> {
+        turn_storage_unavailable()
+    }
+
     /// Atomically commit exact answers, complete the same tool call, and move
     /// its blocked turn to the shared resumable state.
     async fn answer_user_questions(
