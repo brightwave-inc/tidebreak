@@ -29,6 +29,7 @@ mod browser_control;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_semantics;
+mod browser_runtime_adapter;
 mod channel;
 mod chat_debug;
 mod client_execution;
@@ -590,10 +591,9 @@ fn cargo_dev_resource_dir_from(exe_dir: &Path) -> Option<PathBuf> {
 /// desktop binary. The sibling must exist, be a regular file, and (on Unix)
 /// have an executable permission bit.
 ///
-/// This is intentionally unplumbed: a later harness command-path PR will call
-/// it to resolve the `tidebreak` CLI sidecar so provider harness configs can
-/// reference the packaged binary by absolute path.
-#[allow(dead_code)]
+/// The browser runtime resolves the `tidebreak` CLI sidecar through this
+/// boundary before code-session recovery, so provider harnesses never depend
+/// on an ambient `PATH` lookup.
 pub(crate) fn desktop_sibling_exe(name: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
     desktop_sibling_exe_from(&exe, name)
@@ -941,7 +941,19 @@ async fn boot_server(
     let local_voice = Arc::new(voice_transcription::DesktopLocalVoiceRunner::new(
         data_dir.clone(),
     ));
-    let server = tidebreak_server::bind_configured_with_desktop_executor_and_folder_grants(
+    let browser_runtime: Arc<dyn tidebreak_server::BrowserRuntime> = Arc::new(
+        browser_runtime_adapter::DesktopBrowserRuntime::new(
+            app.clone(),
+            app.state::<browser_control::BrowserRegistry>()
+                .inner()
+                .clone(),
+        ),
+    );
+    let browser_binding = tidebreak_server::BrowserChannelBinding::new(
+        browser_runtime,
+        desktop_sibling_exe("tidebreak")?,
+    );
+    let server = tidebreak_server::bind_configured_with_desktop_executor_and_folder_grants_and_browser_binding(
         config,
         client_executor_id,
         folder_grants,
@@ -949,6 +961,7 @@ async fn boot_server(
         Some(host_tool_broker),
         Some(local_voice),
         Some(Arc::new(host_access::DesktopHostFolders::new(app.clone()))),
+        Some(browser_binding),
     )
     .await
     .map_err(|e| e.to_string())?;
