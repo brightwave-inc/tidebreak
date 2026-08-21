@@ -937,8 +937,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             onOpenRun={(runId) => openPanel({ type: "agent", runId })}
           />
         );
-      case "browser":
-        return browserTitles[panel.browserId];
       case "agent":
         return <BackgroundAgentPanel chatId={chatId} runId={panel.runId} />;
       case "browser":
