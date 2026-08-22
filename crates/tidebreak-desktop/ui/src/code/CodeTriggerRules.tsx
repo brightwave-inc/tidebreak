@@ -102,15 +102,20 @@ export function CodeTriggerRules({
   target,
   busy = false,
   onArm,
-  onDisarm,
+  onSetEnabled,
   onChangeAction,
 }: {
   triggers: CodeTriggerSnapshot[];
   /** Where a fire would land right now, or null when nothing can receive one. */
   target: CodeTriggerTarget | null;
   busy?: boolean;
+  /** Arm a condition that has no rule yet. */
   onArm: (condition: CodeTriggerCondition, action: CodeTriggerAction) => void;
-  onDisarm: (trigger: CodeTriggerSnapshot) => void;
+  /**
+   * Switch an existing rule on or off. Separate from arming because the rule
+   * survives being switched off — turning it back on must not build a new one.
+   */
+  onSetEnabled: (trigger: CodeTriggerSnapshot, enabled: boolean) => void;
   onChangeAction: (
     trigger: CodeTriggerSnapshot,
     action: CodeTriggerAction,
@@ -145,13 +150,16 @@ export function CodeTriggerRules({
                 disabled={busy}
                 aria-label={copy.title}
                 onCheckedChange={(enabled) => {
-                  if (!enabled) {
-                    if (trigger) {
-                      onDisarm(trigger);
-                    }
+                  // A rule that exists is switched, never rebuilt: arming
+                  // again would discard the row the server keeps so its
+                  // scoping survives a toggle.
+                  if (trigger) {
+                    onSetEnabled(trigger, enabled);
                     return;
                   }
-                  onArm(condition, trigger?.action ?? "deliver");
+                  if (enabled) {
+                    onArm(condition, "deliver");
+                  }
                 }}
               />
               <div className="min-w-52 flex-1">

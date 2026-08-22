@@ -32,7 +32,7 @@ const meta = {
     },
     busy: false,
     onArm: fn(),
-    onDisarm: fn(),
+    onSetEnabled: fn(),
     onChangeAction: fn(),
   },
   decorators: [
