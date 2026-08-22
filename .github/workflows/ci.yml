@@ -785,6 +785,50 @@ jobs:
           cargo test -p tidebreak-core --no-default-features --features postgres
           --test postgres_code_owner --locked
 
+  self-host-build:
+    name: self-host server build
+    needs: changes
+    if: ${{ needs.changes.outputs.workspace == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+      # The feature set deploy/self-host/Dockerfile builds, which no other job
+      # compiles: clippy and test run default features, and the postgres job
+      # covers tidebreak-core rather than tidebreak-cli. Without this, the
+      # combination first builds inside `Publish server image`, which runs only
+      # after a release is published — so a break there strands a released tag
+      # with no pullable image.
+      #
+      # Debug profile on purpose. This guards compile-time failures such as
+      # trait-resolution and layout-depth limits, which do not vary with
+      # opt-level, and it keeps the job minutes rather than the release build's.
+      # It does not cover the Dockerfile itself or release-only codegen.
+      - name: Build the self-host binary the way the image does
+        run: >-
+          cargo build --locked -p tidebreak-cli
+          --features tidebreak-server/postgres
+
   ui:
     name: desktop UI
     needs: changes

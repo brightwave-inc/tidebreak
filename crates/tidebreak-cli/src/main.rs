@@ -79,6 +79,12 @@
 //! reaches a data directory a desktop app or daemon already owns; two processes
 //! embedding servers over one data directory is refused.
 
+// `tidebreak-server/postgres` deepens the `output_command` async state machine
+// past rustc's default 128-query layout limit, which is how the self-host image
+// build broke while every default-feature build stayed green. The limit is a
+// compile-time bound, so raising it costs nothing at runtime.
+#![recursion_limit = "256"]
+
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::str::FromStr;
