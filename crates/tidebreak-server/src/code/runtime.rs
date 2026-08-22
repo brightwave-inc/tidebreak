@@ -45,8 +45,8 @@ use super::gh::{
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, journal_event, queue_follow_up, spawn_session_worker, WorkerCommand,
-    WorkerError, WorkerHandle,
+    attach_engine, journal_event, queue_follow_up, spawn_session_worker, AttachmentStore,
+    WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -1628,20 +1628,10 @@ impl CodeRuntime {
                 "session has ended",
             ));
         }
-        if !attachments.is_empty() {
-            let adapter = self.adapter(session.harness_kind)?;
-            let probe = self.probe(adapter.as_ref()).await;
-            let caps = adapter.capabilities(&probe);
-            if caps.image_input != CapLevel::Supported {
-                return Err(ServerError::unprocessable_kind(
-                    "unsupported_attachment",
-                    format!(
-                        "{harness} does not support image attachments",
-                        harness = session.harness_kind
-                    ),
-                ));
-            }
-        }
+        // No capability gate on attachments. An engine that states image input
+        // is handed the bytes on its own protocol; every other one is handed a
+        // file under the checkout and a path in the prompt, which is a thing
+        // each of them can already read. The worker picks between the two.
         let handle = self.require_worker(id)?;
         // Both stick: a composer choice is the session's from here on, exactly
         // as the engines' own pickers behave. The outer `Option` on effort is
@@ -2664,7 +2654,15 @@ impl CodeRuntime {
             attached.clone(),
             engine,
             sink,
-            Some(self.blobs.clone()),
+            AttachmentStore {
+                blobs: Some(self.blobs.clone()),
+                worktree: PathBuf::from(&workspace.worktree_path),
+                // Only an engine that states image input takes the bytes on
+                // its own protocol. The rest are handed paths under the
+                // checkout, which every engine can read.
+                engine_reads_images: adapter.capabilities(&probe).image_input
+                    == CapLevel::Supported,
+            },
             self.worktree_turn_lock(attached.workspace_id),
         );
         self.workers

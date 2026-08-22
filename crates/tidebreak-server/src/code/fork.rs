@@ -11,7 +11,7 @@
 //! worktree of the same repository reads.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tidebreak_core::{
     CodeEvent, CodeSession, CodeTurn, CodeTurnId, HarnessKind, SequencedCodeEvent, ToolDetail,
@@ -58,57 +58,15 @@ pub(crate) async fn write_transcript(
     events: &[SequencedCodeEvent],
 ) -> std::io::Result<WrittenTranscript> {
     let rendered = render_transcript(session, turns, events);
-    let dir = worktree.join(FORKS_DIR);
-    tokio::fs::create_dir_all(&dir).await?;
-    ignore_scratch_dir(worktree).await?;
+    let dir = super::scratch::scratch_dir(worktree, FORKS_DIR).await?;
     let path = dir.join(format!("{}.md", session.id));
-    publish(&path, rendered.markdown.as_bytes()).await?;
+    super::scratch::publish(&path, rendered.markdown.as_bytes()).await?;
     Ok(WrittenTranscript {
         path: format!("{FORKS_DIR}/{}.md", session.id),
         byte_len: rendered.markdown.len() as u64,
         turns: rendered.turns,
         truncated: rendered.truncated,
     })
-}
-
-/// Put bytes at `path` in one step, leaving nothing behind if it fails.
-///
-/// The staged name carries a fresh id rather than a fixed `.part` suffix, so
-/// concurrent writers stage separately and neither can be caught writing over
-/// the other's half-written file.
-async fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("the transcript path names no file"))?;
-    let staged = path.with_file_name(format!(
-        "{}.{}.part",
-        name.to_string_lossy(),
-        uuid::Uuid::new_v4()
-    ));
-    let written = tokio::fs::write(&staged, bytes).await;
-    let published = match written {
-        Ok(()) => tokio::fs::rename(&staged, path).await,
-        Err(err) => Err(err),
-    };
-    if published.is_err() {
-        let _ = tokio::fs::remove_file(&staged).await;
-    }
-    published
-}
-
-/// Make `.tidebreak/` ignore itself.
-///
-/// A `.gitignore` holding `*` hides the directory and the ignore file with
-/// it. Writing here mutates nothing the reader tracks and nothing shared with
-/// their other worktrees, which the alternatives — the repository's own
-/// `.gitignore`, or `.git/info/exclude` — both do.
-async fn ignore_scratch_dir(worktree: &Path) -> std::io::Result<()> {
-    let scratch: PathBuf = worktree.join(".tidebreak");
-    let marker = scratch.join(".gitignore");
-    if tokio::fs::try_exists(&marker).await? {
-        return Ok(());
-    }
-    tokio::fs::write(&marker, "*\n").await
 }
 
 /// A rendered transcript and what had to be left out of it.

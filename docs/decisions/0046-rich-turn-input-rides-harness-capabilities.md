@@ -1,6 +1,6 @@
 # 46. Rich Turn Input Rides Harness Capabilities
 
-- Status: Proposed
+- Status: Proposed (amended 2026-08-22, see [Amendment](#amendment-2026-08-22))
 - Date: 2026-08-18
 - Owners: code mode
 - Related: 0031 (adapter capability honesty), 0033 (approvals never paraphrase),
@@ -110,3 +110,28 @@ contract should merge into the chat attachment model rather than diverge.
 - Composer DOM tests: affordances absent when caps are `Unsupported`/
   `Unknown`; paste with support produces an attachment chip; `/` popup lists
   probe-discovered commands and still submits free text without them.
+
+## Amendment (2026-08-22)
+
+**`image_input` no longer gates whether an attachment is offered, only how it
+travels.** The route accepts attachments for every engine, and the composer
+offers the affordance on every session. An adapter that declares `Supported`
+is handed the bytes on its machine-readable input path, exactly as before.
+Every other engine is handed the file: the worker writes it under
+`.tidebreak/attachments/` in the checkout and names the path in the prompt,
+the route a fork's transcript already takes. The `unsupported_attachment`
+refusal is gone.
+
+The rest of this record stands — the capability flag, the fixture rule behind
+`Supported`, the bounded journal reference, and the pass-through contracts for
+slash commands and `@`.
+
+Why: this is the "revisit if" above, reached from the other side. The
+capability was doing two jobs — deciding whether Tidebreak could carry an
+image at all, and deciding which wire carried it — and only the second was
+ever a property of the engine. Every engine reads files off disk with tools it
+already has, so there was never a version of this where an attachment could
+not reach one; there was only a version where Tidebreak declined to try. The
+fixture rule stays exactly as strict, because it now governs the narrower
+claim it was always measuring: that the engine consumed an image on its
+machine-readable input.

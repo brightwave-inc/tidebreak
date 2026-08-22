@@ -92,6 +92,9 @@ pub(crate) struct ScriptedAdapter {
     /// engine onto. Shared with the session so both survive a relaunch.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
     modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
+    /// What each turn actually handed the engine, for a test that cares how
+    /// an attachment travelled rather than that it was accepted.
+    inputs: Arc<std::sync::Mutex<Vec<ScriptedTurnInput>>>,
     child_pid: Option<i64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
@@ -122,6 +125,7 @@ impl ScriptedAdapter {
             posture_fixed: false,
             turns: Arc::new(std::sync::Mutex::new(Vec::new())),
             modes: Arc::new(std::sync::Mutex::new(Vec::new())),
+            inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
             child_pid: None,
             unrecognized_per_turn: 0,
             silent_interrupt: false,
@@ -202,6 +206,11 @@ impl ScriptedAdapter {
     pub(crate) fn with_posture_fixed_at_session_start(mut self) -> Self {
         self.posture_fixed = true;
         self
+    }
+
+    /// What each turn handed the engine, in order.
+    pub(crate) fn turn_inputs(&self) -> Vec<ScriptedTurnInput> {
+        self.inputs.lock().expect("scripted inputs").clone()
     }
 
     /// The effort each turn actually ran at, in order.
@@ -342,6 +351,7 @@ impl HarnessAdapter for ScriptedAdapter {
             posture_fixed: self.posture_fixed,
             turns: self.turns.clone(),
             modes: self.modes.clone(),
+            inputs: self.inputs.clone(),
         }))
     }
 }
@@ -368,6 +378,16 @@ struct ScriptedSession {
     /// after the runtime has dropped and relaunched the session.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
     modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
+    inputs: Arc<std::sync::Mutex<Vec<ScriptedTurnInput>>>,
+}
+
+/// One turn as the engine received it.
+#[derive(Clone, Debug)]
+pub(crate) struct ScriptedTurnInput {
+    /// The prompt text, which is not always the message the person typed.
+    pub text: String,
+    /// How many images rode the protocol.
+    pub images: usize,
 }
 
 impl ScriptedSession {
@@ -433,6 +453,13 @@ impl HarnessSession for ScriptedSession {
             .lock()
             .expect("scripted turns")
             .push(_input.reasoning_effort);
+        self.inputs
+            .lock()
+            .expect("scripted inputs")
+            .push(ScriptedTurnInput {
+                text: _input.text.clone(),
+                images: _input.images.len(),
+            });
         if let Some(detail) = &self.lost_resume {
             return Err(HarnessError::ResumeLost(detail.clone()));
         }

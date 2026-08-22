@@ -646,7 +646,11 @@ mod tests {
             session,
             engine,
             sink,
-            None,
+            crate::code::session_worker::AttachmentStore {
+                blobs: None,
+                worktree: _dir.path().join("wt"),
+                engine_reads_images: false,
+            },
             std::sync::Arc::new(tokio::sync::Mutex::new(())),
         );
         let (reply, _turn) = tokio::sync::oneshot::channel();

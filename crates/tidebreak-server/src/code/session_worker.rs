@@ -11,6 +11,7 @@
 //! it: an interrupt's grace period is exactly when the child's stdout most
 //! needs draining.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -145,6 +146,23 @@ enum TurnWait {
 struct WorktreeTurn<'a> {
     lock: &'a tokio::sync::Mutex<()>,
     wait: TurnWait,
+}
+
+/// Where a turn's attachments come from, and where they can be put.
+///
+/// Two routes, and the engine picks which. Claude Code takes image bytes on
+/// its own protocol, so they ride `TurnInput::images`. Every other engine
+/// reads attachments off disk with the file tools it already has, so the bytes
+/// are written under the checkout and the prompt carries paths — the same
+/// route a fork's transcript takes.
+#[derive(Clone)]
+pub(crate) struct AttachmentStore {
+    /// Published bytes, addressed by blob id.
+    pub blobs: Option<Arc<dyn BlobStore>>,
+    /// The session's checkout, where a file-reading engine is handed paths.
+    pub worktree: PathBuf,
+    /// Whether this engine consumes images over its own protocol.
+    pub engine_reads_images: bool,
 }
 
 pub(crate) struct QueuedFollowUp {
@@ -422,7 +440,7 @@ pub(crate) fn spawn_session_worker(
     session: CodeSession,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
-    blobs: Option<Arc<dyn BlobStore>>,
+    attachments: AttachmentStore,
     worktree_turn: Arc<tokio::sync::Mutex<()>>,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
@@ -433,7 +451,7 @@ pub(crate) fn spawn_session_worker(
         engine,
         sink.clone(),
         queue.clone(),
-        blobs,
+        attachments,
         rx,
     ));
     WorkerHandle {
@@ -471,7 +489,7 @@ async fn run_worker(
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
     queue: TurnQueue,
-    blobs: Option<Arc<dyn BlobStore>>,
+    store: AttachmentStore,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
     if let Some(pid) = engine.child_pid() {
@@ -488,7 +506,7 @@ async fn run_worker(
             engine.as_ref(),
             &sink,
             &queue,
-            blobs.as_deref(),
+            &store,
             &mut commands,
         )
         .await;
@@ -506,7 +524,7 @@ async fn run_worker(
                         &mut session,
                         engine.as_ref(),
                         &sink,
-                        blobs.as_deref(),
+                        &store,
                         &mut commands,
                         WorktreeTurn {
                             lock: &queue.worktree,
@@ -722,7 +740,7 @@ async fn drain_queued(
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     queue: &TurnQueue,
-    blobs: Option<&dyn BlobStore>,
+    store: &AttachmentStore,
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
@@ -734,7 +752,7 @@ async fn drain_queued(
             session,
             engine,
             sink,
-            blobs,
+            store,
             commands,
             WorktreeTurn {
                 lock: &queue.worktree,
@@ -750,7 +768,7 @@ async fn drive_turn(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
-    blobs: Option<&dyn BlobStore>,
+    store: &AttachmentStore,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     worktree: WorktreeTurn<'_>,
     follow_up: QueuedFollowUp,
@@ -772,7 +790,7 @@ async fn drive_turn(
         tidebreak.duration_ms = tracing::field::Empty,
     );
     let started = Instant::now();
-    let result = drive_turn_inner(session, engine, sink, blobs, commands, worktree, follow_up)
+    let result = drive_turn_inner(session, engine, sink, store, commands, worktree, follow_up)
         .instrument(span.clone())
         .await;
     let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -803,7 +821,7 @@ async fn drive_turn_inner(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
-    blobs: Option<&dyn BlobStore>,
+    store: &AttachmentStore,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
@@ -828,7 +846,9 @@ async fn drive_turn_inner(
     if session.lifecycle == CodeSessionLifecycle::Ended {
         return Err(WorkerError::Conflict("session has ended".into()));
     }
-    let images = hydrate_turn_images(blobs, &attachments).await?;
+    // Bytes first, before the worktree lock: a blob read and a decode should
+    // never be held against a sibling session waiting for the checkout.
+    let hydrated = hydrate_turn_images(store.blobs.as_deref(), &attachments).await?;
 
     // The workspace's checkout takes one turn at a time (record 55). Taking
     // the lock *is* the reservation: a pre-flight database read cannot be,
@@ -914,8 +934,19 @@ async fn drive_turn_inner(
         session.model = Some(model);
     }
     session.reasoning_effort = reasoning_effort;
+    // What the engine is handed is not always what the person wrote: an engine
+    // that cannot take images over its own protocol is given paths instead, and
+    // `turn.user_input` above keeps the message as typed.
+    let (engine_text, images) = if store.engine_reads_images || hydrated.is_empty() {
+        (message, hydrated)
+    } else {
+        let written = write_turn_attachments(&store.worktree, &turn.attachments, &hydrated)
+            .await
+            .map_err(|err| WorkerError::Failed(format!("write attachment: {err}")))?;
+        (message_naming_attachments(&message, &written), Vec::new())
+    };
     let run = engine.run_turn(TurnInput {
-        text: message,
+        text: engine_text,
         model: session.model.clone(),
         reasoning_effort: session.reasoning_effort,
         images,
@@ -1178,6 +1209,59 @@ fn code_turn_is_error(result: &Result<CodeTurn, WorkerError>) -> bool {
             ..
         }) | Err(WorkerError::Failed(_))
     )
+}
+
+/// Directory holding a turn's attachments, relative to the worktree root.
+pub(crate) const ATTACHMENTS_DIR: &str = ".tidebreak/attachments";
+
+/// Write a turn's attachments under the checkout, returning worktree-relative
+/// paths in the order they were attached.
+///
+/// Named by blob id, which is content-addressed: the same image attached twice
+/// is one file, and a re-send after a failed turn overwrites itself rather than
+/// growing the directory. The write is published by rename, so an engine that
+/// is already reading one never catches a half-written file.
+async fn write_turn_attachments(
+    worktree: &Path,
+    attachments: &[tidebreak_core::ImageRef],
+    images: &[TurnImage],
+) -> std::io::Result<Vec<String>> {
+    let dir = super::scratch::scratch_dir(worktree, ATTACHMENTS_DIR).await?;
+    let mut written = Vec::with_capacity(images.len());
+    for (attachment, image) in attachments.iter().zip(images) {
+        let name = format!(
+            "{}.{}",
+            attachment.blob_id,
+            attachment.media_type.extension()
+        );
+        super::scratch::publish(&dir.join(&name), &image.bytes).await?;
+        written.push(format!("{ATTACHMENTS_DIR}/{name}"));
+    }
+    Ok(written)
+}
+
+/// Name the attachment paths after the message, the way a fork names the
+/// transcript it wrote.
+///
+/// The engine reads them from disk, so the prompt carries paths and nothing
+/// else. An empty list leaves the message exactly as the reader wrote it.
+fn message_naming_attachments(message: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return message.to_owned();
+    }
+    let list = paths
+        .iter()
+        .map(|path| format!("- `{path}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let noun = if paths.len() == 1 { "image" } else { "images" };
+    let body = format!("{noun} attached to this message, in this worktree:\n{list}");
+    let text = message.trim();
+    if text.is_empty() {
+        body
+    } else {
+        format!("{text}\n\n{body}")
+    }
 }
 
 async fn hydrate_turn_images(

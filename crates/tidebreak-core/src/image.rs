@@ -100,6 +100,22 @@ impl ImageMediaType {
         }
     }
 
+    /// The file extension to write these bytes under, without the dot.
+    ///
+    /// Used where an attachment is materialized as a file rather than sent
+    /// over a protocol: an engine that reads the image off disk needs the
+    /// name to say what it is, both for its own sniffing and for a person
+    /// reading the path in the prompt.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+            Self::Gif => "gif",
+        }
+    }
+
     /// Identify a supported raster format from its file signature.
     ///
     /// This deliberately recognizes only the provider-safe formats represented

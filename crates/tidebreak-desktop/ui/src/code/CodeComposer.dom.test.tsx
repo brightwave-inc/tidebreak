@@ -681,7 +681,6 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        imageInput
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
@@ -701,7 +700,9 @@ describe("CodeComposer", () => {
     expect(text.defaultPrevented).toBe(false);
   });
 
-  it("answers an image paste on an engine with no image path", () => {
+  it("attaches an image on an engine with no protocol for one", () => {
+    // The bytes reach the engine as a file under the checkout, so the
+    // composer offers attachment whatever the engine's own input path is.
     renderComposer(
       <CodeComposer
         running={false}
@@ -714,27 +715,14 @@ describe("CodeComposer", () => {
     );
 
     const box = screen.getByRole("textbox", { name: "Message" });
-    // Left alone, the clipboard's text flavour — a file URL — would land in
-    // the draft and read as an attachment that took.
     const image = pasteOn(box, [
       new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
         type: "image/png",
       }),
     ]);
     expect(image.defaultPrevented).toBe(true);
-    expect(screen.queryByLabelText("Attached images")).toBeNull();
-    expect(
-      screen.getByText("Tidebreak can’t send images to opencode yet."),
-    ).toBeInTheDocument();
-
-    // Writing again is the acknowledgement.
-    fireEvent.change(box, { target: { value: "describe it instead" } });
-    expect(
-      screen.queryByText("Tidebreak can’t send images to opencode yet."),
-    ).toBeNull();
-
-    const text = pasteOn(box, []);
-    expect(text.defaultPrevented).toBe(false);
+    expect(screen.getByLabelText("Attached images")).toBeInTheDocument();
+    expect(screen.getByText("shot.png")).toBeInTheDocument();
   });
 
   it("opens the image picker from the tools menu", async () => {
@@ -744,7 +732,6 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        imageInput
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
       />,
@@ -767,7 +754,6 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        imageInput
         onSend={onSend}
         onInterrupt={vi.fn()}
       />,
@@ -803,7 +789,6 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        imageInput
         onSend={onSend}
         onInterrupt={vi.fn()}
       />,
@@ -836,7 +821,6 @@ describe("CodeComposer", () => {
         running={false}
         permissionMode="ask"
         sessionId="sess-1"
-        imageInput
         onSend={onSend}
         onInterrupt={vi.fn()}
       />,

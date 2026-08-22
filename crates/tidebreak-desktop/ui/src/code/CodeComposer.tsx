@@ -46,7 +46,6 @@ import {
   codeModelVendor,
   effortLadder,
   groupCodeModelOptions,
-  noImagePathNote,
   type CodeModelOption,
   PERMISSION_MODE_UNAVAILABLE_REASON,
   SESSION_PERMISSION_MODE_LOCKED,
@@ -567,7 +566,6 @@ export function CodeComposer({
   contextUsage,
   slashCommands,
   searchPaths,
-  imageInput = false,
   workspaceFiles,
   onSend,
   onSteer,
@@ -614,8 +612,6 @@ export function CodeComposer({
   slashCommands?: readonly { name: string; description: string }[];
   /** Name-matched workspace paths for `@` completion. */
   searchPaths?: (query: string) => Promise<readonly string[]>;
-  /** The doctor said this engine consumes images on its input path. */
-  imageInput?: boolean;
   /**
    * Files already in the worktree, shown as chips and named after the
    * message. A fork's transcript arrives this way.
@@ -929,31 +925,20 @@ export function CodeComposer({
         contextUsage={contextUsage}
         pathMentions={pathMentions}
         slash={slash}
-        imagesUnavailable={
-          harness && !imageInput ? noImagePathNote(harness) : undefined
-        }
-        images={
-          imageInput
-            ? {
-                items: images.attachments,
-                error: images.error,
-                unsupportedModel: null,
-                onAttachFiles: images.attachFiles,
-                onRemove: images.remove,
-                onRetry: images.retry,
-              }
-            : undefined
-        }
-        files={
-          imageInput
-            ? {
-                items: [],
-                attaching: false,
-                onAttach: () => imageInputRef.current?.click(),
-                onRemove: () => undefined,
-              }
-            : undefined
-        }
+        images={{
+          items: images.attachments,
+          error: images.error,
+          unsupportedModel: null,
+          onAttachFiles: images.attachFiles,
+          onRemove: images.remove,
+          onRetry: images.retry,
+        }}
+        files={{
+          items: [],
+          attaching: false,
+          onAttach: () => imageInputRef.current?.click(),
+          onRemove: () => undefined,
+        }}
         workspaceFiles={workspaceFiles}
         onDraftChange={(value) => {
           draftRef.current = value;
@@ -972,21 +957,19 @@ export function CodeComposer({
         steerPending={steerPending}
         steerStatus={steerStatus}
       />
-      {imageInput && (
-        <input
-          ref={imageInputRef}
-          type="file"
-          accept={IMAGE_MEDIA_TYPES.join(",")}
-          multiple
-          className="hidden"
-          aria-label="Attach images"
-          onChange={(event) => {
-            const files = [...(event.target.files ?? [])];
-            event.target.value = "";
-            images.attachFiles(files);
-          }}
-        />
-      )}
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept={IMAGE_MEDIA_TYPES.join(",")}
+        multiple
+        className="hidden"
+        aria-label="Attach images"
+        onChange={(event) => {
+          const files = [...(event.target.files ?? [])];
+          event.target.value = "";
+          images.attachFiles(files);
+        }}
+      />
       {notice && (
         <p
           role="alert"
