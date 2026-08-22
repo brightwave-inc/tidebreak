@@ -563,18 +563,20 @@ impl MigrationTrait for TriggerFireOutbox {
 
 const TRIGGER_FIRE_OUTBOX_TEMP_TABLE: &str = "code_trigger_fire_outbox_upgrade";
 
-fn trigger_fire_uuid(
+fn trigger_fire_uuid_expr(
     row: &QueryResult,
     backend: DbBackend,
     column: &str,
-) -> Result<uuid::Uuid, DbErr> {
+) -> Result<SimpleExpr, DbErr> {
     if backend == DbBackend::Sqlite {
-        return row.try_get::<String>("", column)?.parse().map_err(|error| {
+        let value = row.try_get::<String>("", column)?;
+        let value = value.parse::<uuid::Uuid>().map_err(|error| {
             DbErr::Custom(format!("invalid code_trigger_fire.{column}: {error}"))
-        });
+        })?;
+        return Ok(Expr::value(value.to_string()));
     }
 
-    row.try_get("", column)
+    Ok(Expr::value(row.try_get::<uuid::Uuid>("", column)?))
 }
 
 async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
@@ -604,8 +606,8 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
         .await?;
     for row in rows {
         let owner = row.try_get::<String>("", "owner")?;
-        let trigger_id = trigger_fire_uuid(&row, backend, "trigger_id")?;
-        let workspace_id = trigger_fire_uuid(&row, backend, "workspace_id")?;
+        let trigger_id = trigger_fire_uuid_expr(&row, backend, "trigger_id")?;
+        let workspace_id = trigger_fire_uuid_expr(&row, backend, "workspace_id")?;
         let pr_number = row.try_get::<i64>("", "pr_number")?;
         let head_sha = row.try_get::<String>("", "head_sha")?;
         let fired_at = row.try_get::<chrono::DateTime<chrono::Utc>>("", "fired_at")?;
@@ -634,8 +636,8 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
             ])
             .values_panic([
                 Expr::value(owner),
-                Expr::value(trigger_id),
-                Expr::value(workspace_id),
+                trigger_id,
+                workspace_id,
                 Expr::value(pr_number),
                 Expr::value(head_sha),
                 Expr::value(fired_at),
