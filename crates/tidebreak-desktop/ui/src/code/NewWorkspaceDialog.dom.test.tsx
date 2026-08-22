@@ -518,6 +518,123 @@ describe("NewWorkspaceDialog", () => {
     );
   });
 
+  it("keeps plain Enter in a text field out of create", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const createCodeWorkspace = vi.fn(async () =>
+      workspace("ws-typed", "repo-new", "2026-08-21T00:00:00.000Z"),
+    );
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          createCodeSession: vi.fn(async () =>
+            session("ws-typed", "claude_code", "2026-08-21T00:00:00.000Z"),
+          ),
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "claude_code" as const,
+            models: [
+              {
+                id: "sonnet",
+                label: "Sonnet",
+                default: true,
+                reasoning_efforts: [],
+              },
+            ],
+            reasoning_efforts: [],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    // Enter on a single-line field would submit the form around it, cutting a
+    // worktree from a keystroke that only meant "done typing".
+    await user.click(screen.getByRole("textbox", { name: "Title" }));
+    await user.keyboard("rail polish{Enter}");
+    await user.click(screen.getByRole("textbox", { name: "Base ref" }));
+    await user.keyboard("{Enter}");
+    expect(createCodeWorkspace).not.toHaveBeenCalled();
+
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    await waitFor(() =>
+      expect(createCodeWorkspace).toHaveBeenCalledWith({
+        repo_id: "repo-new",
+        title: "rail polish",
+        base_ref: "main",
+      }),
+    );
+  });
+
+  it("opens a mixed model catalog on every vendor at once", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("opencode")],
+        notices: [],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "opencode" as HarnessKind,
+            models: [
+              {
+                id: "gpt-5.6-sol",
+                label: "GPT 5.6 Sol",
+                default: true,
+                reasoning_efforts: [],
+              },
+              {
+                id: "claude-opus-5",
+                label: "Claude Opus 5",
+                default: false,
+                reasoning_efforts: [],
+              },
+            ],
+            reasoning_efforts: [],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
+    );
+    // Both vendors are one click away, not hidden behind the rail.
+    expect(
+      screen.getByRole("menuitem", { name: /Claude Opus 5/ }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: /Claude Opus 5/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+
+    // The rail still narrows to one vendor.
+    await user.click(
+      screen.getByRole("button", { name: "Model: Claude Opus 5" }),
+    );
+    await user.click(screen.getByRole("tab", { name: "OpenAI" }));
+    expect(
+      screen.queryByRole("menuitem", { name: /Claude Opus 5/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("lets the reader search the model list", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({

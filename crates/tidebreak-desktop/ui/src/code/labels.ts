@@ -103,6 +103,18 @@ export const SESSION_PERMISSION_MODE_LOCKED =
 export const UNSUPERVISED_AUTO_NOTE =
   "This engine has no approval channel: in Auto, every action runs without asking.";
 
+/**
+ * Stated when a paste or drop carries an image the engine has no path for.
+ *
+ * Only Claude Code declares `image_input: supported`, and an adapter may not
+ * declare it without a captured image round-trip. On the rest, an image the
+ * composer accepted would be dropped on the way to the engine, so the paste is
+ * refused where the reader can see it instead.
+ */
+export function noImagePathNote(kind: HarnessKind): string {
+  return `Tidebreak can’t send images to ${HARNESS_LABELS[kind]} yet.`;
+}
+
 /** Stated wherever Allow is offered (decision 0039). */
 export const ALLOW_ALL_NOTE =
   "This engine's permission system is off: every action runs without asking.";

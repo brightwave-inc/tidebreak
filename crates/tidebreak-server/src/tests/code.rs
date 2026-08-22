@@ -1697,6 +1697,69 @@ async fn a_session_can_leave_plan_mode_and_the_engine_relaunches_under_the_new_o
     );
 }
 
+/// opencode takes its agent and permission ruleset on `POST /session`, and
+/// resuming is a plain `GET` — nothing captured re-applies either. The runtime
+/// used to relaunch anyway, which resumed the old posture while the row, the
+/// picker, and the journal all said the new one had taken.
+#[tokio::test]
+async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded() {
+    let (router, token, _runtime, dir) = code_app_with(
+        ScriptedAdapter::new(plain_text_script())
+            .with_auto_mode(CapLevel::Supported)
+            .with_posture_fixed_at_session_start(),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    // A turn is what gives the engine a session to resume into.
+    let accepted = client
+        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "one" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("start a new session"),
+        "the refusal says what to do instead: {body}"
+    );
+
+    let still: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        still["session"]["permission_mode"], "plan",
+        "a refused change must not move the row: {still}"
+    );
+}
+
 /// The engines set an effort per turn, so a level chosen mid-conversation has
 /// to reach the next turn without a new session. Before this the picker was a
 /// local map that forgot on reload and never left the renderer.
