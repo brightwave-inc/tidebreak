@@ -69,6 +69,18 @@ impl ScopedCode {
         })
     }
 
+    /// Bind an already-resolved runtime to a principal.
+    ///
+    /// For callers that have decided for themselves what to do when code mode
+    /// is not configured — the inbox lists chats either way, so it must not
+    /// take the extractor's all-or-nothing rejection.
+    pub(crate) fn for_owner(
+        runtime: std::sync::Arc<super::runtime::CodeRuntime>,
+        owner: OwnerId,
+    ) -> Self {
+        Self { runtime, owner }
+    }
+
     /// The principal's durable owner key, for the seams that take it directly:
     /// the live buses, and background naming.
     pub(crate) fn owner(&self) -> &OwnerId {

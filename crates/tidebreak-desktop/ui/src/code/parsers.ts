@@ -2753,7 +2753,11 @@ function parseUsage(value: unknown): CodeUsage | null {
   };
 }
 
-function parseAttention(value: unknown): Attention | null {
+// Shared with the inbox parser: the attention vocabulary is no longer
+// code-private (decision 48 step 3). It stays defined here rather than moving
+// so this change does not collide with the `idle` fix in flight; the move
+// belongs with whichever lands second.
+export function parseAttention(value: unknown): Attention | null {
   if (!isRecord(value) || !isMember(value.source, ATTENTION_SOURCES)) {
     return null;
   }

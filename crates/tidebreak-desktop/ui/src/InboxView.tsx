@@ -10,7 +10,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { InboxItem, InboxItemKind } from "./api";
+import {
+  inboxConversationKey,
+  type InboxEntry,
+  type InboxItemKind,
+} from "./api";
+import { attentionLabel } from "./code/labels";
 import {
   Empty,
   EmptyDescription,
@@ -68,10 +73,10 @@ const KIND_PRESENTATION: Record<
  */
 export function InboxView() {
   const navigate = useNavigate();
-  const items = useInbox((state) => state.items);
+  const entries = useInbox((state) => state.entries);
   const loaded = useInbox((state) => state.loaded);
 
-  if (items.length === 0) {
+  if (entries.length === 0) {
     return (
       <Empty className="h-full">
         <EmptyHeader>
@@ -94,17 +99,27 @@ export function InboxView() {
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-6">
       <h1 className="text-lg font-medium">Inbox</h1>
       <ul className="flex flex-col gap-2">
-        {items.map((item) => (
-          <li key={item.callId}>
+        {entries.map((entry) => (
+          <li key={inboxConversationKey(entry.conversation)}>
             <InboxRow
-              item={item}
-              onOpen={() =>
+              entry={entry}
+              onOpen={() => {
+                if (entry.conversation.surface === "chat") {
+                  // The first item is the longest-waiting one, which is the
+                  // card the reader is being sent to answer.
+                  const focus = entry.items[0]?.callId;
+                  void navigate({
+                    to: "/c/$chatId",
+                    params: { chatId: entry.conversation.chatId },
+                    ...(focus ? { search: { focus } } : {}),
+                  });
+                  return;
+                }
                 void navigate({
-                  to: "/c/$chatId",
-                  params: { chatId: item.chatId },
-                  search: { focus: item.callId },
-                })
-              }
+                  to: "/code/w/$workspaceId",
+                  params: { workspaceId: entry.conversation.workspaceId },
+                });
+              }}
             />
           </li>
         ))}
@@ -113,10 +128,23 @@ export function InboxView() {
   );
 }
 
-function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
-  const presentation = KIND_PRESENTATION[item.kind];
-  const Icon = presentation.icon;
-  const title = item.chatTitle?.trim() || "New work";
+function InboxRow({
+  entry,
+  onOpen,
+}: {
+  entry: InboxEntry;
+  onOpen: () => void;
+}) {
+  // A chat entry names the card the reader is being sent to; a code entry has
+  // no items here, so its attention is the whole story.
+  const kind = entry.items[0]?.kind;
+  const presentation = kind ? KIND_PRESENTATION[kind] : undefined;
+  const Icon = presentation?.icon ?? ShieldQuestion;
+  const title = entry.title?.trim() || "New work";
+  const label = presentation?.label ?? attentionLabel(entry.attention);
+  const description =
+    presentation?.description ?? attentionLabel(entry.attention);
+  const more = entry.items.length > 1 ? ` +${entry.items.length - 1} more` : "";
   return (
     <button
       type="button"
@@ -126,25 +154,26 @@ function InboxRow({ item, onOpen }: { item: InboxItem; onOpen: () => void }) {
       <span className="flex size-8 shrink-0 items-center justify-center">
         <Icon
           aria-hidden="true"
-          className={`${presentation.iconClass} size-5`}
+          className={`${presentation?.iconClass ?? "text-icon-amber"} size-5`}
         />
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="flex min-w-0 items-center gap-2">
-          <span className="text-sm font-medium">{presentation.label}</span>
+          <span className="text-sm font-medium">
+            {label}
+            {more}
+          </span>
           <span className="text-muted-foreground truncate text-sm">
             {title}
           </span>
         </span>
-        <span className="text-muted-foreground text-xs">
-          {presentation.description}
-        </span>
+        <span className="text-muted-foreground text-xs">{description}</span>
       </span>
       <time
-        dateTime={item.requestedAt}
+        dateTime={entry.waitingSince}
         className="text-muted-foreground ml-auto shrink-0 text-xs"
       >
-        {waitedFor(item.requestedAt)}
+        {waitedFor(entry.waitingSince)}
       </time>
     </button>
   );

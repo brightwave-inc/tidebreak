@@ -23,19 +23,33 @@ function folderRequest(callId: string) {
 }
 
 /** One parked item as the cross-chat read returns it. */
-function inboxItem(
+/** One chat-surface inbox entry, with the calls parked behind it. */
+function inboxEntry(
   chatId: string,
-  callId: string,
-  kind: "question" | "folder_access" | "tool_approval" = "question",
+  calls: Array<{
+    callId: string;
+    kind?: "question" | "folder_access" | "tool_approval";
+  }>,
 ) {
   return {
-    chatId,
-    chatTitle: null,
-    turnId: "turn-1",
-    callId,
-    kind,
-    action: null,
-    requestedAt: "2026-08-04T00:00:00Z",
+    conversation: { surface: "chat" as const, chatId },
+    title: null,
+    attention: {
+      state: {
+        type: "needs_you" as const,
+        prompt: "waiting",
+        source: "structured" as const,
+      },
+      source: "structured" as const,
+    },
+    items: calls.map(({ callId, kind = "question" as const }) => ({
+      turnId: "turn-1",
+      callId,
+      kind,
+      action: null,
+      requestedAt: "2026-08-04T00:00:00Z",
+    })),
+    waitingSince: "2026-08-04T00:00:00Z",
   };
 }
 
@@ -98,7 +112,9 @@ describe("useChatPromptWatcher", () => {
 
   it("asks for attention once per question, not once per read", async () => {
     const client = stubClient({
-      listInbox: vi.fn().mockResolvedValue([inboxItem("chat-2", "call-1")]),
+      listInbox: vi
+        .fn()
+        .mockResolvedValue([inboxEntry("chat-2", [{ callId: "call-1" }])]),
     });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
     await waitFor(() =>
@@ -116,7 +132,7 @@ describe("useChatPromptWatcher", () => {
     // long session accumulates the id of every question ever asked.
     const listInbox = vi
       .fn()
-      .mockResolvedValueOnce([inboxItem("chat-1", "call-1")])
+      .mockResolvedValueOnce([inboxEntry("chat-1", [{ callId: "call-1" }])])
       .mockResolvedValue([]);
     const client = stubClient({ listInbox });
     renderHook(() => useChatPromptWatcher(client, "chat-1"));
@@ -129,7 +145,7 @@ describe("useChatPromptWatcher", () => {
       expect(usePendingPrompts.getState().userQuestions).toHaveLength(0),
     );
 
-    listInbox.mockResolvedValue([inboxItem("chat-1", "call-2")]);
+    listInbox.mockResolvedValue([inboxEntry("chat-1", [{ callId: "call-2" }])]);
     act(() => useRefreshSignals.getState().signal("userQuestions"));
 
     await waitFor(() =>
@@ -190,13 +206,13 @@ describe("useChatPromptWatcher", () => {
 
   it("marks parked chats even when no conversation is open", async () => {
     const client = stubClient({
-      listInbox: vi
-        .fn()
-        .mockResolvedValue([
-          inboxItem("chat-2", "call-question"),
-          inboxItem("chat-3", "call-folder", "folder_access"),
-          inboxItem("chat-3", "call-approval", "tool_approval"),
+      listInbox: vi.fn().mockResolvedValue([
+        inboxEntry("chat-2", [{ callId: "call-question" }]),
+        inboxEntry("chat-3", [
+          { callId: "call-folder", kind: "folder_access" },
+          { callId: "call-approval", kind: "tool_approval" },
         ]),
+      ]),
     });
     renderHook(() => useChatPromptWatcher(client, null));
 
@@ -207,7 +223,12 @@ describe("useChatPromptWatcher", () => {
     );
     // The rail's markers and the inbox come from the same read, so a chat
     // parked on an approval is marked exactly like one parked on a question.
-    expect(useInbox.getState().items).toHaveLength(3);
+    // Two entries, three calls: the queue is conversations now, and chat-3 is
+    // one row holding two parked calls rather than two rows.
+    expect(useInbox.getState().entries).toHaveLength(2);
+    expect(
+      useInbox.getState().entries.flatMap((entry) => entry.items),
+    ).toHaveLength(3);
     expect(host.requestUserAttention).toHaveBeenCalledTimes(1);
     expect(client.listPendingUserQuestions).not.toHaveBeenCalled();
     expect(usePendingPrompts.getState().userQuestions).toEqual([]);

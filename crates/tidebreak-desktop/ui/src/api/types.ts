@@ -991,15 +991,42 @@ export type PendingOutputWritebackRequest = {
  * are read from the conversation the item points at, by the card that owns
  * them — which is also the only place the item can be answered.
  */
+/**
+ * Which conversation an inbox entry belongs to.
+ *
+ * Tagged because chat and code still have separate id spaces. Decision 48
+ * step 5 collapses this to one id when the entities merge; until then the tag
+ * is the only place either surface's shape shows through.
+ */
+export type InboxConversation =
+  | { surface: "chat"; chatId: string }
+  | { surface: "code"; sessionId: string; workspaceId: string };
+
+/** One parked call behind an entry's attention. */
 export type InboxItem = {
-  chatId: string;
-  chatTitle: string | null;
   turnId: string;
   callId: string;
   kind: InboxItemKind;
   action: RendererToolName | null;
   requestedAt: string;
 };
+
+/** One conversation waiting on the reader, and why. */
+export type InboxEntry = {
+  conversation: InboxConversation;
+  title: string | null;
+  attention: Attention;
+  /** Empty for a code conversation, whose approvals have their own route. */
+  items: InboxItem[];
+  waitingSince: string;
+};
+
+/** A stable key for an entry, whichever surface it lives on. */
+export function inboxConversationKey(conversation: InboxConversation): string {
+  return conversation.surface === "chat"
+    ? `chat:${conversation.chatId}`
+    : `code:${conversation.sessionId}`;
+}
 
 /** Opaque prompt state used to mark another chat as needing attention. */
 export type PendingChatPrompt = {

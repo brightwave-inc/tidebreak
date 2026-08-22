@@ -6,7 +6,7 @@ import {
   parseAgentActivityHistory,
   parseAgentRunTaskPlan,
   parseFolderAccessRequest,
-  parseInboxItem,
+  parseInboxEntry,
   parsePendingChatPrompt,
   parseOutputWritebackRequest,
   parsePendingUserQuestions,
@@ -109,40 +109,99 @@ describe("parseFolderAccessRequest", () => {
   });
 });
 
-describe("inbox items", () => {
-  const safe = {
-    chat_id: "chat-1",
-    chat_title: "Quarterly review",
+describe("inbox entries", () => {
+  const item = {
     turn_id: "turn-1",
     call_id: "call-1",
     kind: "tool_approval",
     action: "exec",
     requested_at: "2026-08-04T00:00:00Z",
   };
+  const chatEntry = {
+    conversation: { surface: "chat", chat_id: "chat-1" },
+    title: "Quarterly review",
+    attention: {
+      state: { type: "needs_you", prompt: "waiting", source: "structured" },
+      source: "structured",
+    },
+    items: [item],
+    waiting_since: "2026-08-04T00:00:00Z",
+  };
 
-  it("accepts the read model, with its optional fields absent", () => {
-    expect(parseInboxItem(safe)).toEqual({
-      chatId: "chat-1",
-      chatTitle: "Quarterly review",
-      turnId: "turn-1",
-      callId: "call-1",
-      kind: "tool_approval",
-      action: "exec",
-      requestedAt: "2026-08-04T00:00:00Z",
+  it("accepts a chat entry, with its optional fields absent", () => {
+    expect(parseInboxEntry(chatEntry)).toEqual({
+      conversation: { surface: "chat", chatId: "chat-1" },
+      title: "Quarterly review",
+      attention: {
+        state: { type: "needs_you", prompt: "waiting", source: "structured" },
+        source: "structured",
+      },
+      items: [
+        {
+          turnId: "turn-1",
+          callId: "call-1",
+          kind: "tool_approval",
+          action: "exec",
+          requestedAt: "2026-08-04T00:00:00Z",
+        },
+      ],
+      waitingSince: "2026-08-04T00:00:00Z",
     });
-    const { chat_title: _title, action: _action, ...untitled } = safe;
-    expect(parseInboxItem({ ...untitled, kind: "question" })).toMatchObject({
-      chatTitle: null,
-      action: null,
-      kind: "question",
+    const { title: _title, ...untitled } = chatEntry;
+    expect(parseInboxEntry(untitled)).toMatchObject({ title: null });
+  });
+
+  it("accepts a code entry, which carries its workspace and no items", () => {
+    expect(
+      parseInboxEntry({
+        conversation: {
+          surface: "code",
+          session_id: "sess-1",
+          workspace_id: "ws-1",
+        },
+        title: "Fix the flake",
+        attention: {
+          state: { type: "done_unreviewed" },
+          source: "lifecycle",
+        },
+        items: [],
+        waiting_since: "2026-08-04T00:00:00Z",
+      }),
+    ).toMatchObject({
+      conversation: {
+        surface: "code",
+        sessionId: "sess-1",
+        workspaceId: "ws-1",
+      },
+      items: [],
     });
   });
 
-  it("rejects an unknown kind, an unknown tool, and smuggled detail", () => {
-    expect(parseInboxItem({ ...safe, kind: "everything" })).toBeNull();
-    expect(parseInboxItem({ ...safe, action: "rm_rf" })).toBeNull();
+  it("rejects an unknown surface, an unknown kind, and smuggled detail", () => {
     expect(
-      parseInboxItem({ ...safe, questions: [{ question: "private" }] }),
+      parseInboxEntry({
+        ...chatEntry,
+        conversation: { surface: "email", chat_id: "chat-1" },
+      }),
+    ).toBeNull();
+    expect(
+      parseInboxEntry({
+        ...chatEntry,
+        items: [{ ...item, kind: "everything" }],
+      }),
+    ).toBeNull();
+    expect(
+      parseInboxEntry({ ...chatEntry, items: [{ ...item, action: "rm_rf" }] }),
+    ).toBeNull();
+    // The entry stays opaque: no question prose, plan text, or arguments.
+    expect(
+      parseInboxEntry({ ...chatEntry, questions: [{ question: "private" }] }),
+    ).toBeNull();
+    expect(
+      parseInboxEntry({
+        ...chatEntry,
+        items: [{ ...item, questions: [{ question: "private" }] }],
+      }),
     ).toBeNull();
   });
 });

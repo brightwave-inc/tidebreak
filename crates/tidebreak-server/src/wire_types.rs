@@ -347,6 +347,8 @@ mod tests {
         );
         // The cross-chat attention read model. It shares the tool vocabulary
         // with the approval card it points at, and nothing else.
+        generate::collect_from::<crate::routes::InboxEntrySnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::InboxConversation>(&cfg, &mut out);
         generate::collect_from::<crate::routes::InboxItemSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::CompactionRun>(&cfg, &mut out);
         // Configuration, catalog, and project surfaces. These carry no shared

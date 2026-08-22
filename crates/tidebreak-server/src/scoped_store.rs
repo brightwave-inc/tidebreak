@@ -422,6 +422,20 @@ impl ScopedStore {
         self.store.list_inbox_items_scoped(&self.owner).await
     }
 
+    /// The principal this read is scoped to.
+    pub fn owner(&self) -> &OwnerId {
+        &self.owner
+    }
+
+    /// One attention value per chat that has something to say, derived from
+    /// the same parked rows the inbox projects (decision 48 step 3).
+    pub async fn chat_attention(
+        &self,
+        items: &[tidebreak_core::InboxItem],
+    ) -> Result<std::collections::HashMap<tidebreak_core::ChatId, tidebreak_core::Attention>> {
+        self.store.chat_attention_scoped(&self.owner, items).await
+    }
+
     /// The per-conversation attention summary over the principal's own chats.
     /// Another owner's parked prompt is not merely unreadable here, it is
     /// absent, so the summary cannot even reveal that their chat exists.

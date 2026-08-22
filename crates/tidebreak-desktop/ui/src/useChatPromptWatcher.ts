@@ -62,11 +62,18 @@ export function useChatPromptWatcher(
         const pending = await client.listInbox();
         if (cancelled || seq !== summarySeq) return;
 
-        inboxActions.setItems(pending);
+        inboxActions.setEntries(pending);
+        // The rail marks chats, so only chat-surface entries reach it. A code
+        // conversation is marked on its own rail by its session digest.
         attentionActions.setChatIdsWithPendingPrompts(
-          pending.map((item) => item.chatId),
+          pending
+            .map((entry) => entry.conversation)
+            .filter((conversation) => conversation.surface === "chat")
+            .map((conversation) => conversation.chatId),
         );
-        const pendingPromptIds = new Set(pending.map((item) => item.callId));
+        const pendingPromptIds = new Set(
+          pending.flatMap((entry) => entry.items.map((item) => item.callId)),
+        );
         const unannounced = [...pendingPromptIds].filter(
           (callId) => !announcedCallIdsRef.current.has(callId),
         );

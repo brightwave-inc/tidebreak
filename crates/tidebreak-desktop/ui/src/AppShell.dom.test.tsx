@@ -107,15 +107,29 @@ const desktopUpdateState = vi.hoisted(() => ({
 const restartDesktop = vi.hoisted(() => vi.fn(async () => {}));
 
 /** One waiting question, as the shell's cross-chat read returns it. */
+/** One chat-surface inbox entry holding a single parked question. */
 function parked(chatId: string, callId: string) {
   return {
-    chatId,
-    chatTitle: null,
-    turnId: "turn-1",
-    callId,
-    kind: "question" as const,
-    action: null,
-    requestedAt: "2026-08-04T00:00:00Z",
+    conversation: { surface: "chat" as const, chatId },
+    title: null,
+    attention: {
+      state: {
+        type: "needs_you" as const,
+        prompt: "waiting",
+        source: "structured" as const,
+      },
+      source: "structured" as const,
+    },
+    items: [
+      {
+        turnId: "turn-1",
+        callId,
+        kind: "question" as const,
+        action: null,
+        requestedAt: "2026-08-04T00:00:00Z",
+      },
+    ],
+    waitingSince: "2026-08-04T00:00:00Z",
   };
 }
 const postMessage = vi.fn(async () => {});
