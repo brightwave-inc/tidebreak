@@ -73,6 +73,31 @@ describe("triggersForNotificationRules", () => {
     ]);
   });
 
+  it("matches a scope key whatever case it was stored in", () => {
+    // Persisted keys are lowercased by `codeDeliveryRepositoryKey`; the
+    // repository ref keeps the host's own casing.
+    const armed = triggersForNotificationRules(
+      [
+        rule("run_failure", {
+          repositoryKeys: ["github.com/brightwave-inc/orca"],
+        }),
+      ],
+      [
+        {
+          host: "GitHub.com",
+          owner: "BrightWave-Inc",
+          name: "Orca",
+          name_with_owner: "BrightWave-Inc/Orca",
+          url: "https://github.com/BrightWave-Inc/Orca",
+          tidebreak_repo_id: "repo-2",
+        },
+      ],
+    );
+    expect(armed).toEqual([
+      { repoId: "repo-2", condition: "checks_failed", action: "notify" },
+    ]);
+  });
+
   it("honours an explicit scope", () => {
     const armed = triggersForNotificationRules(
       [

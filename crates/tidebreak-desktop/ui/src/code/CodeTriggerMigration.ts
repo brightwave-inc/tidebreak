@@ -3,9 +3,10 @@ import type {
   CodeTriggerAction,
   CodeTriggerCondition,
 } from "@/api/types";
-import type {
-  CodeDeliveryNotificationRule,
-  CodeDeliveryNotificationRuleKind,
+import {
+  codeDeliveryRepositoryKey,
+  type CodeDeliveryNotificationRule,
+  type CodeDeliveryNotificationRuleKind,
 } from "@/code/CodeDeliveryStore";
 
 /**
@@ -37,10 +38,6 @@ const RULE_CONDITIONS: Record<
   run_failure: ["checks_failed"],
 };
 
-function repositoryKey(repository: CodeGitHubRepositoryRef): string {
-  return `${repository.host}/${repository.owner}/${repository.name}`;
-}
-
 /**
  * Turn the persisted notification rules into the triggers that reproduce them.
  *
@@ -66,7 +63,10 @@ export function triggersForNotificationRules(
       rule.repositoryKeys.length === 0
         ? repositories
         : repositories.filter((repository) =>
-            rule.repositoryKeys.includes(repositoryKey(repository)),
+            // The stored keys are folded by `codeDeliveryRepositoryKey`, so
+            // comparing against a hand-built key would miss any repository
+            // whose host or owner is not already lowercase.
+            rule.repositoryKeys.includes(codeDeliveryRepositoryKey(repository)),
           );
     for (const repository of scoped) {
       const repoId = repository.tidebreak_repo_id;
