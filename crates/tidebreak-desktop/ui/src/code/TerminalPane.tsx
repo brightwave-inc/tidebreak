@@ -161,10 +161,17 @@ function toHex(r: string, g: string, b: string): string {
  * Created on open, disposed on close. Reopening re-fetches recent ring bytes
  * rather than keeping xterm state. Writes are chunked under a frame budget;
  * a stall surfaces a reconnect control.
+ *
+ * `terminalId` names the shell to draw. Without one the pane adopts the
+ * workspace's first live shell, or starts one — the path a link written
+ * before terminals were tabs still takes. Either way it reports the id it
+ * settled on, so the tab above it can name the same shell from then on.
  */
 export function TerminalPane({
   client,
   workspaceId,
+  terminalId,
+  onAttach,
   hideHeader = false,
 }: {
   client: Pick<
@@ -176,6 +183,10 @@ export function TerminalPane({
     | "resizeCodeTerminal"
   >;
   workspaceId: string;
+  /** The shell this pane draws. Absent means adopt one and report it. */
+  terminalId?: string;
+  /** The shell the pane settled on, when that is not the one it was given. */
+  onAttach?: (terminalId: string) => void;
   /** The drawer already names this surface. */
   hideHeader?: boolean;
 }) {
@@ -183,6 +194,10 @@ export function TerminalPane({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const tidRef = useRef<string | null>(null);
+  /** Set by reconnect, so the next attach starts a shell instead of reusing. */
+  const startFreshRef = useRef(false);
+  const onAttachRef = useRef(onAttach);
+  onAttachRef.current = onAttach;
   const cursorRef = useRef(0);
   const pendingRef = useRef("");
   const rafRef = useRef<number | null>(null);
@@ -304,21 +319,24 @@ export function TerminalPane({
     }
 
     async function attach() {
+      const cols = termRef.current?.cols;
+      const rows = termRef.current?.rows;
+      const size = { ...(cols ? { cols } : {}), ...(rows ? { rows } : {}) };
       try {
-        const listed = await client.listCodeTerminals(workspaceId);
-        const live = listed.find((item) => !item.ended);
-        const cols = termRef.current?.cols;
-        const rows = termRef.current?.rows;
+        // Reconnect always starts a fresh shell: it is the answer to one that
+        // stalled or died, so re-attaching to the same id would land back on
+        // the thing the reader asked to get away from.
+        const start = startFreshRef.current;
+        startFreshRef.current = false;
         const snap =
-          live ??
-          (await client.createCodeTerminal(workspaceId, {
-            ...(cols ? { cols } : {}),
-            ...(rows ? { rows } : {}),
-          }));
+          !start && terminalId
+            ? { id: terminalId, ended: false }
+            : await adoptOrCreate(start);
         if (cancelled) return;
         tidRef.current = snap.id;
         cursorRef.current = 0;
         if (snap.ended) setEnded(true);
+        if (snap.id !== terminalId) onAttachRef.current?.(snap.id);
         await pull();
         timer = setInterval(() => {
           void pull();
@@ -328,6 +346,15 @@ export function TerminalPane({
           setError(friendlyErrorMessage(err, "Could not open a terminal"));
         }
       }
+
+      async function adoptOrCreate(forceNew: boolean) {
+        if (!forceNew) {
+          const listed = await client.listCodeTerminals(workspaceId);
+          const live = listed.find((item) => !item.ended);
+          if (live) return live;
+        }
+        return client.createCodeTerminal(workspaceId, size);
+      }
     }
 
     void attach();
@@ -335,7 +362,7 @@ export function TerminalPane({
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [client, workspaceId, generation]);
+  }, [client, workspaceId, terminalId, generation]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -370,6 +397,7 @@ export function TerminalPane({
   }
 
   function reconnect() {
+    startFreshRef.current = true;
     setStalled(false);
     setEnded(false);
     setOverflow(false);
@@ -399,12 +427,15 @@ export function TerminalPane({
         </p>
       )}
       {ended && (
-        <p
-          className="text-muted-foreground px-3 py-2 text-xs"
+        <div
+          className="flex items-center gap-2 px-3 py-2 text-xs"
           data-testid="terminal-ended"
         >
-          Shell ended.
-        </p>
+          <p className="text-muted-foreground">Shell ended.</p>
+          <Button type="button" size="xs" onClick={reconnect}>
+            Start a new shell
+          </Button>
+        </div>
       )}
       {stalled && (
         <div className="flex items-center gap-2 px-3 py-2 text-xs">

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { DndContext } from "@dnd-kit/core";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { fn, userEvent, within } from "storybook/test";
 
 import {
   CodeCenterTabs,
@@ -21,9 +21,9 @@ const MAIN_AGENT: CodeConversationTab[] = [
 
 /**
  * The center tab strip: one tab per agent in the workspace, then editor tabs,
- * then the single `+` that offers everything the center can open — another
- * agent, a file, the all-changes diff, a browser, or the terminal — instead of
- * jumping straight into the file picker.
+ * then the single `+` that offers everything the center can open. That menu
+ * has two groups — the three things a workspace can hold many of (agent,
+ * terminal, browser), then the views onto the worktree.
  */
 function TabStrip({
   editorTabs,
@@ -31,6 +31,7 @@ function TabStrip({
   withBrowser = true,
   withDiff = true,
   withTerminal = true,
+  canNewTerminal = true,
   region = "primary" as const,
 }: {
   editorTabs: PanelContent[];
@@ -38,6 +39,7 @@ function TabStrip({
   withBrowser?: boolean;
   withDiff?: boolean;
   withTerminal?: boolean;
+  canNewTerminal?: boolean;
   region?: "primary" | "secondary";
 }) {
   const [active, setActive] = useState(editorTabs.length > 0 ? 0 : -1);
@@ -77,9 +79,15 @@ function TabStrip({
         onNewSourceControl={withDiff ? fn() : undefined}
         onNewPr={withDiff ? fn() : undefined}
         onNewTerminal={withTerminal ? fn() : undefined}
+        canNewTerminal={canNewTerminal}
         onSplitActive={fn()}
         region={region}
         browserTitles={{ "browser-1": "Storybook — Tidebreak" }}
+        terminalLabels={{
+          "term-1": "Terminal 1",
+          "term-2": "Terminal 2",
+          "term-3": "Terminal 3",
+        }}
       />
     </DndContext>
   );
@@ -106,6 +114,18 @@ type Story = StoryObj<typeof meta>;
 
 /** One agent alone; the `+` menu is the whole affordance. */
 export const ConversationOnly: Story = {};
+
+/**
+ * The `+` menu, open. The top group starts something the workspace can hold
+ * many of; the group under it opens the one view there is of the worktree.
+ */
+export const NewTabMenu: Story = {
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      within(canvasElement).getByRole("button", { name: "New tab" }),
+    );
+  },
+};
 
 /**
  * Several agents in one worktree, each showing its own state: one waiting on a
@@ -182,6 +202,29 @@ export const WithBrowserTab: Story = {
       { type: "file", path: "src/lib.rs" },
       { type: "browser", browserId: "browser-1" },
     ],
+  },
+};
+
+/**
+ * Several shells at once. Each is its own tab over its own process, numbered
+ * so they stay tellable apart, and each drags and reorders like a file.
+ */
+export const ManyTerminals: Story = {
+  args: {
+    editorTabs: [
+      { type: "terminal", terminalId: "term-1" },
+      { type: "terminal", terminalId: "term-2" },
+      { type: "file", path: "src/lib.rs" },
+      { type: "terminal", terminalId: "term-3" },
+    ],
+  },
+};
+
+/** At the workspace's shell limit, the menu stops offering another. */
+export const TerminalLimitReached: Story = {
+  args: {
+    editorTabs: [{ type: "terminal", terminalId: "term-1" }],
+    canNewTerminal: false,
   },
 };
 

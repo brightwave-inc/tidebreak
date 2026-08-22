@@ -39,7 +39,6 @@ import {
   selectCenterTab,
   splitFocusedEditor,
   stepCenterTab,
-  toggleTerminalLayout,
 } from "./code/codeChrome";
 import { CodeDeliveryMonitor } from "./code/CodeDeliveryMonitor";
 import { useCodeUiStore } from "./code/CodeUiStore";
@@ -295,7 +294,11 @@ export function AppShell() {
     "toggle-code-review": () => {
       useCodeUiStore.getState().toggleReviewSidebar();
     },
-    "toggle-code-terminal": () => applyCodeLayout(toggleTerminalLayout),
+    "toggle-code-terminal": () => {
+      // Opening a shell is a server call, so the chord raises the ask and the
+      // workspace page answers it.
+      useCodeUiStore.getState().requestTerminal();
+    },
     "code-quick-open": () => {
       const { pathname } = router.state.location;
       if (!codeWorkspaceIdFromPath(pathname)) return false;

@@ -19,9 +19,12 @@ import {
   moveEditorTab,
   openCodeEditor,
   removedCodeBrowserIds,
+  removedCodeTerminalIds,
+  adoptCodeTerminalId,
+  findCodeTerminalTab,
+  focusedEditorPosition,
   splitCodeChromeLayout,
   splitFocusedEditor,
-  toggleTerminalLayout,
 } from "./codeChrome";
 
 const foldersTerminalAgents = {
@@ -35,22 +38,141 @@ const foldersTerminalAgents = {
 };
 
 describe("code chrome layout", () => {
-  it("lifts the terminal out of the side region into the drawer", () => {
+  it("puts a terminal in the center with the files rather than beside them", () => {
     const layout = {
-      tabs: [{ type: "terminal" as const }],
+      tabs: [{ type: "terminal" as const, terminalId: "t1" }],
       activeIndex: 0,
       fullscreen: false,
     };
 
     expect(splitCodeChromeLayout(layout)).toEqual({
       panels: EMPTY_LAYOUT,
-      editors: EMPTY_LAYOUT,
+      editors: {
+        tabs: [{ type: "terminal", terminalId: "t1" }],
+        activeIndex: 0,
+        fullscreen: false,
+      },
       splitEditors: EMPTY_LAYOUT,
-      terminal: { type: "terminal" },
     });
   });
 
-  it("keeps the visible side tab when the URL did not name the terminal", () => {
+  it("keeps a shell per tab, so opening a second does not replace the first", () => {
+    const one = openCodeEditor(EMPTY_LAYOUT, {
+      type: "terminal",
+      terminalId: "t1",
+    });
+    const two = openCodeEditor(one, { type: "terminal", terminalId: "t2" });
+    expect(two.tabs).toEqual([
+      { type: "terminal", terminalId: "t1" },
+      { type: "terminal", terminalId: "t2" },
+    ]);
+
+    // Re-opening one already showing moves to it instead of adding a third.
+    expect(
+      openCodeEditor(two, { type: "terminal", terminalId: "t1" }).tabs,
+    ).toHaveLength(2);
+  });
+
+  it("ends the shells whose tabs have gone", () => {
+    const both = {
+      tabs: [
+        { type: "terminal" as const, terminalId: "t1" },
+        { type: "terminal" as const, terminalId: "t2" },
+      ],
+      activeIndex: 0,
+      fullscreen: false,
+    };
+    const closed = closeEditorTab(both, 0);
+    expect(removedCodeTerminalIds(both, closed)).toEqual(["t1"]);
+    // Moving a tab into the split is not a close: the shell stays.
+    expect(
+      removedCodeTerminalIds(
+        both,
+        moveEditorTab(both, "primary", 0, "secondary"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("finds the terminal to jump to, main group first", () => {
+    expect(findCodeTerminalTab(EMPTY_LAYOUT)).toBeNull();
+    expect(
+      findCodeTerminalTab({
+        tabs: [
+          { type: "file", path: "src/lib.rs" },
+          { type: "terminal", terminalId: "t1" },
+        ],
+        activeIndex: 0,
+        fullscreen: false,
+      }),
+    ).toEqual({ region: "primary", index: 1 });
+    expect(
+      findCodeTerminalTab({
+        tabs: [{ type: "file", path: "src/lib.rs" }],
+        activeIndex: 0,
+        fullscreen: false,
+        editorSplit: {
+          tabs: [{ type: "terminal", terminalId: "t1" }],
+          activeIndex: 0,
+        },
+      }),
+    ).toEqual({ region: "secondary", index: 0 });
+  });
+
+  it("keeps a terminal tab in place while its shell changes underneath it", () => {
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "terminal" as const },
+      ],
+      activeIndex: 1,
+      fullscreen: false,
+    };
+    // A link written before terminals were tabs names no shell; the pane
+    // adopts one and the tab keeps its position.
+    expect(adoptCodeTerminalId(layout, undefined, "t1").tabs).toEqual([
+      { type: "file", path: "src/lib.rs" },
+      { type: "terminal", terminalId: "t1" },
+    ]);
+    // A shell that died and was restarted reports its replacement.
+    const named = adoptCodeTerminalId(layout, undefined, "t1");
+    expect(adoptCodeTerminalId(named, "t1", "t2").tabs[1]).toEqual({
+      type: "terminal",
+      terminalId: "t2",
+    });
+    // A split tab is reachable the same way.
+    const split = {
+      ...EMPTY_LAYOUT,
+      editorSplit: {
+        tabs: [{ type: "terminal" as const, terminalId: "t1" }],
+        activeIndex: 0,
+      },
+    };
+    expect(adoptCodeTerminalId(split, "t1", "t2").editorSplit?.tabs).toEqual([
+      { type: "terminal", terminalId: "t2" },
+    ]);
+  });
+
+  it("reports the tab in front of the reader, or nothing on the conversation", () => {
+    const layout = {
+      tabs: [
+        { type: "file" as const, path: "src/lib.rs" },
+        { type: "terminal" as const, terminalId: "t1" },
+      ],
+      activeIndex: 1,
+      fullscreen: false,
+    };
+    expect(focusedEditorPosition(layout)).toEqual({
+      region: "primary",
+      index: 1,
+    });
+    expect(focusedEditorPosition(focusConversation(layout))).toBeNull();
+    expect(focusedEditorPosition(EMPTY_LAYOUT)).toBeNull();
+    expect(
+      focusedEditorPosition(moveEditorTab(layout, "primary", 1, "secondary")),
+    ).toEqual({ region: "secondary", index: 0 });
+  });
+
+  it("keeps the visible side tab when the URL also named a terminal", () => {
     expect(
       splitCodeChromeLayout(foldersTerminalAgents).panels.activeIndex,
     ).toBe(0);
@@ -58,61 +180,9 @@ describe("code chrome layout", () => {
       { type: "folders" },
       { type: "agents" },
     ]);
-    expect(splitCodeChromeLayout(foldersTerminalAgents).editors.tabs).toEqual(
-      [],
-    );
-    expect(
-      splitCodeChromeLayout(foldersTerminalAgents).splitEditors.tabs,
-    ).toEqual([]);
-  });
-
-  it("leaves a terminal-only layout as the conversation plus a drawer", () => {
-    expect(
-      splitCodeChromeLayout({
-        tabs: [{ type: "terminal" }],
-        activeIndex: 0,
-        fullscreen: true,
-      }),
-    ).toEqual({
-      panels: EMPTY_LAYOUT,
-      editors: EMPTY_LAYOUT,
-      splitEditors: EMPTY_LAYOUT,
-      terminal: { type: "terminal" },
-    });
-  });
-
-  it("opens and closes the terminal without dropping the other tabs", () => {
-    const withFolders = {
-      tabs: [{ type: "folders" as const }],
-      activeIndex: 0,
-      fullscreen: false,
-    };
-
-    const opened = toggleTerminalLayout(withFolders);
-    expect(opened.tabs).toEqual([{ type: "folders" }, { type: "terminal" }]);
-    expect(toggleTerminalLayout(opened)).toEqual(withFolders);
-    expect(toggleTerminalLayout(EMPTY_LAYOUT).tabs).toEqual([
+    expect(splitCodeChromeLayout(foldersTerminalAgents).editors.tabs).toEqual([
       { type: "terminal" },
     ]);
-    expect(toggleTerminalLayout(toggleTerminalLayout(EMPTY_LAYOUT))).toEqual(
-      EMPTY_LAYOUT,
-    );
-  });
-
-  it("leaves the visible side tab selected when the drawer opens", () => {
-    const layout = {
-      tabs: [{ type: "folders" as const }, { type: "agents" as const }],
-      activeIndex: 0,
-      fullscreen: false,
-    };
-
-    const opened = toggleTerminalLayout(layout);
-    expect(opened).toEqual({
-      tabs: [{ type: "folders" }, { type: "agents" }, { type: "terminal" }],
-      activeIndex: 0,
-      fullscreen: false,
-    });
-    expect(splitCodeChromeLayout(opened).panels.activeIndex).toBe(0);
   });
 
   it("focuses and closes a strip tab without treating the terminal as a strip index", () => {
@@ -120,19 +190,23 @@ describe("code chrome layout", () => {
       ...foldersTerminalAgents,
       activeIndex: 2,
     });
+    // Closing a side tab leaves the center where it was: the terminal tab is
+    // what the reader is actually looking at, and they did not ask to move.
     expect(closeCodeChromeTab(foldersTerminalAgents, 1)).toEqual({
-      tabs: [{ type: "folders" }, { type: "terminal" }],
+      tabs: [{ type: "terminal" }, { type: "folders" }],
       activeIndex: 0,
       fullscreen: false,
+      conversationFocused: undefined,
+      editorSplit: undefined,
     });
-    // Closing the showing Agents tab must land on Folders, not the drawer
-    // sitting between them in the URL.
     expect(
       closeCodeChromeTab({ ...foldersTerminalAgents, activeIndex: 2 }, 1),
     ).toEqual({
-      tabs: [{ type: "folders" }, { type: "terminal" }],
+      tabs: [{ type: "terminal" }, { type: "folders" }],
       activeIndex: 0,
       fullscreen: false,
+      conversationFocused: undefined,
+      editorSplit: undefined,
     });
   });
 
@@ -150,9 +224,9 @@ describe("code chrome layout", () => {
     expect(split.editors.tabs).toEqual([
       { type: "file", path: "src/lib.rs" },
       { type: "diff", path: "src/lib.rs" },
+      { type: "terminal" },
     ]);
     expect(split.panels.tabs).toEqual([]);
-    expect(split.terminal).toEqual({ type: "terminal" });
 
     const chat = focusConversation(layout);
     expect(chat.conversationFocused).toBe(true);
@@ -233,7 +307,7 @@ describe("code chrome layout", () => {
     ]);
   });
 
-  it("closes editor-tab groups without dropping side panels or the terminal", () => {
+  it("closes editor-tab groups without dropping side panels", () => {
     const layout = {
       tabs: [
         { type: "folders" as const },
@@ -248,26 +322,18 @@ describe("code chrome layout", () => {
 
     expect(closeEditorTabsToRight(layout, 0)).toEqual({
       ...layout,
-      tabs: [
-        { type: "folders" },
-        { type: "file", path: "src/lib.rs" },
-        { type: "terminal" },
-      ],
+      tabs: [{ type: "folders" }, { type: "file", path: "src/lib.rs" }],
       activeIndex: 1,
     });
     expect(closeOtherEditorTabs(layout, 1)).toEqual({
       ...layout,
-      tabs: [
-        { type: "folders" },
-        { type: "diff", path: "src/main.rs" },
-        { type: "terminal" },
-      ],
+      tabs: [{ type: "folders" }, { type: "diff", path: "src/main.rs" }],
       activeIndex: 1,
       conversationFocused: false,
     });
     expect(closeAllEditorTabs(layout)).toEqual({
       ...layout,
-      tabs: [{ type: "folders" }, { type: "terminal" }],
+      tabs: [{ type: "folders" }],
       activeIndex: 0,
       conversationFocused: undefined,
     });
@@ -295,7 +361,7 @@ describe("code chrome layout", () => {
 
     expect(closeAllEditorTabs(layout, "primary")).toEqual({
       ...layout,
-      tabs: [{ type: "folders" }, { type: "terminal" }],
+      tabs: [{ type: "folders" }],
       activeIndex: 0,
       conversationFocused: undefined,
     });
@@ -306,11 +372,7 @@ describe("code chrome layout", () => {
 
     expect(closeOtherEditorTabs(layout, 0, "primary")).toEqual({
       ...layout,
-      tabs: [
-        { type: "folders" },
-        { type: "file", path: "src/lib.rs" },
-        { type: "terminal" },
-      ],
+      tabs: [{ type: "folders" }, { type: "file", path: "src/lib.rs" }],
       activeIndex: 1,
       conversationFocused: false,
       editorSplit: { ...layout.editorSplit, focused: undefined },
@@ -372,7 +434,7 @@ describe("code chrome layout", () => {
       conversationFocused: false,
     };
 
-    expect(centerTabCount(layout)).toBe(3);
+    expect(centerTabCount(layout)).toBe(4);
     expect(selectCenterTab(layout, 0).conversationFocused).toBe(true);
     const second = selectCenterTab(layout, 2);
     expect(second.conversationFocused).toBe(false);
@@ -380,8 +442,10 @@ describe("code chrome layout", () => {
       type: "diff",
       path: "src/main.rs",
     });
-    // The terminal is a drawer, not a tab, so it is not position four.
-    expect(selectCenterTab(layout, 3)).toBe(layout);
+    // The terminal is a tab like the rest, so the chord reaches it too.
+    const fourth = selectCenterTab(layout, 3);
+    expect(fourth.tabs[fourth.activeIndex]).toEqual({ type: "terminal" });
+    expect(selectCenterTab(layout, 4)).toBe(layout);
   });
 
   it("numbers the split group on its own, with no main agent in it", () => {

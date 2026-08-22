@@ -14,7 +14,6 @@ const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
 const LAST_CREATE_KEY = "tidebreak.code-last-create";
 const WORKSPACE_SORT_KEY = "tidebreak.code-workspace-sort";
 const RAIL_PREFS_KEY = "tidebreak.code-rail-prefs";
-const TERMINAL_DRAWER_HEIGHTS_KEY = "tidebreak.code-terminal-drawer-heights";
 
 /**
  * How the reader shaped the workspace rail: order, card density, which meta
@@ -154,37 +153,6 @@ function storeRailPrefs(prefs: CodeRailPrefs): void {
   }
 }
 
-function readStoredTerminalDrawerHeights(): Record<string, number> {
-  try {
-    const raw = window.localStorage.getItem(TERMINAL_DRAWER_HEIGHTS_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const heights: Record<string, number> = {};
-    for (const [workspaceId, value] of Object.entries(
-      parsed as Record<string, unknown>,
-    )) {
-      if (typeof value === "number" && Number.isFinite(value)) {
-        heights[workspaceId] = value;
-      }
-    }
-    return heights;
-  } catch {
-    return {};
-  }
-}
-
-function storeTerminalDrawerHeights(heights: Record<string, number>): void {
-  try {
-    window.localStorage.setItem(
-      TERMINAL_DRAWER_HEIGHTS_KEY,
-      JSON.stringify(heights),
-    );
-  } catch {
-    // Preference persistence is best-effort.
-  }
-}
-
 /**
  * Code mode's dialog and chrome state, held outside the components that draw it.
  *
@@ -213,8 +181,13 @@ export type CodeUiStore = {
   inspectorScope: InspectorScope | null;
   railPrefs: CodeRailPrefs;
   lastCreate: CodeCreateDefaults | null;
-  /** Per-workspace terminal drawer height, remembered across reloads. */
-  terminalDrawerHeights: Record<string, number>;
+  /**
+   * A terminal has been asked for from outside the workspace page — the
+   * chord, or a rail command on a workspace that is not on screen yet. The
+   * page takes it, because opening a shell is a server call the chord cannot
+   * make on its own.
+   */
+  terminalPending: boolean;
   /**
    * Ask for a workspace, from a repo page or from anywhere in code mode.
    *
@@ -231,7 +204,8 @@ export type CodeUiStore = {
   setRailPrefs: (patch: Partial<CodeRailPrefs>) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
   rememberCreate: (defaults: CodeCreateDefaults) => void;
-  setTerminalDrawerHeight: (workspaceId: string, height: number) => void;
+  requestTerminal: () => void;
+  takeTerminal: () => boolean;
   /**
    * Prompt waiting for the code composer. It can either fill the draft or run
    * immediately; the composer takes and clears it so a remount cannot repeat
@@ -298,7 +272,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   inspectorScope: null,
   railPrefs: readStoredRailPrefs(),
   lastCreate: readStoredCreateDefaults(),
-  terminalDrawerHeights: readStoredTerminalDrawerHeights(),
+  terminalPending: false,
   pendingComposerPrompt: null,
   composerActionScope: null,
   quickOpenPending: false,
@@ -397,14 +371,10 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     storeCreateDefaults(defaults);
     set({ lastCreate: defaults });
   },
-  setTerminalDrawerHeight: (workspaceId, height) => {
-    set((state) => {
-      const terminalDrawerHeights = {
-        ...state.terminalDrawerHeights,
-        [workspaceId]: height,
-      };
-      storeTerminalDrawerHeights(terminalDrawerHeights);
-      return { terminalDrawerHeights };
-    });
+  requestTerminal: () => set({ terminalPending: true }),
+  takeTerminal: () => {
+    if (!get().terminalPending) return false;
+    set({ terminalPending: false });
+    return true;
   },
 }));

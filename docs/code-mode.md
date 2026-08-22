@@ -365,8 +365,8 @@ boundary applies to `gh` exactly as to harnesses). Absent or signed-out
 Routes (code-defined, hash history, in `ui/src/router.tsx`): `/code` (repo
 rail, doctor-driven empty state), `/code/r/$repoId` (workspace list,
 new-workspace flow, repo settings), `/code/w/$workspaceId` (the main
-surface; files and diff open through the existing panel system; the
-terminal opens as a bottom drawer; git, pull-request state, and comments
+surface; files, diffs, browsers, and terminals open as center tabs
+through the existing panel system; git, pull-request state, and comments
 live in a review sidebar).
 
 `ui/src/code/`:

@@ -209,7 +209,7 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     id: "toggle-code-terminal",
     codes: ["KeyJ"],
     mod: true,
-    description: "Show or hide the terminal",
+    description: "Go to the terminal, or back",
     group: "Code",
     scope: "code",
     allowInEditable: true,
