@@ -17,7 +17,8 @@ import {
   isPaginatedOriginalViewer,
 } from "@/document/DocumentViewer";
 import { exportLibraryDocument } from "@/documents";
-import { hasNativeHost } from "@/host";
+import { hasLocalHostAuthority } from "@/host";
+import { hostErrorMessage } from "@/remoteMachine";
 import { PanelFrame } from "@/panel/PanelFrame";
 import { useCitationPlacement } from "./citationPlacement";
 import {
@@ -48,7 +49,7 @@ export function DocumentDetailRoot({
   documentID,
   citationId,
   download = exportLibraryDocument,
-  canDownload = hasNativeHost(),
+  canDownload = hasLocalHostAuthority(),
 }: Props) {
   const { client } = useApp();
   const [info, setInfo] = useState<DocumentDetail | null>(null);
@@ -242,11 +243,12 @@ function documentTitle(info: DocumentDetail): string {
   return info.title?.trim() || `Source ${info.document_id.slice(0, 8)}`;
 }
 
+/**
+ * Saving reaches this computer, so a window attached to a machine is refused
+ * rather than writing to the wrong host. The refusal arrives as a bare reason
+ * code; the outputs panel beside this one already words it, and this uses the
+ * same sentence rather than showing the code.
+ */
 function friendlyDownloadError(error: unknown): string {
-  const message = String(error)
-    .replace(/^Error:\s*/, "")
-    .trim();
-  return message && message.length <= 240
-    ? message
-    : "Could not save that source.";
+  return hostErrorMessage(error, "Could not save that source.");
 }

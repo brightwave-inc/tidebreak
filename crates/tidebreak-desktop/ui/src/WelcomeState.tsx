@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import type { ApiClient, ExecConfigInfo, PluginPromptInfo } from "./api";
 import {
-  MANAGED_EXECUTION_DISCLOSURE,
+  managedExecutionDisclosure,
   requiresManagedExecutionDisclosure,
 } from "./ExecDisclosure";
 import { Logomark } from "./Logomark";
@@ -231,7 +231,7 @@ export function WelcomeState({
           <h2>{heading}</h2>
           <p>{description}</p>
           {managedExecutionOnly && (
-            <p className="welcome-disclosure">{MANAGED_EXECUTION_DISCLOSURE}</p>
+            <p className="welcome-disclosure">{managedExecutionDisclosure()}</p>
           )}
         </div>
       </div>

@@ -1,8 +1,8 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { openExternal } from "@/host";
+import { attachedRemotely, hasLocalHostAuthority, openExternal } from "@/host";
 import { removeStoredBrowserSession } from "./browserPersistence";
 
 export const CODE_BROWSER_EVENT = "code-browser:event";
@@ -127,7 +127,13 @@ export type CodeBrowserHost = {
 };
 
 export const nativeCodeBrowserHost: CodeBrowserHost = {
-  available: isTauri,
+  /**
+   * The browser is a child webview on this computer's screen, driven by this
+   * computer's input. None of that belongs to a conversation on another
+   * machine — sharing one with an agent that is not here shares the wrong
+   * screen — so a window attached to a machine has no browser to offer.
+   */
+  available: hasLocalHostAuthority,
   command: async (workspaceId, browserId, action) => {
     const normalized = await logicalBrowserAction(action);
     return invoke<BrowserHostSnapshot>("code_browser_command", {
@@ -182,6 +188,20 @@ async function logicalBrowserAction(
   } catch {
     return action;
   }
+}
+
+/**
+ * Why a browser tab cannot run here, for the tab that has to say so.
+ *
+ * A tab restored from a saved layout opens whether or not a browser can run,
+ * so the reason has to be worded rather than assumed: a browser build has no
+ * host at all, while an attached window has one that would open on the wrong
+ * computer.
+ */
+export function browserUnavailableMessage(): string {
+  return attachedRemotely()
+    ? "The in-app browser runs on this computer, and your work is on another machine"
+    : "The in-app browser is available in the Tidebreak desktop app";
 }
 
 /** Explicit tab close. Tab switches only hide the native child webview. */

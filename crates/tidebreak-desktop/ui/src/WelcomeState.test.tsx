@@ -105,7 +105,7 @@ describe("WelcomeState", () => {
     );
 
     expect(
-      await screen.findByText(/Files staged for a run leave this machine/i),
+      await screen.findByText(/Files staged for a run leave this computer/i),
     ).toBeInTheDocument();
   });
 
@@ -119,7 +119,7 @@ describe("WelcomeState", () => {
 
     await waitFor(() => expect(client.getExecConfig).toHaveBeenCalled());
     expect(
-      screen.queryByText(/Files staged for a run leave this machine/i),
+      screen.queryByText(/Files staged for a run leave this computer/i),
     ).toBeNull();
   });
 });

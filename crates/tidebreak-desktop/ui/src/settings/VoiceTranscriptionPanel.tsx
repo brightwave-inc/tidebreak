@@ -18,6 +18,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { attachedRemotely } from "@/host";
+import { hostMachineLabel } from "@/remoteMachine";
 import { cn } from "@/lib/utils";
 import {
   formatModelSize,
@@ -36,6 +38,20 @@ import {
 
 const LOCAL_VALUE_PREFIX = "local:";
 
+/**
+ * Why no speech model can run where the transcription happens.
+ *
+ * The server answers `unavailable` when it has no local runner at all, which
+ * a browser build and a headless machine both report. Naming the desktop app
+ * is the fix in the first case and a false lead in the second, so the two get
+ * different sentences.
+ */
+function localModelsUnavailableCopy(): string {
+  return attachedRemotely()
+    ? "The machine your work is on cannot run a speech model. Pick a cloud model instead."
+    : "Models that run on this computer are only available in the desktop app.";
+}
+
 /** What the closed picker says once a choice is made. */
 export function voiceSelectionLabel(
   info: VoiceTranscriptionInfo | null,
@@ -44,7 +60,8 @@ export function voiceSelectionLabel(
   if (info.model === "gpt4o_transcribe") return "OpenAI · gpt-4o-transcribe";
   if (info.model === "gemini_flash") return "Google · Gemini 3.6 Flash";
   const local = selectedLocalVoiceModel(info);
-  return local ? `On this device · ${local.label}` : "On this device";
+  const host = hostMachineLabel();
+  return local ? `On ${host} · ${local.label}` : `On ${host}`;
 }
 
 export function voiceSelectionValue(
@@ -98,7 +115,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
       title: `Download ${model.label}?`,
       description: `${model.description} The download is about ${formatModelSize(
         model.total_bytes,
-      )} and uses the same amount of disk once installed. Recordings transcribed with it never leave this device.`,
+      )} and uses the same amount of disk once installed. It is downloaded to ${hostMachineLabel()}, and recordings transcribed with it never leave there.`,
       confirmLabel: "Download",
     });
     if (accepted) await useVoiceInputStore.getState().install(client, id);
@@ -107,7 +124,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
   return (
     <SettingsPanel
       title="Voice input"
-      description="Choose how microphone recordings become editable message drafts. Audio stays on this device unless you pick a cloud model."
+      description={`Choose how microphone recordings become editable message drafts. Recordings are transcribed on ${hostMachineLabel()}, and the audio stays there unless you pick a cloud model.`}
       busy={loading}
     >
       <SettingsSection>
@@ -117,14 +134,14 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
           description={
             ready
               ? "The selected voice input model is ready to transcribe recordings."
-              : "Download a model that runs on this device, or configure a supported cloud provider."
+              : `Download a model that runs on ${hostMachineLabel()}, or configure a supported cloud provider.`
           }
         />
       </SettingsSection>
 
       <SettingsSection
         title="Transcription model"
-        description="Models that run on this device come first. One that has not been downloaded yet is still selectable — choosing it starts the download."
+        description={`Models that run on ${hostMachineLabel()} come first. One that has not been downloaded yet is still selectable — choosing it starts the download.`}
       >
         <SettingsField
           label="Model"
@@ -142,7 +159,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                <SelectLabel>On this device</SelectLabel>
+                <SelectLabel>On {hostMachineLabel()}</SelectLabel>
                 {(info?.local_models ?? []).map((model) => (
                   <LocalModelItem key={model.id} model={model} />
                 ))}
@@ -217,7 +234,7 @@ export function VoiceTranscriptionPanel({ client }: { client: ApiClient }) {
           <SettingsStatus
             tone="disabled"
             label="Not available here"
-            description="Models that run on this device are only available in the desktop app."
+            description={localModelsUnavailableCopy()}
           />
         )}
       </SettingsSection>

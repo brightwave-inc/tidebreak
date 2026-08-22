@@ -16,6 +16,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import { hostMachineLabel } from "@/remoteMachine";
 import { useConfirm } from "../components/ConfirmDialog";
 import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
 import { ProviderIcon } from "../ProviderIcons";
@@ -129,7 +130,7 @@ export function ProvidersPanel({
   return (
     <SettingsPanel
       title="Providers"
-      description="Credentials stay on this machine. Enable a provider, then save a credential."
+      description={`Credentials stay on ${hostMachineLabel()}. Enable a provider, then save a credential.`}
     >
       <div className="flex flex-col gap-2">
         {providers
@@ -269,7 +270,7 @@ function ProviderRow({
       title: "Remove the saved credential?",
       description: `This deletes the stored ${providerLabel(
         info.kind,
-      )} credential from this machine's keychain. You can add it again at any time.`,
+      )} credential from the keychain on ${hostMachineLabel()}. You can add it again at any time.`,
       confirmLabel: "Remove credential",
       destructive: true,
     });

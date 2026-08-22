@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   handler: undefined as ((event: { payload: unknown }) => void) | undefined,
   attachDropped: vi.fn(),
   stop: vi.fn(),
+  localHostAuthority: vi.fn(() => true),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -29,6 +30,7 @@ vi.mock("./attachments", () => ({
 
 vi.mock("./host", () => ({
   hasNativeHost: () => true,
+  hasLocalHostAuthority: mocks.localHostAuthority,
 }));
 
 describe("DocumentDropTarget", () => {
@@ -41,6 +43,7 @@ describe("DocumentDropTarget", () => {
       failedImages: [],
     });
     mocks.stop.mockReset();
+    mocks.localHostAuthority.mockReturnValue(true);
   });
 
   it("offers native files and folders without claiming aliases", async () => {
@@ -95,6 +98,43 @@ describe("DocumentDropTarget", () => {
     // delivered after teardown must not reach the resolver either.
     expect(resolveChatId).not.toHaveBeenCalled();
     expect(mocks.attachDropped).not.toHaveBeenCalled();
+  });
+
+  it("refuses a drop while this window works on another machine", async () => {
+    mocks.localHostAuthority.mockReturnValue(false);
+    const onAttached = vi.fn();
+    const resolveChatId = vi.fn(async () => "chat-1");
+    render(
+      <DocumentDropTarget
+        resolveChatId={resolveChatId}
+        onAttached={onAttached}
+        onError={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(mocks.handler).toBeTypeOf("function"));
+
+    act(() => {
+      mocks.handler?.({
+        payload: { phase: "enter", accepted: true, fileCount: 1 },
+      });
+    });
+    // The reader learns before letting go, and is pointed at the route that
+    // does reach the machine.
+    expect(
+      screen.getByText("These files are on this computer"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Use Attach files/)).toBeInTheDocument();
+
+    act(() => {
+      mocks.handler?.({
+        payload: { phase: "dropped", accepted: true, fileCount: 1 },
+      });
+    });
+    // The host would import these paths into the store inside this app, where
+    // the conversation does not exist, so the claim never goes out.
+    expect(resolveChatId).not.toHaveBeenCalled();
+    expect(mocks.attachDropped).not.toHaveBeenCalled();
+    expect(onAttached).not.toHaveBeenCalled();
   });
 
   it("rejects malformed drop projections", () => {

@@ -297,7 +297,7 @@ describe("McpPanel", () => {
       "http://127.0.0.1/mcp",
     );
     await user.click(
-      screen.getByRole("radio", { name: "Local process (stdio)" }),
+      screen.getByRole("radio", { name: "Process on this computer (stdio)" }),
     );
     await user.type(
       screen.getByPlaceholderText("/absolute/path/to/server"),

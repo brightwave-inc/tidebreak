@@ -1,7 +1,18 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closeCodeBrowser, type CodeBrowserHost } from "./browserHost";
+import { setAttachedRemotely } from "@/host";
+import {
+  browserUnavailableMessage,
+  closeCodeBrowser,
+  nativeCodeBrowserHost,
+  type CodeBrowserHost,
+} from "./browserHost";
+
+// The gate is `hasNativeHost() && !attachedRemotely()`, so the native half has
+// to be true for the attachment half to be observable at all.
+const isTauri = vi.hoisted(() => vi.fn(() => true));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri, invoke: vi.fn() }));
 import {
   readStoredBrowserSession,
   writeStoredBrowserSession,
@@ -55,5 +66,32 @@ describe("browser host lifecycle", () => {
 
     expect(readStoredBrowserSession("browser-1")).toBeNull();
     expect(command).not.toHaveBeenCalled();
+  });
+});
+
+describe("browser host availability", () => {
+  afterEach(() => {
+    setAttachedRemotely(false);
+    isTauri.mockReturnValue(true);
+  });
+
+  // Every browser control asks this one predicate, so the gate belongs here
+  // rather than at each of the nine call sites — including "share with agent",
+  // which would otherwise hand an agent elsewhere a browser on this laptop.
+  it("offers no browser while this window works on another machine", () => {
+    expect(nativeCodeBrowserHost.available()).toBe(true);
+    setAttachedRemotely(true);
+    expect(nativeCodeBrowserHost.available()).toBe(false);
+  });
+
+  it("names the machine rather than the build when a tab has to explain", () => {
+    setAttachedRemotely(true);
+    expect(browserUnavailableMessage()).toBe(
+      "The in-app browser runs on this computer, and your work is on another machine",
+    );
+    setAttachedRemotely(false);
+    expect(browserUnavailableMessage()).toBe(
+      "The in-app browser is available in the Tidebreak desktop app",
+    );
   });
 });

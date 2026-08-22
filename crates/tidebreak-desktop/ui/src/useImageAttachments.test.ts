@@ -67,12 +67,12 @@ class FakeUpload {
 
 const client = { baseUrl: "http://127.0.0.1:9", token: "t" } as ApiClient;
 
-const hasNativeHost = vi.hoisted(() => vi.fn(() => false));
+const hasLocalHostAuthority = vi.hoisted(() => vi.fn(() => false));
 const publishChatImage = vi.hoisted(() => vi.fn());
 
 vi.mock("./host", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./host")>()),
-  hasNativeHost,
+  hasLocalHostAuthority,
 }));
 vi.mock("./attachments", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./attachments")>()),
@@ -89,7 +89,7 @@ beforeEach(() => {
   useComposerDrafts.setState({ drafts: {}, attachments: {} });
   window.sessionStorage.clear();
   FakeUpload.opened = [];
-  hasNativeHost.mockReturnValue(false);
+  hasLocalHostAuthority.mockReturnValue(false);
   publishChatImage.mockReset();
   vi.stubGlobal("XMLHttpRequest", FakeUpload);
   URL.createObjectURL = vi.fn((): string => "blob:preview");
@@ -198,7 +198,7 @@ describe("useImageAttachments", () => {
   // pasted image posted from the renderer came back 401 with an empty body and
   // reached the reader as the generic "Could not attach that image".
   it("publishes through the host rather than the renderer when there is one", async () => {
-    hasNativeHost.mockReturnValue(true);
+    hasLocalHostAuthority.mockReturnValue(true);
     publishChatImage.mockResolvedValue({
       attachmentId: ATTACHMENT_ID,
       mediaType: "image/png",
@@ -218,6 +218,29 @@ describe("useImageAttachments", () => {
     );
     expect(FakeUpload.opened).toHaveLength(0);
     expect(publishChatImage).toHaveBeenCalledWith("chat-1", expect.any(File));
+  });
+
+  // Regression: the host branch was taken on `hasNativeHost` alone, so an
+  // attached window published into the store inside this app — where the
+  // conversation does not exist — and every paste failed after the fact.
+  it("posts to the machine rather than the host while attached to one", async () => {
+    hasLocalHostAuthority.mockReturnValue(false);
+    const { result } = renderHook(() => useImageAttachments(client, "chat-1"));
+
+    act(() => result.current.attachFiles([png()]));
+    await waitFor(() => expect(FakeUpload.opened).toHaveLength(1));
+    expect(FakeUpload.opened[0].url).toBe(
+      "http://127.0.0.1:9/chats/chat-1/attachments/images",
+    );
+    expect(publishChatImage).not.toHaveBeenCalled();
+
+    act(() => FakeUpload.opened[0].finish(201, PUBLISHED));
+    await waitFor(() =>
+      expect(result.current.attachments[0]).toMatchObject({
+        status: "ready",
+        attachmentId: ATTACHMENT_ID,
+      }),
+    );
   });
 
   it("keeps the strip across the remount a chat switch causes", async () => {

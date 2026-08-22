@@ -22,6 +22,7 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
 import { BrowserViewportControl } from "./BrowserViewportControl";
 import {
+  browserUnavailableMessage,
   type BrowserBounds,
   type BrowserHostAction,
   type BrowserHostEvent,
@@ -334,10 +335,7 @@ function CodeBrowserTabSession({
       if (!host.available()) {
         if (current.url) {
           updateSession((value) =>
-            failBrowserSession(
-              value,
-              "The in-app browser is available in the Tidebreak desktop app",
-            ),
+            failBrowserSession(value, browserUnavailableMessage()),
           );
         }
         return;
@@ -582,10 +580,7 @@ function CodeBrowserTabSession({
 
     if (!host.available()) {
       updateSession((current) =>
-        failBrowserSession(
-          current,
-          "The in-app browser is available in the Tidebreak desktop app",
-        ),
+        failBrowserSession(current, browserUnavailableMessage()),
       );
       return;
     }

@@ -4,8 +4,9 @@ import { toast } from "sonner";
 import type { ApiClient } from "../api/client";
 import type { CodeWorktreeRoot, HarnessDoctorReport } from "../api/types";
 import { DoctorList } from "@/code/DoctorList";
-import { hasNativeHost, pickCodeDirectory } from "@/host";
+import { hasLocalHostAuthority, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { hostMachineLabel } from "@/remoteMachine";
 import { SettingsError, SettingsPanel } from "./primitives";
 import { WorktreeRootSection } from "./WorktreeRootSection";
 
@@ -91,7 +92,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
   return (
     <SettingsPanel
       title="Coding harnesses"
-      description="Engines installed on this machine, what they can do, and where the workspaces they run in live."
+      description={`Engines installed on ${hostMachineLabel()}, what they can do, and where the workspaces they run in live.`}
       busy={loading || refreshing}
     >
       {error && <SettingsError>{error}</SettingsError>}
@@ -102,7 +103,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
           defaultRoot={worktreeRoot.default_root}
           inherited={worktreeRoot.root === undefined}
           busy={savingRoot}
-          canBrowse={hasNativeHost()}
+          canBrowse={hasLocalHostAuthority()}
           onChange={setRootDraft}
           onBrowse={() => {
             void (async () => {
