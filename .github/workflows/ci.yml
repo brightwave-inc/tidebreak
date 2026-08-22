@@ -21,6 +21,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Cargo's libgit2 transport intermittently fails TLS handshakes against the
+  # pinned Symphonia revision. The runner's Git client handles the fetch.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 concurrency:
   # On a PR ref only the newest commit matters, so supersede in-progress runs.
   # Every other event gets a unique group (keyed by run id) so nothing cancels

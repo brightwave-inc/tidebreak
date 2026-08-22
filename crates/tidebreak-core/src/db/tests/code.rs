@@ -515,7 +515,60 @@ async fn a_capped_replay_keeps_the_newest_events_and_admits_the_head_is_gone() {
 /// code-mode entity references a chat table or id type.
 #[test]
 fn chat_and_code_entities_do_not_cross_reference() {
-    let entities = include_str!("../entities.rs");
+    fn without_comments(source: &str) -> String {
+        let mut stripped = String::with_capacity(source.len());
+        let mut chars = source.chars().peekable();
+        let mut block_depth = 0;
+        while let Some(character) = chars.next() {
+            if block_depth > 0 {
+                match (character, chars.peek().copied()) {
+                    ('/', Some('*')) => {
+                        chars.next();
+                        stripped.push_str("  ");
+                        block_depth += 1;
+                    }
+                    ('*', Some('/')) => {
+                        chars.next();
+                        stripped.push_str("  ");
+                        block_depth -= 1;
+                    }
+                    ('\n', _) => stripped.push('\n'),
+                    _ => stripped.push(' '),
+                }
+                continue;
+            }
+            match (character, chars.peek().copied()) {
+                ('/', Some('/')) => {
+                    chars.next();
+                    stripped.push_str("  ");
+                    for comment in chars.by_ref() {
+                        if comment == '\n' {
+                            stripped.push('\n');
+                            break;
+                        }
+                        stripped.push(' ');
+                    }
+                }
+                ('/', Some('*')) => {
+                    chars.next();
+                    stripped.push_str("  ");
+                    block_depth = 1;
+                }
+                _ => stripped.push(character),
+            }
+        }
+        stripped
+    }
+
+    let sample = "/// ChatId in prose is allowed.\n\
+                  /* AgentEvent in a nested /* TurnId */ comment is allowed. */\n\
+                  pub use crate::id::ChatId as ConversationId;";
+    let stripped_sample = without_comments(sample);
+    assert!(!stripped_sample.contains("ChatId in prose"));
+    assert!(!stripped_sample.contains("AgentEvent in a nested"));
+    assert!(stripped_sample.contains("crate::id::ChatId as ConversationId"));
+
+    let entities = without_comments(include_str!("../entities.rs"));
     let mut current_mod = "";
     for line in entities.lines() {
         if let Some(name) = line.strip_prefix("pub mod ") {
@@ -549,7 +602,7 @@ fn chat_and_code_entities_do_not_cross_reference() {
                 walk_rs(&path, visit);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
                 let text = std::fs::read_to_string(&path).unwrap();
-                visit(&path, &text);
+                visit(&path, &without_comments(&text));
             }
         }
     }

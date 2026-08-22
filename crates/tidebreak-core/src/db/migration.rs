@@ -37,7 +37,12 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Baseline), Box::new(AppOwner), Box::new(CodeOwner)]
+        vec![
+            Box::new(Baseline),
+            Box::new(AppOwner),
+            Box::new(CodeOwner),
+            Box::new(BaselineRepair),
+        ]
     }
 }
 
@@ -213,6 +218,54 @@ impl MigrationTrait for CodeOwner {
     }
 }
 
+/// Repair the known gap for a self-host database that predates the frozen
+/// baseline. Such a database makes [`Baseline`] return when it sees `app`, so
+/// tables added to the baseline later never reached it. Create every missing
+/// baseline table and index in dependency order. This repairs additive schema
+/// changes; changed columns still require their own ordered migration.
+struct BaselineRepair;
+
+impl MigrationName for BaselineRepair {
+    fn name(&self) -> &str {
+        "m20260822_000004_baseline_repair"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for BaselineRepair {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for entry in baseline::tables() {
+            let name = entry
+                .table
+                .get_table_name()
+                .expect("every baseline table statement names its table")
+                .sea_orm_table()
+                .to_string();
+            if manager.has_table(&name).await? {
+                continue;
+            }
+            let mut table = entry.table;
+            table.if_not_exists();
+            manager.create_table(table).await?;
+            for mut index in entry.indexes {
+                index.if_not_exists();
+                manager.create_index(index).await?;
+            }
+        }
+        for seed in baseline::SEED_STATEMENTS {
+            manager.get_connection().execute_unprepared(seed).await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The repair only creates baseline objects that were missing. Removing
+        // them would also remove objects owned by the baseline on a fresh
+        // database.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -263,6 +316,7 @@ mod tests {
                 "m20260814_000001_baseline",
                 "m20260814_000002_app_owner",
                 "m20260814_000003_code_owner",
+                "m20260822_000004_baseline_repair",
             ]
         );
         assert!(db
@@ -408,6 +462,66 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.try_get::<String>("", "owner").unwrap(), "local");
+    }
+
+    /// A self-host database created before later code tables joined the
+    /// baseline keeps its rows and gains every table that the current schema
+    /// expects.
+    #[tokio::test]
+    async fn a_pre_pin_database_gains_tables_added_to_the_baseline() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE app (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                current_revision_id TEXT NOT NULL,
+                revision_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                owner TEXT NOT NULL DEFAULT 'local'
+            )",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared(concat!(
+            "INSERT INTO app (id, name, current_revision_id, revision_count, ",
+            "created_at, updated_at, deleted_at, owner) VALUES ",
+            "('00000000-0000-0000-0000-000000000001', 'legacy', ",
+            "'00000000-0000-0000-0000-000000000002', 1, ",
+            "'2026-08-14 00:00:00+00:00', '2026-08-14 00:00:00+00:00', NULL, 'local')"
+        ))
+        .await
+        .unwrap();
+
+        Migrator::up(&db, None).await.unwrap();
+
+        for table in [
+            "code_watch",
+            "code_trigger",
+            "code_trigger_fire",
+            "code_session_image",
+        ] {
+            let exists = db
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!(
+                        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert!(exists.is_some(), "repair did not create {table}");
+        }
+        let legacy = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT name FROM app WHERE id = '00000000-0000-0000-0000-000000000001'".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.try_get::<String>("", "name").unwrap(), "legacy");
     }
     /// The baseline is frozen, and this is what holds it still.
     ///
