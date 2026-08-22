@@ -329,13 +329,6 @@ export type ComposerProps = {
   plugins?: ComposerPlugins;
   slash?: ComposerSlash;
   images?: ComposerImages;
-  /**
-   * Why this surface has no image path, when it has none. A paste or drop
-   * carrying an image is claimed and answered with this sentence instead of
-   * falling through to the textarea, where the clipboard's text flavour — a
-   * file URL — lands in the draft and reads as an attachment that worked.
-   */
-  imagesUnavailable?: string;
   files?: ComposerFiles;
   /** Paths the agent can already read, shown as chips and named on send. */
   workspaceFiles?: ComposerWorkspaceFiles;
@@ -384,7 +377,6 @@ export function Composer({
   plugins,
   slash,
   images,
-  imagesUnavailable,
   files,
   workspaceFiles,
   folders,
@@ -436,7 +428,6 @@ export function Composer({
   // is its own: there is no token in the draft to read one from.
   const [panelQuery, setPanelQuery] = useState<string | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const [imagesRefused, setImagesRefused] = useState<string | null>(null);
   const inputDisabled = disabled;
   const active = busy && activeTurnId !== null;
   const sendMode = useUiStore((state) => state.activeTurnSendMode);
@@ -470,7 +461,6 @@ export function Composer({
     savedDraftRef.current = "";
     setSlashToken(null);
     setMentionToken(null);
-    setImagesRefused(null);
   }, [resetKey]);
 
   const invokedSkills = slash?.invoked ?? [];
@@ -802,9 +792,6 @@ export function Composer({
     historyIndexRef.current = null;
     rememberSelection(event.target);
     syncSlashToken(event.target.value, event.target.selectionStart);
-    // Typing is the acknowledgement: a refusal from the last paste has been
-    // read by the time the reader is writing again.
-    setImagesRefused(null);
     onDraftChange(event.target.value);
   }
 
@@ -827,18 +814,9 @@ export function Composer({
    * reader chose. A paste that carries no image is left alone: it is text.
    */
   function acceptTransfer(transfer: DataTransfer | null): boolean {
-    if (inputDisabled) return false;
+    if (!images || inputDisabled) return false;
     const files = imageFilesFrom(transfer);
     if (files.length === 0) return false;
-    if (!images) {
-      // Nothing here can hold an image. Claim it anyway where there is an
-      // answer to give, so the reader gets the answer instead of a file URL
-      // in the draft.
-      if (!imagesUnavailable) return false;
-      setImagesRefused(imagesUnavailable);
-      return true;
-    }
-    setImagesRefused(null);
     images.onAttachFiles(files);
     return true;
   }
@@ -1324,11 +1302,6 @@ export function Composer({
         <span className="text-xs text-destructive" role="alert">
           {"Couldn’t attach image: "}
           {images.error}
-        </span>
-      )}
-      {imagesRefused && (
-        <span className="text-xs text-destructive" role="alert">
-          {imagesRefused}
         </span>
       )}
       {images?.unsupportedModel && images.items.length > 0 && (

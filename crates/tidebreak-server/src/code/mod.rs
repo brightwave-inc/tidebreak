@@ -19,6 +19,7 @@ pub(crate) mod harness_install;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod scoped;
+pub(crate) mod scratch;
 pub(crate) mod session_worker;
 pub(crate) mod setup_script;
 pub(crate) mod terminal;

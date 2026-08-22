@@ -1288,6 +1288,21 @@ async fn turn_statuses(
         .collect()
 }
 
+/// Poll until `ready` holds, or fail the test.
+///
+/// A turn is accepted before it runs, so everything the worker does with it —
+/// writing an attachment, handing the engine its input — lands after the
+/// response the caller already has.
+async fn wait_until(mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition never held");
+}
+
 async fn wait_for_open_turn(runtime: &CodeRuntime, session_id: CodeSessionId) -> CodeTurnId {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1806,6 +1821,163 @@ async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded()
     assert_eq!(
         still["session"]["permission_mode"], "plan",
         "a refused change must not move the row: {still}"
+    );
+}
+
+/// Only Claude Code's adapter puts image bytes on the wire. On every other
+/// engine an attached image used to be dropped between the composer and the
+/// child, because the field it rides is one those adapters never read. The
+/// bytes go to disk instead and the prompt carries the path, which is the
+/// route a fork's transcript already takes.
+#[tokio::test]
+async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Unsupported);
+    let engine = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree =
+        std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap().to_owned());
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let pixels = crate::routes::image_attachment::png_header(4, 4);
+    let published = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session}/attachments/images"
+        ))
+        .bearer_auth(&token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(pixels.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), reqwest::StatusCode::CREATED);
+    let attachment: serde_json::Value = published.json().await.unwrap();
+    let blob_id = attachment["attachment_id"].as_str().unwrap().to_owned();
+
+    let accepted = client
+        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "message": "what is in this",
+            "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    let accepted_status = accepted.status();
+    let accepted_body: serde_json::Value = accepted.json().await.unwrap();
+    assert_eq!(
+        accepted_status,
+        reqwest::StatusCode::ACCEPTED,
+        "{accepted_body}"
+    );
+
+    let relative = format!(".tidebreak/attachments/{blob_id}.png");
+    let written = worktree.join(&relative);
+    wait_until(|| written.exists()).await;
+    assert_eq!(
+        std::fs::read(&written).unwrap(),
+        pixels,
+        "the engine reads the bytes that were published"
+    );
+
+    wait_until(|| !engine.turn_inputs().is_empty()).await;
+    let handed = engine.turn_inputs().remove(0);
+    assert_eq!(
+        handed.images, 0,
+        "an engine with no image protocol is sent no image bytes"
+    );
+    assert!(
+        handed.text.starts_with("what is in this"),
+        "the message the person wrote leads: {:?}",
+        handed.text
+    );
+    assert!(
+        handed.text.contains(&relative),
+        "the prompt names the path: {:?}",
+        handed.text
+    );
+
+    // The transcript keeps what was typed, not what the engine was handed.
+    let turns: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(turns[0]["user_input"], "what is in this");
+
+    // `.tidebreak/` hides itself, so none of this shows up as a change.
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".tidebreak/.gitignore")).unwrap(),
+        "*\n"
+    );
+}
+
+/// The engine that has its own image path keeps it. Bytes in the protocol are
+/// lossless and already captured; writing a file for Claude Code would cost a
+/// tool call to read back something it can already see.
+#[tokio::test]
+async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Supported);
+    let engine = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree =
+        std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap().to_owned());
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    let published = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session}/attachments/images"
+        ))
+        .bearer_auth(&token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(crate::routes::image_attachment::png_header(4, 4))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), reqwest::StatusCode::CREATED);
+    let attachment: serde_json::Value = published.json().await.unwrap();
+
+    let accepted = client
+        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "message": "what is in this",
+            "attachments": [{
+                "blob_id": attachment["attachment_id"],
+                "media_type": "image/png",
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+
+    wait_until(|| !engine.turn_inputs().is_empty()).await;
+    let handed = engine.turn_inputs().remove(0);
+    assert_eq!(handed.images, 1, "the bytes ride the protocol");
+    assert_eq!(
+        handed.text, "what is in this",
+        "nothing is appended to a prompt that carries the image itself"
+    );
+    assert!(
+        !worktree.join(".tidebreak/attachments").exists(),
+        "no file is written for an engine that never needs to read one"
     );
 }
 
@@ -5881,61 +6053,6 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
     assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
     let refused_body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(refused_body["kind"], "session_fenced");
-}
-
-#[tokio::test]
-async fn attachments_are_rejected_unless_the_adapter_declares_image_input() {
-    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Unsupported);
-    let (router, token, _runtime, dir) = code_app_with(adapter).await;
-    let addr = serve(router).await;
-    let client = reqwest::Client::new();
-    let repo = init_git_repo(dir.path());
-    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
-    let session = client
-        .post(format!(
-            "http://{addr}/code/workspaces/{}/sessions",
-            json_id(&workspace)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({
-            "harness": "claude_code",
-            "permission_mode": "plan",
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
-    let session: serde_json::Value = session.json().await.unwrap();
-
-    let blob_id = publish_one_pixel_png(&client, addr, &token, json_id(&session)).await;
-
-    let refused = client
-        .post(format!(
-            "http://{addr}/code/sessions/{}/turns",
-            json_id(&session)
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({
-            "message": "look at this",
-            "attachments": [{
-                "blob_id": blob_id,
-                "media_type": "image/png",
-            }],
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
-    let body: serde_json::Value = refused.json().await.unwrap();
-    assert_eq!(body["kind"], "unsupported_attachment");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("claude_code"),
-        "{}",
-        body["message"]
-    );
 }
 
 #[tokio::test]

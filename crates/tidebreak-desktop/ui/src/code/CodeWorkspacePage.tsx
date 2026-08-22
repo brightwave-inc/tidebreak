@@ -2054,7 +2054,6 @@ function CodeSessionPane({
           queued={queued}
           lastTurnBeganId={lastTurnBeganId}
           slashCommands={doctorEntry?.commands}
-          imageInput={doctorEntry?.caps.image_input === "supported"}
           searchPaths={(query) =>
             client
               .listCodeWorkspaceTree(workspaceId, { query })
