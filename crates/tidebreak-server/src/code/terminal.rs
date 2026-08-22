@@ -63,7 +63,15 @@ struct LiveTerminal {
     ring: ByteRing,
     cols: u16,
     rows: u16,
+    /// The shell is gone. Nothing can be typed at it any more, which is what
+    /// a snapshot reports and what `write` and `resize` refuse on.
     ended: bool,
+    /// A PTY reader thread is still feeding this ring, so bytes can still
+    /// arrive after `ended`. The reaper flips `ended` the moment the child
+    /// exits, which is before the reader has drained what the shell wrote on
+    /// its way out. A read reports `ended` only once both have settled, so a
+    /// client that stops polling there has seen every byte.
+    producing: bool,
     created_at: DateTime<Utc>,
     writer: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn MasterPty + Send>>,
@@ -162,6 +170,7 @@ impl TerminalHub {
             cols,
             rows,
             ended: false,
+            producing: true,
             created_at: Utc::now(),
             writer: Some(spawned.writer),
             master: Some(spawned.master),
@@ -197,6 +206,7 @@ impl TerminalHub {
             cols,
             rows,
             ended: false,
+            producing: false,
             created_at: Utc::now(),
             writer: None,
             master: None,
@@ -258,7 +268,10 @@ impl TerminalHub {
             next_cursor,
             overflow,
             truncated,
-            ended: live.ended,
+            // `ended` is what stops a client polling, so it has to mean the
+            // cursor is final — not just that the shell is gone while its
+            // last line is still on its way out of the PTY.
+            ended: live.ended && !live.producing,
         }
     }
 
@@ -436,6 +449,7 @@ impl LiveTerminal {
         self.writer = None;
         self.master = None;
         self.ended = true;
+        self.producing = false;
     }
 }
 
@@ -511,10 +525,16 @@ fn start_reader(
                     Ok(0) => break,
                     Ok(n) => {
                         let mut live = handle.lock().expect("terminal");
-                        if live.ended {
+                        // Keep these bytes even once the reaper has flipped
+                        // `ended`. The shell wrote them before it exited, and
+                        // dropping them loses the tail of the client's own
+                        // command — the last thing it wants to read.
+                        live.ring.write(&buf[..n]);
+                        if !live.producing {
+                            // Closed from the hub. Stop rather than fill a ring
+                            // no reader can reach.
                             break;
                         }
-                        live.ring.write(&buf[..n]);
                         let workspace_id = live.workspace_id;
                         let id = live.id;
                         apply_coalesce(&mut live, &handle, &notices, workspace_id, id);
@@ -524,6 +544,7 @@ fn start_reader(
             }
             if let Ok(mut live) = handle.lock() {
                 live.ended = true;
+                live.producing = false;
                 let workspace_id = live.workspace_id;
                 let id = live.id;
                 drop(live);
@@ -544,6 +565,10 @@ fn start_reaper(
             let _ = child.wait();
             if let Ok(mut live) = handle.lock() {
                 if !live.ended {
+                    // The shell is gone, so nothing can be typed at it. Leave
+                    // `producing` to the reader: the PTY still holds whatever
+                    // the shell wrote on its way out, and the terminal is not
+                    // finished until that has landed in the ring.
                     live.ended = true;
                     live.writer = None;
                     let workspace_id = live.workspace_id;
@@ -738,6 +763,98 @@ mod tests {
 
     fn workspace() -> WorkspaceId {
         WorkspaceId::new()
+    }
+
+    fn handle_of(hub: &TerminalHub, id: CodeTerminalId) -> Arc<Mutex<LiveTerminal>> {
+        hub.inner
+            .lock()
+            .expect("terminal hub")
+            .by_id
+            .get(&id)
+            .cloned()
+            .expect("terminal")
+    }
+
+    /// A PTY-shaped source the test drives one chunk at a time. Dropping the
+    /// sender is the EOF a closed slave produces.
+    struct ScriptedReader {
+        chunks: std::sync::mpsc::Receiver<Vec<u8>>,
+    }
+
+    impl Read for ScriptedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.chunks.recv() {
+                Ok(chunk) => {
+                    let n = chunk.len().min(buf.len());
+                    buf[..n].copy_from_slice(&chunk[..n]);
+                    Ok(n)
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+
+    /// The reaper flips `ended` when the child exits, which happens before the
+    /// reader has drained what the shell wrote on its way out. The tail of the
+    /// client's own command is the last thing it wants to lose.
+    #[test]
+    fn reader_keeps_output_the_shell_wrote_before_it_was_reaped() {
+        let hub = TerminalHub::new();
+        let ws = workspace();
+        let snap = hub.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
+        let handle = handle_of(&hub, snap.id);
+        handle.lock().unwrap().producing = true;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        start_reader(
+            handle.clone(),
+            hub.notices_sender(&OwnerId::local()),
+            Box::new(ScriptedReader { chunks: rx }),
+        );
+
+        // The shell exits with its last line still in the PTY.
+        handle.lock().unwrap().ended = true;
+        tx.send(b"tail of the command\r\n".to_vec()).unwrap();
+        drop(tx);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = hub.read(ws, snap.id, 0);
+            if read.ended {
+                assert_eq!(read.data, b"tail of the command\r\n");
+                return;
+            }
+            assert!(Instant::now() < deadline, "the reader never drained");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `ended` is a client's signal to stop polling, so it has to mean every
+    /// byte has landed, not just that the shell is gone.
+    #[test]
+    fn a_terminal_is_not_finished_while_its_reader_is_still_draining() {
+        let hub = TerminalHub::new();
+        let ws = workspace();
+        let snap = hub.open_memory(&OwnerId::local(), ws, 80, 24).unwrap();
+        let handle = handle_of(&hub, snap.id);
+        handle.lock().unwrap().producing = true;
+
+        hub.push_output(snap.id, b"before ");
+        handle.lock().unwrap().ended = true;
+
+        let mid = hub.read(ws, snap.id, 0);
+        assert_eq!(mid.data, b"before ");
+        assert!(!mid.ended, "bytes are still in flight");
+        // The snapshot answers the other question — whether the shell is there
+        // to type at — and that one is already settled.
+        assert!(hub.get(ws, snap.id).unwrap().ended);
+
+        hub.push_output(snap.id, b"after");
+        handle.lock().unwrap().producing = false;
+
+        let end = hub.read(ws, snap.id, mid.next_cursor);
+        assert_eq!(end.data, b"after");
+        assert!(end.ended);
     }
 
     #[test]

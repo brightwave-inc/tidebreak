@@ -179,7 +179,11 @@ async fn create_write_read_and_two_cursors() {
         .unwrap();
     assert_eq!(written.status(), reqwest::StatusCode::NO_CONTENT);
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    // Generous, because it only bounds a loop that already exits on the
+    // condition it is waiting for. The shell here is the developer's `$SHELL`,
+    // which sources their rc files, and this suite runs alongside a thousand
+    // other tests.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut body = Vec::new();
     let mut cursor = 0u64;
     let mut ended = false;
@@ -196,6 +200,8 @@ async fn create_write_read_and_two_cursors() {
         let page: serde_json::Value = read.json().await.unwrap();
         body.extend(decode_b64(page["bytes"].as_str().unwrap()));
         cursor = page["cursor"].as_u64().unwrap();
+        // `ended` means the shell is gone *and* its reader has drained, so the
+        // cursor is final from here on.
         ended = page["ended"].as_bool() == Some(true);
         let marker_seen = body
             .windows(b"TERM_TWO_READERS_ok".len())
