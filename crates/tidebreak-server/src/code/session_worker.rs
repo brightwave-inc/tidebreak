@@ -24,9 +24,9 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
-    append_event, bump_spawn_epoch, get_open_turn, get_session, get_session_all_owners,
-    insert_approval, insert_turn, next_turn_ordinal, save_session, save_turn,
-    set_session_subagents, CodeJournalError,
+    accept_trigger_turn_delivery, append_event, bump_spawn_epoch, get_open_turn, get_session,
+    get_session_all_owners, insert_approval, insert_turn, next_turn_ordinal, save_session,
+    save_turn, set_session_subagents, CodeJournalError,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -48,6 +48,7 @@ pub(crate) enum WorkerCommand {
         model: Option<String>,
         reasoning_effort: Option<ReasoningEffort>,
         attachments: Vec<tidebreak_core::ImageRef>,
+        trigger_delivery: Option<TriggerDeliveryClaim>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
     },
     SetPermissionMode {
@@ -70,6 +71,13 @@ pub(crate) enum WorkerCommand {
     Shutdown,
 }
 
+/// One live outbox lease propagated only to the sink acceptance boundary.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TriggerDeliveryClaim {
+    pub delivery_id: tidebreak_core::CodeTriggerDeliveryId,
+    pub lease_token: uuid::Uuid,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkerError {
     #[error("{0}")]
@@ -87,6 +95,8 @@ pub(crate) enum WorkerError {
     RelaunchRequired(String),
     #[error("{0}")]
     Failed(String),
+    #[error("trigger delivery was already accepted")]
+    TriggerDeliveryAccepted,
     /// A sibling session holds the workspace's turn lock.
     ///
     /// Never reaches a caller. `submit_turn` parks the message and answers
@@ -170,6 +180,7 @@ pub(crate) struct QueuedFollowUp {
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub attachments: Vec<tidebreak_core::ImageRef>,
+    pub trigger_delivery: Option<TriggerDeliveryClaim>,
 }
 
 pub(crate) struct LiveSink {
@@ -479,6 +490,7 @@ pub(crate) fn queue_follow_up(
         model,
         reasoning_effort,
         attachments,
+        trigger_delivery: None,
     });
     handle.queue.wake.notify_one();
     true
@@ -518,6 +530,7 @@ async fn run_worker(
                     model,
                     reasoning_effort,
                     attachments,
+                    trigger_delivery,
                     reply,
                 }) => {
                     let result = drive_turn(
@@ -535,6 +548,7 @@ async fn run_worker(
                             model,
                             reasoning_effort,
                             attachments,
+                            trigger_delivery,
                         },
                     )
                     .await;
@@ -748,7 +762,7 @@ async fn drain_queued(
         let Some(follow_up) = next else {
             break;
         };
-        let _ = drive_turn(
+        let result = drive_turn(
             session,
             engine,
             sink,
@@ -761,6 +775,36 @@ async fn drain_queued(
             follow_up,
         )
         .await;
+        if let Err(WorkerError::Failed(detail)) = result {
+            warn!(
+                session = %session.id,
+                error = %detail,
+                "a queued code turn could not start"
+            );
+            let _ = persist_and_publish(
+                &sink.db,
+                &sink.bus,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+                CodeEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Error,
+                    message: format!("The queued turn could not start: {detail}"),
+                },
+            )
+            .await;
+            if session.lifecycle != CodeSessionLifecycle::Fenced {
+                super::attention::replace_attention(
+                    session,
+                    Attention::needs_you(
+                        "the queued turn could not start",
+                        AttentionSource::Lifecycle,
+                    ),
+                    false,
+                );
+                let _ = super::attention::persist_session(&sink.db, &sink.bus, session).await;
+            }
+        }
     }
 }
 
@@ -829,6 +873,7 @@ async fn drive_turn_inner(
         model,
         reasoning_effort,
         attachments,
+        trigger_delivery,
     }: QueuedFollowUp,
 ) -> Result<CodeTurn, WorkerError> {
     let db = &sink.db;
@@ -897,9 +942,53 @@ async fn drive_turn_inner(
         started_at: Utc::now(),
         ended_at: None,
     };
-    insert_turn(db, &session.owner, &turn)
+
+    // Clear files a crashed worker left behind before this turn exposes any
+    // new bytes. The worktree lock proves no live turn in this checkout still
+    // owns one of these directories.
+    sweep_attachment_leftovers_or_fence(db, bus, session, &store.worktree).await?;
+    let mut staged_attachments = if store.engine_reads_images {
+        None
+    } else {
+        if hydrated.is_empty() {
+            None
+        } else {
+            Some(
+                write_turn_attachments(
+                    &store.worktree,
+                    session.id,
+                    turn.id,
+                    &turn.attachments,
+                    &hydrated,
+                )
+                .await
+                .map_err(|err| WorkerError::Failed(format!("write attachment: {err}")))?,
+            )
+        }
+    };
+
+    // All fallible file preparation finishes before the database records a
+    // running turn. If staging fails, the session stays idle and the scope
+    // removes any partial files before this function releases the worktree.
+    if let Some(claim) = trigger_delivery {
+        if !accept_trigger_turn_delivery(
+            db,
+            &session.owner,
+            claim.delivery_id,
+            claim.lease_token,
+            &turn,
+            Utc::now(),
+        )
         .await
-        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+        .map_err(|err| WorkerError::Failed(err.to_string()))?
+        {
+            return Err(WorkerError::TriggerDeliveryAccepted);
+        }
+    } else {
+        insert_turn(db, &session.owner, &turn)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    }
     sink.set_turn(turn.id);
 
     session.lifecycle = CodeSessionLifecycle::Running;
@@ -926,10 +1015,9 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    // Adopt what the turn was sent with before anything persists this row.
-    // The route already wrote the session's choice; the worker's copy predates
-    // it, and every `persist_session` below writes the whole row — so without
-    // this the turn after a mid-conversation change reverts to the old one.
+    // Adopt what the turn was sent with before this worker persists general
+    // session fields. The route already wrote the session's choice, but the
+    // worker's copy predates it and would otherwise restore the old value.
     if let Some(model) = model {
         session.model = Some(model);
     }
@@ -940,10 +1028,13 @@ async fn drive_turn_inner(
     let (engine_text, images) = if store.engine_reads_images || hydrated.is_empty() {
         (message, hydrated)
     } else {
-        let written = write_turn_attachments(&store.worktree, &turn.attachments, &hydrated)
-            .await
-            .map_err(|err| WorkerError::Failed(format!("write attachment: {err}")))?;
-        (message_naming_attachments(&message, &written), Vec::new())
+        let staged = staged_attachments
+            .as_ref()
+            .expect("non-native image delivery staged before turn insertion");
+        (
+            message_naming_attachments(&message, &staged.paths),
+            Vec::new(),
+        )
     };
     let run = engine.run_turn(TurnInput {
         text: engine_text,
@@ -1004,6 +1095,30 @@ async fn drive_turn_inner(
     // A control command still in flight has a caller waiting on its reply.
     // Dropping it here would answer them with a dead channel.
     while controls.next().await.is_some() {}
+
+    // The engine has returned and no control call can still need the paths.
+    // Remove the plaintext before checkpointing or releasing the worktree.
+    let attachment_cleanup_error = if let Some(staged) = staged_attachments.as_mut() {
+        match staged.scope.cleanup() {
+            Ok(()) => None,
+            Err(first) => match staged.scope.cleanup() {
+                Ok(()) => {
+                    warn!(
+                        session = %session.id,
+                        turn = %turn.id,
+                        error = %first,
+                        "removing staged turn attachments succeeded on retry"
+                    );
+                    None
+                }
+                Err(second) => Some(format!(
+                    "could not remove staged turn attachments after retry: {second} (first attempt: {first})"
+                )),
+            },
+        }
+    } else {
+        None
+    };
 
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
@@ -1116,6 +1231,18 @@ async fn drive_turn_inner(
             // the turn's edits can still be checkpointed. The engine may have
             // rewritten files before the stream broke.
             super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
+            if let Some(detail) = attachment_cleanup_error.as_ref() {
+                let _ = super::recovery::fence_session(
+                    db,
+                    bus,
+                    session,
+                    FenceReason::ProbeAmbiguous {
+                        detail: detail.clone(),
+                    },
+                )
+                .await;
+                return Err(WorkerError::Failed(detail.clone()));
+            }
             if !session_was_ended(db, session).await {
                 if let HarnessError::ResumeLost(detail) = &err {
                     // The engine has lost this session: every later turn would
@@ -1149,6 +1276,18 @@ async fn drive_turn_inner(
         turn = current;
     }
     super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
+    if let Some(detail) = attachment_cleanup_error {
+        let _ = super::recovery::fence_session(
+            db,
+            bus,
+            session,
+            FenceReason::ProbeAmbiguous {
+                detail: detail.clone(),
+            },
+        )
+        .await;
+        return Err(WorkerError::Failed(detail));
+    }
     if session_was_ended(db, session).await {
         return Ok(turn);
     }
@@ -1188,6 +1327,37 @@ async fn drive_turn_inner(
     Ok(turn)
 }
 
+/// Sweep crash-leftover attachment scopes while the caller holds the worktree.
+///
+/// A failed sweep leaves private bytes in the checkout. Persist the fence
+/// before returning so another turn cannot retry against the same unsafe tree.
+async fn sweep_attachment_leftovers_or_fence(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    session: &mut CodeSession,
+    worktree: &Path,
+) -> Result<(), WorkerError> {
+    let Err(error) = super::scratch::sweep_scopes(worktree, ATTACHMENTS_DIR) else {
+        return Ok(());
+    };
+    let detail = format!("sweep attachments: {error}");
+    super::recovery::fence_session(
+        db,
+        bus,
+        session,
+        FenceReason::ProbeAmbiguous {
+            detail: detail.clone(),
+        },
+    )
+    .await
+    .map_err(|fence| {
+        WorkerError::Failed(format!(
+            "{detail}; could not persist cleanup fence: {fence}"
+        ))
+    })?;
+    Err(WorkerError::Failed(detail))
+}
+
 fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
     match result {
         Ok(turn) => turn.status.as_str(),
@@ -1198,6 +1368,7 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
         Err(WorkerError::SteeringRejected(_)) => "steering_rejected",
         Err(WorkerError::RelaunchRequired(_)) => "relaunch_required",
         Err(WorkerError::Failed(_)) => "error",
+        Err(WorkerError::TriggerDeliveryAccepted) => "trigger_delivery_accepted",
         Err(WorkerError::WorktreeBusy) => "worktree_busy",
     }
 }
@@ -1215,19 +1386,24 @@ fn code_turn_is_error(result: &Result<CodeTurn, WorkerError>) -> bool {
 /// Directory holding a turn's attachments, relative to the worktree root.
 pub(crate) const ATTACHMENTS_DIR: &str = ".tidebreak/attachments";
 
+struct StagedTurnAttachments {
+    scope: super::scratch::ScratchScope,
+    paths: Vec<String>,
+}
+
 /// Write a turn's attachments under the checkout, returning worktree-relative
 /// paths in the order they were attached.
 ///
-/// Named by blob id, which is content-addressed: the same image attached twice
-/// is one file, and a re-send after a failed turn overwrites itself rather than
-/// growing the directory. The write is published by rename, so an engine that
-/// is already reading one never catches a half-written file.
+/// The session and turn path prevents a later session from inheriting files
+/// from this one. The returned scope removes the directory on every exit.
 async fn write_turn_attachments(
     worktree: &Path,
+    session_id: CodeSessionId,
+    turn_id: CodeTurnId,
     attachments: &[tidebreak_core::ImageRef],
     images: &[TurnImage],
-) -> std::io::Result<Vec<String>> {
-    let dir = super::scratch::scratch_dir(worktree, ATTACHMENTS_DIR).await?;
+) -> std::io::Result<StagedTurnAttachments> {
+    let scope = super::scratch::scratch_scope(worktree, ATTACHMENTS_DIR, session_id.0, turn_id.0)?;
     let mut written = Vec::with_capacity(images.len());
     for (attachment, image) in attachments.iter().zip(images) {
         let name = format!(
@@ -1235,10 +1411,15 @@ async fn write_turn_attachments(
             attachment.blob_id,
             attachment.media_type.extension()
         );
-        super::scratch::publish(&dir.join(&name), &image.bytes).await?;
-        written.push(format!("{ATTACHMENTS_DIR}/{name}"));
+        scope
+            .publish(std::ffi::OsStr::new(&name), &image.bytes)
+            .await?;
+        written.push(format!("{ATTACHMENTS_DIR}/{session_id}/{turn_id}/{name}"));
     }
-    Ok(written)
+    Ok(StagedTurnAttachments {
+        scope,
+        paths: written,
+    })
 }
 
 /// Name the attachment paths after the message, the way a fork names the
@@ -1796,7 +1977,7 @@ mod tests {
     use tidebreak_core::db::code::{get_session, insert_repo, insert_session, insert_workspace};
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
-        PermissionMode, RepoId, ToolDetail, WorkspaceId,
+        ImageMediaType, ImageRef, PermissionMode, RepoId, ToolDetail, WorkspaceId,
     };
 
     fn subagent(call_id: &str, status: CodeSubagentStatus) -> CodeSubagentSummary {
@@ -1984,6 +2165,40 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_pre_turn_attachment_sweep_fences_the_session() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let worktree = directory.path().join("wt");
+        let attachment_root = worktree.join(ATTACHMENTS_DIR);
+        let leftover = attachment_root.join(CodeSessionId::new().to_string());
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("private.png"), b"private").unwrap();
+        std::fs::set_permissions(&attachment_root, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let mut session = get_session(&store, &OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let result =
+            sweep_attachment_leftovers_or_fence(&store, &sink.bus, &mut session, &worktree).await;
+
+        std::fs::set_permissions(&attachment_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(result, Err(WorkerError::Failed(_))));
+        let stored = get_session(&store, &OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.lifecycle, CodeSessionLifecycle::Fenced);
+        assert!(matches!(
+            stored.fence_reason,
+            Some(FenceReason::ProbeAmbiguous { ref detail })
+                if detail.starts_with("sweep attachments:")
+        ));
+    }
+
     #[test]
     fn cap_raw_truncates_on_a_char_boundary() {
         // `{"xx":"` is 7 bytes; a string of `é` (2 bytes each) then places a
@@ -2050,6 +2265,60 @@ mod tests {
             CodeApprovalKind::Other {
                 summary: "The engine needs approval".into(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_images_live_only_in_the_session_turn_scope() {
+        let worktree = tempfile::tempdir().unwrap();
+        let session_id = CodeSessionId::new();
+        let turn_id = CodeTurnId::new();
+        let attachment = ImageRef {
+            blob_id: uuid::Uuid::new_v4(),
+            media_type: ImageMediaType::Png,
+            width: 1,
+            height: 1,
+            byte_len: 4,
+        };
+        let staged = write_turn_attachments(
+            worktree.path(),
+            session_id,
+            turn_id,
+            std::slice::from_ref(&attachment),
+            &[TurnImage {
+                media_type: "image/png".into(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+        )
+        .await
+        .unwrap();
+        let expected = format!(
+            "{ATTACHMENTS_DIR}/{session_id}/{turn_id}/{}.png",
+            attachment.blob_id
+        );
+        assert_eq!(staged.paths, vec![expected.clone()]);
+        assert_eq!(
+            std::fs::read(worktree.path().join(expected)).unwrap(),
+            [1, 2, 3, 4]
+        );
+
+        let mut staged = staged;
+        staged.scope.cleanup().unwrap();
+
+        assert!(!worktree
+            .path()
+            .join(ATTACHMENTS_DIR)
+            .join(session_id.to_string())
+            .exists());
+    }
+
+    #[test]
+    fn attachment_paths_are_named_after_the_message_in_order() {
+        let message =
+            message_naming_attachments("compare these", &["first.png".into(), "second.png".into()]);
+        assert_eq!(
+            message,
+            "compare these\n\nimages attached to this message, in this worktree:\n- `first.png`\n- `second.png`"
         );
     }
 }

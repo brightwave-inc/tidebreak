@@ -1,7 +1,9 @@
 import { create } from "zustand";
 
+import type { ApiClient } from "../api/client";
 import type {
   CodeDeliveryPullRequestSummary,
+  CodeDeliveryRepositoriesSnapshot,
   CodeDeliveryRunKind,
   CodeDeliveryRunSummary,
   CodeGitHubRepositoryRef,
@@ -11,7 +13,9 @@ import type {
 const STORAGE_KEY = "tidebreak.code-delivery";
 const STORAGE_VERSION = 1;
 const MAX_NOTIFICATIONS = 500;
+const MAX_SEEN_FINGERPRINTS = 5_000;
 const MAX_NOTIFICATION_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+const REPOSITORY_CACHE_MS = 2 * 60 * 1_000;
 
 export type CodeDeliverySurface = "pull_requests" | "runs";
 
@@ -136,6 +140,15 @@ type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
   polling: boolean;
   monitorError: string | null;
   lastSuccessfulPollAt: string | null;
+  repositorySnapshot: CodeDeliveryRepositoriesSnapshot | null;
+  repositoryLoading: boolean;
+  repositoryError: string | null;
+  repositoryFetchedAt: number | null;
+  persistenceError: string | null;
+  loadRepositories: (
+    client: Pick<ApiClient, "getCodeDeliveryRepositories">,
+    options?: { force?: boolean },
+  ) => Promise<CodeDeliveryRepositoriesSnapshot>;
   rememberManualRepositories: (repositories: CodeGitHubRepositoryRef[]) => void;
   removeManualRepository: (key: string) => void;
   setRegisteredRepositoryExcluded: (repoId: string, excluded: boolean) => void;
@@ -150,6 +163,11 @@ type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
     pullRequests: readonly CodeDeliveryPullRequestSummary[],
     runs: readonly CodeDeliveryRunSummary[],
     receivedAt?: string,
+  ) => number;
+  completeDeliveryPoll: (
+    pullRequests: readonly CodeDeliveryPullRequestSummary[],
+    runs: readonly CodeDeliveryRunSummary[],
+    at: string,
   ) => number;
   markNotificationRead: (id: string, read?: boolean) => void;
   markAllNotificationsRead: () => void;
@@ -186,8 +204,8 @@ function readPersistedState(): PersistedCodeDeliveryState {
   }
 }
 
-function persist(state: CodeDeliveryStore): void {
-  if (typeof window === "undefined") return;
+function persist(state: CodeDeliveryStore): string | null {
+  if (typeof window === "undefined") return null;
   const payload: PersistedCodeDeliveryState = {
     version: STORAGE_VERSION,
     manualRepositories: state.manualRepositories,
@@ -201,18 +219,81 @@ function persist(state: CodeDeliveryStore): void {
   };
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  } catch {
-    // Delivery preferences and history are best-effort local state.
+    return null;
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "Could not save delivery settings on this device.";
   }
 }
 
 const stored = readPersistedState();
+let repositoryRequest: {
+  client: Pick<ApiClient, "getCodeDeliveryRepositories">;
+  promise: Promise<CodeDeliveryRepositoriesSnapshot>;
+} | null = null;
+let repositoryGeneration = 0;
 
-export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
-  ...stored,
-  polling: false,
-  monitorError: null,
-  lastSuccessfulPollAt: stored.lastPollAt,
+export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
+  const persistCurrent = () => {
+    const persistenceError = persist(get());
+    if (get().persistenceError !== persistenceError) set({ persistenceError });
+  };
+
+  return {
+    ...stored,
+    polling: false,
+    monitorError: null,
+    lastSuccessfulPollAt: stored.lastPollAt,
+    repositorySnapshot: null,
+    repositoryLoading: false,
+    repositoryError: null,
+    repositoryFetchedAt: null,
+    persistenceError: null,
+    loadRepositories: async (client, options = {}) => {
+      const current = get();
+      if (
+        !options.force &&
+        current.repositorySnapshot &&
+        current.repositoryFetchedAt !== null &&
+        Date.now() - current.repositoryFetchedAt < REPOSITORY_CACHE_MS
+      ) {
+        return current.repositorySnapshot;
+      }
+      if (repositoryRequest?.client === client) {
+        return repositoryRequest.promise;
+      }
+
+      const generation = ++repositoryGeneration;
+      set({ repositoryLoading: true, repositoryError: null });
+      const promise = client
+        .getCodeDeliveryRepositories({ refreshAuth: options.force })
+        .then((snapshot) => {
+          if (generation === repositoryGeneration) {
+            set({
+              repositorySnapshot: snapshot,
+              repositoryLoading: false,
+              repositoryError: null,
+              repositoryFetchedAt: Date.now(),
+            });
+          }
+          return snapshot;
+        })
+        .catch((error: unknown) => {
+          if (generation === repositoryGeneration) {
+            set({
+              repositoryLoading: false,
+              repositoryError: deliveryErrorMessage(error),
+            });
+          }
+          throw error;
+        })
+        .finally(() => {
+          if (repositoryRequest?.promise === promise) repositoryRequest = null;
+        });
+      repositoryRequest = { client, promise };
+      return promise;
+    },
   rememberManualRepositories: (repositories) => {
     const byKey = new Map(
       get().manualRepositories.map((repository) => [
@@ -224,7 +305,7 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
       byKey.set(codeDeliveryRepositoryKey(repository), repository);
     }
     set({ manualRepositories: [...byKey.values()] });
-    persist(get());
+    persistCurrent();
   },
   removeManualRepository: (key) => {
     set({
@@ -235,21 +316,21 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
         (repositoryKey) => repositoryKey !== key,
       ),
     });
-    persist(get());
+    persistCurrent();
   },
   setRegisteredRepositoryExcluded: (repoId, excluded) => {
     const next = new Set(get().excludedRegisteredRepoIds);
     if (excluded) next.add(repoId);
     else next.delete(repoId);
     set({ excludedRegisteredRepoIds: [...next] });
-    persist(get());
+    persistCurrent();
   },
   setRepositoryPinned: (key, pinned) => {
     const next = new Set(get().pinnedRepositoryKeys);
     if (pinned) next.add(key);
     else next.delete(key);
     set({ pinnedRepositoryKeys: [...next] });
-    persist(get());
+    persistCurrent();
   },
   upsertSavedView: (view) => {
     set({
@@ -258,11 +339,11 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
         ...get().savedViews.filter((candidate) => candidate.id !== view.id),
       ],
     });
-    persist(get());
+    persistCurrent();
   },
   removeSavedView: (id) => {
     set({ savedViews: get().savedViews.filter((view) => view.id !== id) });
-    persist(get());
+    persistCurrent();
   },
   updateNotificationRule: (id, patch) => {
     set({
@@ -270,99 +351,35 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
         rule.id === id ? { ...rule, ...patch, id } : rule,
       ),
     });
-    persist(get());
+    persistCurrent();
   },
   ingestDeliveryPoll: (
     pullRequests,
     runs,
     receivedAt = new Date().toISOString(),
   ) => {
-    const now = Date.parse(receivedAt);
-    const cutoff = now - MAX_NOTIFICATION_AGE_MS;
-    const seen = { ...get().seenFingerprints };
-    const incoming: CodeDeliveryNotification[] = [];
-    const rules = new Map(
-      get().notificationRules.map((rule) => [rule.id, rule]),
-    );
-
-    for (const pullRequest of pullRequests) {
-      if (Date.parse(pullRequest.updated_at) < cutoff) continue;
-      if (pullRequest.attention_reasons.length > 0) {
-        const fingerprint = [
-          "pr-attention",
-          pullRequest.id,
-          pullRequest.head_sha ?? "",
-          [...pullRequest.attention_reasons].sort().join(","),
-        ].join(":");
-        maybeAddNotification(
-          incoming,
-          seen,
-          rules.get("pull_request_attention"),
-          pullRequest,
-          fingerprint,
-          receivedAt,
-          {
-            rule: "pull_request_attention",
-            title: `${pullRequest.repository.name_with_owner} #${pullRequest.number} needs attention`,
-            detail: pullRequest.title,
-          },
-        );
-      }
-      if (pullRequest.ready_to_merge) {
-        const fingerprint = [
-          "pr-ready",
-          pullRequest.id,
-          pullRequest.head_sha ?? "",
-        ].join(":");
-        maybeAddNotification(
-          incoming,
-          seen,
-          rules.get("pull_request_ready"),
-          pullRequest,
-          fingerprint,
-          receivedAt,
-          {
-            rule: "pull_request_ready",
-            title: `${pullRequest.repository.name_with_owner} #${pullRequest.number} is ready`,
-            detail: pullRequest.title,
-          },
-        );
-      }
+    const next = buildDeliveryPoll(get(), pullRequests, runs, receivedAt);
+    if (next.changed) {
+      set({
+        notifications: next.notifications,
+        seenFingerprints: next.seenFingerprints,
+      });
+      persistCurrent();
     }
-
-    for (const run of runs) {
-      if (
-        Date.parse(run.updated_at) < cutoff ||
-        run.attention_reasons.length === 0
-      ) {
-        continue;
-      }
-      const fingerprint = [
-        "run-failure",
-        run.id,
-        run.status,
-        run.conclusion ?? "",
-      ].join(":");
-      maybeAddRunNotification(
-        incoming,
-        seen,
-        rules.get("run_failure"),
-        run,
-        fingerprint,
-        receivedAt,
-      );
-    }
-
-    const notifications = [...incoming, ...get().notifications]
-      .filter((notification) => Date.parse(notification.occurredAt) >= cutoff)
-      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
-      .slice(0, MAX_NOTIFICATIONS);
-    const retainedSeen = Object.fromEntries(
-      Object.entries(seen).filter(([, at]) => Date.parse(at) >= cutoff),
-    );
-    set({ notifications, seenFingerprints: retainedSeen });
-    persist(get());
-    return incoming.length;
+    return next.added;
+  },
+  completeDeliveryPoll: (pullRequests, runs, at) => {
+    const next = buildDeliveryPoll(get(), pullRequests, runs, at);
+    set({
+      notifications: next.notifications,
+      seenFingerprints: next.seenFingerprints,
+      polling: false,
+      monitorError: null,
+      lastPollAt: at,
+      lastSuccessfulPollAt: at,
+    });
+    persistCurrent();
+    return next.added;
   },
   markNotificationRead: (id, read = true) => {
     const at = new Date().toISOString();
@@ -376,7 +393,7 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
           : notification,
       ),
     });
-    persist(get());
+    persistCurrent();
   },
   markAllNotificationsRead: () => {
     const at = new Date().toISOString();
@@ -386,11 +403,11 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
         readAt: notification.readAt ?? at,
       })),
     });
-    persist(get());
+    persistCurrent();
   },
   clearNotifications: () => {
     set({ notifications: [] });
-    persist(get());
+    persistCurrent();
   },
   setPollState: (polling, error = get().monitorError) => {
     set({ polling, monitorError: error });
@@ -402,19 +419,167 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => ({
       lastPollAt: at,
       lastSuccessfulPollAt: at,
     });
-    persist(get());
+    persistCurrent();
   },
   reset: () => {
+    repositoryGeneration += 1;
+    repositoryRequest = null;
     const fresh = emptyPersistedState();
     set({
       ...fresh,
       polling: false,
       monitorError: null,
       lastSuccessfulPollAt: null,
+      repositorySnapshot: null,
+      repositoryLoading: false,
+      repositoryError: null,
+      repositoryFetchedAt: null,
+      persistenceError: null,
     });
-    persist(get());
+    persistCurrent();
   },
-}));
+  };
+});
+
+function buildDeliveryPoll(
+  state: Pick<
+    CodeDeliveryStore,
+    "notificationRules" | "notifications" | "seenFingerprints"
+  >,
+  pullRequests: readonly CodeDeliveryPullRequestSummary[],
+  runs: readonly CodeDeliveryRunSummary[],
+  receivedAt: string,
+): {
+  notifications: CodeDeliveryNotification[];
+  seenFingerprints: Record<string, string>;
+  added: number;
+  changed: boolean;
+} {
+  const now = Date.parse(receivedAt);
+  const cutoff = now - MAX_NOTIFICATION_AGE_MS;
+  const seen = { ...state.seenFingerprints };
+  const incoming: CodeDeliveryNotification[] = [];
+  const rules = new Map(state.notificationRules.map((rule) => [rule.id, rule]));
+
+  for (const pullRequest of pullRequests) {
+    if (Date.parse(pullRequest.updated_at) < cutoff) continue;
+    if (pullRequest.attention_reasons.length > 0) {
+      const fingerprint = [
+        "pr-attention",
+        pullRequest.id,
+        pullRequest.head_sha ?? "",
+        [...pullRequest.attention_reasons].sort().join(","),
+      ].join(":");
+      maybeAddNotification(
+        incoming,
+        seen,
+        rules.get("pull_request_attention"),
+        pullRequest,
+        fingerprint,
+        receivedAt,
+        {
+          rule: "pull_request_attention",
+          title: `${pullRequest.repository.name_with_owner} #${pullRequest.number} needs attention`,
+          detail: pullRequest.title,
+        },
+      );
+    }
+    if (pullRequest.ready_to_merge) {
+      const fingerprint = [
+        "pr-ready",
+        pullRequest.id,
+        pullRequest.head_sha ?? "",
+      ].join(":");
+      maybeAddNotification(
+        incoming,
+        seen,
+        rules.get("pull_request_ready"),
+        pullRequest,
+        fingerprint,
+        receivedAt,
+        {
+          rule: "pull_request_ready",
+          title: `${pullRequest.repository.name_with_owner} #${pullRequest.number} is ready`,
+          detail: pullRequest.title,
+        },
+      );
+    }
+  }
+
+  for (const run of runs) {
+    if (
+      Date.parse(run.updated_at) < cutoff ||
+      run.attention_reasons.length === 0
+    ) {
+      continue;
+    }
+    const fingerprint = [
+      "run-failure",
+      run.id,
+      run.run_attempt ?? run.updated_at,
+      run.status,
+      run.conclusion ?? "",
+    ].join(":");
+    maybeAddRunNotification(
+      incoming,
+      seen,
+      rules.get("run_failure"),
+      run,
+      fingerprint,
+      receivedAt,
+    );
+  }
+
+  const notifications = [...incoming, ...state.notifications]
+    .filter((notification) => Date.parse(notification.occurredAt) >= cutoff)
+    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+    .slice(0, MAX_NOTIFICATIONS);
+  const seenFingerprints = Object.fromEntries(
+    Object.entries(seen)
+      .filter(([, at]) => Date.parse(at) >= cutoff)
+      .sort((left, right) => right[1].localeCompare(left[1]))
+      .slice(0, MAX_SEEN_FINGERPRINTS),
+  );
+  return {
+    notifications,
+    seenFingerprints,
+    added: incoming.length,
+    changed:
+      !sameNotifications(state.notifications, notifications) ||
+      !sameStringRecord(state.seenFingerprints, seenFingerprints),
+  };
+}
+
+function sameNotifications(
+  left: readonly CodeDeliveryNotification[],
+  right: readonly CodeDeliveryNotification[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (notification, index) =>
+        notification.id === right[index]?.id &&
+        notification.readAt === right[index]?.readAt,
+    )
+  );
+}
+
+function sameStringRecord(
+  left: Record<string, string>,
+  right: Record<string, string>,
+): boolean {
+  const entries = Object.entries(left);
+  return (
+    entries.length === Object.keys(right).length &&
+    entries.every(([key, value]) => right[key] === value)
+  );
+}
+
+function deliveryErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : "Could not load GitHub repositories.";
+}
 
 function maybeAddNotification(
   incoming: CodeDeliveryNotification[],

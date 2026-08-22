@@ -1977,6 +1977,7 @@ describe("code delivery API", () => {
       ],
       files_truncated: false,
       comments: [],
+      errors: [],
       can_mark_ready: false,
       can_merge: true,
       can_rerun_failed: false,
@@ -2060,9 +2061,17 @@ describe("code delivery API", () => {
       summary: run,
       jobs: [],
       deployment_statuses: [],
+      errors: [],
       can_rerun_failed: true,
     };
-    const actionResult = { success: true, message: "Failed jobs queued." };
+    const actionResult = {
+      success: false,
+      message: "Failed jobs queued for one workflow run; one workflow run failed.",
+      rerun_outcomes: [
+        { workflow_run_id: 77, success: true },
+        { workflow_run_id: 78, success: false, error: "HTTP 503" },
+      ],
+    };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(

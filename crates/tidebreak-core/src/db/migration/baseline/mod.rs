@@ -198,10 +198,7 @@ pub(super) fn tables() -> Vec<BaselineTable> {
         entry(code::code_workspace_table(), code::code_workspace_indexes()),
         entry(code::code_session_table(), code::code_session_indexes()),
         entry(code::code_turn_table(), code::code_turn_indexes()),
-        entry(
-            code::code_turn_attachment_table(),
-            code::code_turn_attachment_indexes(),
-        ),
+        code_turn_attachment(),
         entry(
             code::code_session_image_table(),
             code::code_session_image_indexes(),
@@ -219,4 +216,11 @@ pub(super) fn tables() -> Vec<BaselineTable> {
 
 fn entry(table: TableCreateStatement, indexes: Vec<IndexCreateStatement>) -> BaselineTable {
     BaselineTable { table, indexes }
+}
+
+pub(crate) fn code_turn_attachment() -> BaselineTable {
+    entry(
+        code::code_turn_attachment_table(),
+        code::code_turn_attachment_indexes(),
+    )
 }

@@ -12,7 +12,8 @@ use tracing::warn;
 use tidebreak_core::db::code::{
     count_turns, get_session, get_workspace, latest_event_created_at, latest_turn,
     latest_watch_for_session, list_approvals, list_recent_events, list_sessions,
-    list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace, save_session,
+    list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace, replace_session_attention,
+    save_session,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeEvent, CodeSession,
@@ -50,8 +51,8 @@ pub(crate) fn replace_attention(
     true
 }
 
-/// Persist the session row and publish its digest. The write path for
-/// lifecycle and attention mutations that already hold the row.
+/// Persist general session fields and route attention through its targeted
+/// row-locked write before publishing the stored digest.
 pub(crate) async fn persist_session(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -59,11 +60,17 @@ pub(crate) async fn persist_session(
 ) -> Result<bool, tidebreak_core::AgentError> {
     let ok = save_session(db, session).await?;
     if ok {
+        let _ =
+            replace_session_attention(db, &session.owner, session.id, &session.attention, false)
+                .await?;
+        let Some(stored) = get_session(db, &session.owner, session.id).await? else {
+            return Ok(false);
+        };
         bus.set_maybe_stalled(
-            session.id,
-            matches!(session.attention.state, AttentionState::Stalled { .. }),
+            stored.id,
+            matches!(stored.attention.state, AttentionState::Stalled { .. }),
         );
-        emit_digest(db, bus, session).await;
+        emit_digest(db, bus, &stored).await;
     }
     Ok(ok)
 }
@@ -78,14 +85,51 @@ pub(crate) async fn apply_attention(
     next: Attention,
     from_user: bool,
 ) -> Result<Option<Attention>, tidebreak_core::AgentError> {
-    let Some(mut session) = get_session(db, owner, session_id).await? else {
+    let Some(changed) = replace_session_attention(db, owner, session_id, &next, from_user).await?
+    else {
         return Ok(None);
     };
-    if !replace_attention(&mut session, next, from_user) {
+    let Some(session) = get_session(db, owner, session_id).await? else {
         return Ok(None);
+    };
+    bus.set_maybe_stalled(
+        session.id,
+        matches!(session.attention.state, AttentionState::Stalled { .. }),
+    );
+    emit_digest(db, bus, &session).await;
+    Ok(Some(changed))
+}
+
+/// Apply attention created by one durable trigger delivery.
+pub(crate) async fn apply_trigger_attention(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    delivery_id: tidebreak_core::CodeTriggerDeliveryId,
+    lease_token: uuid::Uuid,
+    next: Attention,
+) -> Result<(), tidebreak_core::AgentError> {
+    let changed = tidebreak_core::db::code::accept_trigger_attention_delivery(
+        db,
+        owner,
+        delivery_id,
+        lease_token,
+        session_id,
+        &next,
+        Utc::now(),
+    )
+    .await?;
+    if changed {
+        if let Some(session) = get_session(db, owner, session_id).await? {
+            bus.set_maybe_stalled(
+                session.id,
+                matches!(session.attention.state, AttentionState::Stalled { .. }),
+            );
+            emit_digest(db, bus, &session).await;
+        }
     }
-    persist_session(db, bus, &session).await?;
-    Ok(Some(session.attention))
+    Ok(())
 }
 
 /// Options for [`compute_attention`].
@@ -209,7 +253,7 @@ pub(crate) async fn user_set_attention(
     clear: bool,
     note: Option<String>,
 ) -> Result<CodeSession, tidebreak_core::AgentError> {
-    let Some(mut session) = get_session(db, owner, session_id).await? else {
+    let Some(session) = get_session(db, owner, session_id).await? else {
         return Err(tidebreak_core::AgentError::Store(format!(
             "session {session_id} not found"
         )));
@@ -228,9 +272,10 @@ pub(crate) async fn user_set_attention(
     } else {
         Attention::manual(note.unwrap_or_default())
     };
-    replace_attention(&mut session, next, true);
-    persist_session(db, bus, &session).await?;
-    Ok(session)
+    let _ = apply_attention(db, bus, owner, session_id, next, true).await?;
+    get_session(db, owner, session_id)
+        .await?
+        .ok_or_else(|| tidebreak_core::AgentError::Store(format!("session {session_id} not found")))
 }
 
 /// Walk running sessions and apply [`AttentionState::Stalled`] when silent.

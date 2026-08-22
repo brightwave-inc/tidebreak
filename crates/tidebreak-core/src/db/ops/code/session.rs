@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
 };
 
 use crate::attention::{Attention, AttentionSource, AttentionState, FenceReason};
@@ -208,10 +208,10 @@ pub async fn list_sessions_by_lifecycle_all_owners(
         .collect()
 }
 
-/// Persist mutable session fields. `id`, `workspace_id`, `created_at`, and
-/// `subagents` stay as stored — the subagent list has its own targeted write
-/// ([`set_session_subagents`]) so a full-row save from a stale in-memory copy
-/// cannot clobber it.
+/// Persist mutable session fields. `id`, `workspace_id`, `created_at`,
+/// `attention`, and `subagents` stay as stored. Attention and subagents have
+/// targeted writes so a full-row save from a stale worker cannot clobber a
+/// concurrent structured update.
 ///
 /// `spawn_epoch` must be non-decreasing, and `Ended` is terminal: a caller
 /// that is not `Ended` cannot overwrite that lifecycle. Returns `false` when
@@ -280,14 +280,6 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
             sea_orm::sea_query::Expr::value(session.spawn_epoch),
         )
         .col_expr(
-            entities::code_session::Column::AttentionState,
-            sea_orm::sea_query::Expr::value(serde_json::to_value(&session.attention.state)?),
-        )
-        .col_expr(
-            entities::code_session::Column::AttentionSource,
-            sea_orm::sea_query::Expr::value(session.attention.source.as_str().to_owned()),
-        )
-        .col_expr(
             entities::code_session::Column::UnrecognizedEventCount,
             sea_orm::sea_query::Expr::value(session.unrecognized_event_count),
         )
@@ -311,6 +303,72 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Replace one session's attention through the shared row-locked policy.
+///
+/// `from_user` is the explicit pin or clear path. Automatic callers must pass
+/// `false`, which preserves manual attention and reevaluates replacement
+/// against the database value instead of a stale session copy.
+pub async fn replace_session_attention(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    next: &Attention,
+    from_user: bool,
+) -> Result<Option<Attention>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let changed =
+        replace_session_attention_on(&transaction, owner, session_id, next, from_user).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(changed)
+}
+
+pub(in crate::db) async fn replace_session_attention_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    next: &Attention,
+    from_user: bool,
+) -> Result<Option<Attention>>
+where
+    C: ConnectionTrait,
+{
+    if !acquire_code_session_write_lock(conn, session_id).await? {
+        return Ok(None);
+    }
+    let row = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let current = session_from_row(row)?.attention;
+    if current == *next || (!from_user && !crate::attention::should_replace(&current, next)) {
+        return Ok(None);
+    }
+    let updated = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::AttentionState,
+            sea_orm::sea_query::Expr::value(serde_json::to_value(&next.state)?),
+        )
+        .col_expr(
+            entities::code_session::Column::AttentionSource,
+            sea_orm::sea_query::Expr::value(next.source.as_str()),
+        )
+        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        return Err(AgentError::Store(format!(
+            "code session {session_id} disappeared while replacing attention"
+        )));
+    }
+    Ok(Some(next.clone()))
 }
 
 /// Replace one session's subagent list (decision 52). A targeted write so

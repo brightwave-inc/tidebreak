@@ -947,7 +947,31 @@ pub(crate) enum CodeTriggerFire {
     PrNumber,
     HeadSha,
     FiredAt,
+    DeliveryId,
+    DeliveryCondition,
+    DeliveryAction,
+    DeliveryMessage,
+    State,
+    AttemptCount,
+    LeaseToken,
+    LeaseExpiresAt,
+    NextAttemptAt,
+    LastError,
+    DeliveredAt,
+    CancelledAt,
     Owner,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeTriggerDeliveryReceipt {
+    Table,
+    DeliveryId,
+    Owner,
+    Sink,
+    SessionId,
+    TurnId,
+    AcceptanceToken,
+    AcceptedAt,
 }
 
 /// Reserves one validated image for one code session, mirroring

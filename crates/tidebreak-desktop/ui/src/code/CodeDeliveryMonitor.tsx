@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useRouterState } from "@tanstack/react-router";
 
 import type { ApiClient } from "../api/client";
@@ -22,28 +22,37 @@ const MAX_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1_000;
 const OVERLAP_MS = 2 * 60 * 1_000;
 const MAX_MONITOR_PAGES = 5;
 
-/**
- * Shell-level delivery polling.
- *
- * It stays mounted behind the managed gate, so notifications keep advancing
- * while the reader works elsewhere without making any request before sign-in.
- * The first pass asks for one day of high-signal history; later passes overlap
- * slightly and never reach farther back than thirty days.
- */
+type MonitorBatch<T> = {
+  items: T[];
+  complete: boolean;
+  nextCursor?: string;
+};
+
+/** Shell-level delivery polling for GitHub notifications. */
 export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const wakeRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    wakeRef.current?.();
+  }, [pathname]);
 
   useEffect(() => {
     let cancelled = false;
+    let running = false;
+    let rerunRequested = false;
     let timer: number | null = null;
+    let queryController: AbortController | null = null;
 
     const interval = () => {
       if (document.hidden) return HIDDEN_POLL_MS;
       if (
-        pathname.startsWith("/code/delivery/") ||
-        pathname === "/code/notifications"
+        pathnameRef.current.startsWith("/code/delivery/") ||
+        pathnameRef.current === "/code/notifications"
       ) {
         return ACTIVE_POLL_MS;
       }
@@ -52,65 +61,133 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
 
     const schedule = (delay = interval()) => {
       if (cancelled) return;
+      if (running) {
+        rerunRequested = true;
+        return;
+      }
       if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void poll(), delay);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void poll();
+      }, delay);
     };
 
     const poll = async () => {
       if (cancelled) return;
+      if (running) {
+        rerunRequested = true;
+        return;
+      }
+      running = true;
+      rerunRequested = false;
       const startedAt = new Date().toISOString();
-      const state = useCodeDeliveryStore.getState();
-      state.setPollState(true, null);
+      const initial = useCodeDeliveryStore.getState();
+      initial.setPollState(true, null);
       try {
-        const discovered = await client.getCodeDeliveryRepositories();
+        const discovered = await initial.loadRepositories(client);
         if (cancelled) return;
         const current = useCodeDeliveryStore.getState();
+        if (
+          !discovered.capability.found ||
+          discovered.capability.authenticated === false
+        ) {
+          current.setPollState(false, null);
+          return;
+        }
+
         const repositories = trackedCodeDeliveryRepositories(
           discovered.repositories,
           current,
         );
         const targets = repositories.map(codeDeliveryRepositoryTarget);
-        if (targets.length === 0 || !discovered.capability.found) {
-          current.finishPoll(startedAt);
-          schedule();
+        if (targets.length === 0) {
+          current.completeDeliveryPoll([], [], startedAt);
           return;
         }
 
+        queryController = new AbortController();
         const since = monitorSince(current.lastPollAt, Date.parse(startedAt));
-        const [pullRequests, runs] = await Promise.all([
-          monitorPullRequests(client, targets, since),
-          monitorRuns(client, targets, since),
-        ]);
+        const pullRequests: CodeDeliveryPullRequestSummary[] = [];
+        const runs: CodeDeliveryRunSummary[] = [];
+        let pullRequestCursor: string | undefined;
+        let runCursor: string | undefined;
+        let pullRequestsComplete = false;
+        let runsComplete = false;
+
+        while (!pullRequestsComplete || !runsComplete) {
+          const batches: [
+            MonitorBatch<CodeDeliveryPullRequestSummary>,
+            MonitorBatch<CodeDeliveryRunSummary>,
+          ] = await Promise.all([
+            pullRequestsComplete
+              ? Promise.resolve<MonitorBatch<CodeDeliveryPullRequestSummary>>({
+                  items: [],
+                  complete: true,
+                })
+              : monitorPullRequests(
+                  client,
+                  targets,
+                  since,
+                  pullRequestCursor,
+                  queryController.signal,
+                ),
+            runsComplete
+              ? Promise.resolve<MonitorBatch<CodeDeliveryRunSummary>>({
+                  items: [],
+                  complete: true,
+                })
+              : monitorRuns(
+                  client,
+                  targets,
+                  since,
+                  runCursor,
+                  queryController.signal,
+                ),
+          ]);
+          const [pullRequestBatch, runBatch] = batches;
+          pullRequests.push(...pullRequestBatch.items);
+          runs.push(...runBatch.items);
+          pullRequestsComplete = pullRequestBatch.complete;
+          runsComplete = runBatch.complete;
+          pullRequestCursor = pullRequestBatch.nextCursor;
+          runCursor = runBatch.nextCursor;
+        }
+
         if (cancelled) return;
-        const store = useCodeDeliveryStore.getState();
-        const added = store.ingestDeliveryPoll(pullRequests, runs, startedAt);
-        store.finishPoll(startedAt);
-        if (added > 0 && pathname !== "/code/notifications") {
+        const added = useCodeDeliveryStore
+          .getState()
+          .completeDeliveryPoll(pullRequests, runs, startedAt);
+        if (added > 0 && pathnameRef.current !== "/code/notifications") {
           void requestUserAttention().catch(() => {
-            // Best-effort dock attention. The feed remains the durable signal.
+            // The notification feed remains the durable signal.
           });
         }
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || isAbortError(error)) return;
         useCodeDeliveryStore
           .getState()
-          .setPollState(
-            false,
-            error instanceof Error ? error.message : String(error),
-          );
+          .setPollState(false, deliveryErrorMessage(error));
+      } finally {
+        queryController = null;
+        running = false;
+        if (!cancelled) schedule(rerunRequested ? 0 : interval());
       }
-      schedule();
     };
 
-    const onVisibilityChange = () => schedule(document.hidden ? interval() : 0);
+    const onVisibilityChange = () => {
+      schedule(document.hidden ? interval() : 0);
+    };
+    wakeRef.current = () => schedule(0);
     document.addEventListener("visibilitychange", onVisibilityChange);
     schedule(0);
     return () => {
       cancelled = true;
+      wakeRef.current = null;
       document.removeEventListener("visibilitychange", onVisibilityChange);
       if (timer !== null) window.clearTimeout(timer);
+      queryController?.abort();
     };
-  }, [client, pathname]);
+  }, [client]);
 
   return null;
 }
@@ -125,64 +202,79 @@ export function monitorSince(lastPollAt: string | null, now: number): string {
   return new Date(Math.max(floor, withOverlap)).toISOString();
 }
 
-async function monitorPullRequests(
+export async function monitorPullRequests(
   client: Pick<ApiClient, "queryCodeDeliveryPullRequests">,
   repositories: CodeGitHubRepositoryTarget[],
   updatedAfter: string,
-): Promise<CodeDeliveryPullRequestSummary[]> {
+  initialCursor?: string,
+  signal?: AbortSignal,
+): Promise<MonitorBatch<CodeDeliveryPullRequestSummary>> {
   const items: CodeDeliveryPullRequestSummary[] = [];
-  let cursor: string | undefined;
+  let cursor = initialCursor;
   for (let pageNumber = 0; pageNumber < MAX_MONITOR_PAGES; pageNumber += 1) {
-    const page = await client.queryCodeDeliveryPullRequests({
-      repositories,
-      states: ["open"],
-      review_states: [],
-      check_states: [],
-      authors: [],
-      attention_only: false,
-      ready_only: false,
-      updated_after: updatedAfter,
-      limit: 100,
-      // The background poll rides the server's short list cache on purpose:
-      // forcing a reread every tick would spend the GitHub rate limit that
-      // the reader's own Refresh needs.
-      refresh: false,
-      ...(cursor ? { cursor } : {}),
-    });
+    const page = await client.queryCodeDeliveryPullRequests(
+      {
+        repositories,
+        states: ["open"],
+        review_states: [],
+        check_states: [],
+        authors: [],
+        attention_only: false,
+        ready_only: false,
+        updated_after: updatedAfter,
+        limit: 100,
+        refresh: false,
+        ...(cursor ? { cursor } : {}),
+      },
+      { signal },
+    );
     items.push(...page.items);
     cursor = page.next_cursor;
-    if (!cursor) break;
+    if (!cursor) return { items, complete: true };
   }
-  return items;
+  return { items, complete: false, ...(cursor ? { nextCursor: cursor } : {}) };
 }
 
-async function monitorRuns(
+export async function monitorRuns(
   client: Pick<ApiClient, "queryCodeDeliveryRuns">,
   repositories: CodeGitHubRepositoryTarget[],
   createdAfter: string,
-): Promise<CodeDeliveryRunSummary[]> {
+  initialCursor?: string,
+  signal?: AbortSignal,
+): Promise<MonitorBatch<CodeDeliveryRunSummary>> {
   const items: CodeDeliveryRunSummary[] = [];
-  let cursor: string | undefined;
+  let cursor = initialCursor;
   for (let pageNumber = 0; pageNumber < MAX_MONITOR_PAGES; pageNumber += 1) {
-    const page = await client.queryCodeDeliveryRuns({
-      repositories,
-      kinds: [],
-      statuses: [],
-      conclusions: [],
-      workflows: [],
-      environments: [],
-      branches: [],
-      events: [],
-      actors: [],
-      attention_only: true,
-      created_after: createdAfter,
-      limit: 100,
-      refresh: false,
-      ...(cursor ? { cursor } : {}),
-    });
+    const page = await client.queryCodeDeliveryRuns(
+      {
+        repositories,
+        kinds: [],
+        statuses: [],
+        conclusions: [],
+        workflows: [],
+        environments: [],
+        branches: [],
+        events: [],
+        actors: [],
+        attention_only: true,
+        created_after: createdAfter,
+        limit: 100,
+        refresh: false,
+        ...(cursor ? { cursor } : {}),
+      },
+      { signal },
+    );
     items.push(...page.items);
     cursor = page.next_cursor;
-    if (!cursor) break;
+    if (!cursor) return { items, complete: true };
   }
-  return items;
+  return { items, complete: false, ...(cursor ? { nextCursor: cursor } : {}) };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function deliveryErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

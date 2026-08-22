@@ -84,25 +84,32 @@ function CodeNotificationsBody() {
   const lastSuccessfulPollAt = useCodeDeliveryStore(
     (state) => state.lastSuccessfulPollAt,
   );
+  const repositorySnapshot = useCodeDeliveryStore(
+    (state) => state.repositorySnapshot,
+  );
+  const repositoryLoading = useCodeDeliveryStore(
+    (state) => state.repositoryLoading,
+  );
+  const repositoryError = useCodeDeliveryStore(
+    (state) => state.repositoryError,
+  );
+  const persistenceError = useCodeDeliveryStore(
+    (state) => state.persistenceError,
+  );
   const [tab, setTab] = useState("feed");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<FeedFilter>("all");
-  const [discovered, setDiscovered] = useState<CodeGitHubRepositoryRef[]>([]);
 
   useEffect(() => {
-    let cancelled = false;
-    void client
-      .getCodeDeliveryRepositories()
-      .then((snapshot) => {
-        if (!cancelled) setDiscovered(snapshot.repositories);
-      })
+    void useCodeDeliveryStore
+      .getState()
+      .loadRepositories(client)
       .catch(() => {
-        // The monitor owns the visible error. Rules can still edit global scope.
+        // The shared store renders the failure below.
       });
-    return () => {
-      cancelled = true;
-    };
   }, [client]);
+
+  const discovered = repositorySnapshot?.repositories ?? [];
 
   const repositories = useMemo(
     () =>
@@ -146,9 +153,31 @@ function CodeNotificationsBody() {
   const openNotification = (notification: CodeDeliveryNotification) => {
     useCodeDeliveryStore.getState().markNotificationRead(notification.id);
     if (notification.target.kind === "pull_request") {
-      void navigate({ to: "/code/delivery/pull-requests" });
+      void navigate({
+        to: "/code/delivery/pull-requests",
+        search: {
+          view:
+            notification.rule === "pull_request_ready"
+              ? "ready"
+              : "attention",
+          repoHost: notification.target.repository.host,
+          repoOwner: notification.target.repository.owner,
+          repoName: notification.target.repository.name,
+          pr: notification.target.number,
+        },
+      });
     } else {
-      void navigate({ to: "/code/delivery/runs" });
+      void navigate({
+        to: "/code/delivery/runs",
+        search: {
+          view: "failures",
+          repoHost: notification.target.repository.host,
+          repoOwner: notification.target.repository.owner,
+          repoName: notification.target.repository.name,
+          runKind: notification.target.runKind,
+          runId: notification.target.id,
+        },
+      });
     }
   };
 
@@ -199,6 +228,46 @@ function CodeNotificationsBody() {
         <div className="flex shrink-0 items-start gap-2 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
           <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
           <span>Delivery monitoring could not refresh: {monitorError}</span>
+        </div>
+      )}
+
+      {repositoryError && (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
+          <span>
+            GitHub repositories could not refresh: {repositoryError}
+          </span>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            disabled={repositoryLoading}
+            onClick={() =>
+              void useCodeDeliveryStore
+                .getState()
+                .loadRepositories(client, { force: true })
+                .catch(() => undefined)
+            }
+          >
+            Try again
+          </Button>
+        </div>
+      )}
+
+      {repositorySnapshot &&
+        (!repositorySnapshot.capability.found ||
+          repositorySnapshot.capability.authenticated === false) && (
+          <div className="flex shrink-0 items-start gap-2 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
+            <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+            <span>{repositorySnapshot.capability.remediation}</span>
+          </div>
+        )}
+
+      {persistenceError && (
+        <div className="flex shrink-0 items-start gap-2 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            Delivery history could not be saved on this device: {persistenceError}
+          </span>
         </div>
       )}
 

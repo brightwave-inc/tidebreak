@@ -106,6 +106,10 @@ code_id_type!(
     /// Identifies one durable trigger rule bound to a repository.
     CodeTriggerId
 );
+code_id_type!(
+    /// Identifies one durable trigger delivery across every retry.
+    CodeTriggerDeliveryId
+);
 
 /// Which external agent engine a session is bound to.
 ///
@@ -1069,13 +1073,9 @@ pub struct CodeTrigger {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// One trigger's firing record against one pull request head.
-///
-/// The fingerprint that makes a trigger fire on an edge rather than on every
-/// sweep. A row exists once the trigger has fired for that `(pull request,
-/// head SHA)`; finding one is what suppresses the next sweep's fire.
+/// The exact edge identity for one trigger and pull request head.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeTriggerFire {
+pub struct CodeTriggerFireIdentity {
     /// Trigger that fired.
     pub trigger_id: CodeTriggerId,
     /// Principal the fire belongs to, denormalized from its trigger.
@@ -1089,8 +1089,125 @@ pub struct CodeTriggerFire {
     /// A digest with no head SHA never fires: without it the fire cannot be
     /// bounded, and re-firing every sweep is worse than not firing.
     pub head_sha: String,
-    /// When it fired.
+}
+
+/// Durable sink selected for one trigger delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeTriggerDeliverySink {
+    Turn,
+    Steer,
+    Attention,
+}
+
+impl CodeTriggerDeliverySink {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Steer => "steer",
+            Self::Attention => "attention",
+        }
+    }
+}
+
+/// Durable state for one trigger delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeTriggerFireState {
+    /// The side effect still needs delivery or acknowledgement.
+    Pending,
+    /// A sink acknowledged the side effect.
+    Delivered,
+    /// The rule was disabled before any sink accepted the side effect.
+    Cancelled,
+}
+
+impl CodeTriggerFireState {
+    /// Stable database token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Delivered => "delivered",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parse a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "delivered" => Some(Self::Delivered),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// Immutable input captured when a pull-request edge enters the outbox.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeTriggerFirePayload {
+    /// Action selected when the edge fired.
+    pub action: CodeTriggerAction,
+    /// Condition selected when the edge fired.
+    pub condition: CodeTriggerCondition,
+    /// Fully rendered message delivered to a turn or steering sink.
+    pub message: String,
+}
+
+/// One trigger outbox row against one exact pull request head.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeTriggerFire {
+    /// Exact edge identity.
+    pub identity: CodeTriggerFireIdentity,
+    /// Stable idempotency key reused by every retry.
+    pub delivery_id: CodeTriggerDeliveryId,
+    /// Original delivery input. Legacy rows that were already delivered have
+    /// no payload because they never need another attempt.
+    pub payload: Option<CodeTriggerFirePayload>,
+    /// Delivery state.
+    pub state: CodeTriggerFireState,
+    /// Number of leases granted for this delivery.
+    pub attempt_count: i64,
+    /// Worker lease token, when claimed.
+    pub lease_token: Option<Uuid>,
+    /// Worker lease expiry, when claimed.
+    pub lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Earliest time a pending row may be claimed.
+    pub next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last explicit delivery failure, bounded by [`Self::MAX_LAST_ERROR_CHARS`].
+    pub last_error: Option<String>,
+    /// When the edge first entered the outbox.
     pub fired_at: chrono::DateTime<chrono::Utc>,
+    /// When a sink acknowledged delivery.
+    pub delivered_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When disabling the rule cancelled the unaccepted delivery.
+    pub cancelled_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl CodeTriggerFire {
+    /// Maximum persisted error detail.
+    pub const MAX_LAST_ERROR_CHARS: usize = 4_096;
+    /// First retry delay after an explicit failure.
+    pub const INITIAL_RETRY_DELAY_SECS: i64 = 5;
+    /// Maximum retry delay after repeated failures.
+    pub const MAX_RETRY_DELAY_SECS: i64 = 15 * 60;
+
+    /// Bounded exponential delay for the current claimed attempt.
+    #[must_use]
+    pub fn retry_delay(attempt_count: i64) -> chrono::Duration {
+        let exponent = u32::try_from(attempt_count.saturating_sub(1))
+            .unwrap_or(u32::MAX)
+            .min(20);
+        let multiplier = 1_i64.checked_shl(exponent).unwrap_or(i64::MAX);
+        let seconds = Self::INITIAL_RETRY_DELAY_SECS
+            .saturating_mul(multiplier)
+            .min(Self::MAX_RETRY_DELAY_SECS);
+        chrono::Duration::seconds(seconds)
+    }
 }
 
 /// Classify a digest into the condition a trigger would fire on, if any.

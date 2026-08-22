@@ -73,6 +73,10 @@ const docsPackage = JSON.parse(
 const vercelCliPackage = JSON.parse(
   readFileSync(repositoryFile(".github", "vercel-cli", "package.json"), "utf8"),
 );
+const packagedGhDiscoverySmoke = readFileSync(
+  repositoryFile("scripts", "smoke-packaged-gh-discovery.sh"),
+  "utf8",
+);
 
 function workflowJob(source, name) {
   const marker = `  ${name}:\n`;
@@ -2188,6 +2192,41 @@ test("universal macOS release and staging packages contain both slices", () => {
     assert.match(job, /cli_sidecar="\$app_path\/Contents\/MacOS\/tidebreak"/);
     assert.match(job, /cli_arches="\$\(lipo -archs "\$cli_sidecar"\)"/);
   }
+});
+
+test("staging smoke-tests packaged GitHub CLI discovery before upload", () => {
+  const stagingBuild = workflowJob(
+    workflows["staging-publish.yml"],
+    "build_macos_staging",
+  );
+  const verifyAt = stagingBuild.indexOf("Verify and collect signed artifacts");
+  const smokeAt = stagingBuild.indexOf(
+    "Smoke-test packaged GitHub CLI discovery",
+  );
+  const uploadAt = stagingBuild.indexOf("Upload verified macOS artifacts");
+  assert.ok(
+    verifyAt < smokeAt && smokeAt < uploadAt,
+    "the packaged-app smoke check must run after verification and before upload",
+  );
+  assert.match(
+    stagingBuild.slice(smokeAt, uploadAt),
+    /scripts\/smoke-packaged-gh-discovery\.sh "\$\{app_paths\[0\]\}"/,
+  );
+
+  assert.match(packagedGhDiscoverySmoke, /finder_path="\/usr\/bin:\/bin:\/usr\/sbin:\/sbin"/);
+  assert.match(packagedGhDiscoverySmoke, /\/usr\/bin\/env -i/);
+  assert.match(packagedGhDiscoverySmoke, /CFFIXED_USER_HOME="\$profile_home"/);
+  assert.match(packagedGhDiscoverySmoke, /ZDOTDIR="\$shell_config"/);
+  assert.match(
+    packagedGhDiscoverySmoke,
+    /export PATH="\$GH_SMOKE_LOGIN_BIN:\$PATH"/,
+  );
+  assert.match(packagedGhDiscoverySmoke, /listen_path="\$profile_data\/listen\.json"/);
+  assert.match(packagedGhDiscoverySmoke, /\/code\/delivery\/repositories/);
+  assert.match(packagedGhDiscoverySmoke, /\.capability\.found == true/);
+  assert.match(packagedGhDiscoverySmoke, /auth status --json hosts/);
+  assert.match(packagedGhDiscoverySmoke, /trap cleanup EXIT/);
+  assert.match(packagedGhDiscoverySmoke, /rm -rf -- "\$smoke_root"/);
 });
 
 test("the packaged updater trusts the production signing key and endpoint", () => {

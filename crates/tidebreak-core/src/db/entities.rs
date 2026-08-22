@@ -1938,9 +1938,44 @@ pub mod code_trigger_fire {
         #[sea_orm(primary_key, auto_increment = false)]
         pub workspace_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
-        pub head_sha: String,
         pub pr_number: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub head_sha: String,
         pub fired_at: DateTimeUtc,
+        pub delivery_id: Uuid,
+        pub delivery_condition: Option<String>,
+        pub delivery_action: Option<String>,
+        pub delivery_message: Option<String>,
+        pub state: String,
+        pub attempt_count: i64,
+        pub lease_token: Option<Uuid>,
+        pub lease_expires_at: Option<DateTimeUtc>,
+        pub next_attempt_at: Option<DateTimeUtc>,
+        pub last_error: Option<String>,
+        pub delivered_at: Option<DateTimeUtc>,
+        pub cancelled_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_trigger_delivery_receipt {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_trigger_delivery_receipt")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub delivery_id: Uuid,
+        pub owner: String,
+        pub sink: String,
+        pub session_id: Uuid,
+        pub turn_id: Option<Uuid>,
+        pub acceptance_token: Uuid,
+        pub accepted_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

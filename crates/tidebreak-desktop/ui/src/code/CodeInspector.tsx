@@ -400,11 +400,13 @@ export function PrTab({
   async function refresh() {
     if (!prResource) setLocalRefreshing(true);
     try {
-      const next = prResource
-        ? await prResource.refreshFromHost()
-        : await client.refreshCodeWorkspacePr(workspaceId);
+      const commentsRequest =
+        prNumber === undefined ? Promise.resolve() : loadComments();
+      const next = await (prResource
+        ? prResource.refreshFromHost()
+        : client.refreshCodeWorkspacePr(workspaceId));
       if (!next) return;
-      await loadComments();
+      await commentsRequest;
     } catch (err) {
       toast.error(
         friendlyErrorMessage(err, "Could not refresh the pull request"),

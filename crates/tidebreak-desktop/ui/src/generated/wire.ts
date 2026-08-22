@@ -878,10 +878,9 @@ export type CodeCloneJobSnapshot = { id: string, phase: string, percent?: number
 export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat, };
 
 /**
- * Successful delivery mutation; callers refresh the affected detail after
- * showing this bounded result.
+ * Delivery mutation result. A partial rerun returns every per-run outcome.
  */
-export type CodeDeliveryActionResult = { success: boolean, message: string, };
+export type CodeDeliveryActionResult = { success: boolean, message: string, rerun_outcomes?: Array<CodeDeliveryRerunOutcome>, };
 
 /**
  * One CI check, enriched with the workflow run that can be rerun when known.
@@ -907,12 +906,16 @@ export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullReques
  * Full PR drawer payload. Conversation entries retain the existing bounded
  * comment contract used by workspace PRs.
  */
-export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string, 
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string,
 /**
  * Empty when the diff could not be read. Truncated by `files_truncated`
  * rather than paged: the panel is a review aid, not a diff viewer.
  */
-files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>, can_mark_ready: boolean, can_merge: boolean, can_rerun_failed: boolean, can_close: boolean, can_reopen: boolean, can_comment: boolean, };
+files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>,
+/**
+ * Section reads that failed after the pull request itself loaded.
+ */
+errors: Array<CodeDeliverySourceError>, can_mark_ready: boolean, can_merge: boolean, can_rerun_failed: boolean, can_close: boolean, can_reopen: boolean, can_comment: boolean, };
 
 /**
  * One file in a pull request's diff.
@@ -966,13 +969,22 @@ export type CodeDeliveryPullRequestsPage = { capability: CodeGitHubCapability, i
  */
 export type CodeDeliveryRepositoriesSnapshot = { capability: CodeGitHubCapability, repositories: Array<CodeGitHubRepositoryRef>, errors: Array<CodeDeliverySourceError>, fetched_at: string, };
 
+/**
+ * Result of rerunning one GitHub Actions workflow run.
+ */
+export type CodeDeliveryRerunOutcome = { workflow_run_id: number, success: boolean, error?: string, };
+
 export type CodeDeliveryRunAction = { "type": "rerun_failed" };
 
 export type CodeDeliveryRunActionBody = { target: CodeDeliveryRunTarget, action: CodeDeliveryRunAction, };
 
 export type CodeDeliveryRunAttentionReason = "failure" | "timed_out" | "action_required" | "startup_failure";
 
-export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean, };
+export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean,
+/**
+ * Section reads that failed after the run or deployment itself loaded.
+ */
+errors: Array<CodeDeliverySourceError>, };
 
 export type CodeDeliveryRunKind = "workflow_run" | "deployment";
 
@@ -985,7 +997,7 @@ refresh: boolean, };
 /**
  * Normalized Actions workflow run or GitHub deployment row.
  */
-export type CodeDeliveryRunSummary = { id: string, repository: CodeGitHubRepositoryRef, kind: CodeDeliveryRunKind, github_id: number, name: string, url: string, status: string, conclusion?: string, workflow?: string, environment?: string, branch?: string, sha?: string, event?: string, actor?: string, attention_reasons: Array<CodeDeliveryRunAttentionReason>, workspace_links: Array<CodeDeliveryWorkspaceLink>, created_at: string, updated_at: string, };
+export type CodeDeliveryRunSummary = { id: string, repository: CodeGitHubRepositoryRef, kind: CodeDeliveryRunKind, github_id: number, run_attempt?: number, name: string, url: string, status: string, conclusion?: string, workflow?: string, environment?: string, branch?: string, sha?: string, event?: string, actor?: string, attention_reasons: Array<CodeDeliveryRunAttentionReason>, workspace_links: Array<CodeDeliveryWorkspaceLink>, created_at: string, updated_at: string, };
 
 export type CodeDeliveryRunTarget = { repository: CodeGitHubRepositoryTarget, kind: CodeDeliveryRunKind, id: number, };
 

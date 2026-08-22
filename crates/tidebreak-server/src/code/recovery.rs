@@ -10,8 +10,8 @@ use std::io::ErrorKind;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_session, save_turn,
-    set_session_subagents,
+    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, replace_session_attention,
+    save_session, save_turn, set_session_subagents,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
@@ -103,13 +103,23 @@ async fn persist_recovery_session(
     if !save_session(store, session).await? {
         return Ok(false);
     }
+    let _ = replace_session_attention(store, &session.owner, session.id, &session.attention, false)
+        .await?;
     if !set_session_subagents(store, &session.owner, session.id, &session.subagents).await? {
         return Err(tidebreak_core::AgentError::Store(format!(
             "code session {} disappeared while recovery settled subagents",
             session.id
         )));
     }
-    emit_digest(store, bus, session).await;
+    let stored = tidebreak_core::db::code::get_session(store, &session.owner, session.id)
+        .await?
+        .ok_or_else(|| {
+            tidebreak_core::AgentError::Store(format!(
+                "code session {} disappeared while recovery persisted it",
+                session.id
+            ))
+        })?;
+    emit_digest(store, bus, &stored).await;
     Ok(true)
 }
 
@@ -663,6 +673,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 attachments: Vec::new(),
+                trigger_delivery: None,
                 reply,
             })
             .await

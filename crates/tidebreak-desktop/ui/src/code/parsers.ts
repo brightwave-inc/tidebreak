@@ -658,6 +658,7 @@ export function parseCodeDeliveryPullRequestDetail(
       "files",
       "files_truncated",
       "comments",
+      "errors",
       "can_mark_ready",
       "can_merge",
       "can_rerun_failed",
@@ -687,7 +688,8 @@ export function parseCodeDeliveryPullRequestDetail(
     return null;
   }
   const summary = parseCodeDeliveryPullRequestSummary(value.summary);
-  if (!summary) return null;
+  const errors = parseDeliveryErrors(value.errors);
+  if (!summary || !errors) return null;
   const comments: PullRequestComment[] = [];
   for (const item of value.comments) {
     const comment = parsePullRequestComment(item);
@@ -713,6 +715,7 @@ export function parseCodeDeliveryPullRequestDetail(
     files,
     files_truncated: value.files_truncated,
     comments,
+    errors,
     can_mark_ready: value.can_mark_ready,
     can_merge: value.can_merge,
     can_rerun_failed: value.can_rerun_failed,
@@ -774,6 +777,7 @@ function parseCodeDeliveryRunSummary(
       "repository",
       "kind",
       "github_id",
+      "run_attempt",
       "name",
       "url",
       "status",
@@ -792,6 +796,7 @@ function parseCodeDeliveryRunSummary(
     !nonEmpty(value.id) ||
     !isMember(value.kind, DELIVERY_RUN_KINDS) ||
     !isPositiveInteger(value.github_id) ||
+    !(value.run_attempt === undefined || isPositiveInteger(value.run_attempt)) ||
     !nonEmpty(value.name) ||
     !nonEmpty(value.url) ||
     !nonEmpty(value.status) ||
@@ -825,6 +830,9 @@ function parseCodeDeliveryRunSummary(
     repository,
     kind: value.kind,
     github_id: value.github_id,
+    ...(value.run_attempt !== undefined
+      ? { run_attempt: value.run_attempt }
+      : {}),
     name: value.name,
     url: value.url,
     status: value.status,
@@ -965,6 +973,7 @@ export function parseCodeDeliveryRunDetail(
       "jobs",
       "deployment_statuses",
       "can_rerun_failed",
+      "errors",
     ]) ||
     !Array.isArray(value.jobs) ||
     !Array.isArray(value.deployment_statuses) ||
@@ -973,7 +982,8 @@ export function parseCodeDeliveryRunDetail(
     return null;
   }
   const summary = parseCodeDeliveryRunSummary(value.summary);
-  if (!summary) return null;
+  const errors = parseDeliveryErrors(value.errors);
+  if (!summary || !errors) return null;
   const jobs: CodeDeliveryWorkflowJob[] = [];
   for (const item of value.jobs) {
     const job = parseCodeDeliveryWorkflowJob(item);
@@ -991,6 +1001,28 @@ export function parseCodeDeliveryRunDetail(
     jobs,
     deployment_statuses,
     can_rerun_failed: value.can_rerun_failed,
+    errors,
+  };
+}
+
+function parseCodeDeliveryRerunOutcome(
+  value: unknown,
+): NonNullable<CodeDeliveryActionResult["rerun_outcomes"]>[number] | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<
+      NonNullable<CodeDeliveryActionResult["rerun_outcomes"]>[number]
+    >(value, ["workflow_run_id", "success", "error"]) ||
+    !isPositiveInteger(value.workflow_run_id) ||
+    typeof value.success !== "boolean" ||
+    !optionalString(value.error)
+  ) {
+    return null;
+  }
+  return {
+    workflow_run_id: value.workflow_run_id,
+    success: value.success,
+    ...(value.error !== undefined ? { error: value.error } : {}),
   };
 }
 
@@ -999,13 +1031,28 @@ export function parseCodeDeliveryActionResult(
 ): CodeDeliveryActionResult | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireCodeDeliveryActionResult>(value, ["success", "message"]) ||
+    !onlyKeys<WireCodeDeliveryActionResult>(value, [
+      "success",
+      "message",
+      "rerun_outcomes",
+    ]) ||
     typeof value.success !== "boolean" ||
-    typeof value.message !== "string"
+    typeof value.message !== "string" ||
+    (value.rerun_outcomes !== undefined && !Array.isArray(value.rerun_outcomes))
   ) {
     return null;
   }
-  return { success: value.success, message: value.message };
+  const rerun_outcomes = [];
+  for (const item of value.rerun_outcomes ?? []) {
+    const outcome = parseCodeDeliveryRerunOutcome(item);
+    if (!outcome) return null;
+    rerun_outcomes.push(outcome);
+  }
+  return {
+    success: value.success,
+    message: value.message,
+    ...(value.rerun_outcomes !== undefined ? { rerun_outcomes } : {}),
+  };
 }
 
 export function parseCodeSubscriptionUsage(

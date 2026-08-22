@@ -42,6 +42,22 @@ describe("useCodeWorkspacePr", () => {
     expect(getCodeWorkspacePr).toHaveBeenCalledTimes(2);
   });
 
+  it("does not reload for an equal live PR digest with a new object identity", async () => {
+    const snapshot = { ...CLEAN, pr: pr(41) };
+    const getCodeWorkspacePr = vi.fn(async () => snapshot);
+    const { result, rerender } = renderHook(
+      ({ livePr }: { livePr?: PullRequestDigest }) =>
+        useCodeWorkspacePr({ getCodeWorkspacePr }, "workspace-1", 0, livePr),
+      { initialProps: { livePr: snapshot.pr } },
+    );
+
+    await waitFor(() => expect(result.current.data).toEqual(snapshot));
+    rerender({ livePr: { ...snapshot.pr } });
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+
+    expect(getCodeWorkspacePr).toHaveBeenCalledOnce();
+  });
+
   it("does not let an unchanged stale digest overwrite an adopted result", async () => {
     const stale = { ...CLEAN, pr: pr(41) };
     const adopted = { ...CLEAN, pr: pr(42) };
@@ -156,5 +172,46 @@ describe("useCodeWorkspacePr", () => {
       await Promise.resolve();
     });
     expect(result.current.data).toEqual(fresh);
+  });
+
+  it("ignores an old mutation error after the next workspace loads", async () => {
+    const first = { ...CLEAN, pr: pr(41) };
+    const second = { ...CLEAN, pr: pr(42) };
+    const getCodeWorkspacePr = vi.fn(async (workspaceId: string) =>
+      workspaceId === "workspace-1" ? first : second,
+    );
+    let rejectMutation!: (error: Error) => void;
+    const operation = () =>
+      new Promise<void>((_resolve, reject) => {
+        rejectMutation = reject;
+      });
+    const { result, rerender } = renderHook(
+      ({ workspaceId }: { workspaceId: string }) =>
+        useCodeWorkspacePr({ getCodeWorkspacePr }, workspaceId, 0),
+      { initialProps: { workspaceId: "workspace-1" } },
+    );
+    await waitFor(() => expect(result.current.data).toEqual(first));
+
+    const oldSetMutationError = result.current.setMutationError;
+    let mutation!: Promise<void | undefined>;
+    act(() => {
+      mutation = result.current
+        .runMutation("push", operation)
+        .catch((error: Error) => {
+          oldSetMutationError(error.message);
+          return undefined;
+        });
+    });
+    rerender({ workspaceId: "workspace-2" });
+    await waitFor(() => expect(result.current.data).toEqual(second));
+    expect(result.current.busy).toBeNull();
+
+    await act(async () => {
+      rejectMutation(new Error("old push failed"));
+      await mutation;
+    });
+
+    expect(result.current.data).toEqual(second);
+    expect(result.current.mutationError).toBeNull();
   });
 });

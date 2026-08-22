@@ -29,7 +29,7 @@ mod idens;
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
 
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, Statement};
 use sea_orm_migration::prelude::*;
 
 pub struct Migrator;
@@ -43,7 +43,89 @@ impl MigratorTrait for Migrator {
             Box::new(CodeOwner),
             Box::new(BaselineRepair),
             Box::new(CodeSessionFastMode),
+            Box::new(CodeSessionImages),
+            Box::new(TriggerFireOutbox),
+            Box::new(TriggerDeliveryReceipts),
         ]
+    }
+}
+
+/// Persist the acceptance boundary for every trigger delivery sink.
+struct TriggerDeliveryReceipts;
+
+impl MigrationName for TriggerDeliveryReceipts {
+    fn name(&self) -> &str {
+        "m20260822_000008_trigger_delivery_receipts"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for TriggerDeliveryReceipts {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeTriggerDeliveryReceipt::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeTriggerDeliveryReceipt::DeliveryId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeTriggerDeliveryReceipt::Owner)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeTriggerDeliveryReceipt::Sink)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeTriggerDeliveryReceipt::SessionId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeTriggerDeliveryReceipt::TurnId).uuid())
+                    .col(
+                        ColumnDef::new(idens::CodeTriggerDeliveryReceipt::AcceptanceToken)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeTriggerDeliveryReceipt::AcceptedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(
+                        Expr::col(idens::CodeTriggerDeliveryReceipt::DeliveryId)
+                            .ne(uuid::Uuid::nil()),
+                    )
+                    .check(
+                        Expr::col(idens::CodeTriggerDeliveryReceipt::AcceptanceToken)
+                            .ne(uuid::Uuid::nil()),
+                    )
+                    .check(Expr::col(idens::CodeTriggerDeliveryReceipt::Sink).is_in([
+                        "turn",
+                        "steer",
+                        "attention",
+                    ]))
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodeTriggerDeliveryReceipt::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -313,6 +395,452 @@ impl MigrationTrait for CodeSessionFastMode {
     }
 }
 
+/// Bring databases created by v0.60.0 to the image schema that v0.61.0 added
+/// to the baseline. Desktop SQLite normally took the last epoch reset for this
+/// change, but durable PostgreSQL databases did not.
+struct CodeSessionImages;
+
+impl MigrationName for CodeSessionImages {
+    fn name(&self) -> &str {
+        "m20260822_000006_code_session_images"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeSessionImages {
+    fn use_transaction(&self) -> Option<bool> {
+        // SQLite table replacement must either retain every legacy row and
+        // install the migration record, or leave the old table untouched.
+        Some(true)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        ensure_code_turn_attachment_dimensions(manager).await
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: the baseline declares this table and these
+        // columns. `Baseline::down` drops the tables during a full refresh.
+        Ok(())
+    }
+}
+
+const LEGACY_UNKNOWN_IMAGE_DIMENSION: i32 = 1;
+
+async fn ensure_code_turn_attachment_dimensions(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    const TABLE: &str = "code_turn_attachment";
+
+    if !manager.has_table(TABLE).await? {
+        return Err(DbErr::Custom(
+            "baseline repair did not create code_turn_attachment".to_owned(),
+        ));
+    }
+
+    let has_width = manager.has_column(TABLE, "width").await?;
+    let has_height = manager.has_column(TABLE, "height").await?;
+    if has_width && has_height {
+        return Ok(());
+    }
+
+    match manager.get_database_backend() {
+        DbBackend::Sqlite => {
+            rebuild_sqlite_code_turn_attachment(manager, has_width, has_height).await
+        }
+        DbBackend::Postgres => {
+            add_postgres_code_turn_attachment_dimensions(manager, has_width, has_height).await
+        }
+        backend => Err(DbErr::Custom(format!(
+            "code session image migration does not support {}",
+            backend.as_str()
+        ))),
+    }
+}
+
+async fn rebuild_sqlite_code_turn_attachment(
+    manager: &SchemaManager<'_>,
+    has_width: bool,
+    has_height: bool,
+) -> Result<(), DbErr> {
+    const TABLE: &str = "code_turn_attachment";
+    const TEMP_TABLE: &str = "code_turn_attachment_v061_upgrade";
+
+    let entry = baseline::code_turn_attachment();
+    let create = entry.table.to_string(SqliteQueryBuilder).replacen(
+        &format!("\"{TABLE}\""),
+        &format!("\"{TEMP_TABLE}\""),
+        1,
+    );
+    manager.get_connection().execute_unprepared(&create).await?;
+
+    // v0.60.0 retained the blob, media type, and byte length, but not image
+    // dimensions. The smallest valid dimension preserves every row and keeps
+    // the descriptor readable without inventing a larger layout.
+    let width = if has_width { "\"width\"" } else { "1" };
+    let height = if has_height { "\"height\"" } else { "1" };
+    manager
+        .get_connection()
+        .execute_unprepared(&format!(
+            "INSERT INTO \"{TEMP_TABLE}\" (\"owner\", \"turn_id\", \"ordinal\", \
+             \"blob_id\", \"media_type\", \"width\", \"height\", \"byte_len\") \
+             SELECT \"owner\", \"turn_id\", \"ordinal\", \"blob_id\", \"media_type\", \
+             {width}, {height}, \"byte_len\" FROM \"{TABLE}\""
+        ))
+        .await?;
+    manager
+        .drop_table(Table::drop().table(Alias::new(TABLE)).to_owned())
+        .await?;
+    manager
+        .rename_table(
+            Table::rename()
+                .table(Alias::new(TEMP_TABLE), Alias::new(TABLE))
+                .to_owned(),
+        )
+        .await?;
+    for index in entry.indexes {
+        manager.create_index(index).await?;
+    }
+    Ok(())
+}
+
+async fn add_postgres_code_turn_attachment_dimensions(
+    manager: &SchemaManager<'_>,
+    has_width: bool,
+    has_height: bool,
+) -> Result<(), DbErr> {
+    for (missing, column) in [(!has_width, "width"), (!has_height, "height")] {
+        if !missing {
+            continue;
+        }
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "ALTER TABLE \"code_turn_attachment\" \
+                 ADD COLUMN \"{column}\" integer NOT NULL DEFAULT {LEGACY_UNKNOWN_IMAGE_DIMENSION} \
+                 CHECK (\"{column}\" BETWEEN 1 AND {})",
+                crate::image::MAX_IMAGE_DIMENSION
+            ))
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "ALTER TABLE \"code_turn_attachment\" \
+                 ALTER COLUMN \"{column}\" DROP DEFAULT"
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Turn trigger fire fingerprints into a durable delivery outbox.
+///
+/// The preceding schema suppresses a second sweep as soon as a row exists, so
+/// a process crash can strand an undelivered side effect forever. This rebuild
+/// gives every row a stable delivery id, explicit state, and a fenced lease.
+struct TriggerFireOutbox;
+
+impl MigrationName for TriggerFireOutbox {
+    fn name(&self) -> &str {
+        "m20260822_000007_trigger_fire_outbox"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for TriggerFireOutbox {
+    fn use_transaction(&self) -> Option<bool> {
+        Some(true)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        rebuild_code_trigger_fire_outbox(manager).await
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The durable delivery state cannot be collapsed back to a fingerprint
+        // without losing pending work.
+        Ok(())
+    }
+}
+
+const TRIGGER_FIRE_OUTBOX_TEMP_TABLE: &str = "code_trigger_fire_outbox_upgrade";
+
+async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    const TABLE: &str = "code_trigger_fire";
+
+    if !manager.has_table(TABLE).await? {
+        return Err(DbErr::Custom(
+            "baseline repair did not create code_trigger_fire".to_owned(),
+        ));
+    }
+
+    manager
+        .create_table(code_trigger_fire_outbox_table(
+            TRIGGER_FIRE_OUTBOX_TEMP_TABLE,
+        ))
+        .await?;
+
+    let backend = manager.get_database_backend();
+    let rows = manager
+        .get_connection()
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT owner, trigger_id, workspace_id, pr_number, head_sha, fired_at \
+             FROM code_trigger_fire"
+                .to_owned(),
+        ))
+        .await?;
+    for row in rows {
+        let owner = row.try_get::<String>("", "owner")?;
+        let trigger_id = row.try_get::<uuid::Uuid>("", "trigger_id")?;
+        let workspace_id = row.try_get::<uuid::Uuid>("", "workspace_id")?;
+        let pr_number = row.try_get::<i64>("", "pr_number")?;
+        let head_sha = row.try_get::<String>("", "head_sha")?;
+        let fired_at = row.try_get::<chrono::DateTime<chrono::Utc>>("", "fired_at")?;
+        let delivery_id = uuid::Uuid::new_v4();
+        let insert = Query::insert()
+            .into_table(Alias::new(TRIGGER_FIRE_OUTBOX_TEMP_TABLE))
+            .columns([
+                idens::CodeTriggerFire::Owner,
+                idens::CodeTriggerFire::TriggerId,
+                idens::CodeTriggerFire::WorkspaceId,
+                idens::CodeTriggerFire::PrNumber,
+                idens::CodeTriggerFire::HeadSha,
+                idens::CodeTriggerFire::FiredAt,
+                idens::CodeTriggerFire::DeliveryId,
+                idens::CodeTriggerFire::DeliveryCondition,
+                idens::CodeTriggerFire::DeliveryAction,
+                idens::CodeTriggerFire::DeliveryMessage,
+                idens::CodeTriggerFire::State,
+                idens::CodeTriggerFire::AttemptCount,
+                idens::CodeTriggerFire::LeaseToken,
+                idens::CodeTriggerFire::LeaseExpiresAt,
+                idens::CodeTriggerFire::NextAttemptAt,
+                idens::CodeTriggerFire::LastError,
+                idens::CodeTriggerFire::DeliveredAt,
+                idens::CodeTriggerFire::CancelledAt,
+            ])
+            .values_panic([
+                Expr::value(owner),
+                Expr::value(trigger_id),
+                Expr::value(workspace_id),
+                Expr::value(pr_number),
+                Expr::value(head_sha),
+                Expr::value(fired_at),
+                Expr::value(delivery_id),
+                Expr::value(Option::<String>::None),
+                Expr::value(Option::<String>::None),
+                Expr::value(Option::<String>::None),
+                Expr::value("delivered"),
+                Expr::value(1_i64),
+                Expr::value(Option::<uuid::Uuid>::None),
+                Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+                Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+                Expr::value(Option::<String>::None),
+                Expr::value(Some(fired_at)),
+                Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+            ])
+            .to_owned();
+        manager
+            .get_connection()
+            .execute(backend.build(&insert))
+            .await?;
+    }
+
+    manager
+        .drop_table(Table::drop().table(Alias::new(TABLE)).to_owned())
+        .await?;
+    manager
+        .rename_table(
+            Table::rename()
+                .table(
+                    Alias::new(TRIGGER_FIRE_OUTBOX_TEMP_TABLE),
+                    Alias::new(TABLE),
+                )
+                .to_owned(),
+        )
+        .await?;
+    for index in code_trigger_fire_outbox_indexes() {
+        manager.create_index(index).await?;
+    }
+    Ok(())
+}
+
+fn code_trigger_fire_outbox_table(name: &str) -> TableCreateStatement {
+    let pending = Expr::col(idens::CodeTriggerFire::State)
+        .eq("pending")
+        .and(Expr::col(idens::CodeTriggerFire::DeliveredAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::CancelledAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::NextAttemptAt).is_not_null());
+    let delivered = Expr::col(idens::CodeTriggerFire::State)
+        .eq("delivered")
+        .and(Expr::col(idens::CodeTriggerFire::DeliveredAt).is_not_null())
+        .and(Expr::col(idens::CodeTriggerFire::CancelledAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::LeaseToken).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::LeaseExpiresAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::NextAttemptAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::LastError).is_null());
+    let cancelled = Expr::col(idens::CodeTriggerFire::State)
+        .eq("cancelled")
+        .and(Expr::col(idens::CodeTriggerFire::DeliveredAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::CancelledAt).is_not_null())
+        .and(Expr::col(idens::CodeTriggerFire::LeaseToken).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::LeaseExpiresAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::NextAttemptAt).is_null())
+        .and(Expr::col(idens::CodeTriggerFire::LastError).is_null());
+    let has_delivery_payload = Expr::col(idens::CodeTriggerFire::DeliveryCondition)
+        .is_not_null()
+        .and(Expr::col(idens::CodeTriggerFire::DeliveryAction).is_not_null())
+        .and(Expr::col(idens::CodeTriggerFire::DeliveryMessage).is_not_null());
+    let no_lease = Expr::col(idens::CodeTriggerFire::LeaseToken)
+        .is_null()
+        .and(Expr::col(idens::CodeTriggerFire::LeaseExpiresAt).is_null());
+    let active_lease = Expr::col(idens::CodeTriggerFire::LeaseToken)
+        .is_not_null()
+        .and(Expr::col(idens::CodeTriggerFire::LeaseExpiresAt).is_not_null());
+
+    Table::create()
+        .table(Alias::new(name))
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::Owner)
+                .text()
+                .not_null()
+                .default("local"),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::TriggerId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::WorkspaceId)
+                .uuid()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::PrNumber)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::HeadSha)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::FiredAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::DeliveryId)
+                .uuid()
+                .not_null()
+                .unique_key(),
+        )
+        .col(ColumnDef::new(idens::CodeTriggerFire::DeliveryCondition).string_len(32))
+        .col(ColumnDef::new(idens::CodeTriggerFire::DeliveryAction).string_len(16))
+        .col(ColumnDef::new(idens::CodeTriggerFire::DeliveryMessage).text())
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::State)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::AttemptCount)
+                .big_integer()
+                .not_null()
+                .default(0),
+        )
+        .col(ColumnDef::new(idens::CodeTriggerFire::LeaseToken).uuid())
+        .col(ColumnDef::new(idens::CodeTriggerFire::LeaseExpiresAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(idens::CodeTriggerFire::NextAttemptAt).timestamp_with_time_zone())
+        .col(
+            ColumnDef::new(idens::CodeTriggerFire::LastError)
+                .string_len(crate::code::CodeTriggerFire::MAX_LAST_ERROR_CHARS as u32),
+        )
+        .col(ColumnDef::new(idens::CodeTriggerFire::DeliveredAt).timestamp_with_time_zone())
+        .col(ColumnDef::new(idens::CodeTriggerFire::CancelledAt).timestamp_with_time_zone())
+        .primary_key(
+            Index::create()
+                .col(idens::CodeTriggerFire::TriggerId)
+                .col(idens::CodeTriggerFire::WorkspaceId)
+                .col(idens::CodeTriggerFire::PrNumber)
+                .col(idens::CodeTriggerFire::HeadSha),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_trigger_fire_trigger")
+                .from(Alias::new(name), idens::CodeTriggerFire::TriggerId)
+                .to(idens::CodeTrigger::Table, idens::CodeTrigger::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_trigger_fire_workspace")
+                .from(Alias::new(name), idens::CodeTriggerFire::WorkspaceId)
+                .to(idens::CodeWorkspace::Table, idens::CodeWorkspace::Id),
+        )
+        .check(Expr::col(idens::CodeTriggerFire::PrNumber).gte(1))
+        .check(Expr::col(idens::CodeTriggerFire::DeliveryId).ne(uuid::Uuid::nil()))
+        .check(Expr::col(idens::CodeTriggerFire::State).is_in([
+            "pending",
+            "delivered",
+            "cancelled",
+        ]))
+        .check(Expr::col(idens::CodeTriggerFire::AttemptCount).gte(0))
+        .check(no_lease.or(active_lease))
+        .check(pending.or(delivered).or(cancelled))
+        .check(
+            Expr::col(idens::CodeTriggerFire::State)
+                .eq("delivered")
+                .or(has_delivery_payload),
+        )
+        .check(
+            Expr::col(idens::CodeTriggerFire::DeliveryCondition)
+                .is_null()
+                .or(Expr::col(idens::CodeTriggerFire::DeliveryCondition).is_in([
+                    "checks_failed",
+                    "conflicts",
+                    "changes_requested",
+                    "review_required",
+                    "behind",
+                    "ready_to_merge",
+                    "merged",
+                    "closed",
+                ])),
+        )
+        .check(
+            Expr::col(idens::CodeTriggerFire::DeliveryAction)
+                .is_null()
+                .or(Expr::col(idens::CodeTriggerFire::DeliveryAction).is_in(["deliver", "notify"])),
+        )
+        .check(
+            Expr::col(idens::CodeTriggerFire::LastError)
+                .is_null()
+                .or(
+                    Func::char_length(Expr::col(idens::CodeTriggerFire::LastError))
+                        .between(1, crate::code::CodeTriggerFire::MAX_LAST_ERROR_CHARS as i32),
+                ),
+        )
+        .to_owned()
+}
+
+fn code_trigger_fire_outbox_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_code_trigger_fire_workspace")
+            .table(idens::CodeTriggerFire::Table)
+            .col(idens::CodeTriggerFire::WorkspaceId)
+            .to_owned(),
+        Index::create()
+            .name("idx_code_trigger_fire_pending_due")
+            .table(idens::CodeTriggerFire::Table)
+            .col(idens::CodeTriggerFire::State)
+            .col(idens::CodeTriggerFire::NextAttemptAt)
+            .col(idens::CodeTriggerFire::LeaseExpiresAt)
+            .to_owned(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -365,6 +893,9 @@ mod tests {
                 "m20260814_000003_code_owner",
                 "m20260822_000004_baseline_repair",
                 "m20260822_000005_code_session_fast_mode",
+                "m20260822_000006_code_session_images",
+                "m20260822_000007_trigger_fire_outbox",
+                "m20260822_000008_trigger_delivery_receipts",
             ]
         );
         assert!(db
@@ -377,8 +908,8 @@ mod tests {
             .is_none());
     }
 
-    /// A database that stopped at the baseline and later took the rest of the
-    /// chain must land on the schema a fresh database gets in one pass.
+    /// A database that stopped at the current baseline and later took the rest
+    /// of the chain must land on the schema a fresh database gets in one pass.
     ///
     /// This is the property the chain exists for. The desktop profile can be
     /// deleted and rebuilt; the self-host PostgreSQL store cannot, so it only
@@ -387,16 +918,14 @@ mod tests {
     /// schemas against the same queries — and nothing else notices, because
     /// each one is internally consistent.
     ///
-    /// With three migrations this is nearly free. It stops being free the
+    /// With this short chain the check is nearly free. It stops being free the
     /// first time an appended migration adds a column the baseline declares
     /// differently, which is the mistake the folded-in `ensure_*` branches
     /// were one edit away from making.
     ///
-    /// It runs on SQLite while the store it protects is PostgreSQL, and that
-    /// is enough: both sides are the same sea-query statements, so a baseline
-    /// and a migration that disagree disagree on either backend. What differs
-    /// between backends is the *rendering*, and `the_schema_baseline_is_pinned`
-    /// pins that for both.
+    /// This checks the internal ordering contract. The versioned release tests
+    /// cover the older schema that users actually upgrade from, including the
+    /// backend-specific statements in later migrations.
     #[tokio::test]
     async fn a_stepwise_upgrade_lands_on_the_fresh_schema() {
         let stepwise = Database::connect("sqlite::memory:").await.unwrap();
@@ -571,6 +1100,214 @@ mod tests {
             .unwrap();
         assert_eq!(legacy.try_get::<String>("", "name").unwrap(), "legacy");
     }
+    /// A v0.60.0 SQLite database keeps release rows while the current chain
+    /// adds image dimensions and upgrades trigger fires into the outbox.
+    #[tokio::test]
+    async fn a_v060_sqlite_database_keeps_release_rows() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(include_str!("../../fixtures/schema-v0.60.0.sql"))
+            .await
+            .unwrap();
+        Migrator::install(&db).await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO seaql_migrations (version, applied_at) \
+             VALUES ('m20260814_000001_baseline', 0)",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared(
+            "INSERT INTO code_repo (
+                id, owner, root_path, display_name, default_base_ref,
+                branch_prefix, quick_actions, created_at
+             ) VALUES (
+                '00000000-0000-0000-0000-000000000101', 'local', '/srv/release',
+                'release', 'main', 'tidebreak/', '[]', '2026-08-20T12:00:00Z'
+             );
+             INSERT INTO code_workspace (
+                id, owner, repo_id, title, worktree_path, branch_name, base_ref,
+                status, created_at
+             ) VALUES (
+                '00000000-0000-0000-0000-000000000102', 'local',
+                '00000000-0000-0000-0000-000000000101', 'release',
+                '/srv/release-worktree', 'tidebreak/release', 'main', 'active',
+                '2026-08-20T12:00:00Z'
+             );
+             INSERT INTO code_trigger (
+                id, owner, repo_id, condition, action, enabled, created_at, updated_at
+             ) VALUES (
+                '00000000-0000-0000-0000-000000000106', 'local',
+                '00000000-0000-0000-0000-000000000101', 'checks_failed',
+                'deliver', TRUE, '2026-08-20T12:00:00Z', '2026-08-20T12:00:00Z'
+             );
+             INSERT INTO code_trigger_fire (
+                owner, trigger_id, workspace_id, head_sha, pr_number, fired_at
+             ) VALUES (
+                'local', '00000000-0000-0000-0000-000000000106',
+                '00000000-0000-0000-0000-000000000102', 'release-head', 42,
+                '2026-08-20T12:01:00Z'
+             );
+             INSERT INTO code_session (
+                id, owner, workspace_id, kind, harness_kind, permission_mode,
+                lifecycle, attention_state, attention_source, created_at
+             ) VALUES (
+                '00000000-0000-0000-0000-000000000103', 'local',
+                '00000000-0000-0000-0000-000000000102', 'interactive',
+                'claude_code', 'ask', 'idle', '{}', 'lifecycle',
+                '2026-08-20T12:00:00Z'
+             );
+             INSERT INTO code_turn (
+                id, owner, session_id, ordinal, status, user_input, started_at
+             ) VALUES (
+                '00000000-0000-0000-0000-000000000104', 'local',
+                '00000000-0000-0000-0000-000000000103', 1, 'completed',
+                'keep this attachment', '2026-08-20T12:00:00Z'
+             );
+             INSERT INTO code_turn_attachment (
+                owner, turn_id, ordinal, blob_id, media_type, byte_len
+             ) VALUES (
+                'local', '00000000-0000-0000-0000-000000000104', 0,
+                '00000000-0000-0000-0000-000000000105', 'image/png', 8
+             )",
+        )
+        .await
+        .unwrap();
+
+        Migrator::up(&db, None).await.unwrap();
+
+        let attachment = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT blob_id, width, height, byte_len \
+                 FROM code_turn_attachment WHERE turn_id = \
+                 '00000000-0000-0000-0000-000000000104'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attachment.try_get::<String>("", "blob_id").unwrap(),
+            "00000000-0000-0000-0000-000000000105"
+        );
+        assert_eq!(attachment.try_get::<i32>("", "width").unwrap(), 1);
+        assert_eq!(attachment.try_get::<i32>("", "height").unwrap(), 1);
+        assert_eq!(attachment.try_get::<i64>("", "byte_len").unwrap(), 8);
+
+        let fire = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT delivery_id, state, attempt_count,
+                        delivered_at = fired_at AS delivered_at_matches,
+                        lease_token IS NULL AS lease_token_cleared,
+                        lease_expires_at IS NULL AS lease_expiry_cleared,
+                        next_attempt_at IS NULL AS next_attempt_cleared,
+                        last_error IS NULL AS last_error_cleared
+                 FROM code_trigger_fire
+                 WHERE trigger_id = '00000000-0000-0000-0000-000000000106'
+                   AND workspace_id = '00000000-0000-0000-0000-000000000102'
+                   AND pr_number = 42
+                   AND head_sha = 'release-head'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            fire.try_get::<String>("", "delivery_id").unwrap(),
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(fire.try_get::<String>("", "state").unwrap(), "delivered");
+        assert_eq!(fire.try_get::<i64>("", "attempt_count").unwrap(), 1);
+        for column in [
+            "delivered_at_matches",
+            "lease_token_cleared",
+            "lease_expiry_cleared",
+            "next_attempt_cleared",
+            "last_error_cleared",
+        ] {
+            assert_eq!(fire.try_get::<bool>("", column).unwrap(), true);
+        }
+
+        let fire_primary_key = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT name FROM pragma_table_info('code_trigger_fire')
+                 WHERE pk > 0 ORDER BY pk"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "name").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fire_primary_key,
+            ["trigger_id", "workspace_id", "pr_number", "head_sha"]
+        );
+        assert!(db
+            .execute_unprepared(
+                "UPDATE code_trigger_fire
+                 SET state = 'pending', delivered_at = NULL, next_attempt_at = NULL
+                 WHERE trigger_id = '00000000-0000-0000-0000-000000000106'"
+            )
+            .await
+            .is_err());
+
+        let columns = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA table_info('code_turn_attachment')".to_owned(),
+            ))
+            .await
+            .unwrap();
+        for name in ["width", "height"] {
+            let column = columns
+                .iter()
+                .find(|column| column.try_get::<String>("", "name").unwrap() == name)
+                .unwrap();
+            assert_eq!(column.try_get::<i32>("", "notnull").unwrap(), 1);
+            assert_eq!(
+                column.try_get::<Option<String>>("", "dflt_value").unwrap(),
+                None
+            );
+        }
+
+        for (kind, name) in [
+            ("table", "code_session_image"),
+            ("table", "code_trigger_delivery_receipt"),
+            ("index", "idx_code_session_image_blob"),
+            ("index", "idx_code_turn_attachment_blob"),
+        ] {
+            let object = db
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!(
+                        "SELECT 1 AS present FROM sqlite_master \
+                         WHERE type = '{kind}' AND name = '{name}'"
+                    ),
+                ))
+                .await
+                .unwrap();
+            assert!(object.is_some(), "upgrade did not create {name}");
+        }
+
+        let versions = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT version FROM seaql_migrations ORDER BY version".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "version").unwrap())
+            .collect::<Vec<_>>();
+        assert!(versions.contains(&"m20260822_000004_baseline_repair".to_owned()));
+        assert!(versions.contains(&"m20260822_000005_code_session_fast_mode".to_owned()));
+        assert!(versions.contains(&"m20260822_000006_code_session_images".to_owned()));
+        assert!(versions.contains(&"m20260822_000007_trigger_fire_outbox".to_owned()));
+        assert!(versions.contains(&"m20260822_000008_trigger_delivery_receipts".to_owned()));
+    }
+
     /// The baseline is frozen, and this is what holds it still.
     ///
     /// `Migrator::up` records one name per migration and cannot tell that the

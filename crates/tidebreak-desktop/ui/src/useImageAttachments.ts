@@ -276,7 +276,13 @@ export function useImageAttachments(
       setError(null);
     },
     restore: (items) => {
-      update(() => items.map((item) => ({ ...item, previewUrl: null })));
+      update((current) => {
+        const currentIds = new Set(current.map((item) => item.id));
+        const restored = items
+          .filter((item) => !currentIds.has(item.id))
+          .map((item) => ({ ...item, previewUrl: null }));
+        return [...restored, ...current];
+      });
     },
   };
 }

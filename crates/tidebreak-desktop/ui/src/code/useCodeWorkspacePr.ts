@@ -37,7 +37,17 @@ export function useCodeWorkspacePr(
 ): CodeWorkspacePrResource {
   const [busy, setBusy] = useState<CodeWorkspacePrMutation | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
-  const busyRef = useRef<CodeWorkspacePrMutation | null>(null);
+  const busyRef = useRef<{
+    generation: number;
+    mutation: CodeWorkspacePrMutation;
+  } | null>(null);
+  const workspaceRef = useRef(workspaceId);
+  const workspaceGenerationRef = useRef(0);
+  if (workspaceRef.current !== workspaceId) {
+    workspaceRef.current = workspaceId;
+    workspaceGenerationRef.current += 1;
+  }
+  const workspaceGeneration = workspaceGenerationRef.current;
   const load = useCallback(
     () => client.getCodeWorkspacePr(workspaceId),
     [client, workspaceId],
@@ -48,44 +58,79 @@ export function useCodeWorkspacePr(
     load,
     errorMessage: "Could not load workspace status",
   });
-  const seenLivePrRef = useRef({ workspaceId, pr: livePr });
+  const livePrSignature = pullRequestDigestSignature(livePr);
+  const seenLivePrRef = useRef({ workspaceId, signature: livePrSignature });
 
   useEffect(() => {
+    busyRef.current = null;
+    setBusy(null);
     setMutationError(null);
   }, [workspaceId]);
+
+  useEffect(() => {
+    if (!resource.refreshing && resource.error === null && resource.data) {
+      setMutationError(null);
+    }
+  }, [resource.data, resource.error, resource.refreshing]);
 
   useEffect(() => {
     const seen = seenLivePrRef.current;
     if (seen.workspaceId !== workspaceId) {
       // The keyed resource is already loading the new workspace.
-      seenLivePrRef.current = { workspaceId, pr: livePr };
+      seenLivePrRef.current = { workspaceId, signature: livePrSignature };
       return;
     }
-    if (seen.pr === livePr) return;
-    seenLivePrRef.current = { workspaceId, pr: livePr };
+    if (seen.signature === livePrSignature) return;
+    seenLivePrRef.current = { workspaceId, signature: livePrSignature };
     // A digest is a cheap signal that persisted PR state changed elsewhere.
     // Re-read the complete snapshot so local Git fields and hosted PR fields
     // continue to come from one source of truth.
     void resource.refresh();
-  }, [livePr, resource.refresh, workspaceId]);
+  }, [livePrSignature, resource.refresh, workspaceId]);
+
+  const adopt = useCallback(
+    (value: CodeWorkspacePrSnapshot) => {
+      if (workspaceGeneration !== workspaceGenerationRef.current) return;
+      resource.adopt(value);
+      setMutationError(null);
+    },
+    [resource.adopt, workspaceGeneration],
+  );
+  const setBoundMutationError = useCallback(
+    (error: string | null) => {
+      if (workspaceGeneration !== workspaceGenerationRef.current) return;
+      setMutationError(error);
+    },
+    [workspaceGeneration],
+  );
 
   const runMutation = useCallback(
     async <T>(
       mutation: CodeWorkspacePrMutation,
       operation: () => Promise<T>,
     ): Promise<T | undefined> => {
-      if (busyRef.current !== null) return undefined;
-      busyRef.current = mutation;
+      if (workspaceGeneration !== workspaceGenerationRef.current) {
+        return undefined;
+      }
+      if (busyRef.current?.generation === workspaceGeneration) {
+        return undefined;
+      }
+      busyRef.current = { generation: workspaceGeneration, mutation };
       setBusy(mutation);
       setMutationError(null);
       try {
         return await operation();
       } finally {
-        busyRef.current = null;
-        setBusy(null);
+        if (
+          workspaceGeneration === workspaceGenerationRef.current &&
+          busyRef.current?.generation === workspaceGeneration
+        ) {
+          busyRef.current = null;
+          setBusy(null);
+        }
       }
     },
-    [],
+    [workspaceGeneration],
   );
 
   const refreshFromHost = useCallback(
@@ -97,18 +142,46 @@ export function useCodeWorkspacePr(
         // Adopt inside the serialized operation. Besides keeping the lock held
         // until the state is visible, adopt retires any older passive read so
         // it cannot land after this fresh host snapshot.
-        resource.adopt(next);
+        adopt(next);
         return next;
       }),
-    [client, resource.adopt, runMutation, workspaceId],
+    [adopt, client, runMutation, workspaceId],
   );
 
   return {
     ...resource,
+    adopt,
     busy,
     mutationError,
-    setMutationError,
+    setMutationError: setBoundMutationError,
     refreshFromHost,
     runMutation,
   };
+}
+
+function pullRequestDigestSignature(pr: PullRequestDigest | undefined): string {
+  if (!pr) return "";
+  return JSON.stringify([
+    pr.number,
+    pr.url,
+    pr.state,
+    pr.title,
+    pr.checks_summary,
+    pr.checks?.map((check) => [
+      check.name,
+      check.bucket,
+      check.detail,
+      check.url,
+    ]),
+    pr.draft,
+    pr.merged,
+    pr.review_decision,
+    pr.mergeable,
+    pr.merge_state_status,
+    pr.head_branch,
+    pr.base_branch,
+    pr.head_sha,
+    pr.auto_merge_enabled,
+    pr.in_merge_queue,
+  ]);
 }

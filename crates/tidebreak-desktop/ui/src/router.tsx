@@ -23,7 +23,10 @@ import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { CodeHome } from "./code/CodeHome";
 import { CodeArchivePage } from "./code/CodeArchivePage";
-import { CodeDeliveryPage } from "./code/CodeDeliveryPage";
+import {
+  CodeDeliveryPage,
+  codeDeliverySearchFrom,
+} from "./code/CodeDeliveryPage";
 import { CodeNotificationsPage } from "./code/CodeNotificationsPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
@@ -205,14 +208,34 @@ const codeWorkspaceRoute = createRoute({
 const codeDeliveryPullRequestsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/delivery/pull-requests",
-  component: () => <CodeDeliveryPage surface="pull_requests" />,
+  validateSearch: codeDeliverySearchFrom,
+  component: CodeDeliveryPullRequestsRoute,
 });
 
 const codeDeliveryRunsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/delivery/runs",
-  component: () => <CodeDeliveryPage surface="runs" />,
+  validateSearch: codeDeliverySearchFrom,
+  component: CodeDeliveryRunsRoute,
 });
+
+function CodeDeliveryPullRequestsRoute() {
+  return (
+    <CodeDeliveryPage
+      surface="pull_requests"
+      search={codeDeliveryPullRequestsRoute.useSearch()}
+    />
+  );
+}
+
+function CodeDeliveryRunsRoute() {
+  return (
+    <CodeDeliveryPage
+      surface="runs"
+      search={codeDeliveryRunsRoute.useSearch()}
+    />
+  );
+}
 
 const codeArchiveRoute = createRoute({
   getParentRoute: () => rootRoute,

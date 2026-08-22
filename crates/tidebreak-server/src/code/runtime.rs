@@ -10,12 +10,12 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 
 use tidebreak_core::db::code::{
-    delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
-    get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
-    list_events, list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
-    list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
-    mark_repo_removed, save_approval, save_repo, save_session, save_trigger, save_workspace,
-    MAX_REPLAY_EVENTS,
+    arm_trigger, delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo,
+    get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
+    insert_workspace, list_approvals, list_events, list_repos, list_repos_all_owners,
+    list_sessions, list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo,
+    list_turns, list_workspaces, mark_repo_removed, save_approval, save_repo, save_session,
+    save_workspace, update_trigger_enabled, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -46,7 +46,7 @@ use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, journal_event, queue_follow_up, spawn_session_worker, AttachmentStore,
-    WorkerCommand, WorkerError, WorkerHandle,
+    TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -654,6 +654,7 @@ impl CodeRuntime {
             cloned_from,
         };
         insert_repo(&self.db, &repo).await?;
+        self.delivery_cache.invalidate_owner(owner);
         Ok(repo)
     }
 
@@ -770,6 +771,7 @@ impl CodeRuntime {
         if !mark_repo_removed(&self.db, owner, id, Utc::now()).await? {
             return Err(ServerError::not_found(format!("repo {id} not found")));
         }
+        self.delivery_cache.invalidate_owner(owner);
         Ok(())
     }
 
@@ -1553,13 +1555,14 @@ impl CodeRuntime {
         session_id: CodeSessionId,
         requested: &[(uuid::Uuid, String)],
     ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
-        if requested.len() > tidebreak_core::MAX_MESSAGE_ATTACHMENTS {
+        if requested.len() > tidebreak_core::context::MAX_HYDRATED_IMAGES {
             return Err(ServerError::bad_request(format!(
                 "a turn may carry at most {} image attachments",
-                tidebreak_core::MAX_MESSAGE_ATTACHMENTS
+                tidebreak_core::context::MAX_HYDRATED_IMAGES
             )));
         }
         let mut resolved = Vec::with_capacity(requested.len());
+        let mut resolved_bytes = 0_u64;
         for (blob_id, media_type) in requested {
             if blob_id.is_nil() {
                 return Err(ServerError::bad_request(
@@ -1605,6 +1608,16 @@ impl CodeRuntime {
             if image.blob_id != *blob_id || image != published {
                 return Err(unpublished());
             }
+            resolved_bytes = resolved_bytes.saturating_add(image.byte_len);
+            if resolved_bytes
+                > u64::try_from(tidebreak_core::context::MAX_HYDRATED_IMAGE_BYTES)
+                    .expect("the image byte limit fits in u64")
+            {
+                return Err(ServerError::bad_request(format!(
+                    "turn image attachments may total at most {} bytes",
+                    tidebreak_core::context::MAX_HYDRATED_IMAGE_BYTES
+                )));
+            }
             resolved.push(image);
         }
         Ok(resolved)
@@ -1619,6 +1632,41 @@ impl CodeRuntime {
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
+        self.submit_turn_inner(
+            owner,
+            id,
+            message,
+            model,
+            reasoning_effort,
+            attachments,
+            None,
+            true,
+        )
+        .await
+    }
+
+    async fn submit_turn_inner(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        message: String,
+        model: Option<String>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
+        attachments: Vec<tidebreak_core::ImageRef>,
+        trigger_delivery: Option<TriggerDeliveryClaim>,
+        queue_if_busy: bool,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        if let Some(claim) = trigger_delivery {
+            if tidebreak_core::db::code::trigger_delivery_accepted(
+                &self.db,
+                owner,
+                claim.delivery_id,
+            )
+            .await?
+            {
+                return Ok(SubmitTurnOutcome::Queued);
+            }
+        }
         let mut session = self.get_session(owner, id).await?;
         if session.lifecycle == CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
@@ -1680,6 +1728,12 @@ impl CodeRuntime {
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
             || get_open_turn(&self.db, owner, id).await?.is_some();
         if in_flight {
+            if !queue_if_busy {
+                return Err(ServerError::conflict_kind(
+                    "trigger_turn_busy",
+                    "the trigger turn was not accepted because the session became busy",
+                ));
+            }
             return self.park_follow_up(&handle, &session, message, attachments);
         }
         let (reply, rx) = oneshot::channel();
@@ -1690,6 +1744,7 @@ impl CodeRuntime {
                 model: session.model.clone(),
                 reasoning_effort: session.reasoning_effort,
                 attachments: attachments.clone(),
+                trigger_delivery,
                 reply,
             })
             .await
@@ -1706,11 +1761,45 @@ impl CodeRuntime {
             // exactly as a busy session does, and the route answers now rather
             // than holding the connection open for someone else's turn.
             Err(WorkerError::WorktreeBusy) => {
+                if !queue_if_busy {
+                    return Err(ServerError::conflict_kind(
+                        "trigger_turn_busy",
+                        "the trigger turn was not accepted because the workspace became busy",
+                    ));
+                }
                 return self.park_follow_up(&handle, &session, message, attachments);
+            }
+            Err(WorkerError::TriggerDeliveryAccepted) => {
+                return Ok(SubmitTurnOutcome::Queued);
             }
             Err(err) => return Err(map_worker(err)),
         };
         Ok(SubmitTurnOutcome::Ran(Box::new(turn)))
+    }
+
+    /// Submit a turn created by one durable trigger delivery.
+    pub(crate) async fn submit_trigger_turn(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        message: String,
+        delivery_id: tidebreak_core::CodeTriggerDeliveryId,
+        lease_token: uuid::Uuid,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        self.submit_turn_inner(
+            owner,
+            id,
+            message,
+            None,
+            None,
+            Vec::new(),
+            Some(TriggerDeliveryClaim {
+                delivery_id,
+                lease_token,
+            }),
+            false,
+        )
+        .await
     }
 
     /// Park a message in the session's single follow-up slot (record 9).
@@ -1795,6 +1884,29 @@ impl CodeRuntime {
         expected_turn_id: CodeTurnId,
         message: String,
     ) -> Result<(), ServerError> {
+        self.steer_inner(owner, id, expected_turn_id, message, None)
+            .await
+    }
+
+    async fn steer_inner(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        expected_turn_id: CodeTurnId,
+        message: String,
+        trigger_delivery: Option<TriggerDeliveryClaim>,
+    ) -> Result<(), ServerError> {
+        if let Some(claim) = trigger_delivery {
+            if tidebreak_core::db::code::trigger_delivery_accepted(
+                &self.db,
+                owner,
+                claim.delivery_id,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+        }
         let session = self.get_session(owner, id).await?;
         if session.lifecycle != CodeSessionLifecycle::Running {
             return Err(ServerError::conflict_kind(
@@ -1831,19 +1943,80 @@ impl CodeRuntime {
             ));
         }
         let handle = self.require_worker(id)?;
+        let mut accepted_trigger_delivery = None;
+        if let Some(claim) = trigger_delivery {
+            let accepted = tidebreak_core::db::code::accept_trigger_delivery(
+                &self.db,
+                owner,
+                claim.delivery_id,
+                claim.lease_token,
+                tidebreak_core::CodeTriggerDeliverySink::Steer,
+                id,
+                Some(expected_turn_id),
+                Utc::now(),
+            )
+            .await?;
+            if !accepted {
+                return Ok(());
+            }
+            accepted_trigger_delivery = Some(claim.delivery_id);
+        }
         let (reply, rx) = oneshot::channel();
-        handle
-            .commands
-            .send(WorkerCommand::Steer {
-                expected_turn_id,
-                message,
-                reply,
-            })
-            .await
-            .map_err(|_| ServerError::internal("session worker is gone"))?;
-        rx.await
-            .map_err(|_| ServerError::internal("session worker dropped the steer"))?
-            .map_err(map_worker)
+        let result = async {
+            handle
+                .commands
+                .send(WorkerCommand::Steer {
+                    expected_turn_id,
+                    message,
+                    reply,
+                })
+                .await
+                .map_err(|_| ServerError::internal("session worker is gone"))?;
+            rx.await
+                .map_err(|_| ServerError::internal("session worker dropped the steer"))?
+                .map_err(map_worker)
+        }
+        .await;
+        if let Some(delivery_id) = accepted_trigger_delivery {
+            // Engine steering has no durable enqueue boundary. The receipt is
+            // therefore the at-most-once acceptance point: after it commits,
+            // a send failure or ambiguous engine response must not retry and
+            // risk applying the same instruction twice.
+            if let Err(error) = result {
+                tracing::warn!(
+                    delivery = %delivery_id,
+                    session = %id,
+                    turn = %expected_turn_id,
+                    error = %error.message(),
+                    "trigger steering failed after durable acceptance"
+                );
+            }
+            return Ok(());
+        }
+        result
+    }
+
+    /// Steer an active turn for one durable trigger delivery.
+    pub(crate) async fn steer_trigger(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        expected_turn_id: CodeTurnId,
+        message: String,
+        delivery_id: tidebreak_core::CodeTriggerDeliveryId,
+        lease_token: uuid::Uuid,
+    ) -> Result<(), ServerError> {
+        self.steer_inner(
+            owner,
+            id,
+            expected_turn_id,
+            message,
+            Some(TriggerDeliveryClaim {
+                delivery_id,
+                lease_token,
+            }),
+        )
+        .await
     }
 
     pub(crate) async fn reap(
@@ -2190,9 +2363,8 @@ impl CodeRuntime {
 
     /// Arm a trigger on a repository.
     ///
-    /// One row per `(repository, condition, action)`: arming the same rule
-    /// twice returns the row already there rather than making a second one
-    /// that would deliver the same message twice.
+    /// One row per `(repository, condition)`. A later arm sets its action and
+    /// enables it in one upsert.
     pub(crate) async fn create_trigger(
         &self,
         owner: &OwnerId,
@@ -2201,36 +2373,18 @@ impl CodeRuntime {
         action: CodeTriggerAction,
     ) -> Result<CodeTrigger, ServerError> {
         self.get_repo(owner, repo_id).await?;
-        // Match the store's unique key, which is (owner, repo, condition) —
-        // not the condition and action together. `save_trigger` upserts on
-        // that key and updates action and enabled without touching the stored
-        // id, so re-arming one condition with a different action keeps the row
-        // that is already there.
-        let existing = list_triggers_for_repo(&self.db, owner, repo_id)
-            .await?
-            .into_iter()
-            .find(|trigger| trigger.condition == condition);
         let now = Utc::now();
-        let trigger = match existing {
-            Some(found) if found.action == action && found.enabled => return Ok(found),
-            Some(mut found) => {
-                found.action = action;
-                found.enabled = true;
-                found.updated_at = now;
-                found
-            }
-            None => CodeTrigger {
-                id: CodeTriggerId::new(),
-                owner: owner.clone(),
-                repo_id,
-                condition,
-                action,
-                enabled: true,
-                created_at: now,
-                updated_at: now,
-            },
+        let trigger = CodeTrigger {
+            id: CodeTriggerId::new(),
+            owner: owner.clone(),
+            repo_id,
+            condition,
+            action,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
         };
-        save_trigger(&self.db, &trigger).await?;
+        arm_trigger(&self.db, &trigger).await?;
         // Read back rather than returning what we just built. Two arms of the
         // same condition racing each other both see no row and both mint an
         // id; only one is stored, and the loser would otherwise answer 201
@@ -2250,28 +2404,24 @@ impl CodeRuntime {
         id: CodeTriggerId,
         enabled: bool,
     ) -> Result<CodeTrigger, ServerError> {
-        let mut trigger = list_triggers_for_repo(&self.db, owner, repo_id)
+        if !update_trigger_enabled(&self.db, owner, repo_id, id, enabled, Utc::now()).await? {
+            return Err(ServerError::not_found("trigger not found"));
+        }
+        list_triggers_for_repo(&self.db, owner, repo_id)
             .await?
             .into_iter()
             .find(|t| t.id == id)
-            .ok_or_else(|| ServerError::not_found("trigger not found"))?;
-        if trigger.enabled == enabled {
-            return Ok(trigger);
-        }
-        trigger.enabled = enabled;
-        trigger.updated_at = Utc::now();
-        save_trigger(&self.db, &trigger).await?;
-        Ok(trigger)
+            .ok_or_else(|| ServerError::not_found("trigger not found"))
     }
 
-    /// Remove a trigger. Its recorded fires stay: they are what the transcript
-    /// already explained.
+    /// Remove a repository-scoped trigger and its recorded fire fingerprints.
     pub(crate) async fn delete_trigger(
         &self,
         owner: &OwnerId,
+        repo_id: RepoId,
         id: CodeTriggerId,
     ) -> Result<(), ServerError> {
-        if delete_trigger(&self.db, owner, id).await? {
+        if delete_trigger(&self.db, owner, repo_id, id).await? {
             Ok(())
         } else {
             Err(ServerError::not_found("trigger not found"))
@@ -2400,6 +2550,7 @@ impl CodeRuntime {
         let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
         fork::write_transcript(
             std::path::Path::new(&workspace.worktree_path),
+            self.blobs.as_ref(),
             &session,
             &turns,
             &events.events,
@@ -3105,6 +3256,10 @@ fn map_worker(err: WorkerError) -> ServerError {
             ServerError::conflict_kind("relaunch_required", message)
         }
         WorkerError::Failed(message) => ServerError::internal(message),
+        WorkerError::TriggerDeliveryAccepted => ServerError::conflict_kind(
+            "trigger_delivery_accepted",
+            "trigger delivery was already accepted",
+        ),
         // `submit_turn` intercepts this and parks the message instead, so
         // reaching here means a caller took the turn path without handling
         // contention. Answer as a conflict rather than a 500.
