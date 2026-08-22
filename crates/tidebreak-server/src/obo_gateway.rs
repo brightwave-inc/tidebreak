@@ -147,8 +147,6 @@ pub(crate) struct OboGateway {
     /// Where the exchange is POSTed. Honors the verifier override, because
     /// this is a server-to-server call like principal validation.
     token_url: reqwest::Url,
-    /// Anthropic-compatible inference base for exchanged tokens.
-    inference_base_url: String,
     /// The member catalog a caller's exchanged capability reads.
     catalog_url: reqwest::Url,
     /// The normalized gateway base, stamped onto per-caller snapshots so
@@ -194,7 +192,6 @@ impl OboGateway {
     pub(crate) fn new(base_url: &str) -> Result<Self> {
         let base = normalized_gateway_base(base_url)?;
         let token_url = join_below(&base, "oauth/token")?;
-        let inference_base_url = join_below(&base, "compat/anthropic")?.to_string();
         let catalog_url = join_below(&base, "api/v1/me/catalog")?;
         let gateway_base_url = base.as_str().trim_end_matches('/').to_owned();
         let client = reqwest::Client::builder()
@@ -206,7 +203,6 @@ impl OboGateway {
             })?;
         Ok(Self {
             token_url,
-            inference_base_url,
             catalog_url,
             gateway_base_url,
             client,
@@ -217,11 +213,6 @@ impl OboGateway {
     /// The normalized gateway base URL, as stamped onto per-caller snapshots.
     pub(crate) fn gateway_base_url(&self) -> &str {
         &self.gateway_base_url
-    }
-
-    /// The Anthropic-compatible base URL exchanged tokens authenticate against.
-    pub(crate) fn inference_base_url(&self) -> &str {
-        &self.inference_base_url
     }
 
     /// Remember the bearer `owner` just authenticated with.
@@ -886,9 +877,6 @@ mod tests {
         let token = inference.bearer_for(&alice).await.unwrap();
         assert!(token.starts_with("mg_at_inference_"));
         assert!(token.ends_with("mg_at_alice"));
-        assert!(inference
-            .inference_base_url()
-            .ends_with("/compat/anthropic"));
         assert_eq!(gateway.served(), 1);
         server.abort();
     }
@@ -1119,10 +1107,7 @@ mod tests {
 
         config.auth_gateway_url = Some("https://gateway.example".to_owned());
         let inference = OboGateway::from_config(&config).unwrap().unwrap();
-        assert_eq!(
-            inference.inference_base_url(),
-            "https://gateway.example/compat/anthropic"
-        );
+        assert_eq!(inference.gateway_base_url(), "https://gateway.example");
     }
 
     /// The exchange is a server-to-server call, so it honors the same
@@ -1140,10 +1125,7 @@ mod tests {
             inference.token_url.as_str(),
             "https://gateway.internal/oauth/token"
         );
-        assert_eq!(
-            inference.inference_base_url(),
-            "https://gateway.internal/compat/anthropic"
-        );
+        assert_eq!(inference.gateway_base_url(), "https://gateway.internal");
     }
 
     /// A gateway deployed under a subpath keeps its prefix.
@@ -1154,10 +1136,7 @@ mod tests {
             inference.token_url.as_str(),
             "https://example.test/gateway/oauth/token"
         );
-        assert_eq!(
-            inference.inference_base_url(),
-            "https://example.test/gateway/compat/anthropic"
-        );
+        assert_eq!(inference.gateway_base_url(), "https://example.test/gateway");
     }
 
     /// A URL that cannot carry a server-to-server credential is refused at
