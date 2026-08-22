@@ -41,11 +41,7 @@ const PROVISIONED_POLICY_FILE: &str = "gateway-policy.json";
 
 /// The settings key the provisioned policy lived under before it moved to
 /// [`PROVISIONED_POLICY_FILE`]. Read once per boot by
-/// [`import_legacy_setting`]; never written or deleted. It used to be swept by
-/// the next epoch reset, which no longer happens for a profile at or above the
-/// migration pin (decision 61), so on those the row simply stays. It is inert
-/// while the sidecar exists, which is the case for every profile that has
-/// booted since the move.
+/// [`import_legacy_setting`], then deleted once the sidecar holds a valid copy.
 const LEGACY_SETTING_KEY: &str = "managed_policy_v1";
 
 /// The key every OS artifact stores the asserted URL under: the Windows
@@ -1072,15 +1068,14 @@ pub(crate) fn provisioned_url(provisioned: &dyn ProvisionedPolicySource) -> Resu
 /// survive the move. When the file is absent and the legacy row holds a
 /// decodable policy, the row's URL becomes the file's contents.
 ///
-/// Everything else is deliberately untouched. The legacy row itself is left
-/// in place — the [`Store`] API grows no delete for this, and pre-v1
-/// schema-epoch squashes remove the row naturally. A file that exists but
-/// does not decode is not repaired here: importing over it would launder a
-/// tampered artifact into a fresh policy, and the fail-closed misconfigured
-/// projection plus the [`provision`] repair path already cover it. An
-/// undecodable legacy *row* is skipped with a warning for the same reason —
-/// the only writes this function may make are faithful copies of what the
-/// row actually asserted.
+/// Once the file holds a valid policy, the legacy row is deleted so removing
+/// the file later cannot silently provision the profile again. A file that
+/// exists but does not decode is not repaired here: importing over it would
+/// launder a tampered artifact into a fresh policy, and the fail-closed
+/// misconfigured projection plus the [`provision`] repair path already cover
+/// it. An undecodable legacy *row* is skipped with a warning for the same
+/// reason — the only policy write this function may make is a faithful copy
+/// of what the row actually asserted.
 ///
 /// Boot propagates a failed import rather than starting unmanaged: the boot
 /// path retires gateway sessions the policy no longer stands behind, so
@@ -1091,7 +1086,10 @@ pub(crate) async fn import_legacy_setting(
     store: &dyn Store,
 ) -> Result<()> {
     match provisioned.read() {
-        Ok(Some(_)) => return Ok(()),
+        Ok(Some(_)) => {
+            store.delete_setting(LEGACY_SETTING_KEY).await?;
+            return Ok(());
+        }
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(
@@ -1105,7 +1103,10 @@ pub(crate) async fn import_legacy_setting(
         return Ok(());
     };
     match serde_json::from_value::<ProvisionedPolicy>(value) {
-        Ok(saved) => provisioned.write(&saved.gateway_url),
+        Ok(saved) => {
+            provisioned.write(&saved.gateway_url)?;
+            store.delete_setting(LEGACY_SETTING_KEY).await
+        }
         Err(_) => {
             tracing::warn!(
                 "legacy provisioned policy setting does not decode; \
@@ -1359,11 +1360,10 @@ mod tests {
     }
 
     /// The upgrade import, end to end: a profile paired before the policy
-    /// moved out of the settings table boots onto the file, the legacy row
-    /// is left for the epoch squashes to remove, and the import never
-    /// overwrites what the file already says.
+    /// moved out of the settings table boots onto the file, the legacy row is
+    /// deleted, and the import never overwrites what the file already says.
     #[tokio::test]
-    async fn the_legacy_setting_row_is_imported_once_then_left_alone() {
+    async fn the_legacy_setting_row_is_imported_once_then_deleted() {
         let (store, _store_directory) = test_store().await;
         let directory = tempfile::tempdir().unwrap();
         let provisioned = ProvisionedPolicyFile::in_data_dir(directory.path());
@@ -1383,17 +1383,9 @@ mod tests {
         let policy = resolve(&provisioned, &NoOsPolicy).unwrap();
         assert!(policy.managed && !policy.misconfigured);
         assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
-        // The row is left in place; the next pre-v1 epoch squash removes it.
-        assert!(
-            store
-                .get_setting(LEGACY_SETTING_KEY)
-                .await
-                .unwrap()
-                .is_some(),
-            "the import copies, never deletes"
-        );
+        assert_eq!(store.get_setting(LEGACY_SETTING_KEY).await.unwrap(), None);
 
-        // Once the file exists it wins: a changed row is not re-imported.
+        // Once the file exists it wins, and any stale row is retired.
         store
             .set_setting(
                 LEGACY_SETTING_KEY,
@@ -1406,6 +1398,7 @@ mod tests {
             provisioned.read().unwrap().as_deref(),
             Some("https://corp.gateway/")
         );
+        assert_eq!(store.get_setting(LEGACY_SETTING_KEY).await.unwrap(), None);
 
         // An undecodable row is skipped, not laundered into policy.
         let directory = tempfile::tempdir().unwrap();

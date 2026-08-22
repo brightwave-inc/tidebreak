@@ -1074,18 +1074,23 @@ pub(super) async fn post_native_json(
 /// claim it straight from the store, which is a scan over the whole queue. The
 /// app under test must therefore have no turn worker running yet, or the two
 /// race for the same queued turn — see `test_app_without_turn_worker`.
-async fn park_client_wait_for_route_test(
+async fn accept_and_claim_turn_for_route_test(
     store: &dyn Store,
+    turn_id: TurnId,
     chat_id: ChatId,
-    progress: TurnCheckpointProgress,
-) -> (TurnId, ClientToolCallRequest) {
-    let turn_id = TurnId::new();
-    store
-        .accept_turn(turn_id, chat_id, "fake", "native action")
+    content: &str,
+) -> (uuid::Uuid, chrono::DateTime<chrono::Utc>) {
+    let accepted = match store
+        .accept_turn(turn_id, chat_id, "fake", content)
         .await
-        .unwrap();
+        .unwrap()
+    {
+        tidebreak_core::AcceptTurnOutcome::Accepted(turn)
+        | tidebreak_core::AcceptTurnOutcome::Existing(turn) => turn,
+        outcome => panic!("route-test turn was not accepted: {outcome:?}"),
+    };
     let turn_token = uuid::Uuid::new_v4();
-    let claimed_at = chrono::Utc::now();
+    let claimed_at = accepted.available_at;
     let claimed = store
         .claim_turn_run(
             turn_token,
@@ -1095,8 +1100,19 @@ async fn park_client_wait_for_route_test(
         .await
         .unwrap()
         .turn
-        .unwrap();
+        .expect("the accepted route-test turn is due");
     assert_eq!(claimed.id, turn_id);
+    (turn_token, claimed_at)
+}
+
+async fn park_client_wait_for_route_test(
+    store: &dyn Store,
+    chat_id: ChatId,
+    progress: TurnCheckpointProgress,
+) -> (TurnId, ClientToolCallRequest) {
+    let turn_id = TurnId::new();
+    let (turn_token, claimed_at) =
+        accept_and_claim_turn_for_route_test(store, turn_id, chat_id, "native action").await;
     let call = ClientToolCallRequest {
         id: CallId::new(),
         chat_id,
@@ -1107,14 +1123,7 @@ async fn park_client_wait_for_route_test(
     };
     assert!(matches!(
         store
-            .park_turn_for_client_tool_call(
-                turn_id,
-                turn_token,
-                0,
-                progress,
-                chrono::Utc::now(),
-                &call,
-            )
+            .park_turn_for_client_tool_call(turn_id, turn_token, 0, progress, claimed_at, &call,)
             .await
             .unwrap()
             .unwrap(),
@@ -1128,22 +1137,8 @@ async fn park_user_questions_for_route_test(
     chat_id: ChatId,
 ) -> (TurnId, ClientToolCallRequest) {
     let turn_id = TurnId::new();
-    store
-        .accept_turn(turn_id, chat_id, "fake", "ask a question")
-        .await
-        .unwrap();
-    let turn_token = uuid::Uuid::new_v4();
-    let claimed_at = chrono::Utc::now();
-    store
-        .claim_turn_run(
-            turn_token,
-            claimed_at,
-            claimed_at + chrono::Duration::minutes(1),
-        )
-        .await
-        .unwrap()
-        .turn
-        .unwrap();
+    let (turn_token, claimed_at) =
+        accept_and_claim_turn_for_route_test(store, turn_id, chat_id, "ask a question").await;
     let call = ClientToolCallRequest {
         id: CallId::new(),
         chat_id,
@@ -1176,7 +1171,7 @@ async fn park_user_questions_for_route_test(
             turn_token,
             0,
             test_client_checkpoint_progress(1),
-            chrono::Utc::now(),
+            claimed_at,
             &call,
         )
         .await
@@ -2096,22 +2091,8 @@ async fn park_plan_for_route_test(
     chat_id: ChatId,
 ) -> (TurnId, ClientToolCallRequest) {
     let turn_id = TurnId::new();
-    store
-        .accept_turn(turn_id, chat_id, "fake", "propose a plan")
-        .await
-        .unwrap();
-    let turn_token = uuid::Uuid::new_v4();
-    let claimed_at = chrono::Utc::now();
-    store
-        .claim_turn_run(
-            turn_token,
-            claimed_at,
-            claimed_at + chrono::Duration::minutes(1),
-        )
-        .await
-        .unwrap()
-        .turn
-        .unwrap();
+    let (turn_token, claimed_at) =
+        accept_and_claim_turn_for_route_test(store, turn_id, chat_id, "propose a plan").await;
     let call = ClientToolCallRequest {
         id: CallId::new(),
         chat_id,
@@ -2129,7 +2110,7 @@ async fn park_plan_for_route_test(
             turn_token,
             0,
             test_client_checkpoint_progress(1),
-            chrono::Utc::now(),
+            claimed_at,
             &call,
         )
         .await
@@ -2143,22 +2124,8 @@ async fn park_folder_access_for_route_test(
     chat_id: ChatId,
 ) -> ClientToolCallRequest {
     let turn_id = TurnId::new();
-    store
-        .accept_turn(turn_id, chat_id, "fake", "read the notes")
-        .await
-        .unwrap();
-    let turn_token = uuid::Uuid::new_v4();
-    let claimed_at = chrono::Utc::now();
-    store
-        .claim_turn_run(
-            turn_token,
-            claimed_at,
-            claimed_at + chrono::Duration::minutes(1),
-        )
-        .await
-        .unwrap()
-        .turn
-        .unwrap();
+    let (turn_token, claimed_at) =
+        accept_and_claim_turn_for_route_test(store, turn_id, chat_id, "read the notes").await;
     let call = ClientToolCallRequest {
         id: CallId::new(),
         chat_id,
@@ -2177,7 +2144,7 @@ async fn park_folder_access_for_route_test(
             turn_token,
             0,
             test_client_checkpoint_progress(1),
-            chrono::Utc::now(),
+            claimed_at,
             &call,
         )
         .await
