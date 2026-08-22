@@ -305,7 +305,8 @@ describe("delivery pull request list", () => {
     );
   });
 
-  it("does not duplicate a pending pull-request detail request when the aggregate target arrives", async () => {
+  it("reuses a pending pull-request detail request when the target row is selected", async () => {
+    const user = userEvent.setup();
     const detail =
       deferred<
         Awaited<ReturnType<ApiClient["getCodeDeliveryPullRequestDetail"]>>
@@ -320,15 +321,54 @@ describe("delivery pull request list", () => {
       "/code/delivery/pull-requests?repoHost=github.com&repoOwner=brightwave-inc&repoName=tidebreak&pr=2251",
     );
 
-    await rowFor("Build the delivery center");
+    await user.click(await rowFor("Build the delivery center"));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(getDetail).toHaveBeenCalledTimes(1);
 
     detail.resolve(deliveryPullRequestDetails[2251]!);
     expect(
-      await screen.findByRole("heading", { name: "Build the delivery center" }),
+      await screen.findByRole("tab", { name: /Conversation/ }),
     ).toBeInTheDocument();
     expect(getDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replace another selected pull request when route detail resolves", async () => {
+    const user = userEvent.setup();
+    const routeDetail =
+      deferred<
+        Awaited<ReturnType<ApiClient["getCodeDeliveryPullRequestDetail"]>>
+      >();
+    const getDetail = vi.fn(({ number }: { number: number }) =>
+      number === 2251
+        ? routeDetail.promise
+        : Promise.resolve(deliveryPullRequestDetails[number]!),
+    );
+    const client = deliveryClient({
+      getCodeDeliveryPullRequestDetail: getDetail as never,
+    });
+    await renderDeliveryRoute(
+      "pull_requests",
+      client,
+      "/code/delivery/pull-requests?repoHost=github.com&repoOwner=brightwave-inc&repoName=tidebreak&pr=2251",
+    );
+
+    await user.click(await rowFor("Make workspace deep links durable"));
+    expect(
+      await screen.findByRole("heading", {
+        name: "Make workspace deep links durable",
+      }),
+    ).toBeInTheDocument();
+
+    routeDetail.resolve(deliveryPullRequestDetails[2251]!);
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(
+      screen.getByRole("heading", {
+        name: "Make workspace deep links durable",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      getDetail.mock.calls.filter(([request]) => request.number === 2251),
+    ).toHaveLength(1);
   });
 
   it("keeps exact pull-request detail open when the aggregate list fails", async () => {
@@ -465,7 +505,8 @@ describe("delivery run list", () => {
     );
   });
 
-  it("does not duplicate a pending run detail request when the aggregate target arrives", async () => {
+  it("reuses a pending run detail request when the target row is selected", async () => {
+    const user = userEvent.setup();
     const detail =
       deferred<Awaited<ReturnType<ApiClient["getCodeDeliveryRunDetail"]>>>();
     const getDetail = vi.fn(() => detail.promise);
@@ -478,15 +519,48 @@ describe("delivery run list", () => {
       "/code/delivery/runs?repoHost=github.com&repoOwner=brightwave-inc&repoName=tidebreak&runKind=workflow_run&runId=4401",
     );
 
-    await rowFor("Desktop CI");
+    await user.click(await rowFor("Desktop CI"));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(getDetail).toHaveBeenCalledTimes(1);
 
     detail.resolve(deliveryRunDetails[4401]!);
     expect(
-      await screen.findByRole("heading", { name: "Desktop CI" }),
+      await screen.findByRole("heading", { name: "Jobs" }),
     ).toBeInTheDocument();
     expect(getDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replace another selected run when route detail resolves", async () => {
+    const user = userEvent.setup();
+    const routeDetail =
+      deferred<Awaited<ReturnType<ApiClient["getCodeDeliveryRunDetail"]>>>();
+    const getDetail = vi.fn(({ id }: { id: number }) =>
+      id === 4401
+        ? routeDetail.promise
+        : Promise.resolve(deliveryRunDetails[id]!),
+    );
+    const client = deliveryClient({
+      getCodeDeliveryRunDetail: getDetail as never,
+    });
+    await renderDeliveryRoute(
+      "runs",
+      client,
+      "/code/delivery/runs?repoHost=github.com&repoOwner=brightwave-inc&repoName=tidebreak&runKind=workflow_run&runId=4401",
+    );
+
+    await user.click(await rowFor("Production"));
+    expect(
+      await screen.findByRole("heading", { name: "Production" }),
+    ).toBeInTheDocument();
+
+    routeDetail.resolve(deliveryRunDetails[4401]!);
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(
+      screen.getByRole("heading", { name: "Production" }),
+    ).toBeInTheDocument();
+    expect(
+      getDetail.mock.calls.filter(([request]) => request.id === 4401),
+    ).toHaveLength(1);
   });
 
   it("keeps exact run detail and its errors open when the aggregate list fails", async () => {

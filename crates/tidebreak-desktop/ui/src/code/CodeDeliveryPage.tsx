@@ -681,6 +681,12 @@ function DeliveryTab({
   );
 }
 
+type TargetDetailState<T> = {
+  key: string;
+  pending: boolean;
+  detail: T | null;
+};
+
 function PullRequestsSurface({
   repositories,
   capability,
@@ -710,8 +716,8 @@ function PullRequestsSurface({
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [targetDetail, setTargetDetail] =
-    useState<CodeDeliveryPullRequestDetail | null>(null);
+  const [targetDetailState, setTargetDetailState] =
+    useState<TargetDetailState<CodeDeliveryPullRequestDetail> | null>(null);
   const [revision, setRevision] = useState(0);
   // Set by Refresh and by a completed action; consumed by the next query that
   // actually runs. Only those two reach past the server's short list cache —
@@ -719,6 +725,7 @@ function PullRequestsSurface({
   // cross-repository read.
   const forceRefresh = useRef(false);
   const generation = useRef(0);
+  const routeSelectionFenced = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
@@ -739,9 +746,22 @@ function PullRequestsSurface({
     : null;
 
   useEffect(() => {
+    routeSelectionFenced.current = false;
     setSelectedId(null);
-    setTargetDetail(null);
+    setTargetDetailState(
+      targetKey ? { key: targetKey, pending: true, detail: null } : null,
+    );
   }, [targetKey]);
+
+  const selectItem = (id: string) => {
+    routeSelectionFenced.current = true;
+    setSelectedId(id);
+  };
+
+  const closeDetail = () => {
+    routeSelectionFenced.current = true;
+    setSelectedId(null);
+  };
 
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
@@ -759,25 +779,44 @@ function PullRequestsSurface({
         setErrors([]);
         return;
       }
-      const detailRequest: Promise<{
+      let detailRequest: Promise<{
         detail?: CodeDeliveryPullRequestDetail;
         detailError?: unknown;
-      }> =
-        !append && target
-          ? client
-              .getCodeDeliveryPullRequestDetail(target)
-              .then((detail) => {
-                if (token === generation.current) {
-                  setTargetDetail(detail);
-                  setItems((current) =>
-                    dedupeRows([detail.summary, ...current]),
-                  );
-                  setSelectedId(detail.summary.id);
-                }
-                return { detail };
-              })
-              .catch((detailError: unknown) => ({ detailError }))
-          : Promise.resolve({});
+      }> = Promise.resolve({});
+      if (!append && target && targetKey) {
+        const requestKey = targetKey;
+        setTargetDetailState((current) => ({
+          key: requestKey,
+          pending: true,
+          detail: current?.key === requestKey ? current.detail : null,
+        }));
+        detailRequest = client
+          .getCodeDeliveryPullRequestDetail(target)
+          .then((detail) => {
+            if (token === generation.current) {
+              setTargetDetailState({
+                key: requestKey,
+                pending: false,
+                detail,
+              });
+              setItems((current) => dedupeRows([detail.summary, ...current]));
+              if (!routeSelectionFenced.current) {
+                setSelectedId(detail.summary.id);
+              }
+            }
+            return { detail };
+          })
+          .catch((detailError: unknown) => {
+            if (token === generation.current) {
+              setTargetDetailState((current) =>
+                current?.key === requestKey
+                  ? { ...current, pending: false }
+                  : current,
+              );
+            }
+            return { detailError };
+          });
+      }
       const page = await client.queryCodeDeliveryPullRequests({
         repositories: selectedRepositories,
         search: filters.search.trim() || undefined,
@@ -901,7 +940,7 @@ function PullRequestsSurface({
             <PullRequestList
               items={items}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectItem}
               scrollRef={scrollRef}
             />
             {nextCursor && (
@@ -921,15 +960,29 @@ function PullRequestsSurface({
           </>
         )}
       </div>
-      {selected && (
+      {selected &&
+      target &&
+      targetDetailState?.key === targetKey &&
+      targetDetailState.pending &&
+      !targetDetailState.detail &&
+      pullRequestMatchesTarget(selected, target) ? (
+        <PendingDetailPanel
+          context={`${selected.repository.name_with_owner} #${selected.number}`}
+          title={selected.title}
+          closeLabel="Close pull request details"
+          onClose={closeDetail}
+        />
+      ) : selected ? (
         <PullRequestDetailPanel
           key={selected.id}
           client={client}
           summary={selected}
           initialDetail={
-            targetDetail?.summary.id === selected.id ? targetDetail : undefined
+            targetDetailState?.detail?.summary.id === selected.id
+              ? targetDetailState.detail
+              : undefined
           }
-          onClose={() => setSelectedId(null)}
+          onClose={closeDetail}
           onChanged={() => {
             forceRefresh.current = true;
             setRevision((value) => value + 1);
@@ -941,7 +994,7 @@ function PullRequestsSurface({
             })
           }
         />
-      )}
+      ) : null}
     </DeliverySplit>
   );
 }
@@ -975,8 +1028,8 @@ function RunsSurface({
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [targetDetail, setTargetDetail] =
-    useState<CodeDeliveryRunDetail | null>(null);
+  const [targetDetailState, setTargetDetailState] =
+    useState<TargetDetailState<CodeDeliveryRunDetail> | null>(null);
   const [revision, setRevision] = useState(0);
   // Set by Refresh and by a completed action; consumed by the next query that
   // actually runs. Only those two reach past the server's short list cache —
@@ -984,6 +1037,7 @@ function RunsSurface({
   // cross-repository read.
   const forceRefresh = useRef(false);
   const generation = useRef(0);
+  const routeSelectionFenced = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
@@ -1004,9 +1058,22 @@ function RunsSurface({
     : null;
 
   useEffect(() => {
+    routeSelectionFenced.current = false;
     setSelectedId(null);
-    setTargetDetail(null);
+    setTargetDetailState(
+      targetKey ? { key: targetKey, pending: true, detail: null } : null,
+    );
   }, [targetKey]);
+
+  const selectItem = (id: string) => {
+    routeSelectionFenced.current = true;
+    setSelectedId(id);
+  };
+
+  const closeDetail = () => {
+    routeSelectionFenced.current = true;
+    setSelectedId(null);
+  };
 
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
@@ -1024,25 +1091,44 @@ function RunsSurface({
         setErrors([]);
         return;
       }
-      const detailRequest: Promise<{
+      let detailRequest: Promise<{
         detail?: CodeDeliveryRunDetail;
         detailError?: unknown;
-      }> =
-        !append && target
-          ? client
-              .getCodeDeliveryRunDetail(target)
-              .then((detail) => {
-                if (token === generation.current) {
-                  setTargetDetail(detail);
-                  setItems((current) =>
-                    dedupeRows([detail.summary, ...current]),
-                  );
-                  setSelectedId(detail.summary.id);
-                }
-                return { detail };
-              })
-              .catch((detailError: unknown) => ({ detailError }))
-          : Promise.resolve({});
+      }> = Promise.resolve({});
+      if (!append && target && targetKey) {
+        const requestKey = targetKey;
+        setTargetDetailState((current) => ({
+          key: requestKey,
+          pending: true,
+          detail: current?.key === requestKey ? current.detail : null,
+        }));
+        detailRequest = client
+          .getCodeDeliveryRunDetail(target)
+          .then((detail) => {
+            if (token === generation.current) {
+              setTargetDetailState({
+                key: requestKey,
+                pending: false,
+                detail,
+              });
+              setItems((current) => dedupeRows([detail.summary, ...current]));
+              if (!routeSelectionFenced.current) {
+                setSelectedId(detail.summary.id);
+              }
+            }
+            return { detail };
+          })
+          .catch((detailError: unknown) => {
+            if (token === generation.current) {
+              setTargetDetailState((current) =>
+                current?.key === requestKey
+                  ? { ...current, pending: false }
+                  : current,
+              );
+            }
+            return { detailError };
+          });
+      }
       const page = await client.queryCodeDeliveryRuns({
         repositories: selectedRepositories,
         search: filters.search.trim() || undefined,
@@ -1171,7 +1257,7 @@ function RunsSurface({
             <RunList
               items={items}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectItem}
               scrollRef={scrollRef}
             />
             {nextCursor && (
@@ -1191,14 +1277,30 @@ function RunsSurface({
           </>
         )}
       </div>
-      {selected && (
+      {selected &&
+      target &&
+      targetDetailState?.key === targetKey &&
+      targetDetailState.pending &&
+      !targetDetailState.detail &&
+      runMatchesTarget(selected, target) ? (
+        <PendingDetailPanel
+          context={`${selected.repository.name_with_owner} ${
+            selected.kind === "deployment" ? "Deployment" : "Action"
+          }`}
+          title={selected.name}
+          closeLabel="Close run details"
+          onClose={closeDetail}
+        />
+      ) : selected ? (
         <RunDetailPanel
           key={selected.id}
           summary={selected}
           initialDetail={
-            targetDetail?.summary.id === selected.id ? targetDetail : undefined
+            targetDetailState?.detail?.summary.id === selected.id
+              ? targetDetailState.detail
+              : undefined
           }
-          onClose={() => setSelectedId(null)}
+          onClose={closeDetail}
           onChanged={() => {
             forceRefresh.current = true;
             setRevision((value) => value + 1);
@@ -1210,7 +1312,7 @@ function RunsSurface({
             })
           }
         />
-      )}
+      ) : null}
     </DeliverySplit>
   );
 }
@@ -1231,6 +1333,36 @@ function DeliverySplit({
     >
       {children}
     </div>
+  );
+}
+
+function PendingDetailPanel({
+  context,
+  title,
+  closeLabel,
+  onClose,
+}: {
+  context: string;
+  title: string;
+  closeLabel: string;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="flex min-h-0 w-full flex-col border-l border-border-subtle bg-background lg:w-auto">
+      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-muted-foreground">{context}</div>
+          <h2 className="mt-1 text-base font-semibold leading-snug">{title}</h2>
+        </div>
+        <Button type="button" size="icon-xs" variant="ghost" onClick={onClose}>
+          <X />
+          <span className="sr-only">{closeLabel}</span>
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <DetailSkeleton />
+      </div>
+    </aside>
   );
 }
 
