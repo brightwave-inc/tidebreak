@@ -93,6 +93,9 @@ import {
   type CodeWorkspaceBlob,
   type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
+  type CodeTriggerAction,
+  type CodeTriggerCondition,
+  type CodeTriggerSnapshot,
   type CodeWatchSnapshot,
   type CodePrCommentsSnapshot,
   type CodePrMergeMethod,
@@ -160,6 +163,8 @@ import {
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
+  parseCodeTrigger,
+  parseCodeTriggers,
   parseCodeWatch,
   parseCodePrComments,
   parseHarnessModelList,
@@ -2460,6 +2465,68 @@ export class ApiClient {
         ),
       ),
       "code pull request",
+    );
+  }
+
+  /** Triggers armed on a repository, enabled or not. */
+  async listCodeTriggers(repoId: string): Promise<CodeTriggerSnapshot[]> {
+    return requireParsed(
+      parseCodeTriggers(
+        await this.json(`/code/repos/${encodeURIComponent(repoId)}/triggers`, {
+          headers: this.headers(),
+        }),
+      ),
+      "code triggers",
+    );
+  }
+
+  /**
+   * Arm a trigger. Re-arming a condition updates the rule already there
+   * rather than adding a second one, so this is safe to call twice.
+   */
+  async createCodeTrigger(
+    repoId: string,
+    condition: CodeTriggerCondition,
+    action: CodeTriggerAction,
+  ): Promise<CodeTriggerSnapshot> {
+    return requireParsed(
+      parseCodeTrigger(
+        await this.json(`/code/repos/${encodeURIComponent(repoId)}/triggers`, {
+          method: "POST",
+          headers: this.headers(),
+          body: JSON.stringify({ condition, action }),
+        }),
+      ),
+      "code trigger",
+    );
+  }
+
+  /** Switch a trigger on or off. The rule survives either way. */
+  async setCodeTriggerEnabled(
+    repoId: string,
+    triggerId: string,
+    enabled: boolean,
+  ): Promise<CodeTriggerSnapshot> {
+    return requireParsed(
+      parseCodeTrigger(
+        await this.json(
+          `/code/repos/${encodeURIComponent(repoId)}/triggers/${encodeURIComponent(triggerId)}`,
+          {
+            method: "PATCH",
+            headers: this.headers(),
+            body: JSON.stringify({ enabled }),
+          },
+        ),
+      ),
+      "code trigger",
+    );
+  }
+
+  /** Remove a trigger. Its recorded fires stay in the transcript. */
+  deleteCodeTrigger(repoId: string, triggerId: string): Promise<void> {
+    return this.json(
+      `/code/repos/${encodeURIComponent(repoId)}/triggers/${encodeURIComponent(triggerId)}`,
+      { method: "DELETE", headers: this.headers() },
     );
   }
 
