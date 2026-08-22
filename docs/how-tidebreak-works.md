@@ -109,15 +109,18 @@ The main local data is easy to recognize:
 A schema change is an appended migration, so local data survives it
 ([decision 61](decisions/0061-schema-changes-are-migrations.md)). The marker
 records which pin the profile holds. A profile at the pin is kept and its
-marker re-stamped; a profile below it predates the migration chain and holds a
-schema nothing recorded, so opening it rebuilds `tidebreak.db` and its SQLite
-journals once, and never again. Startup also removes the retired `vectors/`
-directory when it is safe to open the current schema. Code worktrees are the exception to "rebuilt": they live
-outside the data directory because they hold uncommitted user work, so a reset
-records them in `orphaned-code-worktrees.json` and leaves the trees, their
-`.git/worktrees` entries, and their branches alone. Unknown, newer, or post-v1 lifecycle markers fail closed so
-a prerelease binary cannot silently erase a future stable database, and the
-destructive path is disabled at runtime for package major version 1 and later.
+marker re-stamped. A profile below the pin predates the migration chain and
+holds a schema nothing recorded, so opening it rebuilds `tidebreak.db` and its
+SQLite journals once, and never again. Startup also removes the retired
+`vectors/` directory when it is safe to open the current schema.
+
+Code worktrees are the exception to "rebuilt": they live outside the data
+directory because they hold uncommitted user work, so a reset records them in
+`orphaned-code-worktrees.json` and leaves the trees, their `.git/worktrees`
+entries, and their branches alone. Unknown or newer lifecycle markers fail
+closed so a prerelease binary cannot silently erase a future stable database,
+and the destructive path is disabled at runtime for package major version 1
+and later.
 
 Source bytes under `blobs/` are physically retained during the reset, but their
 database records are gone. They are therefore unreachable through the product
