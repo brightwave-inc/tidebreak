@@ -906,12 +906,12 @@ export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullReques
  * Full PR drawer payload. Conversation entries retain the existing bounded
  * comment contract used by workspace PRs.
  */
-export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string,
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string, 
 /**
  * Empty when the diff could not be read. Truncated by `files_truncated`
  * rather than paged: the panel is a review aid, not a diff viewer.
  */
-files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>,
+files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>, 
 /**
  * Section reads that failed after the pull request itself loaded.
  */
@@ -980,7 +980,7 @@ export type CodeDeliveryRunActionBody = { target: CodeDeliveryRunTarget, action:
 
 export type CodeDeliveryRunAttentionReason = "failure" | "timed_out" | "action_required" | "startup_failure";
 
-export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean,
+export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean, 
 /**
  * Section reads that failed after the run or deployment itself loaded.
  */
