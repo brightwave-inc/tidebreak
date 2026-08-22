@@ -11,6 +11,9 @@ import type {
   CodeSessionActivity,
   CodeSessionLifecycle,
   CodeSessionKind,
+  CodeTriggerAction,
+  CodeTriggerCondition,
+  CodeTriggerSnapshot,
   CodeWatchState,
   CodeSessionSnapshot,
   CodeFileChange,
@@ -97,6 +100,7 @@ import type {
   ImageRef as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
+  CodeTriggerSnapshot as WireCodeTriggerSnapshot,
   CodeWatchSnapshot as WireCodeWatchSnapshot,
   CodeActionSnapshot as WireCodeActionSnapshot,
   CodeCommitSnapshot as WireCodeCommitSnapshot,
@@ -1537,6 +1541,73 @@ export function parseCodeWatch(value: unknown): CodeWatchSnapshot | null {
     updated_at: value.updated_at,
     ...(value.detail !== undefined ? { detail: value.detail } : {}),
   };
+}
+
+const TRIGGER_CONDITIONS = new Set<CodeTriggerCondition>([
+  "checks_failed",
+  "conflicts",
+  "changes_requested",
+  "review_required",
+  "behind",
+  "ready_to_merge",
+  "merged",
+  "closed",
+]);
+
+const TRIGGER_ACTIONS = new Set<CodeTriggerAction>(["deliver", "notify"]);
+
+export function parseCodeTrigger(value: unknown): CodeTriggerSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeTriggerSnapshot>(value, [
+      "id",
+      "repo_id",
+      "condition",
+      "action",
+      "enabled",
+      "created_at",
+      "updated_at",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.repo_id) ||
+    !isMember(value.condition, TRIGGER_CONDITIONS) ||
+    !isMember(value.action, TRIGGER_ACTIONS) ||
+    typeof value.enabled !== "boolean" ||
+    !nonEmpty(value.created_at) ||
+    !nonEmpty(value.updated_at)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    repo_id: value.repo_id,
+    condition: value.condition,
+    action: value.action,
+    enabled: value.enabled,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+  };
+}
+
+/**
+ * A list where one bad row fails the whole read: a partially parsed rule set
+ * would silently show fewer triggers than are actually armed.
+ */
+export function parseCodeTriggers(
+  value: unknown,
+): CodeTriggerSnapshot[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const triggers: CodeTriggerSnapshot[] = [];
+  for (const item of value) {
+    const trigger = parseCodeTrigger(item);
+    if (!trigger) {
+      return null;
+    }
+    triggers.push(trigger);
+  }
+  return triggers;
 }
 
 const PR_COMMENT_KINDS = new Set<PullRequestCommentKind>([

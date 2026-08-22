@@ -155,6 +155,9 @@ import {
   type CodeWorkspaceTree as WireCodeWorkspaceTree,
   type CodeWorkspaceBlob as WireCodeWorkspaceBlob,
   type CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
+  type CodeTriggerAction as WireCodeTriggerAction,
+  type CodeTriggerCondition as WireCodeTriggerCondition,
+  type CodeTriggerSnapshot as WireCodeTriggerSnapshot,
   type CodeWatchSnapshot as WireCodeWatchSnapshot,
   type CodeWatchState as WireCodeWatchState,
   type CodeActionSnapshot as WireCodeActionSnapshot,
@@ -1167,6 +1170,9 @@ export type CodeWorkspaceBlob = WireCodeWorkspaceBlob;
 export type CodeWorkspaceDiff = WireCodeWorkspaceDiff;
 export type CodeWorkspacePrSnapshot = WireCodeWorkspacePrSnapshot;
 /** One durable watch task on a workspace's pull request. */
+export type CodeTriggerAction = WireCodeTriggerAction;
+export type CodeTriggerCondition = WireCodeTriggerCondition;
+export type CodeTriggerSnapshot = WireCodeTriggerSnapshot;
 export type CodeWatchSnapshot = WireCodeWatchSnapshot;
 export type CodeWatchState = WireCodeWatchState;
 export type CodeSessionActivity = WireCodeSessionActivity;
