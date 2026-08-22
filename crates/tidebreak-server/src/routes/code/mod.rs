@@ -75,12 +75,12 @@ pub(crate) use types::{
     CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
     CodeForkTranscript, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
     CodeRepoSnapshot, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
-    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTurnSnapshot,
-    CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
+    CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot,
-    CodeWorkspaceTree, CodeWorktreeRoot, HarnessDoctorReport, HarnessModelList, MergeCodePrBody,
-    QueuedCodeTurn, ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame,
-    SetCodeWorktreeRootBody,
+    CodeWorkspaceTree, CodeWorktreeRoot, CreateCodeTriggerBody, HarnessDoctorReport,
+    HarnessModelList, MergeCodePrBody, QueuedCodeTurn, ResolveCodeDeliveryRepositoriesBody,
+    SequencedCodeEventFrame, SetCodeWorktreeRootBody, UpdateCodeTriggerBody,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;
