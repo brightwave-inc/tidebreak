@@ -533,6 +533,42 @@ test("merge queue groups re-run required CI", () => {
   assert.match(prTitle, /github\.event_name == 'merge_group'/);
 });
 
+// A main push that a newer commit has already replaced must not keep an
+// expensive lane busy. Two shapes stop it. A concurrency group cancels the
+// older run. A guard step reads main's tip and skips the run instead, which is
+// the shape that also keeps the lane off main's commit list: GitHub rolls a
+// cancelled check up as a red X on a commit whose own checks all passed.
+function cancelsSupersededPush(job, group) {
+  return (
+    new RegExp(
+      `group: \\$\\{\\{ github\\.event_name == 'push' && '${group}'`,
+    ).test(job) &&
+    /cancel-in-progress: \$\{\{ github\.event_name == 'push' \}\}/.test(job)
+  );
+}
+
+// The guard shape only holds if every step the guard exists to avoid is gated
+// on it. One ungated expensive step and a superseded run does its work anyway.
+function skipsSupersededPush(job) {
+  const guard =
+    /^ {6}- name: [^\n]*\n {8}id: tip\n {8}if: \$\{\{ github\.event_name == 'push' \}\}\n/m.exec(
+      job,
+    );
+  if (!guard) return false;
+  if (!/repos\/\$GITHUB_REPOSITORY\/commits\/main/.test(job)) return false;
+  if (!/superseded=true/.test(job)) return false;
+  const rest = job.slice(guard.index + guard[0].length);
+  const steps = rest.split(/\n(?= {6}- )/).slice(1);
+  return (
+    steps.length > 0 &&
+    steps.every((step) =>
+      /\n {8}if: \$\{\{ steps\.tip\.outputs\.superseded != 'true' \}\}/.test(
+        step,
+      ),
+    )
+  );
+}
+
 test("native Windows CI is scope-triggered, label-overridable, with a main backstop", () => {
   const ci = workflows["ci.yml"];
   const windows = workflowJob(ci, "windows-check");
@@ -576,13 +612,10 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
       `${boundary} must set the Windows scope`,
     );
   }
-  assert.match(
-    windows,
-    /group: \$\{\{ github\.event_name == 'push' && 'windows-check-main' \|\| format\('windows-check-run-\{0\}', github\.run_id\) \}\}/,
-  );
-  assert.match(
-    windows,
-    /cancel-in-progress: \$\{\{ github\.event_name == 'push' \}\}/,
+  assert.ok(
+    cancelsSupersededPush(windows, "windows-check-main") ||
+      skipsSupersededPush(windows),
+    "a superseded main push must stop the Windows lane",
   );
   assert.match(windows, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(windows, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
@@ -2176,7 +2209,13 @@ test("the packaged updater trusts the production signing key and endpoint", () =
 test("staging desktop publishes only under the staging prefix", () => {
   const staging = workflows["staging.yml"];
   assert.ok(staging);
-  assert.match(staging, /^on:\n  push:\n    branches: \[main\]/m);
+  // Staging builds main, either on every relevant push or on a poll of main's
+  // tip. It must never build a pull request's code.
+  assert.ok(
+    /^on:\n  push:\n    branches: \[main\]/m.test(staging) ||
+      /^on:\n(?:  #[^\n]*\n)*  schedule:\n    - cron: "[^"]+"$/m.test(staging),
+    "staging must build main",
+  );
   assert.match(staging, /^  workflow_dispatch:$/m);
   assert.doesNotMatch(staging, /^\s*pull_request(?:_target)?:/m);
   assert.match(staging, /^permissions:\n  contents: read$/m);
