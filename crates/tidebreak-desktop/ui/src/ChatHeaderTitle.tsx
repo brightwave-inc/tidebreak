@@ -5,7 +5,7 @@ import type { Chat } from "./api";
 import { useApp } from "./AppContext";
 import { chatDebugDeps, copyChatDebug, saveChatDebug } from "./ChatDebugBundle";
 import { useChatListStore } from "./ChatListStore";
-import { hasNativeHost } from "./host";
+import { hasLocalHostAuthority } from "./host";
 import { useTypewriterOnce } from "./useTypewriterOnce";
 import { Input } from "@/components/ui/input";
 import {
@@ -111,9 +111,11 @@ export function ChatHeaderTitle({ chat }: { chat: Chat }) {
             <Pencil />
             Rename
           </DropdownMenuItem>
-          {/* Diagnostics need the native host to read the journal, so they are
-              absent in a browser build rather than shown and broken. */}
-          {hasNativeHost() && (
+          {/* Diagnostics are rendered natively from the event journal on this
+              computer. A browser build has no journal, and an attached window
+              has the wrong one, so both leave the rows out rather than show
+              them and refuse. */}
+          {hasLocalHostAuthority() && (
             <>
               <DropdownMenuSeparator />
               <DropdownMenuItem

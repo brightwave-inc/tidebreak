@@ -1,7 +1,15 @@
 import type { ExecConfigInfo } from "./api";
+import { hostMachineLabel } from "./remoteMachine";
 
-export const MANAGED_EXECUTION_DISCLOSURE =
-  "Code execution runs in an E2B or Daytona cloud sandbox on this device. Files staged for a run leave this machine and are uploaded to that provider.";
+/**
+ * Where code actually runs when the host has no native sandbox, and what
+ * leaves with it. Named at read time rather than fixed at module load: the
+ * files staged for a run leave whichever machine this window works on.
+ */
+export function managedExecutionDisclosure(): string {
+  const host = hostMachineLabel();
+  return `Code execution runs in an E2B or Daytona cloud sandbox rather than on ${host}. Files staged for a run leave ${host} and are uploaded to that provider.`;
+}
 
 /**
  * Whether this host has no native execution path and therefore must use a

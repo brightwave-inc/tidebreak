@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
+import { hostMachineLabel } from "@/remoteMachine";
 import {
   SettingsError,
   SettingsField,
@@ -617,7 +618,7 @@ export function McpPanel({
 
   return (
     <McpKindSection
-      description="Connect local stdio tool servers or remote HTTP endpoints without a shell or a desktop restart."
+      description={`Connect stdio tool servers that run on ${hostMachineLabel()}, or remote HTTP endpoints, without a shell or a desktop restart.`}
       busy={loading || working}
     >
       {endpointsSection}
@@ -717,7 +718,7 @@ export function McpPanel({
                         >
                           <RadioGroupItem value={transport} />
                           {transport === "stdio"
-                            ? "Local process (stdio)"
+                            ? `Process on ${hostMachineLabel()} (stdio)`
                             : "Remote endpoint (HTTP)"}
                         </Label>
                       ))}
@@ -729,7 +730,7 @@ export function McpPanel({
                   <>
                     <SettingsField
                       label="Executable"
-                      hint="An executable path or command name. Tidebreak never invokes a shell."
+                      hint={`A path or command name on ${hostMachineLabel()}, where the process runs. Tidebreak never invokes a shell.`}
                     >
                       <Input
                         value={server.command ?? ""}

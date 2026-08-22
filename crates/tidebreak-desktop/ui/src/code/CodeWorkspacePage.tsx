@@ -45,6 +45,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 
 import { useApp } from "@/AppContext";
 import { copyPlainText } from "@/ClipboardCopyButton";
+import { attachedRemotely } from "@/host";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -876,6 +877,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const openTerminalCount = codeTerminalIds(layout).length;
   const hasTerminal = findCodeTerminalTab(layout) !== null;
   const canNewTerminal = openTerminalCount < MAX_WORKSPACE_TERMINALS;
+  // The browser opens as a child webview on this computer. A window working on
+  // another machine has no such screen to lend — sharing one with an agent that
+  // is not here shares the wrong browser — so the row is absent rather than
+  // present and refusing.
+  const canNewBrowser = !attachedRemotely();
 
   function editorPanel(
     panel: PanelContent,
@@ -1010,7 +1016,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         }
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("primary")}
-        onNewBrowser={() => openBrowser(undefined, "primary")}
+        onNewBrowser={
+          canNewBrowser ? () => openBrowser(undefined, "primary") : undefined
+        }
         onNewDiff={() =>
           setWorkspaceLayout(
             openCodeEditor(layout, { type: "diff" }, "primary"),
@@ -1172,7 +1180,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         }
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("secondary")}
-        onNewBrowser={() => openBrowser(undefined, "secondary")}
+        onNewBrowser={
+          canNewBrowser ? () => openBrowser(undefined, "secondary") : undefined
+        }
         onNewDiff={() =>
           setWorkspaceLayout(
             openCodeEditor(layout, { type: "diff" }, "secondary"),

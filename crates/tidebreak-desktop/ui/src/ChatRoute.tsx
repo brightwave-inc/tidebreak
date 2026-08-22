@@ -41,14 +41,19 @@ import { OutputsView } from "./outputs/OutputsView";
 import { DocumentDetailRoot } from "./document-detail/DocumentDetailRoot";
 import { warmPresentationConverter } from "./document/officePdf";
 import { FoldersView } from "./FoldersView";
-import { hasNativeHost } from "./host";
+import { hasLocalHostAuthority, hasNativeHost } from "./host";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import { foregroundBrowserScope } from "./code/browser/foregroundBrowserScope";
 import { seedBrowserSession } from "./code/browser/browserPersistence";
 
 import { friendlyErrorMessage } from "./lib/utils";
-import { attachChatFiles, type AttachedFiles } from "./attachments";
+import {
+  attachChatFiles,
+  attachHeldChatFiles,
+  pickHeldFiles,
+  type AttachedFiles,
+} from "./attachments";
 import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
 import { DocumentDropTarget } from "./DocumentDropTarget";
 import {
@@ -574,9 +579,18 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * Which of the two things each file becomes — pixels for the model, or a
    * parsed and readable source — is decided by the host from the bytes, so
    * nothing here has to guess from a name or ask the reader to know first.
+   *
+   * The host route needs the conversation to be on this computer, because it
+   * imports into the store inside this app. A window attached to a machine
+   * takes the browser's own picker instead and posts the bytes to the machine
+   * that holds the conversation — the same operation, aimed at the right host.
    */
   async function onAttach() {
     if (attaching || deletingChatId !== null) return;
+    if (!hasLocalHostAuthority()) {
+      await attachHeldFiles();
+      return;
+    }
     if (!useNativePickerLatch.getState().claim(PICKER_HOLDERS.importSource)) {
       setAttachError(PICKER_BUSY_MESSAGE);
       return;
@@ -591,6 +605,44 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       setAttachError(friendlyAttachError(err));
     } finally {
       useNativePickerLatch.getState().release(PICKER_HOLDERS.importSource);
+      setAttaching(false);
+    }
+  }
+
+  /**
+   * Attach through the browser, for a window whose conversation is elsewhere.
+   *
+   * Nothing is marked as attaching until files are actually chosen, so a
+   * dismissed picker leaves no spinner to clear. Images take the composer's
+   * upload path, which gives them progress and a retry; sources are posted to
+   * the machine and adopted through the same code the host route uses.
+   */
+  async function attachHeldFiles() {
+    const chosen = await pickHeldFiles();
+    if (chosen.length === 0) return;
+    setAttaching(true);
+    setAttachError(null);
+    const room = Math.max(
+      0,
+      MAX_IMAGE_ATTACHMENTS - images.attachments.length - files.length,
+    );
+    const picked = chosen.slice(0, room);
+    try {
+      const held = await attachHeldChatFiles(client, chatId, picked);
+      if (held.images.length > 0) images.attachFiles(held.images);
+      adoptAttached({
+        images: [],
+        documents: held.documents,
+        failedImages: [],
+      });
+      if (picked.length < chosen.length) {
+        setAttachError(
+          `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+        );
+      }
+    } catch (err) {
+      setAttachError(friendlyAttachError(err));
+    } finally {
       setAttaching(false);
     }
   }
@@ -751,7 +803,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           files={{
             items: files,
             attaching,
-            onAttach: hasNativeHost() ? onAttach : undefined,
+            onAttach,
             onReattach: onReattachFile,
             onRemove: (documentId) =>
               setComposerFiles((current) =>
@@ -998,7 +1050,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               onOpenFolders={() => openPanel({ type: "folders" })}
               onOpenPermissions={() => openPanel({ type: "permissions" })}
               onOpenAgents={() => openPanel({ type: "agents" })}
-              onOpenBrowser={nativeHost ? () => openBrowser() : undefined}
+              onOpenBrowser={
+                hasLocalHostAuthority() ? () => openBrowser() : undefined
+              }
             />
           </div>
         </header>

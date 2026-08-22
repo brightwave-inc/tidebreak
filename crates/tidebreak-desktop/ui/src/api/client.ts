@@ -1202,6 +1202,36 @@ export class ApiClient {
     );
   }
 
+  /**
+   * Publish one file the renderer is already holding as a source on this chat.
+   *
+   * The native picker route reads the bytes in the host and imports them into
+   * the store inside this app. That is the wrong store while this window works
+   * on another machine, so a window in that state posts the bytes here instead
+   * and the machine that owns the conversation parses them.
+   *
+   * The media type decides which parser runs. A browser leaves `File.type`
+   * empty for a name it does not recognize, and the route refuses an empty
+   * `Content-Type`, so an unrecognized file is declared as opaque bytes and
+   * retained without extracted text rather than refused outright.
+   */
+  ingestChatDocument(
+    chatId: string,
+    file: File,
+  ): Promise<{ document_id: string }> {
+    return this.json(
+      `/chats/${encodeURIComponent(chatId)}/documents/raw?title=${encodeURIComponent(file.name)}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": file.type || "application/octet-stream",
+        },
+        body: file,
+      },
+    );
+  }
+
   /** One source's extracted text and catalog metadata. */
   getChatDocument(chatId: string, documentId: string): Promise<DocumentDetail> {
     return this.json(

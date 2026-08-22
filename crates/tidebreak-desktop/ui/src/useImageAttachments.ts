@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import type { ApiClient } from "./api";
 import { publishChatImage, publishCodeImage } from "./attachments";
 import { useComposerDrafts } from "./ComposerDrafts";
-import { hasNativeHost } from "./host";
+import { hasLocalHostAuthority } from "./host";
 import {
   imageAttachmentName,
   imageAttachmentRejection,
@@ -162,12 +162,16 @@ export function useImageAttachments(
    * over IPC for the host to publish. In a browser — `pnpm dev`, and the UI
    * tests — the same endpoint sits on the renderer's own bearer, and posting it
    * directly is what gives the chip real byte progress.
+   *
+   * A window attached to a remote machine takes the browser route too. The
+   * host would publish into the store on this computer, where the conversation
+   * does not exist, so the bytes have to go to the machine that holds it.
    */
   async function publish(id: string, file: File, signal: AbortSignal) {
     const chatId = publishTargetRef.current
       ? await publishTargetRef.current()
       : draftKey;
-    if (!hasNativeHost()) {
+    if (!hasLocalHostAuthority()) {
       return uploadImageAttachment(client, chatId, file, {
         onProgress: (uploadedBytes) =>
           update((current) => withUploadProgress(current, id, uploadedBytes)),

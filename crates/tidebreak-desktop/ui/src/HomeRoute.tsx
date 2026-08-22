@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
-import { attachChatFiles } from "./attachments";
+import {
+  attachChatFiles,
+  attachHeldChatFiles,
+  pickHeldFiles,
+} from "./attachments";
 import { useChatListStore } from "./ChatListStore";
 import { Composer, type ComposerImages } from "./Composer";
 import {
@@ -14,7 +18,7 @@ import {
 import { type ImportedDocument, type LibraryImportSuccess } from "./documents";
 import { DocumentDropTarget } from "./DocumentDropTarget";
 import { useFirstMessage } from "./FirstMessage";
-import { hasNativeHost } from "./host";
+import { hasLocalHostAuthority } from "./host";
 import { ModelMenu, useModelSettingsNav } from "./ModelMenu";
 import { modelForSelection, textOnlyModelLabel } from "./ModelSelection";
 import {
@@ -225,8 +229,18 @@ export function HomeRoute() {
     return created.id;
   }
 
+  /**
+   * The host picker imports into the store inside this app, which is not where
+   * the conversation lives while this window is attached to a machine. That
+   * window takes the browser's own picker and posts the bytes to the machine
+   * instead, so the attach succeeds rather than failing once files are chosen.
+   */
   async function onAttach() {
     if (attaching || creatingChat) return;
+    if (!hasLocalHostAuthority()) {
+      await attachHeldFiles();
+      return;
+    }
     setAttaching(true);
     setAttachError(null);
     try {
@@ -234,6 +248,46 @@ export function HomeRoute() {
       const attached = await attachChatFiles(chatId);
       if (!attached) return;
       adoptAttached(attached);
+    } catch (err) {
+      setAttachError(
+        String(err)
+          .replace(/^Error:\s*/, "")
+          .trim() || "Could not attach that file.",
+      );
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  /**
+   * Nothing is marked as attaching until files are chosen, so a dismissed
+   * picker leaves no spinner behind — and no conversation is created for a
+   * selection the reader abandoned.
+   */
+  async function attachHeldFiles() {
+    const chosen = await pickHeldFiles();
+    if (chosen.length === 0) return;
+    setAttaching(true);
+    setAttachError(null);
+    const room = Math.max(
+      0,
+      MAX_IMAGE_ATTACHMENTS - pendingImages.length - pendingFiles.length,
+    );
+    const picked = chosen.slice(0, room);
+    try {
+      const chatId = await ensurePendingChat();
+      const held = await attachHeldChatFiles(client, chatId, picked);
+      if (held.images.length > 0) images.attachFiles(held.images);
+      adoptAttached({
+        images: [],
+        documents: held.documents,
+        failedImages: [],
+      });
+      if (picked.length < chosen.length) {
+        setAttachError(
+          `A message can carry at most ${MAX_IMAGE_ATTACHMENTS} attachments.`,
+        );
+      }
     } catch (err) {
       setAttachError(
         String(err)
@@ -447,7 +501,7 @@ export function HomeRoute() {
               files={{
                 items: pendingFiles,
                 attaching,
-                onAttach: hasNativeHost() ? onAttach : undefined,
+                onAttach,
                 onRemove: (documentId) =>
                   setPendingFiles((current) =>
                     current.filter((file) => file.documentId !== documentId),

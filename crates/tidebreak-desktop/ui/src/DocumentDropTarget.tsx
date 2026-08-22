@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 
 import { attachDroppedChatFiles, type AttachedFiles } from "./attachments";
-import { hasNativeHost } from "./host";
+import { hasLocalHostAuthority, hasNativeHost } from "./host";
 
 type DropPhase = "enter" | "leave" | "dropped";
 
@@ -52,7 +52,7 @@ export function DocumentDropTarget({
       }
       if (next.phase === "dropped") {
         setState(null);
-        if (next.accepted) {
+        if (next.accepted && hasLocalHostAuthority()) {
           void (async () => {
             // Unmounting during this round trip cannot call the conversation
             // back: it is already created, and it shows up in the sidebar
@@ -80,23 +80,36 @@ export function DocumentDropTarget({
   }, []);
 
   if (!state) return null;
+  // A dropped path is a path on this computer, and the host reads it into the
+  // store inside this app. Neither is where the conversation is while this
+  // window works on a machine, so the overlay says so before the reader lets
+  // go rather than failing the import after they have.
+  const accepted = state.accepted && hasLocalHostAuthority();
   return (
     <div
-      className={`absolute inset-0 z-20 flex flex-col items-center justify-center rounded-xl border-2 border-dashed bg-background/95 px-4 text-center ${state.accepted ? "border-primary" : "border-destructive"}`}
+      className={`absolute inset-0 z-20 flex flex-col items-center justify-center rounded-xl border-2 border-dashed bg-background/95 px-4 text-center ${accepted ? "border-primary" : "border-destructive"}`}
       aria-live="assertive"
     >
-      <strong>
-        {state.accepted
-          ? `Attach ${dropItemCountCopy(state.fileCount)}`
-          : "Only regular files and folders can be attached"}
-      </strong>
+      <strong>{dropHeadline(state, accepted)}</strong>
       <span className="text-xs text-muted-foreground">
-        {state.accepted
-          ? "Release to add them to this message."
-          : "Aliases and unavailable items cannot be imported."}
+        {dropDetail(state, accepted)}
       </span>
     </div>
   );
+}
+
+function dropHeadline(state: DropState, accepted: boolean): string {
+  if (accepted) return `Attach ${dropItemCountCopy(state.fileCount)}`;
+  if (state.accepted) return "These files are on this computer";
+  return "Only regular files and folders can be attached";
+}
+
+function dropDetail(state: DropState, accepted: boolean): string {
+  if (accepted) return "Release to add them to this message.";
+  if (state.accepted) {
+    return "Your conversation is on another machine. Use Attach files in the Tools menu to send them to it.";
+  }
+  return "Aliases and unavailable items cannot be imported.";
 }
 
 export function parseDropState(value: unknown): DropState | null {

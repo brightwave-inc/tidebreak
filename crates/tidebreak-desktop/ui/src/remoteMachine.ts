@@ -6,7 +6,7 @@ import type {
   RemoteMachineState,
 } from "./api";
 import type { HostAuthority } from "./host";
-import { hostAuthorityRefusal } from "./host";
+import { attachedRemotely, hostAuthorityRefusal } from "./host";
 import { friendlyErrorMessage } from "./lib/utils";
 
 /**
@@ -96,6 +96,18 @@ const CONNECT_COPY: Record<RemoteConnectReason, string> = {
 
 export function connectFailureMessage(error: RemoteConnectError): string {
   return CONNECT_COPY[error.reason];
+}
+
+/**
+ * What to call the computer a settings panel is describing.
+ *
+ * These panels configure the machine this window works on: this computer by
+ * default, and another one while attached. Copy that says "this machine"
+ * regardless names the wrong host, and a reader who believes it makes the
+ * wrong call about where their files, their commands, and their audio go.
+ */
+export function hostMachineLabel(): string {
+  return attachedRemotely() ? "the machine" : "this computer";
 }
 
 /** What each host capability is called where a reader can see it. */

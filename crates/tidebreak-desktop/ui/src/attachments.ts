@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { ApiClient } from "./api";
 import { parseLibraryImportBatch, type LibraryImportBatch } from "./documents";
 import {
+  isSupportedImageType,
   parseAttachedImage,
   parseHostPublishedImage,
   type PickedImage,
@@ -35,6 +37,98 @@ export async function attachChatFiles(
   return parseAttachedFiles(
     await invoke("attach_chat_files", { request: { chatId } }),
   );
+}
+
+/**
+ * What one browser selection produced.
+ *
+ * The images come back as the files themselves rather than as published
+ * identities: they take the composer's own upload path, which shows byte
+ * progress and can retry, while the native picker publishes in the host and
+ * hands back finished attachments.
+ */
+export type HeldFiles = {
+  images: File[];
+  documents: LibraryImportBatch | null;
+};
+
+/**
+ * Ask for files through the browser's own picker.
+ *
+ * Resolves with an empty list when the reader dismisses it, so nothing on the
+ * way in has to tell a dismissal from a failure.
+ */
+export function pickHeldFiles(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    // Off screen rather than hidden: a `display: none` input is not clickable
+    // in every engine, and the picker has to open from the reader's gesture.
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    document.body.append(input);
+    function settle(files: File[]) {
+      input.remove();
+      resolve(files);
+    }
+    input.addEventListener("change", () =>
+      settle(Array.from(input.files ?? [])),
+    );
+    input.addEventListener("cancel", () => settle([]));
+    input.click();
+  });
+}
+
+/**
+ * Route files the renderer already holds to the machine this window works on.
+ *
+ * This is the split the host performs on picked paths, performed here because
+ * these bytes never reach the host: pixels for the model on one side, sources
+ * to parse and cite on the other. One file that cannot be imported is reported
+ * beside the ones that were, so a bad file does not cost the reader the rest
+ * of the selection.
+ */
+export async function attachHeldChatFiles(
+  client: ApiClient,
+  chatId: string,
+  files: readonly File[],
+): Promise<HeldFiles> {
+  const images = files.filter((file) => isSupportedImageType(file.type));
+  const sources = files.filter((file) => !isSupportedImageType(file.type));
+  if (sources.length === 0) return { images, documents: null };
+  const results = await Promise.all(
+    sources.map(async (file) => {
+      try {
+        const { document_id } = await client.ingestChatDocument(chatId, file);
+        return {
+          status: "imported" as const,
+          document: {
+            documentId: document_id,
+            displayName: file.name,
+            mediaType: file.type || "application/octet-stream",
+            byteLen: file.size,
+          },
+        };
+      } catch (error) {
+        return {
+          status: "failed" as const,
+          displayName: file.name,
+          message: importFailureText(error),
+        };
+      }
+    }),
+  );
+  return { images, documents: { results } };
+}
+
+function importFailureText(error: unknown): string {
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
+  return message && message.length <= 240
+    ? message
+    : "That file could not be attached.";
 }
 
 /** Claim one just-dropped native path set and attach it to the composer. */

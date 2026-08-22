@@ -7,11 +7,12 @@ import type {
   ExecProviderKind,
 } from "../api";
 import {
-  MANAGED_EXECUTION_DISCLOSURE,
+  managedExecutionDisclosure,
   requiresManagedExecutionDisclosure,
 } from "../ExecDisclosure";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { hostMachineLabel } from "@/remoteMachine";
 import {
   ActiveProviderField,
   ProviderCredentialField,
@@ -160,7 +161,7 @@ export function ExecPanel({ client }: { client: ApiClient }) {
           {requiresManagedExecutionDisclosure(config.providers) && (
             <SettingsSection title="Where code runs">
               <p className="text-sm leading-relaxed text-muted-foreground">
-                {MANAGED_EXECUTION_DISCLOSURE}
+                {managedExecutionDisclosure()}
               </p>
             </SettingsSection>
           )}
@@ -242,12 +243,12 @@ export function ExecPanel({ client }: { client: ApiClient }) {
             Local execution confines writes to private work scratch and routes
             any granted network access through a loopback broker. E2B and
             Daytona run commands in managed cloud sandboxes and reuse their
-            workspace while it is alive. Docker runs them in a container on this
-            machine, so staged files never leave it, with the same document
-            tooling the cloud sandboxes have — but it does not yet enforce a
-            conversation's network setting. Every provider retains the same
-            direct-command, bounded-output, idempotency, and execution-consent
-            contract.
+            workspace while it is alive. Docker runs them in a container on{" "}
+            {hostMachineLabel()}, so staged files never leave it, with the same
+            document tooling the cloud sandboxes have — but it does not yet
+            enforce a conversation's network setting. Every provider retains the
+            same direct-command, bounded-output, idempotency, and
+            execution-consent contract.
           </p>
         </>
       )}
@@ -278,21 +279,24 @@ type ProviderUnavailableReason = NonNullable<
  * would change it. The codes come from the server's single availability
  * decision, so this list is exactly the set of states execution can be in —
  * the panel never guesses why a provider is dark.
+ *
+ * Read at render rather than fixed at module load: the host whose runtimes
+ * these sentences describe is the machine this window works on, not always
+ * this computer.
  */
-const PROVIDER_UNAVAILABLE_SENTENCES: Record<
+function providerUnavailableSentences(): Record<
   ProviderUnavailableReason,
   string
-> = {
-  unsupported_platform:
-    "Not supported on this operating system. Use a cloud sandbox instead — it runs the same commands with the same staged files.",
-  missing_sandbox_binary:
-    "This host is missing the sandbox binary local execution needs to confine commands.",
-  missing_credential: "Add an API key above to make this provider usable.",
-  missing_container_runtime:
-    "No container runtime was found. Install Docker (or a Docker-compatible runtime) to run commands in a container on this machine.",
-  container_runtime_unreachable:
-    "A container runtime is installed but isn't responding. Start it — Docker Desktop, or the daemon on this host — and this becomes usable.",
-};
+> {
+  const host = hostMachineLabel();
+  return {
+    unsupported_platform: `The operating system on ${host} does not support it. Use a cloud sandbox instead — it runs the same commands with the same staged files.`,
+    missing_sandbox_binary: `Local execution needs a sandbox binary that is missing from ${host}.`,
+    missing_credential: "Add an API key above to make this provider usable.",
+    missing_container_runtime: `No container runtime was found. Install Docker (or a Docker-compatible runtime) on ${host} to run commands in a container there.`,
+    container_runtime_unreachable: `A container runtime is installed but isn't responding. Start it on ${host} — Docker Desktop, or the daemon — and this becomes usable.`,
+  };
+}
 
 /**
  * Per-provider capability, stated plainly: which providers could run here at
@@ -316,7 +320,7 @@ function ProviderAvailabilityDisclosure({
               {PROVIDER_SANDBOX_LABEL[row.provider]}
             </span>
             {row.unavailable_reason &&
-              ` — ${PROVIDER_UNAVAILABLE_SENTENCES[row.unavailable_reason]}`}
+              ` — ${providerUnavailableSentences()[row.unavailable_reason]}`}
           </span>
         </div>
       ))}
@@ -445,7 +449,7 @@ function codeExecutionState(config: ExecConfigInfo | null): {
     label: "Unavailable",
     description: `${codeExecutionProviderLabel(config.provider)} is selected but cannot run: ${
       config.unavailable_reason
-        ? PROVIDER_UNAVAILABLE_SENTENCES[config.unavailable_reason]
+        ? providerUnavailableSentences()[config.unavailable_reason]
         : "the provider reported no reason."
     }`,
   };
