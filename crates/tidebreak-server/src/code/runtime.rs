@@ -176,6 +176,8 @@ pub(crate) struct CodeRuntime {
     stall_started: AtomicBool,
     watch_sweep: Mutex<Option<super::watch::WatchSweepGuard>>,
     watch_started: AtomicBool,
+    trigger_sweep: Mutex<Option<super::trigger::TriggerSweepGuard>>,
+    trigger_started: AtomicBool,
     /// Workspaces with a background naming call in flight.
     ///
     /// One call per workspace at a time; a second trigger is dropped rather
@@ -245,6 +247,8 @@ impl CodeRuntime {
             stall_started: AtomicBool::new(false),
             watch_sweep: Mutex::new(None),
             watch_started: AtomicBool::new(false),
+            trigger_sweep: Mutex::new(None),
+            trigger_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -286,6 +290,7 @@ impl CodeRuntime {
             // the sweep reads its work list from the `code_watch` table, so
             // active watches resume with no extra state.
             runtime.ensure_watch_sweep();
+            runtime.ensure_trigger_sweep();
             actions
         })
     }
@@ -343,6 +348,8 @@ impl CodeRuntime {
             stall_started: AtomicBool::new(false),
             watch_sweep: Mutex::new(None),
             watch_started: AtomicBool::new(false),
+            trigger_sweep: Mutex::new(None),
+            trigger_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -2062,6 +2069,16 @@ impl CodeRuntime {
         }
         let guard = super::watch::WatchSweepGuard::spawn(Arc::downgrade(self));
         *self.watch_sweep.lock().expect("watch sweep") = Some(guard);
+    }
+
+    /// Start the trigger sweep once. Same weak-handle shape as the watch
+    /// sweep, on its own interval so the two do not read GitHub together.
+    pub(super) fn ensure_trigger_sweep(self: &Arc<Self>) {
+        if self.trigger_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let guard = super::trigger::TriggerSweepGuard::spawn(Arc::downgrade(self));
+        *self.trigger_sweep.lock().expect("trigger sweep") = Some(guard);
     }
 
     /// End one session: mark the row ended, stop its worker, and re-assert.
