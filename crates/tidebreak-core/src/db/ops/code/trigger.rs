@@ -41,6 +41,7 @@ pub async fn trigger_delivery_accepted(
 }
 
 /// Cross an at-most-once sink boundary before an external side effect.
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_trigger_delivery(
     store: &DbStore,
     owner: &OwnerId,
