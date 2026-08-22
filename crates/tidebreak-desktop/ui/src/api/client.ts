@@ -666,6 +666,18 @@ export class ApiClient {
     return this.json("/gateway/apps", { headers: this.headers() });
   }
 
+  /**
+   * The hosted machine this profile's gateway offers, if it offers one.
+   *
+   * A hint for the address field, never a grant: attaching runs the same
+   * discovery handshake either way. An absent `url` means no prefill — a
+   * gateway that hosts no machine, one older than the field, and one that
+   * did not answer are the same answer here.
+   */
+  getGatewayMachine(): Promise<{ url?: string }> {
+    return this.json("/gateway/machine", { headers: this.headers() });
+  }
+
   syncGatewayModels(): Promise<GatewayStatus> {
     return this.json("/gateway/models/sync", {
       method: "POST",

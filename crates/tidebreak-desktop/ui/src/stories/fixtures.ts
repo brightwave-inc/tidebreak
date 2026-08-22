@@ -18,6 +18,9 @@ import type {
   HarnessDoctorEntry,
   HarnessDoctorReport,
   PendingUserQuestions,
+  GatewayApps,
+  GatewayStatus,
+  RemoteMachineState,
   TaskPlan,
   ToolActionPreview,
   WebSearchConfigInfo,
@@ -1276,4 +1279,57 @@ export const contextUsageUnmetered: ContextUsageReading = {
 export const contextUsageNoReading: ContextUsageReading = {
   ...contextUsageNormal,
   contextTokens: null,
+};
+
+/** A managed profile whose gateway is named by policy but not signed in to. */
+export const gatewaySignedOut: GatewayStatus = {
+  base_url: "https://gateway.example.com",
+  signed_in: false,
+  model_count: 0,
+  sign_in: { state: "idle" },
+};
+
+export const gatewaySignedIn: GatewayStatus = {
+  ...gatewaySignedOut,
+  signed_in: true,
+  account_hint: "abaas@example.test",
+  installation_id: "inst-4f21",
+  model_count: 4,
+  member_catalog: "v1",
+};
+
+/** Two entitled apps, one of them still waiting on its connection. */
+export const gatewayApps: GatewayApps = {
+  supported: true,
+  apps: [
+    {
+      id: "github",
+      name: "GitHub",
+      app_kind: "rest",
+      enabled: true,
+      mcp_endpoint_slugs: ["engineering"],
+      connection: "ready",
+      used_by_app_count: 2,
+    },
+    {
+      id: "salesforce",
+      name: "Salesforce",
+      app_kind: "rest",
+      enabled: true,
+      mcp_endpoint_slugs: ["revenue"],
+      connection: "not_connected",
+      used_by_app_count: 0,
+    },
+  ],
+};
+
+/** This window runs on the server inside the app — the default. */
+export const machineLocal: RemoteMachineState = {
+  attachment: "local",
+  baseUrl: null,
+};
+
+export const machineAttached: RemoteMachineState = {
+  attachment: "remote",
+  baseUrl: "https://tidebreak.example.com",
 };

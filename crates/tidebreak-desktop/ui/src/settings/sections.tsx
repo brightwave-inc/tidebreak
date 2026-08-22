@@ -12,7 +12,6 @@ import {
   ShieldCheck,
   SquareTerminal,
   Mic,
-  MonitorSmartphone,
   Terminal,
   Waypoints,
 } from "lucide-react";
@@ -27,7 +26,6 @@ import { ExecPanel } from "./ExecPanel";
 import { CompactionPanel } from "./CompactionPanel";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 import { GatewayPanel } from "./GatewayPanel";
-import { MachinePanel } from "./MachinePanel";
 import { PermissionsPanel } from "./PermissionsPanel";
 import { ModelsPanel } from "./ModelsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
@@ -199,9 +197,6 @@ export type SettingsSectionDef = {
    * deep link or a stale history entry must land on something legible — and
    * the panel itself renders its locked state. */
   managedHidden?: boolean;
-  /** Kept out of the rail on an unmanaged profile, same deep-link contract:
-   * the route resolves and the panel renders its not-connected state. */
-  unmanagedHidden?: boolean;
 };
 
 /**
@@ -224,7 +219,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: Waypoints,
     iconClass: "text-icon-cyan",
     Component: GatewaySection,
-    unmanagedHidden: true,
   },
   {
     path: "models",
@@ -292,16 +286,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     iconClass: "text-icon-green",
     Component: PermissionsSection,
   },
-  // Last among the substantive sections: attaching to another machine changes
-  // what every section above it is configuring, so a reader meets them in
-  // their default meaning first.
-  {
-    path: "machine",
-    label: "Machine",
-    icon: MonitorSmartphone,
-    iconClass: "text-icon-cyan",
-    Component: MachinePanel,
-  },
   {
     path: "appearance",
     label: "Appearance",
@@ -324,13 +308,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
  * A managed profile has no bring-your-own credentials to manage, so the
  * Providers section is dropped and the Model Gateway — the one place its
  * models and session come from — becomes the first section, and therefore
- * where settings opens. An unmanaged profile has no gateway at all — policy
- * is the only gateway source, and connecting happens from the gateway's own
- * page — so the Model Gateway section is dropped from its rail instead.
+ * where settings opens. Every other section is on both rails, Model Gateway
+ * included: an unmanaged profile has no gateway to configure, but the
+ * section is also where a machine is attached, and a machine behind no
+ * gateway is reachable with its own token.
  */
 export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
-  return SETTINGS_SECTIONS.filter((section) =>
-    managed ? !section.managedHidden : !section.unmanagedHidden,
+  return SETTINGS_SECTIONS.filter(
+    (section) => !(managed && section.managedHidden),
   );
 }
 

@@ -2,8 +2,8 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, GatewayStatus } from "../api";
-import { GatewayPanel } from "./GatewayPanel";
+import type { ApiClient, GatewayStatus, RemoteMachineState } from "../api";
+import { GatewayPanel, type MachineControls } from "./GatewayPanel";
 
 const GATEWAY_URL = "http://127.0.0.1:28081/";
 
@@ -31,9 +31,25 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
     gatewaySignOut: vi.fn().mockResolvedValue(signedOut),
     syncGatewayModels: vi.fn().mockResolvedValue(signedIn),
     getGatewayApps: vi.fn().mockResolvedValue({ supported: true, apps: [] }),
+    getGatewayMachine: vi.fn().mockResolvedValue({}),
     putProvider: vi.fn().mockResolvedValue({}),
     ...overrides,
   } as unknown as ApiClient;
+}
+
+const local: RemoteMachineState = { attachment: "local", baseUrl: null };
+
+/** The native machine commands, stubbed: nothing here reaches a shell. */
+function machineStub(
+  state: RemoteMachineState = local,
+): MachineControls & { attachWithGateway: ReturnType<typeof vi.fn> } {
+  return {
+    read: vi.fn().mockResolvedValue(state),
+    attachWithGateway: vi.fn().mockResolvedValue(state),
+    attachWithToken: vi.fn().mockResolvedValue(state),
+    detach: vi.fn().mockResolvedValue(local),
+    reattach: vi.fn(),
+  };
 }
 
 function managedPanel(
@@ -41,9 +57,11 @@ function managedPanel(
   {
     onChanged = () => undefined,
     onOpenConnectedApps = () => undefined,
+    machine = machineStub(),
   }: {
     onChanged?: () => void;
     onOpenConnectedApps?: () => void;
+    machine?: MachineControls;
   } = {},
 ) {
   return (
@@ -53,6 +71,7 @@ function managedPanel(
       gatewayUrl={GATEWAY_URL}
       onChanged={onChanged}
       onOpenConnectedApps={onOpenConnectedApps}
+      machine={machine}
     />
   );
 }
@@ -73,6 +92,7 @@ describe("GatewayPanel", () => {
         gatewayUrl={null}
         onChanged={() => undefined}
         onOpenConnectedApps={() => undefined}
+        machine={machineStub()}
       />,
     );
 
@@ -80,14 +100,23 @@ describe("GatewayPanel", () => {
       screen.getByText(/not connected to a model gateway/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/gateway's own page/i)).toBeInTheDocument();
-    // No URL field, no enable toggle, no connect flow — and no gateway
-    // traffic at all: policy is the only way a profile becomes connected.
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    // No gateway URL field, no enable toggle, no sign-in — and no gateway
+    // traffic at all: policy is the only way a profile becomes connected,
+    // and there is no gateway here to ask which machine it hosts.
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Connect/ }),
+      screen.queryByRole("button", { name: "Connect" }),
     ).not.toBeInTheDocument();
     expect(client.getGatewayStatus).not.toHaveBeenCalled();
+    expect(client.getGatewayMachine).not.toHaveBeenCalled();
+
+    // The machine does show. Hiding it would leave a machine behind no
+    // gateway — the standalone-token case — with no route in the app.
+    expect(await screen.findByText("Working on this computer")).toBeVisible();
+    expect(screen.getByLabelText(/Address/)).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: /Connect with Model Gateway/ }),
+    ).toBeInTheDocument();
   });
 
   it("managed: shows the read-only policy origin and connects through the browser", async () => {
@@ -102,11 +131,13 @@ describe("GatewayPanel", () => {
     // it, no toggle to turn the gateway off, and no credential prompt.
     expect(screen.getByText(GATEWAY_URL)).toBeInTheDocument();
     expect(screen.getByText(/not editable here/i)).toBeInTheDocument();
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/API key/i)).not.toBeInTheDocument();
+    // The one text field on the page is the machine address below. Nothing
+    // edits the gateway origin.
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: /Connect/ }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
     // Connecting is the sign-in flow alone — never a provider write.
     expect(client.putProvider).not.toHaveBeenCalled();
@@ -260,7 +291,7 @@ describe("GatewayPanel", () => {
 
     expect(await screen.findByText("Not signed in")).toBeInTheDocument();
     expect(screen.getByText(/names no gateway/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Connect/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
   });
 
   it("surfaces a failed sign-in with its bounded message", async () => {
@@ -342,5 +373,61 @@ describe("GatewayPanel", () => {
     // A ready app carries no readiness copy at all.
     expect(screen.queryByText(/not ready at your gateway/)).toBeNull();
     expect(screen.getByText("Monitors")).toBeInTheDocument();
+  });
+
+  it("prefills the address with the machine the gateway offers", async () => {
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayMachine: vi
+        .fn()
+        .mockResolvedValue({ url: "https://tidebreak.example.com" }),
+    });
+    const machine = machineStub();
+    render(managedPanel(client, { machine }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Address/)).toHaveValue(
+        "https://tidebreak.example.com",
+      ),
+    );
+    expect(screen.getByText(/Offered by your gateway/)).toBeInTheDocument();
+    // Filling the field is the whole of it. Attaching moves the reader's
+    // work to another machine, so it stays a deliberate click.
+    expect(machine.attachWithGateway).not.toHaveBeenCalled();
+    expect(screen.getByText("Working on this computer")).toBeInTheDocument();
+  });
+
+  it("leaves the address empty when the gateway offers no machine", async () => {
+    // A gateway that hosts nothing, and one older than the field, answer the
+    // same way. Absence is a state, not a failure.
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+      getGatewayMachine: vi.fn().mockRejectedValue(new Error("no such route")),
+    });
+    render(managedPanel(client));
+
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Address/)).toHaveValue("");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the standalone token behind Advanced", async () => {
+    // The only client path to a machine running on a static token file, so
+    // it stays reachable — but it is not what a managed reader needs, so it
+    // starts collapsed.
+    const user = userEvent.setup();
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+    });
+    render(managedPanel(client));
+
+    expect(await screen.findByText("Signed in")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Standalone token/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+    expect(screen.getByLabelText(/Standalone token/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Connect with token/ }),
+    ).toBeDisabled();
   });
 });

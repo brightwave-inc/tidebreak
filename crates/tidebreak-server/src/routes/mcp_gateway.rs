@@ -243,6 +243,19 @@ pub async fn get_gateway_apps(
     Ok(Json(state.gateway.apps(&auth.principal.owner_id()).await?))
 }
 
+/// `GET /gateway/machine` — the hosted Tidebreak machine this profile's
+/// gateway offers, if it offers one.
+///
+/// A hint for the address field on the gateway settings panel, never a
+/// grant: attaching runs the same discovery handshake either way. It cannot
+/// fail — an unmanaged profile, a gateway older than the field, and a
+/// gateway that does not answer all read as no offer.
+pub async fn get_gateway_machine(
+    State(state): State<AppState>,
+) -> Json<crate::gateway_runtime::GatewayMachineOffer> {
+    Json(state.gateway.offered_machine().await)
+}
+
 /// `POST /gateway/models/sync` — the settings page's explicit "sync with the
 /// gateway": refetch the entitled models into the provider's model set and
 /// reconcile the entitled MCP endpoint mounts, the same pair the periodic

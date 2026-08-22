@@ -150,6 +150,18 @@ pub struct GatewayMeta {
     pub gateway_version: String,
     pub public_url: String,
     pub auth_mode: String,
+    /// The hosted Tidebreak machine this deployment offers, when it hosts
+    /// one. Absent on every gateway that does not, and on every gateway
+    /// older than the field, so absence means "no machine offered" and never
+    /// an error.
+    ///
+    /// A hint for the address field a reader is about to fill in, never
+    /// authorization: attaching still runs the discovery handshake, which
+    /// holds the machine to naming this same gateway and echoing the
+    /// resource the client derives locally. A wrong value here can only
+    /// produce an address that fails to connect.
+    #[serde(default)]
+    pub tidebreak_machine_url: Option<String>,
     /// The capability surfaces this deployment advertises. Absent on
     /// gateways that predate the member-catalog contract; every consumer
     /// must degrade rather than require it.
@@ -2216,6 +2228,32 @@ mod tests {
         assert!(!is_sign_in_required(&AgentError::Authentication(
             "provider key rejected".into()
         )));
+    }
+
+    /// A gateway that offers no machine, and a gateway older than the field,
+    /// are the same thing to a client: no offer. The address field is then
+    /// simply empty, which is what it was before the field existed.
+    #[test]
+    fn meta_without_a_machine_url_reads_as_no_offer() {
+        let meta: GatewayMeta = serde_json::from_str(
+            r#"{"api_version":"v1","installation_id":"install-1",
+                "gateway_version":"1.0.0","public_url":"https://gateway.test",
+                "auth_mode":"oidc"}"#,
+        )
+        .unwrap();
+        assert_eq!(meta.tidebreak_machine_url, None);
+
+        let offered: GatewayMeta = serde_json::from_str(
+            r#"{"api_version":"v1","installation_id":"install-1",
+                "gateway_version":"1.0.0","public_url":"https://gateway.test",
+                "auth_mode":"oidc",
+                "tidebreak_machine_url":"https://tidebreak.example.test"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            offered.tidebreak_machine_url.as_deref(),
+            Some("https://tidebreak.example.test")
+        );
     }
 
     #[test]
