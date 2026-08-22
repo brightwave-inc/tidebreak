@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, Bell, GitPullRequest, Plus } from "lucide-react";
+import { Archive, Bell, FolderPlus, GitPullRequest, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
@@ -23,11 +23,10 @@ import {
   useWorkspaceDigests,
   watchChildren,
 } from "./CodeUpdatesStore";
-import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { FOCUS_RING, HOVER_TINT, RAIL_ICON_BUTTON } from "./interactive";
 import { findCodeTerminalTab } from "./codeChrome";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { RailSettingsMenu } from "./RailSettingsMenu";
-import { RepoSwitcherPopover } from "./RepoSwitcherPopover";
 import {
   useWorkspaceCardCommands,
   workspaceCommands,
@@ -44,10 +43,10 @@ import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
  * share chrome. It must not touch chat session stores — that separation is
  * what later convergence merges rather than translates.
  *
- * The rail spends no section on the repo catalog: by-repo group headers link
- * to their repo page, and the toolbar's repo switcher covers the other sort
- * orders. What each card draws is the reader's `railPrefs` choice; what each
- * card *says* (the aria-label) never shrinks with those choices.
+ * The rail spends no section on the repo catalog: workspaces are the only
+ * list, and by-repo group headers are labels rather than links. What each card
+ * draws is the reader's `railPrefs` choice; what each card *says* (the
+ * aria-label) never shrinks with those choices.
  *
  * It also hosts code mode's two dialogs. The rail is on screen for every
  * `/code` route, so mounting them here is what makes them reachable from the
@@ -116,52 +115,41 @@ export function CodeSidebar() {
     >
       <CodeModeSwitch />
 
-      <div className="px-2 pt-1">
+      <div className="flex shrink-0 items-center gap-0.5 px-1 pt-1 pb-1.5">
+        <span className="min-w-0 flex-1 px-2 py-1 text-sm font-medium text-muted-foreground">
+          Workspaces
+        </span>
+        <RailSettingsMenu />
         <button
           type="button"
-          className={cn(
-            "flex h-9 w-full cursor-pointer items-center gap-2 rounded-xl border border-border-subtle bg-background px-2.5 text-left text-[13px] font-medium shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_5%,transparent)] hover:bg-muted/55",
-            FOCUS_RING,
-            HOVER_TINT,
-          )}
+          className={RAIL_ICON_BUTTON}
+          aria-label="Add repo"
+          onClick={() => setAddRepoOpen(true)}
+        >
+          <FolderPlus size={15} />
+        </button>
+        <button
+          type="button"
+          className={RAIL_ICON_BUTTON}
+          aria-label="New workspace"
           onClick={() => startNewWorkspace()}
         >
-          <Plus size={14} />
-          <span>New workspace</span>
+          <Plus size={15} />
         </button>
-      </div>
-
-      <div className="flex items-center gap-0.5 px-2 pt-1.5 pb-1.5">
-        <RepoSwitcherPopover repos={repos} />
-        <div className="flex-1" />
-        <RailSettingsMenu />
       </div>
 
       <div className="flex min-h-0 flex-col gap-1">
         {groups.map((group) => (
           <div key={group.key} className="flex flex-col gap-1">
-            {group.label && group.repoId ? (
-              <GroupHeaderLink
-                label={group.label}
-                active={pathname === `/code/r/${group.repoId}`}
-                onOpen={() =>
-                  void navigate({
-                    to: "/code/r/$repoId",
-                    params: { repoId: group.repoId! },
-                  })
-                }
-              />
-            ) : (
-              group.label && (
-                <div
-                  className="truncate px-2 pt-3 pb-1 text-[11px] font-medium text-muted-foreground/90"
-                  title={group.label}
-                >
-                  {group.key === "archived"
-                    ? `${group.label} · ${group.workspaces.length}`
-                    : group.label}
-                </div>
-              )
+            {group.label && (
+              <div
+                className="truncate px-2 pt-3 pb-1 text-[11px] font-medium text-muted-foreground/90"
+                title={group.label}
+              >
+                {group.key === "archived"
+                  ? `${group.label} · ${group.workspaces.length}`
+                  : group.label}
+              </div>
             )}
             {group.workspaces.map((workspace) => {
               const digest = digests[workspace.id];
@@ -376,40 +364,6 @@ function CodeUtilityLinks({
         </SidebarButton>
       ))}
     </div>
-  );
-}
-
-/**
- * A by-repo group header that is also the way into its repo page.
- *
- * The old rail spent a whole section restating these names as buttons; the
- * header was already the label readers scanned, so the header is the control.
- */
-function GroupHeaderLink({
-  label,
-  active,
-  onOpen,
-}: {
-  label: string;
-  active: boolean;
-  onOpen: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={`Open repo ${label}`}
-      aria-current={active ? "page" : undefined}
-      data-active={active || undefined}
-      className={cn(
-        "mt-3 cursor-pointer truncate rounded-lg px-2 py-1 text-left text-[11px] font-medium text-muted-foreground/90 hover:bg-background hover:text-foreground data-[active]:text-foreground",
-        FOCUS_RING,
-        HOVER_TINT,
-      )}
-      title={label}
-      onClick={onOpen}
-    >
-      {label}
-    </button>
   );
 }
 

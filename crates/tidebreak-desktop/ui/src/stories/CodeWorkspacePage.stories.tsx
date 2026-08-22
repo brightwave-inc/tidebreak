@@ -746,11 +746,6 @@ function storyRouter(client: ApiClient, initialUrl: string) {
     path: "/settings",
     component: () => <p className="p-6">Settings</p>,
   });
-  const repoRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/code/r/$repoId",
-    component: () => <p className="p-6">Repo</p>,
-  });
   const workspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
@@ -770,7 +765,6 @@ function storyRouter(client: ApiClient, initialUrl: string) {
       homeRoute,
       codeRoute,
       settingsRoute,
-      repoRoute,
       workspaceRoute,
     ]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),

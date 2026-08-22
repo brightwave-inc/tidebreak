@@ -18,8 +18,8 @@ import { arrangeWorkspaces } from "./workspaceCards";
  *
  * Wraps at both ends, the way the tab chords do: a rail is a ring the reader
  * cycles, and stopping at the last card would make the chord feel broken
- * exactly when they are furthest from the top. From off the rail — a repo page
- * or the code home — a step enters at the end it is walking towards.
+ * exactly when they are furthest from the top. From off the rail — the code
+ * home or a delivery page — a step enters at the end it is walking towards.
  */
 export function stepWorkspaceId(
   ids: readonly string[],

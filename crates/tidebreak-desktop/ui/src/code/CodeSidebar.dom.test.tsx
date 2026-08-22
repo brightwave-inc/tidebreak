@@ -145,14 +145,15 @@ describe("CodeSidebar", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Work" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Code" })).toBeInTheDocument();
-    // The repo list collapsed into the switcher; the by-repo group header is
-    // now the way into the repo page.
-    expect(
-      await screen.findByRole("button", { name: "Open repo app" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Repos" })).toBeInTheDocument();
+    // One header over one list: the by-repo group header is a label, and the
+    // three actions beside "Workspaces" are the whole toolbar.
+    expect(await screen.findByTitle("app")).toBeInTheDocument();
+    expect(screen.getByText("Workspaces")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Workspace list settings" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Add repo" }),
     ).toBeInTheDocument();
     // The card's name carries what the glyph rail shows, not just the title.
     expect(
@@ -209,19 +210,17 @@ describe("CodeSidebar", () => {
       </AppContextProvider>,
       { initialUrl: "/code" },
     );
-    await screen.findByRole("button", { name: "Open repo app" });
+    await screen.findByTitle("app");
 
     fireEvent.click(
       screen.getByRole("button", { name: "Workspace list settings" }),
     );
     fireEvent.click(await screen.findByRole("radio", { name: "By created" }));
 
-    // By-created has no group headers, so the repo header link goes away and
-    // the card grows its repo chip back.
+    // By-created has no group headers, so the repo label goes away and the
+    // card grows its repo chip back.
     await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: "Open repo app" }),
-      ).not.toBeInTheDocument(),
+      expect(screen.queryByTitle("app")).not.toBeInTheDocument(),
     );
     expect(
       JSON.parse(

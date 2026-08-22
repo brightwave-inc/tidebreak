@@ -363,16 +363,18 @@ boundary applies to `gh` exactly as to harnesses). Absent or signed-out
 ## UI
 
 Routes (code-defined, hash history, in `ui/src/router.tsx`): `/code` (repo
-rail, doctor-driven empty state), `/code/r/$repoId` (workspace list,
-new-workspace flow, repo settings), `/code/w/$workspaceId` (the main
+list, doctor-driven empty state), `/code/w/$workspaceId` (the main
 surface; files, diffs, browsers, and terminals open as center tabs
 through the existing panel system; git, pull-request state, and comments
-live in a review sidebar).
+live in a review sidebar). A repo has no page of its own: registering one
+opens the new-workspace dialog, and picking one on `/code` does the same.
 
 `ui/src/code/`:
 
-- `CodeSidebar.tsx` on the existing sidebar frame and primitives: repos,
-  recent workspaces with attention badges, the mode switch back to chat.
+- `CodeSidebar.tsx` on the existing sidebar frame and primitives: one
+  "Workspaces" header carrying list settings, add repo, and new workspace,
+  then workspace cards with attention badges, and the mode switch back to
+  chat.
 - `CodeUpdatesStore.ts` — one singleton store fed by `/code/updates`;
   everything list-shaped reads from it.
 - `CodeSessionRegistry.ts` — `Map<sessionId, {store, controller, refCount}>`
