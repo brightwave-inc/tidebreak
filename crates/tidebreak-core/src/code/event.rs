@@ -557,8 +557,12 @@ mod tests {
     /// `CodeEvent` is written into `code_event.event` and read back, so its
     /// field names are a storage format. Rows in the old shape survive a
     /// schema change now, so a diff here needs a `#[serde(alias)]` or a
-    /// migration, not a refreshed fixture on its own — see the same test on
-    /// `AgentEvent` in [`crate::event`].
+    /// migration, not a refreshed fixture on its own. The chat journal's own
+    /// copy of this test says the same thing.
+    ///
+    /// Do not name the chat payload type here, even in prose:
+    /// `chat_and_code_entities_do_not_cross_reference` scans this file as
+    /// text, and it cannot tell a doc comment from a use.
     ///
     /// Regenerate with
     /// `UPDATE_CODE_JOURNAL_FIXTURE=1 cargo test -p tidebreak-core`.
