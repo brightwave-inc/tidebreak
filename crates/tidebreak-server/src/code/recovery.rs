@@ -720,14 +720,17 @@ mod tests {
     #[tokio::test]
     async fn fenced_recovery_does_not_overwrite_a_manual_pin() {
         let (_dir, store, session_id, _) = seeded_running(Some(1)).await;
-        let mut session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
-            .await
-            .unwrap()
-            .unwrap();
-        session.attention = Attention::manual("hold");
-        tidebreak_core::db::code::save_session(&store, &session)
-            .await
-            .unwrap();
+        let pinned = Attention::manual("hold");
+        let changed = replace_session_attention(
+            &store,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+            &pinned,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed, Some(pinned));
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Alive)
             .await
