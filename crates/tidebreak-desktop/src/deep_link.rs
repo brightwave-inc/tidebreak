@@ -279,6 +279,13 @@ fn spawn_pairing(app: tauri::AppHandle, link: ProvisionLink) {
             }
             Ok(PendingRegistration::AlreadyManaged) => {
                 log_pairing(&app, &format!("{origin} already manages this device"));
+                // Nothing to provision, but the click still means "connect me
+                // to this gateway" — and the profile may be managed by it
+                // with no session behind that, which is exactly when someone
+                // reaches for the link again. Nudging the gate makes it
+                // re-read policy now and present its sign-in, instead of the
+                // link reading as the app ignoring them until the next poll.
+                notify_pairing_changed(&app);
             }
             Err(PairingError::Conflict {
                 provisioned_url,

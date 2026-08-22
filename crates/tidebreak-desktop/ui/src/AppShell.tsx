@@ -61,7 +61,11 @@ import { useComposerDrafts } from "./ComposerDrafts";
 import { useConfirm } from "./components/ConfirmDialog";
 import { ComputerUseIndicator } from "./ComputerUseIndicator";
 import { useDesktopNavigation } from "./DesktopNavigation";
-import { hasMacOverlayTitlebar, hasNativeHost } from "./host";
+import {
+  hasMacOverlayTitlebar,
+  hasNativeHost,
+  setAttachedRemotely,
+} from "./host";
 import { friendlyErrorMessage } from "./lib/utils";
 import { useInterfaceZoom } from "./InterfaceZoom";
 import { Logomark } from "./Logomark";
@@ -428,6 +432,10 @@ export function AppShell() {
           gatewayAuth: server.gatewayAuth,
         });
         setInfo(server);
+        // Before the client, and before anything can call one of them: the
+        // three host callers that sit outside React read this flag rather
+        // than a hook. See `host.ts`.
+        setAttachedRemotely(server.attachment === "remote");
         setClient(new ApiClient(server.baseUrl, server.token));
         // Outputs are read over the same API; their module holds the
         // connection because they are called from places with no client.
@@ -912,7 +920,10 @@ export function AppShell() {
     );
   }
 
-  if (!client) {
+  // `info` rides with `client`: boot sets both in one step, and the context
+  // below reads the attachment off it. Guarding on both keeps that a fact
+  // rather than an assumption.
+  if (!client || !info) {
     return (
       <div className="boot">
         <WindowDragStrip />
@@ -939,6 +950,7 @@ export function AppShell() {
       <AppContextProvider
         value={{
           client,
+          attachment: info.attachment,
           models,
           defaultModelKey,
           providers,

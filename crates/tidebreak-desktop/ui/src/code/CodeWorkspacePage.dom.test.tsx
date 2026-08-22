@@ -431,6 +431,7 @@ function appContext(client: ReturnType<typeof makeClient>): AppContextValue {
       error: null,
       enabled: false,
     }),
+    attachment: "local",
     restartForUpdate: async () => {},
   };
 }
