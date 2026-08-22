@@ -8,16 +8,16 @@ import {
   nativeCodeBrowserHost,
   type CodeBrowserHost,
 } from "./browserHost";
-
-// The gate is `hasNativeHost() && !attachedRemotely()`, so the native half has
-// to be true for the attachment half to be observable at all.
-const isTauri = vi.hoisted(() => vi.fn(() => true));
-vi.mock("@tauri-apps/api/core", () => ({ isTauri, invoke: vi.fn() }));
 import {
   readStoredBrowserSession,
   writeStoredBrowserSession,
 } from "./browserPersistence";
 import { createBrowserSession } from "./browserSession";
+
+// The gate is `hasNativeHost() && !attachedRemotely()`, so the native half has
+// to be true for the attachment half to be observable at all.
+const isTauri = vi.hoisted(() => vi.fn(() => true));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri, invoke: vi.fn() }));
 
 describe("browser host lifecycle", () => {
   beforeEach(() => window.localStorage.clear());
