@@ -1781,7 +1781,7 @@ async fn workspace_index(
             repository_targets.insert(entry.repo.id, entry.target);
         }
 
-        let index = stream::iter(workspaces)
+        let index: Vec<WorkspaceIndexEntry> = stream::iter(workspaces)
             .map(|workspace| {
                 let target = repository_targets.get(&workspace.repo_id).cloned();
                 let root = roots.get(&workspace.repo_id).cloned();

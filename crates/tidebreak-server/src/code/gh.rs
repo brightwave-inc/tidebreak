@@ -483,7 +483,7 @@ pub(crate) fn classify_merge_error(err: String) -> GhError {
         || lower.contains("head commit") && lower.contains("match")
     {
         return GhError::pull_request_head_changed(
-            "the pull request head changed; refresh it before merging".into(),
+            "the pull request head changed; refresh it before merging",
         );
     }
     if is_gh_unavailable_error(&bounded) {
@@ -1983,7 +1983,7 @@ async fn spawn_gh(
     let login_env = GH_LAUNCH
         .get()
         .filter(|launch| launch.binary == binary)
-        .and_then(|launch| launch.login_env.as_deref());
+        .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
     spawn_gh_with_login_env(cwd, binary, login_env, args, limit).await
 }
 

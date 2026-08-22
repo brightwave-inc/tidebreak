@@ -211,8 +211,10 @@ async fn sweep_owner(
         .list_repos(owner)
         .await?
         .into_iter()
-        .filter(|repo| repo.removed_at.is_none() && repositories.contains_key(&repo.id))
         .filter_map(|repo| {
+            if repo.removed_at.is_some() {
+                return None;
+            }
             let triggers = repositories.remove(&repo.id)?;
             let eligible = eligible.remove(&repo.id)?;
             Some((repo, triggers, eligible))

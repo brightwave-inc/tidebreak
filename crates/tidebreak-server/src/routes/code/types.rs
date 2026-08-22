@@ -944,8 +944,7 @@ pub struct CodeDeliveryRerunOutcome {
 pub struct CodeDeliveryActionResult {
     pub success: bool,
     pub message: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rerun_outcomes: Vec<CodeDeliveryRerunOutcome>,
 }
 
