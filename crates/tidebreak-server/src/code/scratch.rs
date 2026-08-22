@@ -56,7 +56,7 @@ impl ScratchDir {
 /// cancellation and panic fallback, and runs before the caller releases the
 /// worktree turn lock because the scope is created after that lock.
 pub(crate) struct ScratchScope {
-    dir: ScratchDir,
+    dir: Option<ScratchDir>,
     session_parent: Dir,
     session_name: OsString,
     turn_name: OsString,
@@ -65,10 +65,14 @@ pub(crate) struct ScratchScope {
 
 impl ScratchScope {
     pub(crate) async fn publish(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
-        self.dir.publish(name, bytes).await
+        let dir = self.dir.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "scratch scope is already closed")
+        })?;
+        dir.publish(name, bytes).await
     }
 
     pub(crate) fn cleanup(&mut self) -> io::Result<()> {
+        drop(self.dir.take());
         let result = remove_scope(&self.session_parent, &self.session_name, &self.turn_name);
         if result.is_ok() {
             self.cleaned = true;
@@ -85,6 +89,7 @@ impl ScratchScope {
 impl Drop for ScratchScope {
     fn drop(&mut self) {
         if !self.cleaned {
+            drop(self.dir.take());
             let _ = remove_scope(&self.session_parent, &self.session_name, &self.turn_name);
         }
     }
@@ -178,7 +183,7 @@ pub(crate) fn scratch_scope(
     let session = ensure_child_dir(&root.dir, &session_name)?;
     let turn = ensure_child_dir(&session, &turn_name)?;
     Ok(ScratchScope {
-        dir: ScratchDir { dir: turn },
+        dir: Some(ScratchDir { dir: turn }),
         session_parent: root.dir,
         session_name,
         turn_name,
@@ -384,6 +389,7 @@ fn remove_scope(parent: &Dir, session_name: &OsStr, turn_name: &OsStr) -> io::Re
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    drop(session);
     match parent.remove_dir(session_name) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
