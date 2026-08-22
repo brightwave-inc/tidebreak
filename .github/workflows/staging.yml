@@ -3,30 +3,27 @@ name: Publish staging desktop
 run-name: Publish staging desktop ${{ github.sha }}
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .cargo/**
-      - .github/workflows/release.yml
-      - .github/workflows/staging-publish.yml
-      - .github/workflows/staging.yml
-      - Cargo.lock
-      - Cargo.toml
-      - crates/**
-      - legal/**
-      - plugins/**
-      - rust-toolchain.toml
-      - scripts/**
-      - skills/**
-      - LICENSE
-      - NOTICE
+  # A staging build takes about 45 minutes and every build serializes on one
+  # publish group, so a per-push trigger could only queue merges behind each
+  # other. GitHub keeps at most one pending run per group and cancels the rest,
+  # which reddened main's commit list for builds that never ran a step. Poll
+  # main's tip instead and build it only when a staged path has moved since the
+  # build the staging channel already hosts.
+  schedule:
+    - cron: "23 * * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: Build main's tip even when no staged path has changed since the hosted build
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  # Unique per run so a later merge cannot cancel this caller — that would
+  # Unique per run so a later poll cannot cancel this caller — that would
   # also cancel the reusable publish it started. The publish workflow
   # serializes on its own group without dropping an in-flight notarization.
   group: tidebreak-desktop-staging-${{ github.run_id }}
@@ -38,6 +35,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     outputs:
+      changed: ${{ steps.scope.outputs.changed }}
       sha: ${{ steps.version.outputs.sha }}
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -46,8 +44,72 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      # The hosted manifest is the only record of which commit staging users
+      # are actually running, so it is what a poll must compare against. The
+      # path list below is the one the push trigger used to filter on.
+      - name: Decide whether a staged path moved since the hosted build
+        id: scope
+        env:
+          FORCE: ${{ github.event.inputs.force }}
+          STAGING_SHA: ${{ github.sha }}
+        run: |
+          build() {
+            printf '%s\n' "$1"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [[ "$FORCE" = "true" ]]; then
+            build "Forced by workflow_dispatch."
+          fi
+
+          hosted=""
+          if curl --fail --silent --show-error --max-time 30 \
+            "https://downloads.brightwave.io/tidebreak/staging/manifest.json?poll=$GITHUB_RUN_ID" \
+            --output "$RUNNER_TEMP/hosted-manifest.json"; then
+            hosted="$(jq -r '.sha // empty' "$RUNNER_TEMP/hosted-manifest.json" || true)"
+          fi
+          if [[ -z "$hosted" ]]; then
+            build "The staging channel hosts no readable build; building main's tip."
+          fi
+          if ! git cat-file -e "$hosted^{commit}" 2>/dev/null; then
+            build "Hosted staging commit $hosted is not in this history; building main's tip."
+          fi
+          if ! git merge-base --is-ancestor "$hosted" "$STAGING_SHA"; then
+            build "Hosted staging commit $hosted is not an ancestor of $STAGING_SHA; building main's tip."
+          fi
+          if [[ "$hosted" = "$STAGING_SHA" ]]; then
+            echo "Staging already hosts $STAGING_SHA."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$hosted" "$STAGING_SHA" -- \
+            .cargo \
+            .github/workflows/release.yml \
+            .github/workflows/staging-publish.yml \
+            .github/workflows/staging.yml \
+            Cargo.lock \
+            Cargo.toml \
+            crates \
+            legal \
+            plugins \
+            rust-toolchain.toml \
+            scripts \
+            skills \
+            LICENSE \
+            NOTICE)"
+          if [[ -z "$changed" ]]; then
+            echo "No staged path changed between $hosted and $STAGING_SHA."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'Staged paths changed since %s:\n%s\n' "$hosted" "$changed"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
       - name: Derive the staging product version
         id: version
+        if: ${{ steps.scope.outputs.changed == 'true' }}
         env:
           STAGING_RUN_NUMBER: ${{ github.run_number }}
           STAGING_SHA: ${{ github.sha }}
@@ -70,6 +132,7 @@ jobs:
   publish:
     name: publish staging
     needs: resolve
+    if: ${{ needs.resolve.outputs.changed == 'true' }}
     uses: ./.github/workflows/staging-publish.yml
     permissions:
       contents: read
