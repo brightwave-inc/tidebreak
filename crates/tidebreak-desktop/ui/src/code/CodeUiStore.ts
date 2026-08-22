@@ -189,7 +189,7 @@ export type CodeUiStore = {
    */
   terminalPending: boolean;
   /**
-   * Ask for a workspace, from a repo page or from anywhere in code mode.
+   * Ask for a workspace, from a repo row or from anywhere in code mode.
    *
    * With nothing registered the new-workspace dialog is a form the reader
    * cannot submit, so the request lands on repo registration instead — that is

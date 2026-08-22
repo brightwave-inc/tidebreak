@@ -450,7 +450,7 @@ describe("NewWorkspaceDialog", () => {
           defaultRepoId="repo-old"
         />
       </AppContextProvider>,
-      { initialUrl: "/code/r/repo-old" },
+      { initialUrl: "/code" },
     );
 
     const repoField = screen.getByRole("combobox", { name: "Repo" });

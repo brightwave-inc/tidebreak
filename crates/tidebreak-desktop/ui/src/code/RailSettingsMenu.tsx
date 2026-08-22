@@ -1,4 +1,4 @@
-import { SlidersHorizontal } from "lucide-react";
+import { ListFilter } from "lucide-react";
 
 import {
   Popover,
@@ -10,9 +10,8 @@ import {
   type SegmentedOption,
 } from "@/components/ui/segmented";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
 import { useCodeUiStore, type CodeRailPrefs } from "./CodeUiStore";
-import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { RAIL_ICON_BUTTON } from "./interactive";
 import {
   CARD_DENSITIES,
   CARD_DENSITY_LABELS,
@@ -50,14 +49,10 @@ export function RailSettingsMenu() {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md p-1",
-            FOCUS_RING,
-            HOVER_TINT,
-          )}
+          className={RAIL_ICON_BUTTON}
           aria-label="Workspace list settings"
         >
-          <SlidersHorizontal size={14} />
+          <ListFilter size={15} />
         </button>
       </PopoverTrigger>
       <PopoverContent

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { Folder, GitBranch, Link2 } from "lucide-react";
 
 import type { CodeCloneDefaults, CodeCloneJobSnapshot } from "../api/types";
@@ -26,6 +25,7 @@ import { Progress } from "@/components/ui/progress";
 import { hasNativeHost, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 type Stage = "sources" | "local" | "git_url" | "github" | "progress";
@@ -65,7 +65,6 @@ export function AddRepoPalette({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const navigate = useNavigate();
   const { client } = useApp();
   const upsertRepo = useCodeCatalogStore((state) => state.upsertRepo);
   const cloneJobs = useCodeUpdatesStore((state) => state.cloneJobs);
@@ -119,10 +118,9 @@ export function AddRepoPalette({
           const repo = await client.getCodeRepo(job.repo_id!);
           upsertRepo(repo);
           onOpenChange(false);
-          await navigate({
-            to: "/code/r/$repoId",
-            params: { repoId: repo.id },
-          });
+          // A registered repo does nothing on its own. Hand the reader
+          // straight to the one thing it is for, with the new repo picked.
+          useCodeUiStore.getState().startNewWorkspace(repo.id);
         } catch (err) {
           setError(
             friendlyErrorMessage(err, "Cloned, but could not open the repo"),
@@ -130,7 +128,7 @@ export function AddRepoPalette({
         }
       })();
     }
-  }, [job, stage, client, upsertRepo, navigate, onOpenChange]);
+  }, [job, stage, client, upsertRepo, onOpenChange]);
 
   function goBack() {
     if (stage === "sources") {
@@ -165,7 +163,7 @@ export function AddRepoPalette({
       });
       upsertRepo(repo);
       onOpenChange(false);
-      await navigate({ to: "/code/r/$repoId", params: { repoId: repo.id } });
+      useCodeUiStore.getState().startNewWorkspace(repo.id);
     } catch (err) {
       setError(friendlyErrorMessage(err, "Could not register that repo"));
     } finally {

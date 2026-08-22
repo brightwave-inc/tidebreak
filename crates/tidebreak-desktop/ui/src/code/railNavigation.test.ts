@@ -15,7 +15,7 @@ describe("stepWorkspaceId", () => {
   });
 
   it("enters the rail at the end it is walking towards", () => {
-    // From a repo page or the code home there is no current workspace, and
+    // From the code home there is no current workspace, and
     // doing nothing would leave the reader with no keyboard way onto the rail.
     expect(stepWorkspaceId(rail, undefined, 1)).toBe("a");
     expect(stepWorkspaceId(rail, undefined, -1)).toBe("c");

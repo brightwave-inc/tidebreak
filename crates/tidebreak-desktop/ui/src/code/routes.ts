@@ -20,22 +20,11 @@ export function shellShortcutMode(pathname: string): ShellShortcutMode {
 }
 
 /**
- * The repo a path is showing, when it is showing one.
- *
- * Lets a shortcut fired on a repo page open the same pre-selected repo the
- * page's own button does. The reader can still pick a different one.
- */
-export function codeRepoIdFromPath(pathname: string): string | undefined {
-  const match = /^\/code\/r\/([^/]+)$/.exec(pathname);
-  return match?.[1];
-}
-
-/**
  * The workspace a path is showing, when it is showing one.
  *
  * The terminal drawer and review-sidebar shortcuts only mean something on a
- * workspace, so the shell reads the id from here the same way Cmd+N reads
- * the repo.
+ * workspace, so the shell reads the id from here rather than from a store
+ * the route could disagree with.
  */
 export function codeWorkspaceIdFromPath(pathname: string): string | undefined {
   const match = /^\/code\/w\/([^/]+)$/.exec(pathname);

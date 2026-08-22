@@ -316,15 +316,7 @@ export function useWorkspaceCardCommands(): {
     forgetWorkspaceSession(archived.id);
     toast.success("Workspace archived");
     if (pathname === `/code/w/${archived.id}`) {
-      if (archived.repo_id) {
-        await navigate({
-          to: "/code/r/$repoId",
-          params: { repoId: archived.repo_id },
-          replace: true,
-        });
-      } else {
-        await navigate({ to: "/code", replace: true });
-      }
+      await navigate({ to: "/code", replace: true });
     }
   }
 

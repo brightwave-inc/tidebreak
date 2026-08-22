@@ -474,11 +474,6 @@ async function mountWorkspace(
     path: "/code",
     component: () => <p>code index</p>,
   });
-  const codeRepoRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/code/r/$repoId",
-    component: () => <p>repo page</p>,
-  });
   const codeWorkspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
@@ -495,11 +490,7 @@ async function mountWorkspace(
   });
 
   const router = createRouter({
-    routeTree: rootRoute.addChildren([
-      codeRoute,
-      codeRepoRoute,
-      codeWorkspaceRoute,
-    ]),
+    routeTree: rootRoute.addChildren([codeRoute, codeWorkspaceRoute]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });
   await router.load();
@@ -1003,9 +994,7 @@ describe("CodeWorkspacePage", () => {
       within(confirmation).getByRole("button", { name: "Archive" }),
     );
 
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/code/r/repo-1"),
-    );
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
   });
 
@@ -1066,9 +1055,7 @@ describe("CodeWorkspacePage", () => {
       within(confirmation).getByRole("button", { name: "Archive" }),
     );
 
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/code/r/repo-1"),
-    );
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
     expect(
       screen.queryByRole("heading", { name: /Fix login/ }),
@@ -1096,9 +1083,7 @@ describe("CodeWorkspacePage", () => {
       within(confirmation).getByRole("button", { name: "Discard and archive" }),
     );
 
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/code/r/repo-1"),
-    );
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", true);
   });
 

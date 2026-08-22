@@ -35,3 +35,11 @@ export const FOCUS_RING_INSET =
  */
 export const HOVER_TINT =
   "motion-safe:transition-colors motion-safe:duration-[140ms] motion-safe:ease-out";
+
+/**
+ * The rail header's icon buttons: list settings, add repo, new workspace.
+ *
+ * One string so the three cannot drift apart — they sit side by side, where a
+ * pixel of difference in padding reads as a bug.
+ */
+export const RAIL_ICON_BUTTON = `shrink-0 cursor-pointer rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground ${FOCUS_RING} ${HOVER_TINT}`;

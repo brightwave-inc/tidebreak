@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { FolderGit2, GitBranch, Plus, Sparkles } from "lucide-react";
 
 import { useApp } from "@/AppContext";
@@ -16,6 +15,7 @@ import { RouteFrame } from "@/RouteFrame";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { CodeSidebar } from "./CodeSidebar";
+import { useCodeUiStore } from "./CodeUiStore";
 import { DoctorList } from "./DoctorList";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { isHarnessReady } from "./labels";
@@ -41,8 +41,8 @@ export function CodeHome() {
 }
 
 function CodeHomeBody() {
-  const navigate = useNavigate();
   const { client } = useApp();
+  const startNewWorkspace = useCodeUiStore((state) => state.startNewWorkspace);
   const doctor = useCodeCatalogStore((state) => state.doctor);
   const repos = useCodeCatalogStore((state) => state.repos);
   const loaded = useCodeCatalogStore((state) => state.loaded);
@@ -123,7 +123,12 @@ function CodeHomeBody() {
       {showRepos && (
         <section className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">Repos</h2>
+            <div>
+              <h2 className="text-lg font-semibold">Repos</h2>
+              <p className="text-muted-foreground text-sm">
+                Pick one to open a workspace on it.
+              </p>
+            </div>
             <Button
               type="button"
               size="sm"
@@ -143,12 +148,8 @@ function CodeHomeBody() {
                     FOCUS_RING,
                     HOVER_TINT,
                   )}
-                  onClick={() =>
-                    void navigate({
-                      to: "/code/r/$repoId",
-                      params: { repoId: repo.id },
-                    })
-                  }
+                  aria-label={`New workspace on ${repo.display_name}`}
+                  onClick={() => startNewWorkspace(repo.id)}
                 >
                   <span className="min-w-0 shrink truncate font-medium">
                     {repo.display_name}

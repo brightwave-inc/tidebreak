@@ -251,11 +251,6 @@ function storyRouter(initialUrl: string) {
     path: "/settings",
     component: () => <p className="p-6">Settings</p>,
   });
-  const repoRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/code/r/$repoId",
-    component: () => <p className="p-6">Repository</p>,
-  });
   const workspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
@@ -287,7 +282,6 @@ function storyRouter(initialUrl: string) {
       homeRoute,
       codeRoute,
       settingsRoute,
-      repoRoute,
       workspaceRoute,
       pullRequestsRoute,
       runsRoute,

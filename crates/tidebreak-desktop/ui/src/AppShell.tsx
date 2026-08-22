@@ -44,7 +44,6 @@ import { CodeDeliveryMonitor } from "./code/CodeDeliveryMonitor";
 import { useCodeUiStore } from "./code/CodeUiStore";
 import { stepRailWorkspace } from "./code/railNavigation";
 import {
-  codeRepoIdFromPath,
   codeWorkspaceIdFromPath,
   isCodeRoute,
   shellShortcutMode,
@@ -258,7 +257,7 @@ export function AppShell() {
   /**
    * Move to the workspace the rail draws next, wherever in code mode we are.
    *
-   * Works off a workspace too — from a repo page or the code home, a step
+   * Works off a workspace too — from the code home or a delivery page, a step
    * enters the rail rather than doing nothing, which is what a reader arriving
    * by keyboard wants.
    */
@@ -288,8 +287,7 @@ export function AppShell() {
     "toggle-sidebar": () => useUiStore.getState().toggleSidebar(),
     "new-chat": () => void onNewChat(),
     "code-new-workspace": () => {
-      const { pathname } = router.state.location;
-      useCodeUiStore.getState().startNewWorkspace(codeRepoIdFromPath(pathname));
+      useCodeUiStore.getState().startNewWorkspace();
     },
     "toggle-code-review": () => {
       useCodeUiStore.getState().toggleReviewSidebar();

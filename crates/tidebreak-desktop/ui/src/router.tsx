@@ -25,7 +25,6 @@ import { CodeHome } from "./code/CodeHome";
 import { CodeArchivePage } from "./code/CodeArchivePage";
 import { CodeDeliveryPage } from "./code/CodeDeliveryPage";
 import { CodeNotificationsPage } from "./code/CodeNotificationsPage";
-import { CodeRepoPage } from "./code/CodeRepoPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
 const rootRoute = createRootRoute({ component: AppShell });
@@ -195,17 +194,6 @@ const codeRoute = createRoute({
   component: CodeHome,
 });
 
-const codeRepoRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/code/r/$repoId",
-  component: CodeRepoRouteComponent,
-});
-
-function CodeRepoRouteComponent() {
-  const { repoId } = codeRepoRoute.useParams();
-  return <CodeRepoPage key={repoId} repoId={repoId} />;
-}
-
 const codeWorkspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/w/$workspaceId",
@@ -337,7 +325,6 @@ export const routeTree = rootRoute.addChildren([
   projectRoute,
   projectChatRoute,
   codeRoute,
-  codeRepoRoute,
   codeWorkspaceRoute,
   codeDeliveryPullRequestsRoute,
   codeDeliveryRunsRoute,
