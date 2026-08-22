@@ -1,6 +1,6 @@
 # 16. Desktop Staging Channel from Main
 
-- Status: Accepted
+- Status: Accepted (amended 2026-08-21, see [Amendment](#amendment-2026-08-21))
 - Date: 2026-08-13
 - Owners: desktop and release
 - Related: [releases](../releases.md), [decision 15](0015-tidebreak-product-and-technical-identity.md)
@@ -187,3 +187,27 @@ release line (LTS, beta) needs a fourth identity.
 - A newer staging version may replace `latest.json`; an older one may not.
 - Deep-link parsing in a staging build accepts `tidebreak-staging://` and
   refuses `tidebreak://`. Production still refuses both extra schemes.
+
+## Amendment (2026-08-21)
+
+**Staging builds from a poll of `main`'s tip, not from every relevant push.**
+The "When" column for staging above should read that way; the rest of this
+record stands unchanged.
+
+A staging build takes about 45 minutes, and every build serializes on
+`tidebreak-desktop-staging-build`. A per-push trigger could therefore only
+queue merges behind each other, and GitHub keeps at most one pending run per
+concurrency group: on a busy day each merge evicted the run queued before it.
+Over one 25-commit stretch, 20 commits carried a cancelled staging check that
+had never run a step, and GitHub rolls a cancelled check up as a red X, so
+`main`'s commit list read as broken when it was not.
+
+**Publish staging desktop** now runs on an hourly `schedule` and on
+`workflow_dispatch`. Each poll reads the commit recorded in the hosted staging
+manifest, compares it against `main`'s tip over the path list the push trigger
+used to filter on, and builds only when one of those paths moved. A manual run
+takes a `force` input to build a tip the poll would skip.
+
+The concurrency rules above are unchanged: the caller still uses a per-run
+group, and the publish workflow still serializes with
+`cancel-in-progress: false` so an in-flight notarization finishes.

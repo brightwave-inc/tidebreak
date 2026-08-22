@@ -419,9 +419,9 @@ the configured distribution. No long-lived AWS access key belongs in GitHub.
 
 ### Staging desktop from main
 
-Every relevant push to `main` also publishes a packaged **staging** app, a
-third desktop identity that can run beside both `cargo tauri dev` and an
-installed release. The contract is recorded in
+Tidebreak publishes a packaged **staging** app from `main`, a third desktop
+identity that can run beside both `cargo tauri dev` and an installed
+release. The contract is recorded in
 [decision record 16](decisions/0016-desktop-staging-channel.md).
 
 Staging is a release-profile build with a blue icon, product name
@@ -429,16 +429,22 @@ Staging is a release-profile build with a blue icon, product name
 service `tidebreak.staging`, and the `tidebreak-staging://` scheme. It does
 not share a single-instance lock, app-data directory, updater feed, or
 updater signing key with production. Its versions are
-`0.0.0-staging.{run_number}` — monotonic for the Tauri updater, and not a
-production `vMAJOR.MINOR.PATCH` tag.
+`0.0.0-staging.{run_number}` — monotonic for the Tauri updater, not
+contiguous, and not a production `vMAJOR.MINOR.PATCH` tag.
 
-The caller is **Publish staging desktop**. It derives the version, then
-invokes the `workflow_call`-only **Publish staging desktop build** workflow
-with `channel: staging`. Staging publishes serialize so an in-flight
-notarization is not cancelled by the next merge; `latest.json` still only
-advances if that commit is still `main`. Production's concurrency group is
-untouched. Staging artifacts live under
-`https://downloads.brightwave.io/tidebreak/staging/`; the publish step
+The caller is **Publish staging desktop**. It polls `main` hourly rather
+than running on every push. A staging build takes about 45 minutes and every
+build serializes on one publish group, so a per-push trigger could only queue
+merges behind each other, and GitHub cancels the runs it cannot keep pending.
+Each poll compares `main`'s tip against the commit recorded in the hosted
+staging manifest and builds only when a staged path moved between them. To
+build a commit the poll skips, run the workflow by hand with `force`.
+
+The caller derives the version, then invokes the `workflow_call`-only
+**Publish staging desktop build** workflow with `channel: staging`. Staging
+publishes serialize so an in-flight notarization is not cancelled by the next
+build. Production's concurrency group is untouched. Staging artifacts live
+under `https://downloads.brightwave.io/tidebreak/staging/`; the publish step
 refuses any other prefix and will not advance `latest.json` if `main` has
 already moved on.
 

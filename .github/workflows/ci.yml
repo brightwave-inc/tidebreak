@@ -530,12 +530,6 @@ jobs:
     #
     if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci') || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-latest
-    # Every Rust-scoped main push contains the prior main state, so the newest
-    # Windows run proves everything an older in-progress one would have proven.
-    # PRs, schedules, and manual dispatches remain isolated by run id.
-    concurrency:
-      group: ${{ github.event_name == 'push' && 'windows-check-main' || format('windows-check-run-{0}', github.run_id) }}
-      cancel-in-progress: ${{ github.event_name == 'push' }}
     # The persistence steps below compile tidebreak-server's test target, which
     # is the heaviest codegen this lane pays; leave headroom over the
     # check-plus-broker baseline.
@@ -547,17 +541,43 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
     steps:
+      # A newer main commit contains this one, so its own Windows run proves
+      # everything this run would. Bailing out with success is what keeps that
+      # off main's commit list: a concurrency group reports `cancelled`, and
+      # GitHub rolls a cancelled check up as a red X on a commit whose checks
+      # all passed. Fail open — an unreadable tip runs the lane.
+      - name: Skip a push that main has already moved past
+        id: tip
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tip="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha || true)"
+          if [[ -z "$tip" ]]; then
+            echo "Could not read main's tip; running the lane."
+            exit 0
+          fi
+          if [[ "$tip" != "$GITHUB_SHA" ]]; then
+            echo "main is at $tip, past $GITHUB_SHA; skipping this superseded run."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
       - name: Install toolchain (honors rust-toolchain.toml)
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: rustup show
       - name: Set up compiler cache
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         with:
           shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
           add-job-id-key: "false"
@@ -570,6 +590,7 @@ jobs:
       # from a clean checkout. Prepare the real Windows artifact first so the
       # desktop check exercises Tauri's target-suffixed sidecar resolution.
       - name: Prepare target-named sidecar binaries
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         shell: pwsh
         env:
           TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
@@ -584,6 +605,7 @@ jobs:
             throw "prepare-sidecar did not produce $cli"
           }
       - name: Check Windows-gated crates
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: >-
           cargo check --target x86_64-pc-windows-msvc
           -p tidebreak-core
@@ -598,6 +620,7 @@ jobs:
       # closes. Deliberately one crate: this lane is for checks that need the
       # native host, not a second copy of the workspace suite.
       - name: Host broker Windows tests
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: cargo test -p tidebreak-host-broker --locked
       # Code mode crosses Windows-native executable, environment, PowerShell,
       # path-identity, and process-tree boundaries. A cross-target check cannot
@@ -606,6 +629,7 @@ jobs:
       # Process-tree teardown races PowerShell startup on a loaded runner.
       # Three attempts cover that without dropping the Windows contract.
       - name: Code mode Windows lifecycle tests
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
@@ -637,12 +661,14 @@ jobs:
       # crate's windows-native backend. Targeted filters on two crates — not a
       # second copy of the workspace suite.
       - name: SQLite profile open and migrations
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: cargo test -p tidebreak-server --lib desktop_schema --locked
       # `-- --ignored` runs the native round trip alone, so the process-global
       # in-memory keyring mock installed by the ordinary unit test never
       # activates and the test reaches the real Credential Manager available
       # under the hosted runner session.
       - name: Credential Manager round trip
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: cargo test -p tidebreak-core --lib keychain --locked -- --ignored
 
   test:
