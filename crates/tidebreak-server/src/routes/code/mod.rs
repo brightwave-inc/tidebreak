@@ -21,6 +21,7 @@ mod repos;
 mod session_events;
 mod sessions;
 mod terminals;
+mod triggers;
 pub(crate) mod types;
 mod updates;
 mod usage;
@@ -60,6 +61,9 @@ pub(crate) use sessions::{
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,
     resize_terminal, write_terminal,
+};
+pub(crate) use triggers::{
+    create_repo_trigger, delete_repo_trigger, list_repo_triggers, update_repo_trigger,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

@@ -6,10 +6,11 @@ use ts_rs::TS;
 use tidebreak_core::{
     Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
     CodeEvent, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
-    CodeTerminalId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch, CodeWatchId, CodeWatchState,
-    CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
-    HarnessKind, HarnessTier, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort,
-    RepoId, WorkspaceId,
+    CodeTerminalId, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeTurn,
+    CodeTurnId, CodeTurnStatus, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace,
+    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
+    HarnessTier, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort, RepoId,
+    WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -686,6 +687,48 @@ pub struct CodeDeliveryCheck {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workflow_run_id: Option<u64>,
+}
+
+/// One armed trigger, as the interface reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeTriggerSnapshot {
+    pub id: CodeTriggerId,
+    pub repo_id: RepoId,
+    pub condition: CodeTriggerCondition,
+    pub action: CodeTriggerAction,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<CodeTrigger> for CodeTriggerSnapshot {
+    fn from(trigger: CodeTrigger) -> Self {
+        Self {
+            id: trigger.id,
+            repo_id: trigger.repo_id,
+            condition: trigger.condition,
+            action: trigger.action,
+            enabled: trigger.enabled,
+            created_at: trigger.created_at,
+            updated_at: trigger.updated_at,
+        }
+    }
+}
+
+/// Arm a trigger on a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CreateCodeTriggerBody {
+    pub condition: CodeTriggerCondition,
+    pub action: CodeTriggerAction,
+}
+
+/// Switch a trigger on or off. The row survives either way, so the scoping
+/// does not have to be rebuilt to turn a rule back on.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateCodeTriggerBody {
+    pub enabled: bool,
 }
 
 /// Pull request row shared by the overview and notification monitor.

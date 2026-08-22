@@ -115,7 +115,7 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, Method};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -917,6 +917,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/workspaces/{id}/pr/ready",
             post(routes::code::mark_workspace_pr_ready),
+        )
+        .route(
+            "/code/repos/{id}/triggers",
+            get(routes::code::list_repo_triggers).post(routes::code::create_repo_trigger),
+        )
+        .route(
+            "/code/repos/{id}/triggers/{trigger_id}",
+            patch(routes::code::update_repo_trigger).delete(routes::code::delete_repo_trigger),
         )
         .route(
             "/code/workspaces/{id}/watch",
