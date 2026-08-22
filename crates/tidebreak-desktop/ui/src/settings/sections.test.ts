@@ -15,15 +15,21 @@ describe("settings sections", () => {
     expect(defaultSettingsPathFor(true)).toBe("/settings/gateway");
   });
 
-  it("drops the gateway entry from an unmanaged profile's rail", () => {
-    // Policy is the only gateway source: an unmanaged profile has nothing to
-    // configure under Model Gateway, so the section leaves its rail — while
-    // every route in the registry still resolves for deep links.
+  it("keeps the gateway entry on an unmanaged profile's rail", () => {
+    // Policy is still the only gateway source, so an unmanaged profile has no
+    // gateway to configure — but the section is also where a machine is
+    // attached, and a machine behind no gateway is reachable with its own
+    // token. Hiding it would leave that machine with no route in the app.
     const unmanaged = settingsSectionsFor(false);
-    expect(unmanaged.map((section) => section.path)).not.toContain("gateway");
+    expect(unmanaged.map((section) => section.path)).toContain("gateway");
     expect(defaultSettingsPathFor(false)).toBe("/settings/providers");
-    expect(SETTINGS_SECTIONS.map((section) => section.path)).toContain(
-      "gateway",
+  });
+
+  it("has no machine section of its own", () => {
+    // Folded into Model Gateway: the gateway that governs a profile is the
+    // one that hosts the machine it offers, so the two are one page.
+    expect(SETTINGS_SECTIONS.map((section) => section.path)).not.toContain(
+      "machine",
     );
   });
 

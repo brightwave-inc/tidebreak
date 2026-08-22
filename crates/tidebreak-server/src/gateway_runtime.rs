@@ -67,6 +67,11 @@ pub(crate) struct GatewayRuntime {
     /// neither clobber a newer one's status, resurrect a signed-out session,
     /// nor commit a pairing that was dismissed or replaced under it.
     sign_in_generation: std::sync::atomic::AtomicU64,
+    /// The machine offer last read from the gateway's `/api/v1/meta`, keyed
+    /// by the gateway it was read from so a re-pair reads the new one.
+    /// Process-lifetime: meta is re-read every boot, and opening settings
+    /// twice costs one request.
+    machine_offer: Mutex<Option<(String, Option<String>)>>,
     /// A deep-link pairing awaiting the sign-in that is its consent.
     ///
     /// Process-ephemeral on purpose: nothing durable exists until the user
@@ -142,6 +147,15 @@ pub(crate) struct GatewayStatus {
     pub(crate) sign_in: SignInProgress,
 }
 
+/// The hosted Tidebreak machine this profile's gateway offers, if it offers
+/// one. Absent means the address field stays empty — a gateway that hosts no
+/// machine and a gateway older than the field are the same thing here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct GatewayMachineOffer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) url: Option<String>,
+}
+
 /// Renderer-safe list of the connected apps the signed-in user is entitled
 /// to, fetched live from the gateway (never cached: a revoked grant is gone
 /// on the next request).
@@ -192,6 +206,7 @@ impl GatewayRuntime {
             model_sync: Arc::new(RwLock::new(())),
             sign_in: Mutex::new(SignInProgress::Idle),
             sign_in_generation: std::sync::atomic::AtomicU64::new(0),
+            machine_offer: Mutex::new(None),
             pending_pairing: Mutex::new(None),
             #[cfg(test)]
             sync_commit_pause: Mutex::new(None),
@@ -290,6 +305,52 @@ impl GatewayRuntime {
             member_catalog: snapshot.and_then(|snapshot| snapshot.member_catalog),
             sign_in: self.sign_in.lock().await.clone(),
         })
+    }
+
+    /// The hosted machine this profile's gateway offers, for the address
+    /// field on the settings panel.
+    ///
+    /// Read from the gateway's unauthenticated `/api/v1/meta` rather than
+    /// from the provision link: the link fires once at pair time, so a
+    /// profile paired earlier would never see the value and a machine that
+    /// moved would leave a stale one behind. Meta is re-read every boot.
+    ///
+    /// Every failure reads as no offer — an unmanaged profile, a gateway
+    /// older than the field, a gateway that does not answer. The value is a
+    /// hint for a text field and never authorization: attaching still runs
+    /// discovery, which holds the machine to naming this same gateway.
+    pub(crate) async fn offered_machine(&self) -> GatewayMachineOffer {
+        GatewayMachineOffer {
+            url: self.read_offered_machine().await,
+        }
+    }
+
+    /// The offer, memoized per gateway. Only a gateway that answered is
+    /// remembered, so a boot that raced the network retries on the next ask,
+    /// and an unmanaged profile that pairs mid-session reads its new gateway
+    /// rather than the absence recorded before it paired.
+    async fn read_offered_machine(&self) -> Option<String> {
+        let policy = self.policy().ok()?;
+        if !policy.managed {
+            return None;
+        }
+        let base_url = policy.gateway_url?;
+        let mut memo = self.machine_offer.lock().await;
+        if let Some((read_from, offer)) = memo.as_ref() {
+            if *read_from == base_url {
+                return offer.clone();
+            }
+        }
+        let connection = self.connection_at(base_url.clone()).await.ok()?;
+        let meta = connection.auth().meta().await.ok()?;
+        // The reader sees this in a text box, so hold it to the same URL
+        // rules the connect path enforces: a value that could never be
+        // connected to is worse than an empty field.
+        let offer = meta
+            .tidebreak_machine_url
+            .filter(|url| GatewayAuthConfig::new(url).is_ok());
+        *memo = Some((base_url, offer.clone()));
+        offer
     }
 
     /// The entitled connected apps, fetched live from the gateway with the
@@ -2196,6 +2257,7 @@ mod tests {
                         "gateway_version": "1.0.0",
                         "public_url": "http://gateway.test",
                         "auth_mode": "oidc",
+                        "tidebreak_machine_url": "https://machine.tidebreak.test",
                     }))
                 }),
             )
@@ -2281,6 +2343,22 @@ mod tests {
             runtime.provisioned_policy().clone(),
             Arc::new(crate::managed_policy::NoOsPolicy),
         ))
+    }
+
+    /// A gateway that hosts a machine names it on `/api/v1/meta`, and the
+    /// settings panel prefills the address field from it. Reading it needs
+    /// no session: meta is unauthenticated, so the offer is there before the
+    /// first sign-in.
+    #[tokio::test]
+    async fn the_offered_machine_comes_from_gateway_meta() {
+        let address = serve(Arc::new(FakeGateway::default())).await;
+        let base = format!("http://{address}");
+        let (runtime, _store, _directory) = signed_in_runtime(&base).await;
+
+        assert_eq!(
+            runtime.offered_machine().await.url.as_deref(),
+            Some("https://machine.tidebreak.test")
+        );
     }
 
     #[tokio::test]
@@ -4050,6 +4128,10 @@ mod tests {
             !policy.managed,
             "a legacy row must never auto-convert the profile to managed"
         );
+
+        // Including the machine offer: with no gateway of its own to ask,
+        // an unmanaged profile reads none whatever this one advertises.
+        assert!(runtime.offered_machine().await.url.is_none());
 
         // The status surface reads no gateway and signed out.
         let status = runtime.status().await.unwrap();

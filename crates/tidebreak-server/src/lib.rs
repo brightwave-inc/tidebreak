@@ -628,6 +628,7 @@ pub fn app(state: AppState) -> Router {
         .route("/policy", get(routes::get_policy))
         .route("/gateway/status", get(routes::get_gateway_status))
         .route("/gateway/apps", get(routes::get_gateway_apps))
+        .route("/gateway/machine", get(routes::get_gateway_machine))
         .route(
             "/gateway/pairing/dismiss",
             post(routes::post_gateway_pairing_dismiss),

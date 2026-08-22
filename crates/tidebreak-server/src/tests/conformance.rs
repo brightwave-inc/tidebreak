@@ -589,6 +589,7 @@ fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/policy"),
         ("GET", "/gateway/status"),
         ("GET", "/gateway/apps"),
+        ("GET", "/gateway/machine"),
         ("GET", "/providers"),
         ("GET", "/providers/openai/chatgpt/status"),
         ("GET", "/voice-transcription"),

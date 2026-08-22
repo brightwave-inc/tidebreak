@@ -157,9 +157,11 @@ is the intended degradation — not a desktop Settings panel.
 
 The packaged desktop app still embeds its local Desktop-profile server, but it
 can attach its renderer to a remote self-host machine. For a Gateway-backed
-machine, Settings → Machine → “Connect with Model Gateway” reuses the app's
-managed Gateway session and stores no Tidebreak user token. “Connect with
-token” remains available for this standalone compatibility mode.
+machine, Settings → Model Gateway → “Connect with Model Gateway” reuses the
+app's managed Gateway session and stores no Tidebreak user token. The address
+is filled in for you when the Gateway names the machine it hosts. “Connect with
+token”, under Advanced, remains available for this standalone compatibility
+mode.
 
 Give `admin` only to the people who actually administer the deployment: MCP
 server definitions spawn processes on the host, and the provider credentials
