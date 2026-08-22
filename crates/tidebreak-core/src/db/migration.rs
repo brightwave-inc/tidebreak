@@ -29,7 +29,7 @@ mod idens;
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
 
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult, Statement};
 use sea_orm_migration::prelude::*;
 
 pub struct Migrator;
@@ -563,6 +563,20 @@ impl MigrationTrait for TriggerFireOutbox {
 
 const TRIGGER_FIRE_OUTBOX_TEMP_TABLE: &str = "code_trigger_fire_outbox_upgrade";
 
+fn trigger_fire_uuid(
+    row: &QueryResult,
+    backend: DbBackend,
+    column: &str,
+) -> Result<uuid::Uuid, DbErr> {
+    if backend == DbBackend::Sqlite {
+        return row.try_get::<String>("", column)?.parse().map_err(|error| {
+            DbErr::Custom(format!("invalid code_trigger_fire.{column}: {error}"))
+        });
+    }
+
+    row.try_get("", column)
+}
+
 async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     const TABLE: &str = "code_trigger_fire";
 
@@ -590,8 +604,8 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
         .await?;
     for row in rows {
         let owner = row.try_get::<String>("", "owner")?;
-        let trigger_id = row.try_get::<uuid::Uuid>("", "trigger_id")?;
-        let workspace_id = row.try_get::<uuid::Uuid>("", "workspace_id")?;
+        let trigger_id = trigger_fire_uuid(&row, backend, "trigger_id")?;
+        let workspace_id = trigger_fire_uuid(&row, backend, "workspace_id")?;
         let pr_number = row.try_get::<i64>("", "pr_number")?;
         let head_sha = row.try_get::<String>("", "head_sha")?;
         let fired_at = row.try_get::<chrono::DateTime<chrono::Utc>>("", "fired_at")?;
