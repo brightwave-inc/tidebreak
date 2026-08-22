@@ -6,7 +6,11 @@
 //! event bus is a lossy `broadcast`, and a fact this misses is a message an
 //! agent never gets.
 //!
-//! This module only *claims* fires. Acting on one is the delivery slice.
+//! A fire is claimed only once its delivery is settled. The claim is
+//! fingerprinted against `head_sha`, so claiming on a tick that could not
+//! deliver would burn the edge and the message would never arrive: the
+//! condition staying true is not a second edge. Holding the claim back is
+//! what makes "retry on a later tick" work without a row to mark drained.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
@@ -14,16 +18,21 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    get_repo, insert_trigger_fire, list_active_watches_all_owners, list_enabled_triggers_all_owners,
+    get_open_turn, get_repo, get_session, insert_trigger_fire, latest_turn,
+    list_active_watches_all_owners, list_enabled_triggers_all_owners, list_sessions_for_workspace,
 };
 use tidebreak_core::{
-    classify_trigger_condition, CodeTrigger, CodeTriggerFire, CodeWorkspaceStatus, OwnerId,
-    PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
+    classify_trigger_condition, Attention, AttentionSource, CapLevel, CodeEvent, CodeSession,
+    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction,
+    CodeTriggerCondition, CodeTriggerFire, CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel,
+    OwnerId, PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
 };
 use tracing::{debug, warn};
 
+use super::attention::apply_attention;
 use super::delivery::{query_pull_requests, repository_target_from_local};
 use super::runtime::CodeRuntime;
+use super::session_worker::journal_event;
 use crate::error::ServerError;
 use crate::routes::code::types::{
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestSummary, CodeDeliveryWorkspaceLink,
@@ -140,7 +149,7 @@ async fn sweep_repo(
     Ok(())
 }
 
-/// Claim one fire per matching trigger per linked workspace.
+/// Claim and deliver one fire per matching trigger per linked workspace.
 async fn claim_fires(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
@@ -153,7 +162,8 @@ async fn claim_fires(
     let Some(head_sha) = item.head_sha.clone() else {
         return;
     };
-    let Some(condition) = classify_trigger_condition(&digest_from(item)) else {
+    let digest = digest_from(item);
+    let Some(condition) = classify_trigger_condition(&digest) else {
         return;
     };
     let workspaces = linked_workspaces(&item.workspace_links, watched);
@@ -162,34 +172,288 @@ async fn claim_fires(
     }
     for trigger in triggers.iter().filter(|t| t.condition == condition) {
         for workspace_id in &workspaces {
-            let fire = CodeTriggerFire {
-                trigger_id: trigger.id,
-                owner: owner.clone(),
-                workspace_id: *workspace_id,
-                pr_number: item.number,
-                head_sha: head_sha.clone(),
-                fired_at: Utc::now(),
-            };
-            match insert_trigger_fire(&runtime.db, &fire).await {
-                Ok(true) => debug!(
+            if let Err(err) =
+                fire_one(runtime, owner, trigger, *workspace_id, &digest, &head_sha).await
+            {
+                warn!(
                     trigger = %trigger.id,
                     workspace = %workspace_id,
-                    pr = item.number,
-                    condition = ?condition,
-                    "code-mode trigger fired"
-                ),
-                // Already fired for this head. The condition being still true
-                // is not a second edge.
-                Ok(false) => {}
-                Err(err) => warn!(
-                    trigger = %trigger.id,
-                    workspace = %workspace_id,
-                    error = %err,
-                    "code-mode trigger sweep could not claim a fire"
-                ),
+                    error = %err.message(),
+                    "code-mode trigger sweep could not deliver a fire"
+                );
             }
         }
     }
+}
+
+/// How this fire reaches the agent.
+#[derive(Debug, Clone, Copy)]
+enum Delivery {
+    /// Interrupt the turn already running. Only where the harness declares it.
+    Steer {
+        session_id: CodeSessionId,
+        turn_id: CodeTurnId,
+    },
+    /// Submit a turn. The workspace is quiet, so nothing is contended.
+    Turn { session_id: CodeSessionId },
+    /// Raise attention and leave the session alone.
+    Notify { session_id: CodeSessionId },
+}
+
+impl Delivery {
+    fn session_id(self) -> CodeSessionId {
+        match self {
+            Self::Steer { session_id, .. }
+            | Self::Turn { session_id }
+            | Self::Notify { session_id } => session_id,
+        }
+    }
+}
+
+/// Settle delivery, then claim, then act.
+async fn fire_one(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    trigger: &CodeTrigger,
+    workspace_id: WorkspaceId,
+    digest: &PullRequestDigest,
+    head_sha: &str,
+) -> Result<(), ServerError> {
+    // Settled first, deliberately. See the module note: the claim is the
+    // commitment to act, not the observation of an edge.
+    let Some(delivery) = plan_delivery(runtime, owner, workspace_id, trigger.action).await? else {
+        return Ok(());
+    };
+
+    let fire = CodeTriggerFire {
+        trigger_id: trigger.id,
+        owner: owner.clone(),
+        workspace_id,
+        pr_number: digest.number,
+        head_sha: head_sha.to_owned(),
+        fired_at: Utc::now(),
+    };
+    // Already fired for this head. The condition still being true is not a
+    // second edge.
+    if !insert_trigger_fire(&runtime.db, &fire).await? {
+        return Ok(());
+    }
+    debug!(
+        trigger = %trigger.id,
+        workspace = %workspace_id,
+        pr = digest.number,
+        condition = ?trigger.condition,
+        delivery = ?delivery,
+        "code-mode trigger fired"
+    );
+
+    let session_id = delivery.session_id();
+    let message = trigger_message(trigger.condition, digest);
+    match delivery {
+        Delivery::Steer { turn_id, .. } => {
+            runtime.steer(owner, session_id, turn_id, message).await?;
+        }
+        Delivery::Turn { .. } => {
+            runtime
+                .submit_turn(owner, session_id, message, None, None, Vec::new())
+                .await?;
+        }
+        Delivery::Notify { .. } => {
+            let _ = apply_attention(
+                &runtime.db,
+                &runtime.bus,
+                owner,
+                session_id,
+                Attention::needs_you(
+                    describe_condition(trigger.condition, digest.number),
+                    AttentionSource::Structured,
+                ),
+                false,
+            )
+            .await;
+        }
+    }
+    note_fire(runtime, owner, session_id, trigger, digest).await;
+    Ok(())
+}
+
+/// Which session a fire reaches and how, or `None` to try again next tick.
+async fn plan_delivery(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    workspace_id: WorkspaceId,
+    action: CodeTriggerAction,
+) -> Result<Option<Delivery>, ServerError> {
+    let sessions = list_sessions_for_workspace(&runtime.db, owner, workspace_id).await?;
+    let Some(target) = most_recently_active(runtime, owner, &sessions).await? else {
+        return Ok(None);
+    };
+    if action == CodeTriggerAction::Notify {
+        // Attention does not touch the worktree, so a busy workspace is fine.
+        return Ok(Some(Delivery::Notify {
+            session_id: target.id,
+        }));
+    }
+
+    // Another session's turn owns the checkout. The turn lock in the worker is
+    // what actually serializes it (record 55); standing down here keeps the
+    // fire unclaimed so a later tick delivers it.
+    let busy = sessions
+        .iter()
+        .any(|session| session.lifecycle == CodeSessionLifecycle::Running);
+    if !busy {
+        return Ok(Some(Delivery::Turn {
+            session_id: target.id,
+        }));
+    }
+
+    // Busy: steering is the only way in, and only where the engine takes it.
+    if target.lifecycle != CodeSessionLifecycle::Running {
+        return Ok(None);
+    }
+    let adapter = runtime.adapter(target.harness_kind)?;
+    let probe = runtime.probe(adapter.as_ref()).await;
+    if adapter.capabilities(&probe).mid_turn_steering != CapLevel::Supported {
+        return Ok(None);
+    }
+    let Some(turn) = get_open_turn(&runtime.db, owner, target.id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(Delivery::Steer {
+        session_id: target.id,
+        turn_id: turn.id,
+    }))
+}
+
+/// The workspace's most recently active interactive session.
+///
+/// Watch sessions are never a target: a watch is already acting on the same
+/// facts, and delivering to it would put two drivers on one loop. Recency is
+/// the last turn a session ran, falling back to when it was created, because
+/// a session row carries no activity timestamp of its own.
+async fn most_recently_active(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    sessions: &[CodeSession],
+) -> Result<Option<CodeSession>, ServerError> {
+    let mut best: Option<(chrono::DateTime<chrono::Utc>, CodeSession)> = None;
+    for session in sessions {
+        if session.kind != CodeSessionKind::Interactive {
+            continue;
+        }
+        if matches!(
+            session.lifecycle,
+            CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+        ) {
+            continue;
+        }
+        let at = latest_turn(&runtime.db, owner, session.id)
+            .await?
+            .map_or(session.created_at, |turn| turn.started_at);
+        if best.as_ref().is_none_or(|(best_at, _)| at > *best_at) {
+            best = Some((at, session.clone()));
+        }
+    }
+    Ok(best.map(|(_, session)| session))
+}
+
+/// The message a fire delivers.
+///
+/// It names the trigger that fired and the fact that fired it, so the agent
+/// never has to infer why it was interrupted, and it never reads as the user
+/// speaking. Content discipline follows `fix_turn_instruction`: check names,
+/// buckets, and URLs, never raw logs.
+fn trigger_message(condition: CodeTriggerCondition, pr: &PullRequestDigest) -> String {
+    let number = pr.number;
+    let mut lines = vec![
+        format!(
+            "Tidebreak trigger: {}. Nobody typed this — a trigger you armed on \
+             this repository fired because the fact below changed.",
+            describe_condition(condition, number)
+        ),
+        String::new(),
+    ];
+    lines.push(format!(
+        "Pull request: #{number}{}",
+        pr.title
+            .as_deref()
+            .map(|title| format!(" - {title}"))
+            .unwrap_or_default()
+    ));
+    if let Some(url) = pr.url.as_deref() {
+        lines.push(format!("URL: {url}"));
+    }
+    let failing = pr
+        .checks
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|check| check.bucket == tidebreak_core::PullRequestCheckBucket::Fail)
+        .collect::<Vec<_>>();
+    if !failing.is_empty() {
+        lines.push("Failing checks:".to_owned());
+        for check in failing {
+            let mut line = format!("- {}", check.name);
+            if let Some(url) = check.url.as_deref() {
+                line.push_str(&format!(" ({url})"));
+            }
+            lines.push(line);
+        }
+    }
+    lines.push(String::new());
+    lines.push(
+        "Decide whether to act on this now. Do not merge, enable auto-merge, or \
+         change the pull request's draft or review state — those stay the user's."
+            .to_owned(),
+    );
+    lines.join("\n")
+}
+
+/// One phrase naming the fact, shared by the message and the notification.
+fn describe_condition(condition: CodeTriggerCondition, number: u64) -> String {
+    match condition {
+        CodeTriggerCondition::ChecksFailed => format!("checks failed on #{number}"),
+        CodeTriggerCondition::Conflicts => format!("#{number} has merge conflicts"),
+        CodeTriggerCondition::ChangesRequested => format!("changes requested on #{number}"),
+        CodeTriggerCondition::ReviewRequired => format!("#{number} is waiting on review"),
+        CodeTriggerCondition::Behind => format!("#{number} is behind its base"),
+        CodeTriggerCondition::ReadyToMerge => format!("#{number} is ready to merge"),
+        CodeTriggerCondition::Merged => format!("#{number} merged"),
+        CodeTriggerCondition::Closed => format!("#{number} closed without merging"),
+    }
+}
+
+/// Journal the fire so the transcript says why the agent got something.
+///
+/// A `HarnessNotice` rather than a variant of its own, following
+/// `note_permission_mode`: the journal already uses it for "something moved on
+/// this session" lines that no harness produced.
+async fn note_fire(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    trigger: &CodeTrigger,
+    digest: &PullRequestDigest,
+) {
+    let Ok(Some(session)) = get_session(&runtime.db, owner, session_id).await else {
+        return;
+    };
+    let _ = journal_event(
+        &runtime.db,
+        &runtime.bus,
+        owner,
+        session_id,
+        session.spawn_epoch,
+        CodeEvent::HarnessNotice {
+            level: HarnessNoticeLevel::Info,
+            message: format!(
+                "trigger {} fired: {}",
+                trigger.id,
+                describe_condition(trigger.condition, digest.number)
+            ),
+        },
+    )
+    .await;
 }
 
 /// Active workspaces this pull request is exactly on, minus watched ones.
