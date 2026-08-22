@@ -639,10 +639,7 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
                 Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
             ])
             .to_owned();
-        manager
-            .get_connection()
-            .execute(&backend.build(&insert))
-            .await?;
+        manager.get_connection().execute(&insert).await?;
     }
 
     manager
