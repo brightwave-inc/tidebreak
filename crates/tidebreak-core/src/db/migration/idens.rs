@@ -841,6 +841,7 @@ pub(crate) enum CodeSession {
     PermissionMode,
     Model,
     ReasoningEffort,
+    FastMode,
     Lifecycle,
     FenceReason,
     ChildPid,

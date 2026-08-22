@@ -84,6 +84,21 @@ pub(crate) fn effort_flags(effort: Option<ReasoningEffort>) -> Vec<String> {
     vec!["--effort".into(), token.to_owned()]
 }
 
+/// The `--settings` flag that arms fast mode, or nothing when it is off.
+///
+/// `fastMode` is a settings key rather than a flag of its own, and `--settings`
+/// takes inline JSON as well as a path. Off is the engine's own default, so an
+/// off session composes no flag at all rather than an explicit `false` — that
+/// keeps argv identical to what a session without the feature would produce,
+/// and leaves a user's own settings file to speak for itself.
+#[must_use]
+pub(crate) fn fast_mode_flags(fast_mode: bool) -> Vec<String> {
+    if !fast_mode {
+        return Vec::new();
+    }
+    vec!["--settings".into(), r#"{"fastMode":true}"#.to_owned()]
+}
+
 /// The prompt as the engine receives it: the user's text, plus the ultracode
 /// keyword on its own line when the turn asked for that level.
 ///
@@ -163,6 +178,9 @@ struct EngineChannel {
     /// Resolved effort this child was launched with. `--effort` is a launch
     /// flag too, and 2.1.234 has no control request that moves it.
     effort: Option<ReasoningEffort>,
+    /// Whether this child was launched in fast mode. `fastMode` rides
+    /// `--settings`, so it is a launch flag like the two above.
+    fast_mode: bool,
     /// The mode this child is running under.
     ///
     /// Starts as what argv composed and moves with an accepted
@@ -324,6 +342,7 @@ impl ClaudeSession {
             argv.push(model);
         }
         argv.extend(effort_flags(self.resolved_effort(turn_effort)));
+        argv.extend(fast_mode_flags(self.spec.fast_mode));
         if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
@@ -402,6 +421,7 @@ impl ClaudeSession {
             stderr_task: Mutex::new(Some(stderr_task)),
             model: self.resolved_model(turn_model),
             effort: self.resolved_effort(turn_effort),
+            fast_mode: self.spec.fast_mode,
             mode: Mutex::new(self.permission_mode()),
         }))
     }
@@ -412,9 +432,10 @@ impl ClaudeSession {
     /// longer matches, is retired here: the replacement resumes the session, so
     /// the turn the user asked for still lands on their transcript.
     ///
-    /// Model, effort, and the bypass posture are all launch flags. A mode
-    /// switch the control request already handled leaves the child's own mode
-    /// agreeing with the session, so only a move to or from `Allow` respawns.
+    /// Model, effort, fast mode, and the bypass posture are all launch flags.
+    /// A mode switch the control request already handled leaves the child's own
+    /// mode agreeing with the session, so only a move to or from `Allow`
+    /// respawns for that one.
     async fn ensure_channel(
         &self,
         turn_model: Option<&str>,
@@ -424,6 +445,7 @@ impl ClaudeSession {
         if let Some(channel) = slot.as_ref() {
             let same_flags = channel.model == self.resolved_model(turn_model)
                 && channel.effort == self.resolved_effort(turn_effort)
+                && channel.fast_mode == self.spec.fast_mode
                 && *channel.mode.lock().expect("claude child mode") == self.permission_mode();
             // Probing reaps a child that has already exited, so never wait on
             // it again afterwards.
@@ -819,6 +841,7 @@ mod encode_tests {
             text: "hello".into(),
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             images: Vec::new(),
         });
         let line = String::from_utf8(encoded).unwrap();
@@ -837,6 +860,7 @@ mod encode_tests {
             text: "look".into(),
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             images: vec![TurnImage {
                 media_type: "image/png".into(),
                 bytes: b"pixels".to_vec(),
@@ -916,6 +940,7 @@ mod tests {
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -939,6 +964,7 @@ mod tests {
             text: text.into(),
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             images: Vec::new(),
         }
     }
@@ -973,6 +999,7 @@ mod tests {
                 text: text.into(),
                 model: None,
                 reasoning_effort: level,
+                fast_mode: false,
                 images: Vec::new(),
             })
         };
@@ -1002,6 +1029,7 @@ mod tests {
             permission_mode: PermissionMode::Ask,
             model: None,
             reasoning_effort: Some(ReasoningEffort::Ultra),
+            fast_mode: false,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -1081,6 +1109,7 @@ mod tests {
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -1133,6 +1162,7 @@ mod tests {
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),

@@ -1283,7 +1283,11 @@ export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId
 /**
  * Absent means the engine's own default, which is not any level.
  */
-reasoning_effort?: ReasoningEffort, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+reasoning_effort?: ReasoningEffort, 
+/**
+ * Whether this session runs its turns in the engine's fast mode.
+ */
+fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
 
 /**
  * Status of a harness subagent, derived from its spanning `Task` call
@@ -2275,7 +2279,12 @@ export type HarnessModel = { id: string, label: string, default: boolean,
 /**
  * Effort levels this row accepts, ascending. Empty hides the control.
  */
-reasoning_efforts: Array<ReasoningEffort>, };
+reasoning_efforts: Array<ReasoningEffort>, 
+/**
+ * Whether this row can serve the engine's fast mode. `false` hides the
+ * control, the same way an empty effort ladder does.
+ */
+fast_mode: boolean, };
 
 /**
  * `GET /code/harnesses/{kind}/models`.

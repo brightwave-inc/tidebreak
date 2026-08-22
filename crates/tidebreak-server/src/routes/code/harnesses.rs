@@ -73,6 +73,7 @@ pub async fn list_harness_models(
             label: model.label,
             default: model.default,
             reasoning_efforts: model.reasoning_efforts,
+            fast_mode: model.fast_mode,
         })
         .collect();
     Ok(Json(HarnessModelList {

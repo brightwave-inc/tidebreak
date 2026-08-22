@@ -198,6 +198,8 @@ pub(crate) struct NewSessionSettings {
     pub model: Option<String>,
     /// `None` leaves the engine's own default in force.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether the session starts armed for the engine's fast mode.
+    pub fast_mode: bool,
 }
 
 impl CodeRuntime {
@@ -1422,6 +1424,7 @@ impl CodeRuntime {
             permission_mode,
             model,
             reasoning_effort,
+            fast_mode,
         }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
@@ -1497,6 +1500,7 @@ impl CodeRuntime {
             permission_mode,
             model: normalize_model(model),
             reasoning_effort,
+            fast_mode,
             lifecycle: CodeSessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
@@ -2054,6 +2058,77 @@ impl CodeRuntime {
         session.reasoning_effort = effort;
         save_session(&self.db, &session).await?;
         Ok(session)
+    }
+
+    /// Arm or disarm the engine's fast mode for a session.
+    ///
+    /// Refused mid-turn and after the session ends, on the rule the effort
+    /// route already applies. Refused too when the session's model cannot
+    /// serve fast mode: unlike effort, which every listed rung is valid for,
+    /// fast mode is offered on part of a provider's line only, and silently
+    /// accepting it would report a session running at a speed it never got —
+    /// and, on a metered key, at a price it was never charged.
+    pub(crate) async fn set_fast_mode(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        fast_mode: bool,
+    ) -> Result<CodeSession, ServerError> {
+        let mut session = self.get_session(owner, id).await?;
+        if session.fast_mode == fast_mode {
+            return Ok(session);
+        }
+        match session.lifecycle {
+            CodeSessionLifecycle::Running => {
+                return Err(ServerError::conflict_kind(
+                    "turn_running",
+                    "finish or interrupt the running turn before changing fast mode",
+                ));
+            }
+            CodeSessionLifecycle::Ended => {
+                return Err(ServerError::conflict_kind(
+                    "session_ended",
+                    "this session has ended; start a new one to run it in fast mode",
+                ));
+            }
+            _ => {}
+        }
+        // Only arming needs the check. Disarming returns the session to the
+        // engines' own default, which every model serves.
+        if fast_mode && !self.model_serves_fast_mode(&session).await? {
+            return Err(ServerError::unprocessable_kind(
+                "fast_mode_unsupported",
+                match session.model.as_deref() {
+                    Some(model) => format!("{model} does not serve fast mode"),
+                    None => format!(
+                        "{harness} has no model selected that serves fast mode",
+                        harness = session.harness_kind
+                    ),
+                },
+            ));
+        }
+        session.fast_mode = fast_mode;
+        save_session(&self.db, &session).await?;
+        Ok(session)
+    }
+
+    /// Whether the session's selected model advertises fast mode.
+    ///
+    /// Read off the engine's own listing rather than a table here, so a model
+    /// that gains or loses the tier upstream needs no change in this repo. A
+    /// session whose model the engine does not list reads as no fast mode.
+    async fn model_serves_fast_mode(&self, session: &CodeSession) -> Result<bool, ServerError> {
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let listed = adapter.list_models(&probe).await;
+        let selected = session.model.as_deref();
+        Ok(listed
+            .iter()
+            .find(|model| match selected {
+                Some(selected) => model.id == selected,
+                None => model.default,
+            })
+            .is_some_and(|model| model.fast_mode))
     }
 
     pub(crate) async fn set_attention(
@@ -2626,6 +2701,7 @@ impl CodeRuntime {
             permission_mode: session.permission_mode,
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort,
+            fast_mode: session.fast_mode,
             resume_ref: session.harness_resume_ref.clone(),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),

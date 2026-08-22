@@ -2280,6 +2280,26 @@ export class ApiClient {
     );
   }
 
+  /** Arm or disarm the engine's fast mode for a session. */
+  async setCodeSessionFastMode(
+    sessionId: string,
+    fastMode: boolean,
+  ): Promise<CodeSessionSnapshot> {
+    return requireParsed(
+      parseCodeSession(
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/fast-mode`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ fast_mode: fastMode }),
+          },
+        ),
+      ),
+      "code session",
+    );
+  }
+
   getCodeSessionImage(
     sessionId: string,
     blobId: string,

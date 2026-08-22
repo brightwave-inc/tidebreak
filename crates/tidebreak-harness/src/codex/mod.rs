@@ -280,6 +280,7 @@ fn parse_model_list(result: &Value) -> Vec<ListedHarnessModel> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 reasoning_efforts: parse_reasoning_efforts(row),
+                fast_mode: parse_fast_mode(row),
             })
         })
         .collect()
@@ -291,6 +292,39 @@ fn parse_model_list(result: &Value) -> Vec<ListedHarnessModel> {
 /// own rows do not offer the same rungs, and only some reach `ultra`. A token
 /// this build has no level for is dropped, so a newer catalog cannot make the
 /// picker offer something nothing downstream can spell.
+/// Whether a catalog row advertises Codex's fast speed tier.
+///
+/// Codex states this two ways and the spelling varies by surface: the model
+/// catalog lists `additional_speed_tiers` (`["fast"]`), while the richer
+/// `service_tiers` array carries the id the request actually sends
+/// (`priority`). Read either, and accept both camelCase and snake_case, since
+/// the app-server and the packaged catalog do not agree on case.
+///
+/// A row that advertises neither reads as no fast mode. That is the same
+/// conservative direction the effort ladder takes: an unstated capability
+/// hides the control rather than offering one the engine would ignore.
+fn parse_fast_mode(row: &Value) -> bool {
+    const FAST_TIERS: &[&str] = &["fast", "priority"];
+    let names = |key: &str, alt: &str| -> Option<&Value> { row.get(key).or_else(|| row.get(alt)) };
+    let speed_tiers = names("additional_speed_tiers", "additionalSpeedTiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let service_tiers = names("service_tiers", "serviceTiers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tier| {
+            tier.get("id")
+                .and_then(Value::as_str)
+                .or_else(|| tier.as_str())
+        });
+    speed_tiers
+        .chain(service_tiers)
+        .any(|tier| FAST_TIERS.contains(&tier.trim()))
+}
+
 fn parse_reasoning_efforts(row: &Value) -> Vec<ReasoningEffort> {
     let mut levels: Vec<ReasoningEffort> = row
         .get("supportedReasoningEfforts")
@@ -612,6 +646,8 @@ mod tests {
                     ReasoningEffort::High,
                     ReasoningEffort::Ultra,
                 ],
+                // The fixture row advertises no speed tier.
+                fast_mode: false,
             }]
         );
     }

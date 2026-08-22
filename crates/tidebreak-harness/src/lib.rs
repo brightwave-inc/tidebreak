@@ -196,6 +196,12 @@ pub struct TurnInput {
     /// alone. The adapter maps the level onto whatever its engine spells, and
     /// degrades one the engine does not offer rather than refusing the turn.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether this turn runs in the engine's fast mode.
+    ///
+    /// An adapter whose engine has no fast mode, or whose selected model
+    /// cannot serve one, ignores this rather than refusing the turn — the
+    /// same degrade-don't-refuse rule effort follows.
+    pub fast_mode: bool,
     /// Images already published to the blob store and hydrated for this turn.
     pub images: Vec<TurnImage>,
 }
@@ -388,6 +394,8 @@ pub struct SessionSpec {
     pub model: Option<String>,
     /// Reasoning effort the session starts on, when it chose one.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether the session starts in the engine's fast mode.
+    pub fast_mode: bool,
     /// Engine-native resume token, when continuing a prior session.
     pub resume_ref: Option<String>,
     /// Extra argv from settings. Still subject to the bypass-flag denylist.

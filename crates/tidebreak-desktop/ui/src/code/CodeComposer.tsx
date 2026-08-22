@@ -6,6 +6,7 @@ import {
   List,
   Search,
   Sparkles,
+  Zap,
 } from "lucide-react";
 
 import type {
@@ -63,6 +64,10 @@ const MODES: PermissionMode[] = ["plan", "ask", "auto", "allow"];
 const ULTRA_TRIGGER_CLASS =
   "border border-[var(--ultra-edge)] bg-[var(--ultra-wash)] text-[var(--ultra-ink)] " +
   "hover:bg-[var(--ultra-wash-strong)] hover:text-[var(--ultra-ink)]";
+/// Armed styling for the fast-mode toggle. It borrows the ultra treatment so
+/// the two premium controls read as the same kind of thing in the footer: both
+/// say "this turn costs more than the default".
+const FAST_TRIGGER_CLASS = ULTRA_TRIGGER_CLASS;
 const STEERING_UNAVAILABLE =
   "Redirect isn’t available for this harness. Choose Queue to send this after the response.";
 
@@ -463,6 +468,52 @@ function isTopEffort(
  * what a turn costs and how long it runs by more than a step, so the control
  * says so while it is selected rather than reading like any other choice.
  */
+/**
+ * Fast mode as a single footer toggle.
+ *
+ * A toggle rather than a menu because there are two states and no default to
+ * fall back to — unlike effort, where "the engine's own level" is a real third
+ * choice. Renders nothing when the selected model cannot serve the tier, which
+ * is the same rule an empty effort ladder follows: a control that would arm a
+ * premium the model ignores is worse than no control.
+ *
+ * The label names the cost, not the speed. "Faster" alone reads as free.
+ */
+export function FastModeToggle({
+  available,
+  value,
+  disabled,
+  onChange,
+}: {
+  available: boolean;
+  value: boolean;
+  disabled?: boolean;
+  onChange: (fastMode: boolean) => void;
+}) {
+  if (!available) return null;
+  const label = value ? "Fast mode on" : "Fast mode off";
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      role="switch"
+      aria-checked={value}
+      className={cn("h-8 gap-2 px-2", value && FAST_TRIGGER_CLASS)}
+      disabled={disabled}
+      aria-label={label}
+      title={
+        value
+          ? "Fast mode on: faster output, higher price per token"
+          : "Fast mode off: the engine's usual speed and price"
+      }
+      data-fast={value ? "on" : undefined}
+      onClick={() => onChange(!value)}
+    >
+      <Zap className={cn("size-4", !value && "opacity-50")} />
+    </Button>
+  );
+}
+
 export function ReasoningEffortMenu({
   levels,
   value,
@@ -560,9 +611,11 @@ export function CodeComposer({
   lastTurnBeganId,
   reasoningEffort = null,
   engineEfforts = [],
+  fastMode = false,
   onModelChange,
   onModeChange,
   onEffortChange,
+  onFastModeChange,
   contextUsage,
   slashCommands,
   searchPaths,
@@ -594,6 +647,8 @@ export function CodeComposer({
   lastTurnBeganId?: string | null;
   /** The session's stored level. `null` is the engine's own default. */
   reasoningEffort?: ReasoningEffort | null;
+  /** Whether the session is armed for fast mode. */
+  fastMode?: boolean;
   /**
    * The engine's own ladder, used for a model row that states none of its
    * own — a gateway catalog row, or a model the engine no longer lists.
@@ -603,6 +658,8 @@ export function CodeComposer({
   onModeChange?: (mode: PermissionMode) => void;
   /** Absent hides the effort control, as an empty ladder does. */
   onEffortChange?: (effort: ReasoningEffort | null) => void;
+  /** Absent hides the fast-mode toggle, as an unsupporting model does. */
+  onFastModeChange?: (fastMode: boolean) => void;
   /** Same meter as chat: the last turn's reading in the send cluster. */
   contextUsage?: ContextUsageReading | null;
   /**
@@ -639,6 +696,7 @@ export function CodeComposer({
   const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(
     reasoningEffort,
   );
+  const [selectedFastMode, setSelectedFastMode] = useState(fastMode);
   const [notice, setNotice] = useState<{ text: string } | null>(null);
   const [followUpQueued, setFollowUpQueued] = useState(false);
   const [steerPending, setSteerPending] = useState(false);
@@ -662,6 +720,9 @@ export function CodeComposer({
     modelOptions?.find((option) => option.default) ??
     modelOptions?.[0];
   const effortLevels = effortLadder(selectedOption, engineEfforts);
+  // Read off the selected row, so switching to a model without the tier hides
+  // the control rather than leaving a stale armed toggle behind.
+  const fastModeAvailable = selectedOption?.fast_mode ?? false;
 
   const onPathQueryChange = useCallback((query: string | null) => {
     if (query === null || !searchPathsRef.current) {
@@ -899,6 +960,18 @@ export function CodeComposer({
                     }
                   : undefined
               }
+            />
+          ) : undefined
+        }
+        fastModeToggle={
+          onFastModeChange ? (
+            <FastModeToggle
+              available={fastModeAvailable}
+              value={selectedFastMode}
+              onChange={(next) => {
+                setSelectedFastMode(next);
+                onFastModeChange(next);
+              }}
             />
           ) : undefined
         }

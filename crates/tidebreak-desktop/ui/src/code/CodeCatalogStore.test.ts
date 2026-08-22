@@ -51,6 +51,7 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
         kind: "codex" as const,
         models: [],
         reasoning_efforts: [],
+        fast_mode: false,
       })),
     };
 
@@ -88,6 +89,7 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
           label: "GLM 5.2",
           default: true,
           reasoning_efforts: [],
+          fast_mode: false,
         },
       ],
       reasoning_efforts: [],
@@ -147,6 +149,7 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
                   label: "GPT-5.6 Luna",
                   default: true,
                   reasoning_efforts: [],
+                  fast_mode: false,
                 },
               ]
             : [],

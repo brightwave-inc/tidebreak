@@ -55,8 +55,8 @@ pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
     create_session, fork_session, get_session_debug, get_session_image, interrupt_session,
     list_session_turns, list_workspace_sessions, publish_session_image, reap_session,
-    set_attention, set_session_permission_mode, set_session_reasoning_effort, steer_session,
-    submit_turn,
+    set_attention, set_session_fast_mode, set_session_permission_mode,
+    set_session_reasoning_effort, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,

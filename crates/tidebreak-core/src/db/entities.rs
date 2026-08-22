@@ -1725,6 +1725,7 @@ pub mod code_session {
         pub permission_mode: String,
         pub model: Option<String>,
         pub reasoning_effort: Option<String>,
+        pub fast_mode: bool,
         pub lifecycle: String,
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub fence_reason: Option<Json>,
