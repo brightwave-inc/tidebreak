@@ -114,11 +114,17 @@ function appReadinessLabel(connection: string | undefined): string | null {
  * profile sees the machine sections, including an unmanaged one — a machine
  * behind no gateway is reachable with its own token, and this is the only
  * place in the app that reaches it.
+ *
+ * A gateway-authenticated hosted machine is the third state, and it has no
+ * session of its own to show: the reader signed in to the gateway on their
+ * own computer and attached with that account, so this names the gateway and
+ * leaves the machine sections to say where the work runs.
  */
 export function GatewayPanel({
   client,
   managed,
   gatewayUrl,
+  hostedGatewayUrl = null,
   onChanged,
   onOpenConnectedApps,
   machine = NATIVE_MACHINE,
@@ -128,6 +134,9 @@ export function GatewayPanel({
   managed: boolean;
   /** The policy's locked gateway origin, shown read-only. */
   gatewayUrl: string | null;
+  /** The gateway the machine this window works on authenticates its callers
+   * against. Never a session this profile holds — see the hosted panel. */
+  hostedGatewayUrl?: string | null;
   onChanged: () => void;
   /** Navigates to the Connected apps page, whose MCP section is where
    * entitled endpoints are mounted. Mounting lives beside the health of what
@@ -136,6 +145,30 @@ export function GatewayPanel({
   onOpenConnectedApps: () => void;
   machine?: MachineControls;
 }) {
+  if (!managed && hostedGatewayUrl !== null) {
+    // Read-only, with no sign in and no sign out, because there is nothing
+    // here to sign in to: the reader authenticated to this machine with their
+    // own gateway account, and the machine holds that credential for as long
+    // as the session lasts. A Connect button would start a flow this machine
+    // could never complete.
+    return (
+      <SettingsPanel
+        title="Model Gateway"
+        description="This machine authenticates you with your Model Gateway account."
+      >
+        <p className="text-sm">
+          <code className="font-medium">{hostedGatewayUrl}</code>
+        </p>
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          You signed in to this gateway on your own computer, and this machine
+          runs your work with that account. Models and usage follow your
+          entitlements there, not this machine&apos;s. Your access ends here the
+          moment it ends at the gateway.
+        </p>
+        <MachineSections client={client} managed={false} machine={machine} />
+      </SettingsPanel>
+    );
+  }
   if (!managed) {
     return (
       <SettingsPanel

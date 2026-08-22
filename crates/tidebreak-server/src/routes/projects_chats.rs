@@ -212,7 +212,7 @@ pub async fn create_chat(
         crate::code_execution::normalize_network_policy(policy)?;
     }
     let title = normalize_chat_title(body.title)?;
-    let managed = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
+    let managed = state.managed_policy()?;
     let model = match body.model.as_ref() {
         Some(model) => Some(model.clone()),
         // On an unmanaged profile, preserve the historical recovery behavior
@@ -241,10 +241,7 @@ pub async fn create_chat(
         // mirroring how the turn gate treats stored over-ceiling modes.
         None => match read_sticky_default(&*state.store, &owner, STICKY_PERMISSION_MODE_KEY).await?
         {
-            Some(sticky) => {
-                crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?
-                    .clamp_permission_mode(Some(sticky))
-            }
+            Some(sticky) => state.managed_policy()?.clamp_permission_mode(Some(sticky)),
             None => None,
         },
     };

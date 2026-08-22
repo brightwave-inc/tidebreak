@@ -84,6 +84,7 @@ function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
     a.source === b.source &&
     a.misconfigured === b.misconfigured &&
     (a.gateway_url ?? null) === (b.gateway_url ?? null) &&
+    (a.hosted_gateway_url ?? null) === (b.hosted_gateway_url ?? null) &&
     (a.pending_gateway_url ?? null) === (b.pending_gateway_url ?? null)
   );
 }

@@ -451,6 +451,22 @@ impl AppState {
         self.local_voice = runner;
     }
 
+    /// The resolved managed-mode policy every route reads.
+    ///
+    /// One accessor rather than a `managed_policy::resolve` call per handler,
+    /// because the resolution has a third input a handler cannot see: the
+    /// gateway this deployment authenticates its own callers against
+    /// (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`). That
+    /// tier only describes the deployment — it never asserts management, so
+    /// no route gains a lockdown or a sign-in gate by moving here.
+    pub(crate) fn managed_policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
+        crate::managed_policy::resolve_with_deployment(
+            &*self.provisioned_policy,
+            &*self.os_policy,
+            self.config.hosted_gateway_url(),
+        )
+    }
+
     /// Resolve model credentials per caller through `inference` (decision 51).
     ///
     /// Pass the same instance the resolver holds: the authentication

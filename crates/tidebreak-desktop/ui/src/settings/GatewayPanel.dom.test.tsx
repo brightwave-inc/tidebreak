@@ -38,6 +38,10 @@ function api(overrides: Partial<Record<keyof ApiClient, unknown>> = {}) {
 }
 
 const local: RemoteMachineState = { attachment: "local", baseUrl: null };
+const attached: RemoteMachineState = {
+  attachment: "remote",
+  baseUrl: "https://machine.example",
+};
 
 /** The native machine commands, stubbed: nothing here reaches a shell. */
 function machineStub(
@@ -116,6 +120,48 @@ describe("GatewayPanel", () => {
     expect(screen.getByLabelText(/Address/)).toHaveValue("");
     expect(
       screen.getByRole("button", { name: /Connect with Model Gateway/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("hosted machine: names the gateway and offers no session to manage", async () => {
+    // Callers authenticate *to* this machine with their own gateway account.
+    // It holds no session of its own, so a sign-in here would start a flow it
+    // could never complete — and the panel must not read a status it has no
+    // session behind either.
+    const client = api();
+    render(
+      <GatewayPanel
+        client={client}
+        managed={false}
+        gatewayUrl={null}
+        hostedGatewayUrl="https://gateway.example/"
+        onChanged={() => undefined}
+        onOpenConnectedApps={() => undefined}
+        machine={machineStub(attached)}
+      />,
+    );
+
+    expect(screen.getByText("https://gateway.example/")).toBeInTheDocument();
+    expect(
+      screen.getByText(/authenticates you with your Model Gateway account/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/not connected to a model gateway/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Connect" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sync/ }),
+    ).not.toBeInTheDocument();
+    expect(client.getGatewayStatus).not.toHaveBeenCalled();
+
+    // The machine still says where the work runs, and how to come back.
+    expect(
+      await screen.findByText("Attached to a remote machine"),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /Work on this computer/ }),
     ).toBeInTheDocument();
   });
 

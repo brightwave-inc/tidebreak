@@ -57,6 +57,24 @@ Policy resolution has three tiers, strongest first:
 3. **Open.** Neither present; the unmanaged product, which has no gateway
    surface at all.
 
+### A hosted machine names a gateway without being managed by one
+
+A gateway-authenticated hosted machine
+([decision 49](decisions/0049-gateway-authenticated-hosted-machines.md)) is a
+fourth thing, and it is deliberately not a fourth tier of the list above. Its
+callers authenticate *to* it with their own gateway tokens; nobody signs in
+*through* it. It therefore holds no session, can never report one, and must
+never be resolved as managed — a sign-in gate against it is one nothing could
+ever satisfy.
+
+So the deployment's own `TIDEBREAK_AUTH_GATEWAY_URL` reaches the resolved
+policy as a separate fact, `hosted_gateway_url`. It describes: an attached
+client can name the gateway that authenticates it, and the model surfaces know
+the credential is resolved per caller
+([decision 51](decisions/0051-on-behalf-of-inference-for-hosted-machines.md)).
+It governs nothing: `managed` stays false, so no lockdown, no sign-in gate, and
+no change to how routes are collected.
+
 ## Pairing: the provision link is a proposal, not a command
 
 Pairing starts from the gateway's own web UI: a link of exactly one shape,
