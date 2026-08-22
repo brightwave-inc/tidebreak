@@ -26,7 +26,7 @@ use super::super::super::{entities, store_err, DbStore};
 /// number)`: an existing row keeps its id and its `first_seen_at`, and takes
 /// the fresh snapshot plus `last_seen_at`. Trigger `pr_opened` edges key on
 /// `first_seen_at`, which is why an upsert never moves it.
-pub async fn upsert_pull_request_fact(
+pub async fn save_pull_request_fact(
     store: &DbStore,
     fact: &CodePullRequestFact,
 ) -> Result<CodePullRequestId> {
@@ -162,11 +162,21 @@ pub async fn list_fact_repo_identities(
     Ok(rows)
 }
 
-/// Every owner holding at least one fact row. A system path for the sweep.
-pub async fn list_fact_owners_all(store: &DbStore) -> Result<Vec<String>> {
-    let rows: Vec<String> = entities::code_pull_request::Entity::find()
+/// Every distinct `(owner, host, repo_owner, repo_name)` holding at least
+/// one fact row.
+///
+/// A system path, not a request path: the reconcile sweep walks every
+/// tracked repository identity regardless of who observed it, then scopes
+/// each read to the row's owner. Nothing reachable from a route may call it.
+pub async fn list_fact_repo_identities_all_owners(
+    store: &DbStore,
+) -> Result<Vec<(String, String, String, String)>> {
+    let rows: Vec<(String, String, String, String)> = entities::code_pull_request::Entity::find()
         .select_only()
         .column(entities::code_pull_request::Column::Owner)
+        .column(entities::code_pull_request::Column::Host)
+        .column(entities::code_pull_request::Column::RepoOwner)
+        .column(entities::code_pull_request::Column::RepoName)
         .distinct()
         .into_tuple()
         .all(&store.conn)
@@ -178,7 +188,7 @@ pub async fn list_fact_owners_all(store: &DbStore) -> Result<Vec<String>> {
 /// Mint one workspace's tie to a pull request. Returns `true` when this call
 /// created the row; an existing `(pull_request, workspace)` row wins and the
 /// call reports `false` without touching it.
-pub async fn claim_pull_request_attribution(
+pub async fn insert_pull_request_attribution(
     store: &DbStore,
     attribution: &CodePullRequestAttribution,
 ) -> Result<bool> {

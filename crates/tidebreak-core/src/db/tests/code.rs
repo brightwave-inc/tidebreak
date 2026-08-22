@@ -2476,9 +2476,9 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         CodePullRequestId, CodePullRequestRelation, CodePullRequestState,
     };
     use crate::db::code::{
-        claim_pull_request_attribution, count_attributed_prs_for_workspace, get_pull_request_fact,
+        count_attributed_prs_for_workspace, get_pull_request_fact, insert_pull_request_attribution,
         list_attributed_facts_for_workspace, list_fact_repo_identities,
-        promote_attribution_to_authored, upsert_pull_request_fact,
+        promote_attribution_to_authored, save_pull_request_fact,
     };
 
     let (_dir, store) = temp_store().await;
@@ -2513,7 +2513,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         first_seen_at: first_seen,
         last_seen_at: first_seen,
     };
-    let id = upsert_pull_request_fact(&store, &fact).await.unwrap();
+    let id = save_pull_request_fact(&store, &fact).await.unwrap();
 
     // Same identity, fresh snapshot: the id and first_seen_at hold, the
     // snapshot and last_seen_at move.
@@ -2529,7 +2529,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         last_seen_at: later,
         ..fact.clone()
     };
-    let same_id = upsert_pull_request_fact(&store, &refreshed).await.unwrap();
+    let same_id = save_pull_request_fact(&store, &refreshed).await.unwrap();
     assert_eq!(id, same_id);
     let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
         .await
@@ -2554,10 +2554,10 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         parent_call_id: Some("task-1".into()),
         created_at: now(),
     };
-    assert!(claim_pull_request_attribution(&store, &attribution)
+    assert!(insert_pull_request_attribution(&store, &attribution)
         .await
         .unwrap());
-    assert!(!claim_pull_request_attribution(
+    assert!(!insert_pull_request_attribution(
         &store,
         &CodePullRequestAttribution {
             relation: CodePullRequestRelation::Authored,

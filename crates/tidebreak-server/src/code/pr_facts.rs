@@ -17,8 +17,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use tidebreak_core::db::code::{
-    claim_pull_request_attribution, list_recent_events, promote_attribution_to_authored,
-    upsert_pull_request_fact,
+    insert_pull_request_attribution, list_recent_events, promote_attribution_to_authored,
+    save_pull_request_fact,
 };
 use tidebreak_core::{
     CodeEvent, CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,
@@ -391,14 +391,14 @@ pub(crate) async fn record_confirmed_fact(
 ) -> Option<CodePullRequestId> {
     let now = Utc::now();
     let fact = fact_from_gh_value(owner, target, value, now)?;
-    let id = match upsert_pull_request_fact(db, &fact).await {
+    let id = match save_pull_request_fact(db, &fact).await {
         Ok(id) => id,
         Err(err) => {
             debug!("pr fact upsert failed: {err}");
             return None;
         }
     };
-    let claimed = claim_pull_request_attribution(
+    let claimed = insert_pull_request_attribution(
         db,
         &CodePullRequestAttribution {
             owner: owner.clone(),
