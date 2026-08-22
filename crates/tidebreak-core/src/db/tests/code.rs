@@ -663,7 +663,7 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
             status: CodeTurnStatus::Completed,
             user_input: "look at this".into(),
             user_input_blob_id: None,
-            attachments: vec![image.clone()],
+            attachments: vec![image],
             checkpoint_ref: None,
             diffstat: None,
             usage: None,

@@ -501,17 +501,7 @@ async fn deliver_leased_fire(
     };
 
     let session_id = delivery.session_id();
-    if let Err(delivery_error) = deliver_fire(
-        runtime,
-        owner,
-        delivery,
-        fire.delivery_id,
-        lease_token,
-        payload.condition,
-        fire.identity.pr_number,
-        payload.message.clone(),
-    )
-    .await
+    if let Err(delivery_error) = deliver_fire(runtime, &fire, payload, delivery, lease_token).await
     {
         reschedule_delivery_failure(runtime, &fire, lease_token, delivery_error.message()).await;
         return Err(delivery_error);
@@ -586,14 +576,14 @@ async fn reschedule_delivery_failure(
 
 async fn deliver_fire(
     runtime: &Arc<CodeRuntime>,
-    owner: &OwnerId,
+    fire: &CodeTriggerFire,
+    payload: &CodeTriggerFirePayload,
     delivery: Delivery,
-    delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
-    condition: CodeTriggerCondition,
-    pr_number: u64,
-    message: String,
 ) -> Result<(), ServerError> {
+    let owner = &fire.identity.owner;
+    let delivery_id = fire.delivery_id;
+    let message = payload.message.clone();
     let session_id = delivery.session_id();
     match delivery {
         Delivery::Steer { turn_id, .. } => {
@@ -622,7 +612,7 @@ async fn deliver_fire(
                 delivery_id,
                 lease_token,
                 Attention::needs_you(
-                    describe_condition(condition, pr_number),
+                    describe_condition(payload.condition, fire.identity.pr_number),
                     AttentionSource::Structured,
                 ),
             )
@@ -1032,7 +1022,9 @@ mod tests {
     fn a_fuzzy_link_alone_produces_no_target() {
         let fuzzy = link(false, CodeWorkspaceStatus::Active);
         let eligible = HashSet::from([fuzzy.workspace_id]);
-        assert!(linked_workspaces(&[fuzzy.clone()], fuzzy.repo_id, &eligible).is_empty());
+        assert!(
+            linked_workspaces(std::slice::from_ref(&fuzzy), fuzzy.repo_id, &eligible).is_empty()
+        );
     }
 
     #[test]

@@ -1645,6 +1645,7 @@ impl CodeRuntime {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit_turn_inner(
         &self,
         owner: &OwnerId,

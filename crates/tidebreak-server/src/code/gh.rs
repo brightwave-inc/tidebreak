@@ -1867,6 +1867,7 @@ pub(crate) async fn comment_on_pull_request_target(
 
 /// Repository-qualified merge for a PR that may not have a local Tidebreak
 /// workspace. The runner still admits only `gh pr merge` argv.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_pull_request_target(
     host: &str,
     owner: &str,
@@ -1908,7 +1909,7 @@ pub(crate) async fn rerun_failed_jobs_with_observation(
     repo: &str,
     run_id: u64,
 ) -> Result<(), GhError> {
-    let binary = require_gh_binary(&observation)?;
+    let binary = require_gh_binary(observation)?;
     let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs");
     let mut args = vec![
         "api".to_owned(),

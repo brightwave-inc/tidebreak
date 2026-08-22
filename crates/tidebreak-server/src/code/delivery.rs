@@ -494,7 +494,6 @@ pub(crate) async fn discover_repositories(
         stream::iter(catalog.entries)
             .map(|entry| {
                 let binary = binary.clone();
-                let runtime = runtime;
                 async move {
                     resolve_repository_cached(
                         runtime,
@@ -579,7 +578,6 @@ pub(crate) async fn resolve_repositories(
         let results = stream::iter(targets)
             .map(|target| {
                 let binary = binary.clone();
-                let runtime = runtime;
                 async move {
                     resolve_repository_cached(runtime, &binary, &target, None, false)
                         .await
@@ -674,7 +672,6 @@ pub(crate) async fn query_pull_requests(
                 .map(|target| {
                     let binary = binary.clone();
                     let workspace_index = workspace_index.clone();
-                    let runtime = runtime;
                     async move {
                         fetch_pull_requests(
                             runtime,
@@ -1175,7 +1172,6 @@ pub(crate) async fn query_runs(
                 .map(|target| {
                     let binary = binary.clone();
                     let workspace_index = workspace_index.clone();
-                    let runtime = runtime;
                     async move {
                         fetch_runs(
                             runtime,
@@ -1664,7 +1660,7 @@ fn dedupe_numbered_targets(
             Some((target, numbers))
         })
         .collect::<Vec<_>>();
-    grouped.sort_by(|(left, _), (right, _)| repository_key(left).cmp(&repository_key(right)));
+    grouped.sort_by_key(|(target, _)| repository_key(target));
     Ok(grouped)
 }
 

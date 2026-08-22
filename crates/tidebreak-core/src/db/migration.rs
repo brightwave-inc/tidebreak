@@ -1222,7 +1222,7 @@ mod tests {
             "next_attempt_cleared",
             "last_error_cleared",
         ] {
-            assert_eq!(fire.try_get::<bool>("", column).unwrap(), true);
+            assert!(fire.try_get::<bool>("", column).unwrap());
         }
 
         let fire_primary_key = db
