@@ -1,5 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+import { attachedRemotely } from "../host";
+
 import {
   APP_INVOKE_REFUSAL_KINDS,
   AppInvokeRefusalError,
@@ -593,7 +595,13 @@ export class ApiClient {
   }
 
   putMcpServers(servers: McpServerDefinition[]): Promise<McpServersInfo> {
-    if (isTauri()) {
+    // The native command exists to put an OS confirmation in front of stdio
+    // commands that would run on this computer, and it writes to the server
+    // embedded in this app. Neither is right while attached: the commands
+    // would run on the machine, and writing here would save the reader's
+    // edit to a config they were not looking at — `listMcpServers` reads the
+    // machine's, so the panel would re-read and show the edit gone.
+    if (isTauri() && !attachedRemotely()) {
       return invoke<McpServersInfo>("put_native_mcp_servers", {
         config: { servers },
       });

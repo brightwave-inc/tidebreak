@@ -232,6 +232,9 @@ vi.mock("./host", () => ({
   hasMacOverlayTitlebar: () => false,
   requestUserAttention,
   onPairingChanged: () => () => undefined,
+  setAttachedRemotely: () => undefined,
+  attachedRemotely: () => false,
+  hasLocalHostAuthority: () => hasNativeHost(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

@@ -59,6 +59,40 @@ export function hasNativeHost(): boolean {
   return isTauri();
 }
 
+/**
+ * Whether this window works on a machine other than this computer.
+ *
+ * The module-level twin of `useAttachedRemotely`, for the three callers that
+ * sit outside React and cannot use a hook: the API client, the image
+ * attachment hook's non-component branch, and the code-mode browser host.
+ * Boot resolves the attachment before any of them runs and records it here.
+ *
+ * Defaults to `false`, which is what a browser tab is and what the desktop is
+ * until told otherwise. The default has to be the permissive one: attachment
+ * changes always reload the window, so a stale `true` could never be cleared,
+ * while a stale `false` cannot outlive boot.
+ */
+let attachedRemotelyFlag = false;
+
+export function setAttachedRemotely(attached: boolean): void {
+  attachedRemotelyFlag = attached;
+}
+
+export function attachedRemotely(): boolean {
+  return attachedRemotelyFlag;
+}
+
+/**
+ * Whether host authority applies to what this window is working on.
+ *
+ * Prefer this to a bare {@link hasNativeHost} anywhere the call reaches this
+ * computer's files, screen, or input. `hasNativeHost` alone stays true while
+ * attached to another machine, so it offers controls that then refuse.
+ */
+export function hasLocalHostAuthority(): boolean {
+  return hasNativeHost() && !attachedRemotely();
+}
+
 /** Native directory picker for code-mode repo registration and clone destinations. */
 export async function pickCodeDirectory(): Promise<string | null> {
   if (!isTauri()) return null;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, Laptop, RefreshCw } from "lucide-react";
 
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { onPairingChanged } from "./host";
 import { openInBrowser } from "./openInBrowser";
+import { disconnectRemoteMachine, remoteMachineState } from "./remoteMachine";
 import { WindowDragStrip } from "./WindowDragStrip";
 
 /** While the browser flow is pending the exchange lands out of band, so the
@@ -119,6 +120,15 @@ export function ManagedGate({
   // reader is still looking at.
   const [statusError, setStatusError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // The machine this window is pointed at, or `null` for this computer.
+  //
+  // Read from the shell rather than through the API client on purpose. When
+  // the client is attached to a machine that refuses it — a gateway session
+  // that ended, access revoked — every read through the client fails, and
+  // this is the one fact still legible. It is also what makes the escape
+  // hatch below possible: detaching is a host command, so it works no matter
+  // what the machine says.
+  const [attachedMachine, setAttachedMachine] = useState<string | null>(null);
 
   const policy = policyState.kind === "resolved" ? policyState.policy : null;
   const managed = policy?.managed === true;
@@ -132,6 +142,24 @@ export function ManagedGate({
   // it ("Not now") is what returns the app.
   const pendingPairingUrl = policy?.pending_gateway_url ?? null;
   const gateActive = managed || pendingPairingUrl !== null;
+
+  // Once, on mount. The attachment only changes by a path that reloads the
+  // window, so there is nothing here to watch.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const state = await remoteMachineState();
+        if (!cancelled) setAttachedMachine(state.baseUrl);
+      } catch {
+        // Not knowing leaves the local copy below, which is the safe read:
+        // it offers no escape hatch rather than a broken one.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (policyState.kind !== "loading") return;
@@ -297,6 +325,72 @@ export function ManagedGate({
       (policy.managed && !policy.gateway_url));
 
   if (policyState.kind === "blocked" || policyMisconfigured) {
+    // Attached to a machine, and it will not answer. Naming the managed
+    // policy here would be a lie — the policy on this computer is fine, and
+    // the reader cannot act on the machine's copy anyway. What they can
+    // always do is come back to this computer, and until this screen offered
+    // it there was no way to: the Machine settings sit behind this gate, so
+    // a machine that stopped accepting the session locked the window with
+    // nothing but a Retry that retried the same refusal.
+    if (attachedMachine !== null) {
+      return (
+        <div className="boot" aria-label="Machine unavailable">
+          <WindowDragStrip />
+          <div className="boot-brand">
+            <Logomark />
+            <h1>Tidebreak</h1>
+          </div>
+          <div className="welcome-copy">
+            <h2>That machine is not answering</h2>
+            <p>
+              This window works on{" "}
+              <code className="font-medium">{attachedMachine}</code>, and that
+              machine refused it. Your access may have ended, or the machine may
+              be down.
+            </p>
+            <p>
+              Come back to this computer to sign in again. Work on the machine
+              keeps running, and you can reattach once it answers.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              disabled={working}
+              onClick={() =>
+                void (async () => {
+                  setWorking(true);
+                  setActionError(null);
+                  try {
+                    await disconnectRemoteMachine();
+                    // Same reason the settings panel reloads: the API client
+                    // and the event stream were built against the machine
+                    // this window opened on.
+                    window.location.reload();
+                  } catch (err) {
+                    setActionError(String(err));
+                    setWorking(false);
+                  }
+                })()
+              }
+            >
+              <Laptop size={14} />
+              Work on this computer
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={working}
+              onClick={() => setPolicyState({ kind: "loading" })}
+            >
+              <RefreshCw size={14} />
+              Retry
+            </Button>
+          </div>
+          {actionError && <p className="boot-error-detail">{actionError}</p>}
+        </div>
+      );
+    }
     return (
       <div className="boot" aria-label="Managed policy unavailable">
         <WindowDragStrip />

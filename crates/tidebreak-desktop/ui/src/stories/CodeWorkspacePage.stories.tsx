@@ -725,6 +725,7 @@ function appContext(client: ApiClient): AppContextValue {
       error: null,
       enabled: false,
     }),
+    attachment: "local",
     restartForUpdate: async () => {},
   };
 }

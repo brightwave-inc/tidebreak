@@ -118,6 +118,7 @@ const app: AppContextValue = {
     error: null,
     enabled: false,
   }),
+  attachment: "local",
   restartForUpdate: async () => {},
 };
 

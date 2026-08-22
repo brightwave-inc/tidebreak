@@ -1,6 +1,13 @@
 import { createContext, useContext } from "react";
 
-import type { ApiClient, Chat, ModelInfo, Project, ProviderInfo } from "./api";
+import type {
+  ApiClient,
+  Attachment,
+  Chat,
+  ModelInfo,
+  Project,
+  ProviderInfo,
+} from "./api";
 import type { DesktopUpdateState } from "./updates";
 
 /**
@@ -18,6 +25,17 @@ import type { DesktopUpdateState } from "./updates";
  */
 export type AppContextValue = {
   client: ApiClient;
+  /**
+   * Which machine this window works on.
+   *
+   * Host authority — the folder broker, the client executor, native export,
+   * computer use — reaches the computer the window runs on, and while
+   * attached the conversation is somewhere else. Surfaces that reach the host
+   * must branch on this, not on {@link hasNativeHost}: that one answers "am I
+   * a native shell", which stays true while attached, so using it as the gate
+   * offers a control that then fails.
+   */
+  attachment: Attachment;
   models: ModelInfo[];
   /**
    * The catalog key a chat without an override runs against, so the picker can
@@ -70,4 +88,14 @@ export function useApp(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) throw new Error("useApp must be used inside the app shell");
   return value;
+}
+
+/**
+ * Whether this window works on a machine other than this computer.
+ *
+ * The one gate for host authority. Attaching and detaching both reload the
+ * window, so this never changes under a mounted component.
+ */
+export function useAttachedRemotely(): boolean {
+  return useApp().attachment === "remote";
 }

@@ -137,6 +137,7 @@ function app(client: Partial<AppContextValue["client"]>): AppContextValue {
       error: null,
       enabled: false,
     }),
+    attachment: "local",
     restartForUpdate: async () => {},
   } as AppContextValue;
 }

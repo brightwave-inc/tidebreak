@@ -113,6 +113,7 @@ function app(
       error: null,
       enabled: false,
     }),
+    attachment: "local",
     restartForUpdate: async () => {},
   };
 }
