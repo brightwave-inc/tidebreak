@@ -594,7 +594,10 @@ async fn chat_search_model(
             .flatten()
             .unwrap_or_else(|| default_model.to_owned()),
     };
-    let policy = crate::providers::resolve_model_policy(store, &selected, true)
+    // Hosted callers' gateway selections resolve to nothing here: the search
+    // sub-request rides the deployment-resolved provider, which a hosted
+    // machine does not have. Decision 62 names this gap and leaves it open.
+    let policy = crate::providers::resolve_model_policy(store, &selected, true, None)
         .await
         .ok()
         .flatten()?;

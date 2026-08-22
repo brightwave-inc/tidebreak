@@ -298,6 +298,9 @@ fn user_prompt(action: &str, context: &[JudgeContextMessage]) -> String {
 
 /// Polls for judge-owned approvals and lands one verdict per call.
 pub(crate) struct ApprovalJudgeWorker {
+    /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
+    /// 62): the judge runs as the caller whose approval it reads.
+    on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     secrets: Arc<dyn tidebreak_core::SecretProvider>,
@@ -317,6 +320,7 @@ impl ApprovalJudgeWorker {
         approvals: Arc<ApprovalBroker>,
     ) -> Self {
         Self {
+            on_behalf_of: None,
             store,
             resolver,
             secrets,
@@ -325,6 +329,14 @@ impl ApprovalJudgeWorker {
             approvals,
             poll: Duration::from_millis(750),
         }
+    }
+
+    pub(crate) fn with_on_behalf_of_gateway(
+        mut self,
+        gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
+    ) -> Self {
+        self.on_behalf_of = gateway;
+        self
     }
 
     pub(crate) async fn run(self) {
@@ -377,19 +389,32 @@ impl ApprovalJudgeWorker {
         let Some(action) = action_description(preview) else {
             return Ok(false);
         };
-        // No utility model configured means no judge, not a cheaper gate.
+        // The judge runs as the caller whose approval it reads: their own
+        // entitlements pick the utility model, and their credential drives it
+        // (decision 62). No utility model configured means no judge, not a
+        // cheaper gate.
+        let owner = self
+            .store
+            .chat_owner(approval.chat_id)
+            .await
+            .unwrap_or_default();
+        let caller_gateway = match (self.on_behalf_of.as_ref(), owner.as_ref()) {
+            (Some(gateway), Some(owner)) => gateway.snapshot_for(owner).await.ok().flatten(),
+            _ => None,
+        };
         let Some(utility) = crate::model_roles::resolve_utility_model(
             &*self.store,
             &*self.secrets,
             &*self.provisioned_policy,
             &*self.os_policy,
+            caller_gateway.as_ref(),
         )
         .await?
         else {
             return Ok(false);
         };
         let context = conversation_digest(&self.store.list_messages(approval.chat_id).await?);
-        let provider = self.resolver.resolve().await;
+        let provider = self.resolver.resolve_for(owner.as_ref()).await;
         let verdict = request_verdict(
             provider.as_ref(),
             &utility,

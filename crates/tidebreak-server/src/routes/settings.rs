@@ -235,7 +235,8 @@ pub async fn put_settings(
     Json(mut body): Json<SettingsUpdate>,
 ) -> Result<Json<Settings>, ServerError> {
     if let Some(Some(model)) = body.model.as_mut() {
-        *model = validate_model_selection(&state, model, false).await?;
+        *model = validate_model_selection(&state, model, false, Some(&auth.principal.owner_id()))
+            .await?;
     }
     match body.model {
         // Absent: leave the model unchanged.

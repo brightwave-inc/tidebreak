@@ -444,8 +444,11 @@ impl SandboxAgentRunWorker {
             }
         }
         let search_capabilities = if self.resolver.enforces_model_registry() {
+            // Sandbox runs resolve without a caller snapshot: on a hosted
+            // machine their model path has no per-caller route yet either.
+            // Decision 62 names this gap and leaves it open.
             let Some(policy) =
-                crate::providers::resolve_model_policy(&*self.store, &model, true).await?
+                crate::providers::resolve_model_policy(&*self.store, &model, true, None).await?
             else {
                 return Err(AgentError::config(
                     "sandbox model is not registered for its provider",

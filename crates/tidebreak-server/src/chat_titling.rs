@@ -230,7 +230,10 @@ impl ChatTitler {
         let Some(material) = user_message_digest(&self.store.list_messages(chat_id).await?) else {
             return Ok(None);
         };
-        let provider = self.resolver.resolve().await;
+        // The title runs as the chat's owner: on a hosted machine that is
+        // the caller whose credential can actually drive it (decision 62).
+        let owner = self.store.chat_owner(chat_id).await.unwrap_or_default();
+        let provider = self.resolver.resolve_for(owner.as_ref()).await;
         let title = derive_title_with_retries(
             provider.as_ref(),
             utility,

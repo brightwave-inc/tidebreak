@@ -788,7 +788,7 @@ impl GatewayRuntime {
             // Lock order matches the sign-in task's sync path: the sign-in
             // state lock is already held, the snapshot lock nests inside it.
             let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
-            if !providers::gateway_models(&*self.store, &policy)
+            if !providers::gateway_models(&*self.store, &policy, None)
                 .await?
                 .is_empty()
             {
@@ -968,46 +968,9 @@ impl GatewayRuntime {
             GatewayCatalogFetch::Fresh { catalog, etag } => {
                 member_catalog = Some(MEMBER_CATALOG_V1.to_owned());
                 catalog_etag = etag;
-                catalog
-                    .models
-                    .into_iter()
-                    .filter_map(|model| {
-                        let protocols: Vec<_> = model
-                            .protocols
-                            .iter()
-                            .filter_map(|protocol| {
-                                providers::GatewayModelProtocol::parse(protocol)
-                            })
-                            .collect();
-                        // A dual-protocol model routes through Anthropic
-                        // Messages, the richer adapter; a model with no
-                        // protocol this client speaks is skipped, exactly as
-                        // on the older surface.
-                        let protocol = if protocols
-                            .contains(&providers::GatewayModelProtocol::AnthropicMessages)
-                        {
-                            providers::GatewayModelProtocol::AnthropicMessages
-                        } else {
-                            *protocols.first()?
-                        };
-                        let id = model.id;
-                        model_protocols.insert(id.clone(), protocol);
-                        Some(CustomModelConfig {
-                            id,
-                            display_name: Some(model.name),
-                            // The catalog reports gateway-id aliases instead
-                            // of the provider-side id; both exist to match a
-                            // curated row.
-                            upstream_id: None,
-                            aliases: model.aliases,
-                            context_window: clamp_u32(model.context_window, 32_768),
-                            max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
-                            input_modalities: vec![crate::model_registry::InputModality::Text],
-                            supports_reasoning: false,
-                            reasoning_efforts: Vec::new(),
-                        })
-                    })
-                    .collect()
+                let (models, protocols) = providers::member_catalog_models(catalog);
+                model_protocols = protocols;
+                models
             }
             GatewayCatalogFetch::Unsupported => connection
                 .models(None)
@@ -1030,8 +993,8 @@ impl GatewayRuntime {
                         // its curated row; gateways older than the field send none.
                         upstream_id: model.upstream_id,
                         aliases: Vec::new(),
-                        context_window: clamp_u32(model.context_window, 32_768),
-                        max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+                        context_window: providers::clamp_u32(model.context_window, 32_768),
+                        max_output_tokens: providers::clamp_u32(model.max_output_tokens, 4_096),
                         input_modalities: vec![crate::model_registry::InputModality::Text],
                         supports_reasoning: false,
                         reasoning_efforts: Vec::new(),
@@ -1559,13 +1522,6 @@ fn require_managed(policy: &crate::managed_policy::ManagedPolicy) -> Result<Stri
             "the managed gateway policy has no usable gateway URL; repair the policy authority",
         )
     })
-}
-
-fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
-    value
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
 }
 
 /// Router-facing supplier of the gateway's `llm`-resource token. Refresh and
@@ -2370,7 +2326,9 @@ mod tests {
         assert_eq!(runtime.sync_models().await.unwrap(), 2);
 
         let policy = runtime.policy().unwrap();
-        let models = providers::gateway_models(&*store, &policy).await.unwrap();
+        let models = providers::gateway_models(&*store, &policy, None)
+            .await
+            .unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "sample-claude");
         assert_eq!(models[0].display_name.as_deref(), Some("Sample Claude"));
@@ -2393,7 +2351,7 @@ mod tests {
 
         // The synced snapshot resolves as a model policy under the gateway key.
         let policy =
-            providers::resolve_model_policy(&*store, "model_gateway::sample-claude", false)
+            providers::resolve_model_policy(&*store, "model_gateway::sample-claude", false, None)
                 .await
                 .unwrap()
                 .expect("synced model resolves");
@@ -2488,7 +2446,7 @@ mod tests {
         // The catalog's alias matches the curated registry row, so the
         // policy carries curated capabilities under the gateway's own id.
         let policy =
-            providers::resolve_model_policy(&*store, "model_gateway::sample-claude", false)
+            providers::resolve_model_policy(&*store, "model_gateway::sample-claude", false, None)
                 .await
                 .unwrap()
                 .expect("synced model resolves");
@@ -2681,7 +2639,7 @@ mod tests {
             .unwrap();
 
         let policy = runtime.policy().unwrap();
-        assert!(providers::gateway_models(&*store, &policy)
+        assert!(providers::gateway_models(&*store, &policy, None)
             .await
             .unwrap()
             .is_empty());
@@ -3168,7 +3126,7 @@ mod tests {
         .unwrap();
 
         let matched =
-            providers::resolve_model_policy(&*store, "model_gateway::claude-opus-5", false)
+            providers::resolve_model_policy(&*store, "model_gateway::claude-opus-5", false, None)
                 .await
                 .unwrap()
                 .expect("the gateway row resolves");
@@ -3201,6 +3159,7 @@ mod tests {
             &*store,
             "model_gateway::anthropic-us-claude-opus-5",
             false,
+            None,
         )
         .await
         .unwrap()
@@ -3234,11 +3193,15 @@ mod tests {
         assert!(aliased.supports_structured_output);
         assert_eq!(aliased.context_window, 200_000);
 
-        let unmatched =
-            providers::resolve_model_policy(&*store, "model_gateway::acme-inhouse-llm", false)
-                .await
-                .unwrap()
-                .expect("the unmatched gateway row still resolves");
+        let unmatched = providers::resolve_model_policy(
+            &*store,
+            "model_gateway::acme-inhouse-llm",
+            false,
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("the unmatched gateway row still resolves");
         assert_eq!(unmatched.vendor, None);
         assert_eq!(
             unmatched.verification,
@@ -3389,7 +3352,8 @@ mod tests {
             &*store,
             &*runtime.secrets,
             crate::providers::ProviderKind::ModelGateway,
-            &policy
+            &policy,
+            None
         )
         .await
         .unwrap());
@@ -3560,7 +3524,7 @@ mod tests {
         assert_eq!(status.model_count, 0);
         assert!(status.account_hint.is_none());
         let policy = runtime.policy().unwrap();
-        assert!(providers::gateway_models(&*store, &policy)
+        assert!(providers::gateway_models(&*store, &policy, None)
             .await
             .unwrap()
             .is_empty());
@@ -4148,12 +4112,12 @@ mod tests {
         assert!(routes
             .iter()
             .all(|route| route.kind != tidebreak_router::RouteKind::ModelGateway));
-        assert!(providers::catalog_models(&*store, &*secrets, &policy)
+        assert!(providers::catalog_models(&*store, &*secrets, &policy, None)
             .await
             .unwrap()
             .iter()
             .all(|model| model.policy.provider != crate::providers::ProviderKind::ModelGateway));
-        assert!(providers::list_providers(&*store, &*secrets, &policy)
+        assert!(providers::list_providers(&*store, &*secrets, &policy, None)
             .await
             .unwrap()
             .iter()
@@ -4162,7 +4126,8 @@ mod tests {
             &*store,
             &*secrets,
             crate::providers::ProviderKind::ModelGateway,
-            &policy
+            &policy,
+            None
         )
         .await
         .unwrap());
@@ -4238,7 +4203,9 @@ mod tests {
         providers::retire_legacy_gateway_row(&*store, &policy)
             .await
             .unwrap();
-        let models = providers::gateway_models(&*store, &policy).await.unwrap();
+        let models = providers::gateway_models(&*store, &policy, None)
+            .await
+            .unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "carried-model");
 
@@ -4264,7 +4231,9 @@ mod tests {
         providers::retire_legacy_gateway_row(&*store, &policy)
             .await
             .unwrap();
-        let models = providers::gateway_models(&*store, &policy).await.unwrap();
+        let models = providers::gateway_models(&*store, &policy, None)
+            .await
+            .unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "carried-model");
     }
