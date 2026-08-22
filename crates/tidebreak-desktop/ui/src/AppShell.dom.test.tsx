@@ -239,6 +239,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("./updates", () => ({
+  UPDATE_CHECK_REQUESTED_EVENT: "desktop-update-check-requested",
   useDesktopUpdates: () => ({
     state: desktopUpdateState,
     check: vi.fn(),

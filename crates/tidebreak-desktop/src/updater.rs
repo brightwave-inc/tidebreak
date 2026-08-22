@@ -32,9 +32,7 @@ const UPDATE_STATE_EVENT: &str = "desktop-update-state";
 /// Raised to the renderer when the native "Check for Updates…" menu item is
 /// chosen; the UI opens the Updates settings panel and runs an explicit check
 /// there so the outcome (up to date, or an update staged) is visible.
-const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requested";
-const MENU_CHECK_FOR_UPDATES_ID: &str = "check-for-updates";
-const MENU_RELOAD_ID: &str = "reload-app";
+pub(crate) const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requested";
 const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_ERROR: &str = "Could not check for updates. Try again later.";
@@ -287,60 +285,6 @@ async fn run_update_check(app: AppHandle) -> DesktopUpdateState {
         .busy
         .store(false, Ordering::Release);
     current_update_state(&app)
-}
-
-/// Install the app's native menu additions on macOS.
-///
-/// "Check for Updates…" sits in the application submenu directly under
-/// "About", while "Reload" leads the View menu with the browser-standard
-/// Cmd+R accelerator. The rest of Tauri's default menu stays intact.
-#[cfg(target_os = "macos")]
-pub(crate) fn install_app_menu(app: &tauri::App) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-
-    let handle = app.handle();
-    let menu = Menu::default(handle)?;
-    let items = menu.items()?;
-    if let Some(app_submenu) = items.first().and_then(|item| item.as_submenu().cloned()) {
-        let check = MenuItem::with_id(
-            handle,
-            MENU_CHECK_FOR_UPDATES_ID,
-            "Check for Updates…",
-            true,
-            None::<&str>,
-        )?;
-        app_submenu.insert(&check, 1)?;
-    }
-    if let Some(view_submenu) = items.iter().find_map(|item| {
-        let submenu = item.as_submenu()?;
-        matches!(submenu.text().as_deref(), Ok("View")).then(|| submenu.clone())
-    }) {
-        let reload =
-            MenuItem::with_id(handle, MENU_RELOAD_ID, "Reload", true, Some("CmdOrCtrl+R"))?;
-        let separator = PredefinedMenuItem::separator(handle)?;
-        view_submenu.prepend(&separator)?;
-        view_submenu.prepend(&reload)?;
-    }
-    app.set_menu(menu)?;
-    Ok(())
-}
-
-pub(crate) fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
-    match event.id().as_ref() {
-        MENU_CHECK_FOR_UPDATES_ID => {
-            if let Err(error) = app.emit(UPDATE_CHECK_REQUESTED_EVENT, ()) {
-                eprintln!("tidebreak-desktop: could not raise the update-check request: {error}");
-            }
-        }
-        MENU_RELOAD_ID => {
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = window.reload() {
-                    eprintln!("tidebreak-desktop: could not reload the app: {error}");
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 pub(crate) fn spawn_update_loop(app: AppHandle) {

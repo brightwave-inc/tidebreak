@@ -42,6 +42,7 @@ mod documents;
 mod host_access;
 mod host_authority;
 mod image_attachments;
+mod menu;
 mod node_install;
 mod office_install;
 mod office_pdf;
@@ -840,7 +841,7 @@ pub fn run() {
             updater::check_for_update,
             updater::restart_for_update
         ])
-        .on_menu_event(updater::handle_menu_event)
+        .on_menu_event(menu::handle_menu_event)
         .setup(move |app| {
             // The dev server's origin is remote as far as the IPC is
             // concerned, so `tauri dev` needs it granted explicitly. Added
@@ -852,7 +853,7 @@ pub fn run() {
             let handle = app.handle().clone();
             deep_link::install(&handle);
             #[cfg(target_os = "macos")]
-            updater::install_app_menu(app)?;
+            menu::install_app_menu(app)?;
             updater::spawn_update_loop(handle.clone());
             let data = data_dir(&handle)?;
             // Before anything that can warn: the embedded server's tracing
