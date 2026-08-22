@@ -23,6 +23,7 @@ pub(crate) mod session_worker;
 pub(crate) mod setup_script;
 pub(crate) mod terminal;
 pub(crate) mod titling;
+pub(crate) mod trigger;
 pub(crate) mod watch;
 pub(crate) mod worktree;
 pub(crate) mod worktree_orphans;

@@ -859,7 +859,7 @@ async fn require_authenticated(runtime: &CodeRuntime) -> Result<GhObservation, S
     Ok(observation)
 }
 
-async fn repository_target_from_local(
+pub(crate) async fn repository_target_from_local(
     repo: &CodeRepo,
 ) -> Result<CodeGitHubRepositoryTarget, String> {
     let remote = git_read(Path::new(&repo.root_path), &["remote", "get-url", "origin"])
