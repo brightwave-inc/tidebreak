@@ -18,11 +18,14 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    get_repo, insert_trigger_fire, list_active_watches_all_owners, list_enabled_triggers_all_owners,
+    get_open_turn, get_repo, get_session, insert_trigger_fire, latest_turn,
+    list_active_watches_all_owners, list_enabled_triggers_all_owners, list_sessions_for_workspace,
 };
 use tidebreak_core::{
-    classify_trigger_condition, CodeTrigger, CodeTriggerFire, CodeWorkspaceStatus, OwnerId,
-    PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
+    classify_trigger_condition, Attention, AttentionSource, CapLevel, CodeEvent, CodeSession,
+    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction,
+    CodeTriggerCondition, CodeTriggerFire, CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel,
+    OwnerId, PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
 };
 use tracing::{debug, warn};
 
@@ -432,9 +435,7 @@ async fn note_fire(
     trigger: &CodeTrigger,
     digest: &PullRequestDigest,
 ) {
-    let Ok(Some(session)) =
-        tidebreak_core::db::code::get_session(&runtime.db, owner, session_id).await
-    else {
+    let Ok(Some(session)) = get_session(&runtime.db, owner, session_id).await else {
         return;
     };
     let _ = journal_event(
