@@ -1615,6 +1615,7 @@ pub(crate) async fn attach_engine(
     Ok(session)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sink_for(
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,

@@ -148,18 +148,13 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
     recorded.sort_by_key(|(_, command)| command.seq);
 
     let mut confirms = 0usize;
-    let mut parsed = 0usize;
     let mut seen_creates: HashSet<String> = HashSet::new();
     let mut seen_pushes: HashSet<String> = HashSet::new();
     let mut pushes: Vec<(RecordedCommand, PushAct)> = Vec::new();
 
     // Creates first: an authored claim outranks a contributed one, and the
     // confirm budget should never be spent on pushes before creates.
-    for (call_id, command) in recorded {
-        if parsed >= MAX_COMMANDS_PER_TURN {
-            break;
-        }
-        parsed += 1;
+    for (call_id, command) in recorded.into_iter().take(MAX_COMMANDS_PER_TURN) {
         // A command the engine reports as failed cannot have created or
         // pushed anything; confirming it against the host could match an
         // older pull request on the same branch and mis-attribute it.

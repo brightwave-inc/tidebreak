@@ -193,6 +193,7 @@ async fn seeded(
     (session, turn_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn journal_command(
     store: &tidebreak_core::DbStore,
     session: &CodeSession,
