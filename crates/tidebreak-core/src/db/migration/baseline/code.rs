@@ -487,3 +487,136 @@ pub(super) fn code_watch_indexes() -> Vec<IndexCreateStatement> {
         .col(CodeWatch::WorkspaceId)
         .to_owned()]
 }
+
+/// Standing trigger rules, bound per repository (decision 60).
+///
+/// A trigger is a preference about how the user wants to be reached, not a
+/// decision about one pull request the way a watch is, so it hangs off the
+/// repository and applies to every workspace on it that has a pull request.
+pub(super) fn code_trigger_table() -> TableCreateStatement {
+    Table::create()
+        .table(CodeTrigger::Table)
+        .col(
+            ColumnDef::new(CodeTrigger::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(owner_column(CodeTrigger::Owner))
+        .col(ColumnDef::new(CodeTrigger::RepoId).uuid().not_null())
+        .col(ColumnDef::new(CodeTrigger::Condition).text().not_null())
+        .col(ColumnDef::new(CodeTrigger::Action).text().not_null())
+        .col(
+            ColumnDef::new(CodeTrigger::Enabled)
+                .boolean()
+                .not_null()
+                .default(true),
+        )
+        .col(
+            ColumnDef::new(CodeTrigger::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeTrigger::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_trigger_repo")
+                .from(CodeTrigger::Table, CodeTrigger::RepoId)
+                .to(CodeRepo::Table, CodeRepo::Id),
+        )
+        .check(Expr::col(CodeTrigger::Condition).is_in([
+            "checks_failed",
+            "conflicts",
+            "changes_requested",
+            "review_required",
+            "behind",
+            "ready_to_merge",
+            "merged",
+            "closed",
+        ]))
+        .check(Expr::col(CodeTrigger::Action).is_in(["deliver", "notify"]))
+        .to_owned()
+}
+
+pub(super) fn code_trigger_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        // The sweep reads by repository; one owner may arm several conditions
+        // on one repository, so this is not unique.
+        Index::create()
+            .name("idx_code_trigger_repo")
+            .table(CodeTrigger::Table)
+            .col(CodeTrigger::RepoId)
+            .to_owned(),
+        // One row per (owner, repository, condition): arming the same
+        // condition twice is an edit, not a second rule.
+        Index::create()
+            .name("uq_code_trigger_rule")
+            .table(CodeTrigger::Table)
+            .col(CodeTrigger::Owner)
+            .col(CodeTrigger::RepoId)
+            .col(CodeTrigger::Condition)
+            .unique()
+            .to_owned(),
+    ]
+}
+
+/// One row per trigger fire, fingerprinted against the head SHA it fired for.
+///
+/// This table is what makes a trigger fire on an edge rather than on every
+/// sweep that still finds the condition true. The primary key is the
+/// fingerprint: finding the row is the suppression.
+pub(super) fn code_trigger_fire_table() -> TableCreateStatement {
+    Table::create()
+        .table(CodeTriggerFire::Table)
+        .col(owner_column(CodeTriggerFire::Owner))
+        .col(ColumnDef::new(CodeTriggerFire::TriggerId).uuid().not_null())
+        .col(
+            ColumnDef::new(CodeTriggerFire::WorkspaceId)
+                .uuid()
+                .not_null(),
+        )
+        .col(ColumnDef::new(CodeTriggerFire::HeadSha).text().not_null())
+        .col(
+            ColumnDef::new(CodeTriggerFire::PrNumber)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeTriggerFire::FiredAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .col(CodeTriggerFire::TriggerId)
+                .col(CodeTriggerFire::WorkspaceId)
+                .col(CodeTriggerFire::HeadSha),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_trigger_fire_trigger")
+                .from(CodeTriggerFire::Table, CodeTriggerFire::TriggerId)
+                .to(CodeTrigger::Table, CodeTrigger::Id)
+                .on_delete(ForeignKeyAction::Cascade),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_trigger_fire_workspace")
+                .from(CodeTriggerFire::Table, CodeTriggerFire::WorkspaceId)
+                .to(CodeWorkspace::Table, CodeWorkspace::Id),
+        )
+        .check(Expr::col(CodeTriggerFire::PrNumber).gte(1))
+        .to_owned()
+}
+
+pub(super) fn code_trigger_fire_indexes() -> Vec<IndexCreateStatement> {
+    vec![Index::create()
+        .name("idx_code_trigger_fire_workspace")
+        .table(CodeTriggerFire::Table)
+        .col(CodeTriggerFire::WorkspaceId)
+        .to_owned()]
+}

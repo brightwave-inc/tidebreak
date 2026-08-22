@@ -1875,3 +1875,49 @@ pub mod code_watch {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod code_trigger {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_trigger")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub repo_id: Uuid,
+        pub condition: String,
+        pub action: String,
+        pub enabled: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_trigger_fire {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_trigger_fire")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub trigger_id: Uuid,
+        pub owner: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub workspace_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub head_sha: String,
+        pub pr_number: i64,
+        pub fired_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
