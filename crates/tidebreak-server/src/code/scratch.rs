@@ -121,13 +121,12 @@ fn reject_git_indexable_root(root: &Path) -> io::Result<()> {
             ));
         }
         match std::fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(metadata) if metadata.is_dir() || metadata.is_file() => {
+            Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "private storage cannot be inside a Git worktree",
                 ));
             }
-            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
@@ -280,9 +279,24 @@ fn ensure_child_dir(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
             ));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use cap_std::fs::{DirBuilder, DirBuilderExt as _};
+
+                let mut builder = DirBuilder::new();
+                builder.mode(0o700);
+                parent.create_dir_with(name, &builder)?;
+            }
+            #[cfg(not(unix))]
             parent.create_dir(name)?;
         }
         Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::{Permissions, PermissionsExt as _};
+
+        parent.set_permissions(name, Permissions::from_mode(0o700))?;
     }
     parent.open_dir_nofollow(name)
 }
@@ -297,6 +311,12 @@ async fn publish_file(directory: &Dir, name: &OsStr, bytes: &[u8]) -> io::Result
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+
+        options.mode(0o600);
+    }
     let file = directory.open_with(&staged, &options)?;
     if !file.metadata()?.is_file() {
         let _ = directory.remove_file(&staged);
@@ -447,6 +467,73 @@ mod tests {
 
         assert!(workspace_root(data_dir.path(), WorkspaceId::new()).is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_root_rejects_a_symlinked_git_marker() {
+        let worktree = tempfile::tempdir().unwrap();
+        let git_dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(git_dir.path(), worktree.path().join(".git")).unwrap();
+        let data_dir = worktree.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+
+        let error = workspace_root(&data_dir, WorkspaceId::new()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_directories_and_files_reject_group_and_world_access() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let private_root = workspace_root(data_dir.path(), WorkspaceId::new()).unwrap();
+        let scope = scratch_scope(
+            &private_root,
+            "attachments",
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        )
+        .unwrap();
+        scope
+            .publish(OsStr::new("private.png"), b"private")
+            .await
+            .unwrap();
+
+        let private_mode = std::fs::metadata(&private_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let attachments = private_root.join("attachments");
+        let attachment_mode = std::fs::metadata(&attachments)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let session = std::fs::read_dir(&attachments)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let turn = std::fs::read_dir(&session)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let file_mode = std::fs::metadata(turn.join("private.png"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(private_mode, 0o700);
+        assert_eq!(attachment_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
     }
 
     #[test]

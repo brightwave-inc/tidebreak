@@ -626,6 +626,8 @@ mod tests {
             None,
             session.subagents.clone(),
         );
+        let private_root = _dir.path().join("private");
+        std::fs::create_dir(&private_root).unwrap();
         let child_pid = i64::from(std::process::id());
         let engine = crate::scripted_harness::ScriptedAdapter::new(vec![
             tidebreak_harness::HarnessEvent::TurnStarted,
@@ -661,7 +663,7 @@ mod tests {
             sink,
             crate::code::session_worker::AttachmentStore {
                 blobs: None,
-                private_root: _dir.path().join("private"),
+                private_root,
                 engine_reads_images: false,
             },
             std::sync::Arc::new(tokio::sync::Mutex::new(())),
