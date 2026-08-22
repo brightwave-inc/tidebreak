@@ -1,12 +1,26 @@
-//! The database schema.
+//! The database schema: a baseline, then an ordered chain.
 //!
-//! Fresh pre-v1 databases are described by a single [`Baseline`]. Desktop
-//! SQLite changes bump `DESKTOP_SCHEMA_EPOCH` so disposable local data is
-//! rebuilt. Self-host databases are durable: a renamed baseline must not
-//! recreate tables that already exist, and any later in-place baseline edit
-//! that must reach an already-recorded schema also gets an ordered upgrade
-//! migration in this module. Squash again before `1.0.0` so that release's
-//! first migration is a clean snapshot, not this public-opening chain.
+//! [`Baseline`] describes a fresh database. Anything that has to reach a
+//! database the baseline already ran against is an appended migration in
+//! [`Migrator::migrations`], in order.
+//!
+//! The ordering is the point. SeaORM records one name per migration and cannot
+//! tell that the statements behind an already-recorded name changed, so an
+//! in-place baseline edit reaches a fresh database and no existing one. The
+//! desktop profile survives that because `DESKTOP_SCHEMA_EPOCH` deletes and
+//! rebuilds it. The self-host PostgreSQL store is durable and has no reset, so
+//! an appended migration is the only thing that reaches it.
+//!
+//! The two owner migrations below used to be branches inside `Baseline::up`,
+//! each guarded by whether its column existed yet. One such branch works.
+//! Several do not: the guard is the only thing saying what runs when, so
+//! nothing records the order, and a fresh database and an upgraded one can
+//! drift apart with no test to notice. That is what
+//! `a_stepwise_upgrade_lands_on_the_fresh_schema` notices now.
+//!
+//! Squash this chain into a single clean snapshot before `1.0.0`, so that
+//! release's first migration is a baseline rather than this development
+//! history.
 
 mod baseline;
 mod idens;
@@ -22,7 +36,7 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Baseline)]
+        vec![Box::new(Baseline), Box::new(AppOwner), Box::new(CodeOwner)]
     }
 }
 
@@ -37,12 +51,12 @@ impl MigrationName for Baseline {
 #[async_trait::async_trait]
 impl MigrationTrait for Baseline {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // An existing self-host database already recorded an older baseline
-        // name. Re-running CREATE TABLE would fail; fold leftover upgrades
-        // into this snapshot instead and leave the rows alone.
+        // A self-host database that recorded the pre-squash chain already
+        // holds these tables under a different migration name, so
+        // `CREATE TABLE` would fail. Leave its rows alone and let the
+        // migrations after this one bring it forward.
         if manager.has_table("app").await? {
-            ensure_app_owner(manager).await?;
-            return ensure_code_owner(manager).await;
+            return Ok(());
         }
         for entry in baseline::tables() {
             manager.create_table(entry.table).await?;
@@ -73,36 +87,55 @@ impl MigrationTrait for Baseline {
     }
 }
 
-/// Folded from the pre-public `add_app_owner` upgrade. Existing self-host
-/// databases that recorded the August 4 baseline may still lack the column.
-async fn ensure_app_owner(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    if !manager.has_column("app", "owner").await? {
+/// Unfolded from the pre-public `add_app_owner` upgrade. A self-host database
+/// that recorded the August 4 baseline may still lack the column; the current
+/// baseline declares it, so on a fresh database this is a no-op.
+struct AppOwner;
+
+impl MigrationName for AppOwner {
+    fn name(&self) -> &str {
+        "m20260814_000002_app_owner"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AppOwner {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("app", "owner").await? {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::App::Table)
+                        .add_column(
+                            ColumnDef::new(idens::App::Owner)
+                                .text()
+                                .not_null()
+                                .default("local"),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
         manager
-            .alter_table(
-                Table::alter()
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_app_owner_updated")
                     .table(idens::App::Table)
-                    .add_column(
-                        ColumnDef::new(idens::App::Owner)
-                            .text()
-                            .not_null()
-                            .default("local"),
-                    )
+                    .col(idens::App::Owner)
+                    .col(idens::App::UpdatedAt)
+                    .col(idens::App::Id)
                     .to_owned(),
             )
-            .await?;
+            .await
     }
-    manager
-        .create_index(
-            Index::create()
-                .if_not_exists()
-                .name("idx_app_owner_updated")
-                .table(idens::App::Table)
-                .col(idens::App::Owner)
-                .col(idens::App::UpdatedAt)
-                .col(idens::App::Id)
-                .to_owned(),
-        )
-        .await
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: the baseline declares this column and index, so
+        // dropping them would leave a fresh database short of its own
+        // snapshot. `Baseline::down` drops the table outright.
+        Ok(())
+    }
 }
 
 /// Owner columns for the code-mode tables, for self-host databases that
@@ -116,51 +149,67 @@ async fn ensure_app_owner(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 /// databases two owners cannot register the same path until the store is
 /// recreated. Fresh databases get the per-owner uniqueness the baseline
 /// declares.
-async fn ensure_code_owner(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    const CODE_TABLES: [&str; 7] = [
-        "code_repo",
-        "code_workspace",
-        "code_session",
-        "code_turn",
-        "code_turn_attachment",
-        "code_event",
-        "code_approval",
-    ];
-    for name in CODE_TABLES {
-        if !manager.has_table(name).await? {
-            continue;
-        }
-        if manager.has_column(name, "owner").await? {
-            continue;
-        }
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(Alias::new(name))
-                    .add_column(
-                        ColumnDef::new(idens::CodeWorkspace::Owner)
-                            .text()
-                            .not_null()
-                            .default("local"),
-                    )
-                    .to_owned(),
-            )
-            .await?;
+struct CodeOwner;
+
+impl MigrationName for CodeOwner {
+    fn name(&self) -> &str {
+        "m20260814_000003_code_owner"
     }
-    if manager.has_table("code_workspace").await? {
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_code_workspace_owner_created")
-                    .table(idens::CodeWorkspace::Table)
-                    .col(idens::CodeWorkspace::Owner)
-                    .col(idens::CodeWorkspace::CreatedAt)
-                    .to_owned(),
-            )
-            .await?;
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeOwner {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        const CODE_TABLES: [&str; 7] = [
+            "code_repo",
+            "code_workspace",
+            "code_session",
+            "code_turn",
+            "code_turn_attachment",
+            "code_event",
+            "code_approval",
+        ];
+        for name in CODE_TABLES {
+            if !manager.has_table(name).await? {
+                continue;
+            }
+            if manager.has_column(name, "owner").await? {
+                continue;
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Alias::new(name))
+                        .add_column(
+                            ColumnDef::new(idens::CodeWorkspace::Owner)
+                                .text()
+                                .not_null()
+                                .default("local"),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        if manager.has_table("code_workspace").await? {
+            manager
+                .create_index(
+                    Index::create()
+                        .if_not_exists()
+                        .name("idx_code_workspace_owner_created")
+                        .table(idens::CodeWorkspace::Table)
+                        .col(idens::CodeWorkspace::Owner)
+                        .col(idens::CodeWorkspace::CreatedAt)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
-    Ok(())
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse, for the reason on `AppOwner::down`.
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -171,8 +220,28 @@ mod tests {
 
     use super::Migrator;
 
+    /// Every `CREATE TABLE` a fresh database runs comes from `sqlite_master`,
+    /// which stores the statement verbatim and appends what `ALTER TABLE`
+    /// adds. Comparing two databases through it therefore sees columns a
+    /// migration added, not only tables it created.
+    async fn schema_of(db: &sea_orm::DatabaseConnection) -> String {
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL \
+                 ORDER BY type, name"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|row| row.try_get::<String>("", "sql").unwrap())
+            .collect::<Vec<_>>()
+            .join(";\n")
+    }
+
     #[tokio::test]
-    async fn a_fresh_database_is_described_by_one_baseline() {
+    async fn a_fresh_database_records_the_whole_chain() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
 
@@ -187,7 +256,14 @@ mod tests {
             .iter()
             .map(|row| row.try_get::<String>("", "version").unwrap())
             .collect();
-        assert_eq!(versions, ["m20260814_000001_baseline"]);
+        assert_eq!(
+            versions,
+            [
+                "m20260814_000001_baseline",
+                "m20260814_000002_app_owner",
+                "m20260814_000003_code_owner",
+            ]
+        );
         assert!(db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -198,9 +274,47 @@ mod tests {
             .is_none());
     }
 
-    /// The self-host durable branch: a database that recorded the older
-    /// baseline keeps its code rows and gains the owner column in place,
-    /// rather than having `CREATE TABLE` re-run against it.
+    /// A database that stopped at the baseline and later took the rest of the
+    /// chain must land on the schema a fresh database gets in one pass.
+    ///
+    /// This is the property the chain exists for. The desktop profile can be
+    /// deleted and rebuilt; the self-host PostgreSQL store cannot, so it only
+    /// ever sees the appended migrations. If those disagree with the baseline
+    /// by even a default or a nullability, the two deployments run different
+    /// schemas against the same queries — and nothing else notices, because
+    /// each one is internally consistent.
+    ///
+    /// With three migrations this is nearly free. It stops being free the
+    /// first time an appended migration adds a column the baseline declares
+    /// differently, which is the mistake the folded-in `ensure_*` branches
+    /// were one edit away from making.
+    ///
+    /// It runs on SQLite while the store it protects is PostgreSQL, and that
+    /// is enough: both sides are the same sea-query statements, so a baseline
+    /// and a migration that disagree disagree on either backend. What differs
+    /// between backends is the *rendering*, and `the_schema_baseline_is_pinned`
+    /// pins that for both.
+    #[tokio::test]
+    async fn a_stepwise_upgrade_lands_on_the_fresh_schema() {
+        let stepwise = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&stepwise, Some(1)).await.unwrap();
+        Migrator::up(&stepwise, None).await.unwrap();
+
+        let fresh = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&fresh, None).await.unwrap();
+
+        assert_eq!(
+            schema_of(&stepwise).await,
+            schema_of(&fresh).await,
+            "an upgraded database and a fresh one describe different schemas; \
+             an appended migration disagrees with the baseline"
+        );
+    }
+
+    /// The durable self-host path: a database that recorded the pre-squash
+    /// chain keeps its code rows, skips the baseline, and gains the owner
+    /// column from [`super::CodeOwner`] instead of having `CREATE TABLE`
+    /// re-run against it.
     #[tokio::test]
     async fn an_existing_pre_owner_code_repo_is_backfilled_and_not_recreated() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
