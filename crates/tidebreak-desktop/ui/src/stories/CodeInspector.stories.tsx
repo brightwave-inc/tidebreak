@@ -13,6 +13,7 @@ import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
 type InspectorScenario =
   | "ready"
   | "merge-ready"
+  | "multi-pr"
   | "empty"
   | "loading"
   | "failure";
@@ -46,6 +47,62 @@ const pullRequest: PullRequestDigest = {
     { name: "workspace / integration", bucket: "pending" },
   ],
 };
+
+const workspacePullRequestFacts = [
+  {
+    host: "github.com",
+    repo_owner: "example",
+    repo_name: "tidebreak",
+    number: 2248,
+    url: "https://github.com/example/tidebreak/pull/2248",
+    title: "Rework the code workspace around persistent conversation",
+    state: "open",
+    draft: false,
+    author: "sam",
+    head_branch: "thet/ui-pane-redesign",
+    base_branch: "main",
+    head_sha: "6cf15e2a",
+    relation: "authored" as const,
+    created_at: "2026-08-20T13:10:00.000Z",
+    updated_at: "2026-08-20T15:40:00.000Z",
+    last_seen_at: "2026-08-20T15:41:00.000Z",
+  },
+  {
+    host: "github.com",
+    repo_owner: "example",
+    repo_name: "tidebreak",
+    number: 2244,
+    url: "https://github.com/example/tidebreak/pull/2244",
+    title: "Retire the legacy pane",
+    state: "merged",
+    draft: false,
+    author: "sam",
+    head_branch: "thet/retire-legacy-pane",
+    base_branch: "main",
+    relation: "authored" as const,
+    created_at: "2026-08-19T09:00:00.000Z",
+    updated_at: "2026-08-20T10:00:00.000Z",
+    merged_at: "2026-08-20T10:00:00.000Z",
+    last_seen_at: "2026-08-20T15:41:00.000Z",
+  },
+  {
+    host: "github.com",
+    repo_owner: "example",
+    repo_name: "design-tokens",
+    number: 87,
+    url: "https://github.com/example/design-tokens/pull/87",
+    title: "Pane rhythm spacing tokens",
+    state: "open",
+    draft: true,
+    author: "sam",
+    head_branch: "thet/pane-rhythm",
+    base_branch: "main",
+    relation: "contributed" as const,
+    created_at: "2026-08-20T14:00:00.000Z",
+    updated_at: "2026-08-20T15:00:00.000Z",
+    last_seen_at: "2026-08-20T15:41:00.000Z",
+  },
+];
 
 const prSnapshot: CodeWorkspacePrSnapshot = {
   dirty: true,
@@ -160,6 +217,15 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
                   }
                 : changedFiles,
     getCodeWorkspacePr: async () => prSnapshot,
+    getCodeWorkspacePullRequests: async () => ({
+      items:
+        scenario === "multi-pr"
+          ? workspacePullRequestFacts
+          : scenario === "empty"
+            ? []
+            : workspacePullRequestFacts.slice(0, 1),
+      fetched_at: "2026-08-20T15:41:00.000Z",
+    }),
     refreshCodeWorkspacePr: async () => prSnapshot,
     commitCodeWorkspace: async () => ({
       sha: "6cf15e2",
@@ -295,6 +361,15 @@ export const Review: Story = {
 /** The same compact merge card when GitHub says the PR can land now. */
 export const ReviewReadyToMerge: Story = {
   args: { tab: "pr", scenario: "merge-ready" },
+};
+
+/**
+ * Several attributed pull requests (decision 62): the set lists above the
+ * panel, the primary stays live, and a selected row shows its stored
+ * snapshot.
+ */
+export const ReviewPullRequestSet: Story = {
+  args: { tab: "pr", scenario: "multi-pr" },
 };
 
 export const ChangesLoading: Story = {

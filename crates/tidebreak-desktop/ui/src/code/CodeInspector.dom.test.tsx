@@ -80,6 +80,7 @@ function makeClient(): Pick<
   | "listCodeWorkspaceFiles"
   | "listCodeWorkspaceTree"
   | "getCodeWorkspacePr"
+  | "getCodeWorkspacePullRequests"
 > {
   return {
     getCodePrComments: vi.fn().mockResolvedValue({
@@ -116,6 +117,10 @@ function makeClient(): Pick<
       truncated: false,
     }),
     getCodeWorkspacePr: vi.fn().mockResolvedValue(null),
+    getCodeWorkspacePullRequests: vi.fn().mockResolvedValue({
+      items: [],
+      fetched_at: "2026-08-22T12:00:00Z",
+    }),
   };
 }
 

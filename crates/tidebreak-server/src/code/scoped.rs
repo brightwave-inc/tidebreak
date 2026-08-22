@@ -442,6 +442,19 @@ impl ScopedCode {
         self.runtime.workspace_pr(&self.owner, id).await
     }
 
+    pub(crate) async fn workspace_pull_requests(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<
+        Vec<(
+            tidebreak_core::CodePullRequestFact,
+            tidebreak_core::CodePullRequestRelation,
+        )>,
+        ServerError,
+    > {
+        self.runtime.workspace_pull_requests(&self.owner, id).await
+    }
+
     pub(crate) async fn refresh_workspace_pr(
         &self,
         id: WorkspaceId,

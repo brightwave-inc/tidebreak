@@ -5,12 +5,12 @@ use ts_rs::TS;
 
 use tidebreak_core::{
     Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
-    CodeTerminalId, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeTurn,
-    CodeTurnId, CodeTurnStatus, CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspace,
-    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
-    HarnessTier, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort, RepoId,
-    WorkspaceId,
+    CodeEvent, CodePullRequestRelation, CodeRepo, CodeSession, CodeSessionKind,
+    CodeSessionLifecycle, CodeSubagentSummary, CodeTerminalId, CodeTrigger, CodeTriggerAction,
+    CodeTriggerCondition, CodeTriggerId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch,
+    CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
+    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PermissionMode, PullRequestDigest,
+    QuickAction, ReasoningEffort, RepoId, WorkspaceId,
 };
 
 /// A registered local git repository.
@@ -558,6 +558,49 @@ pub struct CodeWorkspacePrSnapshot {
     pub watch: Option<CodeWatchSnapshot>,
 }
 
+/// One pull request attributed to a workspace, from the durable fact store
+/// (decision 62). A projection of the stored snapshot — no live host read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspacePullRequestFact {
+    pub host: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    /// Coarse lifecycle: `open`, `merged`, or `closed`.
+    pub state: String,
+    pub draft: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author: Option<String>,
+    pub head_branch: String,
+    pub base_branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+    /// How the workspace is tied to it.
+    pub relation: CodePullRequestRelation,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the store last confirmed this snapshot against the host.
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response of `GET /code/workspaces/{id}/pull-requests`: every pull request
+/// this workspace authored or contributed to, open first, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspacePullRequests {
+    pub items: Vec<CodeWorkspacePullRequestFact>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// One durable watch task on a workspace's pull request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeWatchSnapshot {
@@ -707,6 +750,12 @@ pub struct CodeDeliveryWorkspaceLink {
     pub branch_name: String,
     pub status: CodeWorkspaceStatus,
     pub exact: bool,
+    /// Durable attribution behind this link, when one is stored: the
+    /// workspace authored or contributed to the pull request (decision 62).
+    /// Absent on links the live heuristic derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub relation: Option<CodePullRequestRelation>,
 }
 
 /// Why an open pull request belongs in the default Needs attention view.
@@ -1493,6 +1542,11 @@ pub struct CodeSessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pr_state: Option<PullRequestDigest>,
+    /// How many pull requests hold a durable attribution to this workspace
+    /// (decision 62). Absent when none do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr_count: Option<u64>,
     /// Watch progress, present only on `kind: watch` digests.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1522,6 +1576,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             turn_count: digest.turn_count,
             activity: digest.activity,
             pr_state: digest.pr_state,
+            pr_count: digest.pr_count,
             watch_state: digest.watch_state,
             watch_detail: digest.watch_detail,
             watch_cycles: digest.watch_cycles,
@@ -1559,6 +1614,11 @@ pub enum CodeUpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         pr_state: Option<Box<PullRequestDigest>>,
+        /// How many pull requests hold a durable attribution to this
+        /// workspace (decision 62). Absent when none do.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        pr_count: Option<u64>,
         /// Watch progress, present only on `kind: watch` digests.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -1643,6 +1703,7 @@ impl CodeUpdateNotice {
             turn_count: wire.turn_count,
             activity: wire.activity,
             pr_state: wire.pr_state.map(Box::new),
+            pr_count: wire.pr_count,
             watch_state: wire.watch_state,
             watch_detail: wire.watch_detail,
             watch_cycles: wire.watch_cycles,

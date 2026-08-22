@@ -179,6 +179,8 @@ pub(crate) struct CodeRuntime {
     watch_started: AtomicBool,
     trigger_sweep: Mutex<Option<super::trigger::TriggerSweepGuard>>,
     trigger_started: AtomicBool,
+    reconcile_sweep: Mutex<Option<super::reconcile::ReconcileSweepGuard>>,
+    reconcile_started: AtomicBool,
     /// Workspaces with a background naming call in flight.
     ///
     /// One call per workspace at a time; a second trigger is dropped rather
@@ -252,6 +254,8 @@ impl CodeRuntime {
             watch_started: AtomicBool::new(false),
             trigger_sweep: Mutex::new(None),
             trigger_started: AtomicBool::new(false),
+            reconcile_sweep: Mutex::new(None),
+            reconcile_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -294,6 +298,7 @@ impl CodeRuntime {
             // active watches resume with no extra state.
             runtime.ensure_watch_sweep();
             runtime.ensure_trigger_sweep();
+            runtime.ensure_reconcile_sweep();
             actions
         })
     }
@@ -353,6 +358,8 @@ impl CodeRuntime {
             watch_started: AtomicBool::new(false),
             trigger_sweep: Mutex::new(None),
             trigger_started: AtomicBool::new(false),
+            reconcile_sweep: Mutex::new(None),
+            reconcile_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -1305,6 +1312,35 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)
+    }
+
+    /// Every pull request attributed to the workspace, from the durable fact
+    /// store (decision 62): open first, then newest activity. No host read.
+    pub(crate) async fn workspace_pull_requests(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<
+        Vec<(
+            tidebreak_core::CodePullRequestFact,
+            tidebreak_core::CodePullRequestRelation,
+        )>,
+        ServerError,
+    > {
+        // The read authorizes through the workspace row: another owner's
+        // workspace is indistinguishable from a missing one.
+        let _ = self.get_workspace(owner, id).await?;
+        let mut facts =
+            tidebreak_core::db::code::list_attributed_facts_for_workspace(&self.db, owner, id)
+                .await?;
+        facts.sort_by(|(left, _), (right, _)| {
+            let left_open = left.state == tidebreak_core::CodePullRequestState::Open;
+            let right_open = right.state == tidebreak_core::CodePullRequestState::Open;
+            right_open
+                .cmp(&left_open)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
+        Ok(facts)
     }
 
     /// User-initiated merge (or auto-merge arming) of the workspace PR, then a
@@ -2499,6 +2535,16 @@ impl CodeRuntime {
         }
         let guard = super::trigger::TriggerSweepGuard::spawn(Arc::downgrade(self));
         *self.trigger_sweep.lock().expect("trigger sweep") = Some(guard);
+    }
+
+    /// Start the pull-request reconcile sweep once (decision 62). Same
+    /// weak-handle shape, on a third coprime interval.
+    pub(super) fn ensure_reconcile_sweep(self: &Arc<Self>) {
+        if self.reconcile_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let guard = super::reconcile::ReconcileSweepGuard::spawn(Arc::downgrade(self));
+        *self.reconcile_sweep.lock().expect("reconcile sweep") = Some(guard);
     }
 
     /// End one session: mark the row ended, stop its worker, and re-assert.

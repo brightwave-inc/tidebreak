@@ -15,6 +15,7 @@ import {
   prChipTone,
   sessionActivityLabel,
   workspaceCardLabel,
+  workspacePrChipSummary,
   workspaceStatusRank,
 } from "./workspaceCards";
 
@@ -376,5 +377,18 @@ describe("workspaceCardLabel", () => {
         attention: { state: { type: "working" }, source: "lifecycle" },
       }),
     ).toBe("Fix login · app · tidebreak/fix-login");
+  });
+});
+
+describe("workspacePrChipSummary", () => {
+  it("stays quiet for one or no attributed pull requests", () => {
+    expect(workspacePrChipSummary(undefined)).toBeNull();
+    expect(workspacePrChipSummary(0)).toBeNull();
+    expect(workspacePrChipSummary(1)).toBeNull();
+  });
+
+  it("counts once the workspace worked on several", () => {
+    expect(workspacePrChipSummary(2)).toBe("2 PRs");
+    expect(workspacePrChipSummary(7)).toBe("7 PRs");
   });
 });

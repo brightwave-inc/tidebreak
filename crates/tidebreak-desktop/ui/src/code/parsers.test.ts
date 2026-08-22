@@ -26,6 +26,7 @@ import {
   parseCodeTurnList,
   parseCodeTurnSubmission,
   parseCodeUpdateNotice,
+  parseCodeWorkspacePullRequests,
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
@@ -1143,5 +1144,129 @@ describe("parseFenceReason", () => {
       }),
     ).toBeNull();
     expect(parseFenceReason({ type: "who_knows" })).toBeNull();
+  });
+});
+
+describe("pull request facts (decision 62)", () => {
+  const fact = {
+    host: "github.com",
+    repo_owner: "acme",
+    repo_name: "tools",
+    number: 412,
+    url: "https://github.com/acme/tools/pull/412",
+    title: "Add fact tracking",
+    state: "open",
+    draft: false,
+    author: "octocat",
+    head_branch: "feat/x",
+    base_branch: "main",
+    head_sha: "aaa111",
+    relation: "authored",
+    created_at: "2026-08-22T10:00:00Z",
+    updated_at: "2026-08-22T11:00:00Z",
+    last_seen_at: "2026-08-22T11:00:30Z",
+  };
+
+  it("accepts GET /code/workspaces/{id}/pull-requests", () => {
+    const page = { items: [fact], fetched_at: "2026-08-22T11:00:31Z" };
+    expect(parseCodeWorkspacePullRequests(page)).toEqual(page);
+  });
+
+  it("rejects an unknown relation or state instead of guessing", () => {
+    expect(
+      parseCodeWorkspacePullRequests({
+        items: [{ ...fact, relation: "reviewed" }],
+        fetched_at: "2026-08-22T11:00:31Z",
+      }),
+    ).toBeNull();
+    expect(
+      parseCodeWorkspacePullRequests({
+        items: [{ ...fact, state: "OPEN" }],
+        fetched_at: "2026-08-22T11:00:31Z",
+      }),
+    ).toBeNull();
+  });
+
+  it("carries pr_count through a digest notice", () => {
+    const digest = {
+      workspace: "ws-1",
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: "Fix login",
+      turn_count: 3,
+      pr_count: 3,
+    };
+    expect(parseCodeUpdateNotice({ type: "digest", ...digest })).toEqual({
+      type: "digest",
+      ...digest,
+    });
+    expect(
+      parseCodeUpdateNotice({ type: "digest", ...digest, pr_count: "3" }),
+    ).toBeNull();
+  });
+
+  it("carries a durable relation on a delivery workspace link", () => {
+    const page = {
+      capability: {
+        found: true,
+        authenticated: true,
+        remediation: "",
+      },
+      items: [
+        {
+          id: "github.com/acme/tools#412",
+          repository: {
+            host: "github.com",
+            owner: "acme",
+            name: "tools",
+            name_with_owner: "acme/tools",
+            url: "https://github.com/acme/tools",
+          },
+          number: 412,
+          url: "https://github.com/acme/tools/pull/412",
+          title: "Add fact tracking",
+          state: "open",
+          draft: false,
+          head_branch: "feat/x",
+          base_branch: "main",
+          auto_merge_enabled: false,
+          checks: [],
+          attention_reasons: [],
+          ready_to_merge: false,
+          workspace_links: [
+            {
+              workspace_id: "ws-1",
+              repo_id: "repo-1",
+              title: "facts",
+              branch_name: "feat/x",
+              status: "active",
+              exact: true,
+              relation: "contributed",
+            },
+          ],
+          labels: [],
+          created_at: "2026-08-22T10:00:00Z",
+          updated_at: "2026-08-22T11:00:00Z",
+        },
+      ],
+      errors: [],
+      fetched_at: "2026-08-22T11:00:31Z",
+    };
+    expect(parseCodeDeliveryPullRequestsPage(page)).toEqual(page);
+    expect(
+      parseCodeDeliveryPullRequestsPage({
+        ...page,
+        items: [
+          {
+            ...page.items[0],
+            workspace_links: [
+              { ...page.items[0].workspace_links[0], relation: "owner" },
+            ],
+          },
+        ],
+      }),
+    ).toBeNull();
   });
 });

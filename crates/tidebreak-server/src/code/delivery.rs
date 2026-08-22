@@ -16,9 +16,14 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use tidebreak_core::db::code::{
+    get_workspace, insert_pull_request_attribution, list_attributions_for_pull_requests,
+    list_pull_request_facts_for_repo, save_pull_request_fact,
+};
 use tidebreak_core::{
-    CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId, PullRequestCheckBucket,
-    PullRequestComment, PullRequestCommentKind, RepoId,
+    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestId,
+    CodePullRequestRelation, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, DbStore, OwnerId,
+    PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind, RepoId, WorkspaceId,
 };
 
 use super::gh::{self, GhObservation};
@@ -40,7 +45,7 @@ use crate::routes::code::types::{
 const GH_READ_TIMEOUT: Duration = Duration::from_secs(45);
 const GIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
-const MAX_REPOSITORIES: usize = 50;
+pub(crate) const MAX_REPOSITORIES: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const MAX_REMOTE_ITEMS_PER_REPO: usize = 100;
 const DELIVERY_CONCURRENCY: usize = 4;
@@ -702,11 +707,27 @@ pub(crate) async fn query_pull_requests(
                     .cmp(&left.updated_at)
                     .then_with(|| left.id.cmp(&right.id))
             });
+            let workspaces_gaining_links = persist_and_augment_pull_request_facts(
+                &runtime.db,
+                owner,
+                &workspace_index,
+                &mut items,
+            )
+            .await;
             runtime.delivery_cache.put_pull_requests(
                 cache_key.clone(),
                 items.clone(),
                 errors.clone(),
             );
+            for workspace_id in workspaces_gaining_links {
+                super::attention::emit_workspace_digests(
+                    &runtime.db,
+                    &runtime.bus,
+                    owner,
+                    workspace_id,
+                )
+                .await;
+            }
             CachedAggregate {
                 fetched_at: Instant::now(),
                 items,
@@ -759,9 +780,21 @@ pub(crate) async fn pull_request_detail(
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let workspace_index = workspace_index(runtime, owner, false).await?;
-    let summary = fetch_pull_request(binary, &repository, target.number, &workspace_index)
+    let mut summary = fetch_pull_request(binary, &repository, target.number, &workspace_index)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
+    let minted = persist_and_augment_pull_request_facts(
+        &runtime.db,
+        owner,
+        &workspace_index,
+        std::slice::from_mut(&mut summary),
+    )
+    .await;
+    for workspace_id in minted {
+        super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
+            .await;
+    }
+    let summary = summary;
 
     let pull_endpoint = api_endpoint(&target.repository, &format!("pulls/{}", target.number));
     let issue_comments_endpoint = api_endpoint(
@@ -2410,6 +2443,7 @@ fn workspace_links(
                     branch_name: entry.workspace.branch_name.clone(),
                     status: entry.workspace.status,
                     exact,
+                    relation: None,
                 },
             ))
         })
@@ -2421,6 +2455,180 @@ fn workspace_links(
             .then_with(|| right_time.cmp(left_time))
     });
     links.into_iter().map(|(_, link)| link).collect()
+}
+
+/// Persist durable facts for the page's tracked pull requests and fold the
+/// stored attribution back into every item's workspace links (decision 62).
+///
+/// Tracked means exact-linked to a workspace (the index's number or head-SHA
+/// tiers) or already holding a fact row — a pull request nobody here worked
+/// on stays a live-only observation. The branch-name tier never mints.
+/// Returns the workspaces that gained an attribution row, so the caller can
+/// restate their digests. Best-effort throughout: a store failure degrades
+/// to the live heuristic links.
+async fn persist_and_augment_pull_request_facts(
+    db: &DbStore,
+    owner: &OwnerId,
+    workspaces: &[WorkspaceIndexEntry],
+    items: &mut [CodeDeliveryPullRequestSummary],
+) -> Vec<WorkspaceId> {
+    let mut minted = Vec::new();
+    let now = Utc::now();
+
+    // One fact read per repository identity on the page.
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        groups
+            .entry(repository_key_ref(&item.repository))
+            .or_default()
+            .push(index);
+    }
+    let mut fact_ids: HashMap<usize, CodePullRequestId> = HashMap::new();
+    for indices in groups.values() {
+        let repository = &items[indices[0]].repository;
+        let known: HashMap<u64, CodePullRequestId> = match list_pull_request_facts_for_repo(
+            db,
+            owner,
+            &repository.host,
+            &repository.owner,
+            &repository.name,
+        )
+        .await
+        {
+            Ok(facts) => facts
+                .into_iter()
+                .map(|fact| (fact.number, fact.id))
+                .collect(),
+            Err(err) => {
+                tracing::debug!("fact read failed for a delivery page: {err}");
+                continue;
+            }
+        };
+        for &index in indices {
+            let item = &items[index];
+            let exact_workspaces: Vec<WorkspaceId> = item
+                .workspace_links
+                .iter()
+                .filter(|link| link.exact)
+                .map(|link| link.workspace_id)
+                .collect();
+            if exact_workspaces.is_empty() && !known.contains_key(&item.number) {
+                continue;
+            }
+            let Some(fact) = super::reconcile::fact_from_summary(owner, item, now) else {
+                continue;
+            };
+            let id = match save_pull_request_fact(db, &fact).await {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::debug!("fact upsert failed for a delivery page: {err}");
+                    continue;
+                }
+            };
+            fact_ids.insert(index, id);
+            for workspace_id in exact_workspaces {
+                match insert_pull_request_attribution(
+                    db,
+                    &CodePullRequestAttribution {
+                        owner: owner.clone(),
+                        pull_request_id: id,
+                        workspace_id,
+                        relation: CodePullRequestRelation::Contributed,
+                        discovered_via: CodePullRequestDiscovery::Reconcile,
+                        session_id: None,
+                        parent_call_id: None,
+                        created_at: now,
+                    },
+                )
+                .await
+                {
+                    Ok(true) => minted.push(workspace_id),
+                    Ok(false) => {}
+                    Err(err) => tracing::debug!("attribution claim failed: {err}"),
+                }
+            }
+        }
+    }
+
+    if fact_ids.is_empty() {
+        return minted;
+    }
+    let ids: Vec<CodePullRequestId> = fact_ids.values().copied().collect();
+    let attributions = match list_attributions_for_pull_requests(db, owner, &ids).await {
+        Ok(attributions) => attributions,
+        Err(err) => {
+            tracing::debug!("attribution read failed for a delivery page: {err}");
+            return minted;
+        }
+    };
+    let mut by_fact: HashMap<CodePullRequestId, Vec<&CodePullRequestAttribution>> = HashMap::new();
+    for attribution in &attributions {
+        by_fact
+            .entry(attribution.pull_request_id)
+            .or_default()
+            .push(attribution);
+    }
+
+    // Workspace metadata for links the live index did not produce — an
+    // archived or foreign-branch workspace whose attribution outlived the
+    // heuristic match.
+    let mut workspace_meta: HashMap<WorkspaceId, CodeWorkspace> = workspaces
+        .iter()
+        .map(|entry| (entry.workspace.id, entry.workspace.clone()))
+        .collect();
+    for attribution in &attributions {
+        if workspace_meta.contains_key(&attribution.workspace_id) {
+            continue;
+        }
+        if let Ok(Some(workspace)) = get_workspace(db, owner, attribution.workspace_id).await {
+            workspace_meta.insert(workspace.id, workspace);
+        }
+    }
+
+    for (index, fact_id) in fact_ids {
+        let Some(attributions) = by_fact.get(&fact_id) else {
+            continue;
+        };
+        let item = &mut items[index];
+        for attribution in attributions {
+            if let Some(link) = item
+                .workspace_links
+                .iter_mut()
+                .find(|link| link.workspace_id == attribution.workspace_id)
+            {
+                link.exact = true;
+                link.relation = Some(attribution.relation);
+                continue;
+            }
+            let Some(workspace) = workspace_meta.get(&attribution.workspace_id) else {
+                continue;
+            };
+            item.workspace_links.push(CodeDeliveryWorkspaceLink {
+                workspace_id: workspace.id,
+                repo_id: workspace.repo_id,
+                title: workspace.title.clone(),
+                branch_name: workspace.branch_name.clone(),
+                status: workspace.status,
+                exact: true,
+                relation: Some(attribution.relation),
+            });
+        }
+        // Restore the established order — status rank, exact first, newest —
+        // because the notifications store routes to the first link.
+        item.workspace_links.sort_by(|left, right| {
+            let left_time = workspace_meta
+                .get(&left.workspace_id)
+                .map(|workspace| workspace.created_at);
+            let right_time = workspace_meta
+                .get(&right.workspace_id)
+                .map(|workspace| workspace.created_at);
+            workspace_status_rank(left.status)
+                .cmp(&workspace_status_rank(right.status))
+                .then_with(|| right.exact.cmp(&left.exact))
+                .then_with(|| right_time.cmp(&left_time))
+        });
+    }
+    minted
 }
 
 fn workspace_status_rank(status: CodeWorkspaceStatus) -> u8 {
