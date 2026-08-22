@@ -1,3 +1,4 @@
+import { parseAttention } from "../code/parsers";
 import {
   RENDERER_TOOL_NAMES,
   type AgentActivityDetail,
@@ -27,6 +28,8 @@ import {
   type ApprovalGrantRung,
   type ExecBackend,
   type ExecDegradation,
+  type InboxConversation,
+  type InboxEntry,
   type InboxItem,
   type InboxItemKind,
   type NetworkPolicy,
@@ -135,23 +138,12 @@ export function parseInboxItem(value: unknown): InboxItem | null {
   if (
     !isRecord(value) ||
     !onlyKeys<{
-      chat_id: string;
-      chat_title?: string;
       turn_id: string;
       call_id: string;
       kind: InboxItemKind;
       action?: RendererToolName;
       requested_at: string;
-    }>(value, [
-      "chat_id",
-      "chat_title",
-      "turn_id",
-      "call_id",
-      "kind",
-      "action",
-      "requested_at",
-    ]) ||
-    !nonEmptyBounded(value.chat_id, 128) ||
+    }>(value, ["turn_id", "call_id", "kind", "action", "requested_at"]) ||
     !nonEmptyBounded(value.turn_id, 128) ||
     !nonEmptyBounded(value.call_id, 128) ||
     !nonEmptyBounded(value.requested_at, 64) ||
@@ -160,15 +152,7 @@ export function parseInboxItem(value: unknown): InboxItem | null {
   ) {
     return null;
   }
-  // Both are optional on the wire, and neither may arrive as anything but its
-  // own declared shape — an untitled chat omits the key rather than sending an
-  // empty title, and only the closed tool vocabulary may name an action.
-  if (
-    value.chat_title !== undefined &&
-    !nonEmptyBounded(value.chat_title, 256)
-  ) {
-    return null;
-  }
+  // Only the closed tool vocabulary may name an action.
   if (
     value.action !== undefined &&
     !RENDERER_TOOL_NAMES.includes(value.action as RendererToolName)
@@ -176,13 +160,94 @@ export function parseInboxItem(value: unknown): InboxItem | null {
     return null;
   }
   return {
-    chatId: value.chat_id,
-    chatTitle: (value.chat_title as string | undefined) ?? null,
     turnId: value.turn_id,
     callId: value.call_id,
     kind: value.kind as InboxItemKind,
     action: (value.action as RendererToolName | undefined) ?? null,
     requestedAt: value.requested_at,
+  };
+}
+
+/** The tagged conversation an entry belongs to. */
+function parseInboxConversation(value: unknown): InboxConversation | null {
+  if (!isRecord(value)) return null;
+  if (value.surface === "chat") {
+    if (
+      !onlyKeys<{ surface: string; chat_id: string }>(value, [
+        "surface",
+        "chat_id",
+      ])
+    ) {
+      return null;
+    }
+    if (!nonEmptyBounded(value.chat_id, 128)) return null;
+    return { surface: "chat", chatId: value.chat_id };
+  }
+  if (value.surface === "code") {
+    if (
+      !onlyKeys<{ surface: string; session_id: string; workspace_id: string }>(
+        value,
+        ["surface", "session_id", "workspace_id"],
+      )
+    ) {
+      return null;
+    }
+    if (
+      !nonEmptyBounded(value.session_id, 128) ||
+      !nonEmptyBounded(value.workspace_id, 128)
+    ) {
+      return null;
+    }
+    return {
+      surface: "code",
+      sessionId: value.session_id,
+      workspaceId: value.workspace_id,
+    };
+  }
+  return null;
+}
+
+export function parseInboxEntry(value: unknown): InboxEntry | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<{
+      conversation: unknown;
+      title?: string;
+      attention: unknown;
+      items: unknown;
+      waiting_since: string;
+    }>(value, [
+      "conversation",
+      "title",
+      "attention",
+      "items",
+      "waiting_since",
+    ]) ||
+    !nonEmptyBounded(value.waiting_since, 64) ||
+    !Array.isArray(value.items)
+  ) {
+    return null;
+  }
+  const conversation = parseInboxConversation(value.conversation);
+  if (!conversation) return null;
+  const attention = parseAttention(value.attention);
+  if (!attention) return null;
+  // An untitled conversation omits the key rather than sending an empty title.
+  if (value.title !== undefined && !nonEmptyBounded(value.title, 256)) {
+    return null;
+  }
+  const items: InboxItem[] = [];
+  for (const raw of value.items) {
+    const item = parseInboxItem(raw);
+    if (!item) return null;
+    items.push(item);
+  }
+  return {
+    conversation,
+    title: (value.title as string | undefined) ?? null,
+    attention,
+    items,
+    waitingSince: value.waiting_since,
   };
 }
 

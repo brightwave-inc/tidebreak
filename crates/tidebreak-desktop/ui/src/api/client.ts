@@ -73,7 +73,8 @@ import {
   type AgentRun,
   type AgentRunProgress,
   type LocalVoiceInfo,
-  type InboxItem,
+  type InboxEntry,
+  inboxConversationKey,
   type AgentRunTaskPlan,
   type PendingChatPrompt,
   type TaskPlan,
@@ -123,7 +124,7 @@ import {
   parseAgentActivityHistory,
   parseAgentRunProgress,
   parseFolderAccessRequest,
-  parseInboxItem,
+  parseInboxEntry,
   parseOutputWritebackRequest,
   parsePendingChatPrompt,
   parsePendingPlanApproval,
@@ -991,24 +992,28 @@ export class ApiClient {
    * whole set to badge the inbox and mark the rail, and asking each chat in
    * turn would make that cost grow with the profile.
    */
-  async listInbox(): Promise<InboxItem[]> {
+  async listInbox(): Promise<InboxEntry[]> {
     const body = await this.json<unknown>("/inbox", {
       headers: this.headers(),
     });
     if (!Array.isArray(body)) {
       throw new Error("inbox response is not an array");
     }
-    const items: InboxItem[] = [];
+    const entries: InboxEntry[] = [];
     const seen = new Set<string>();
     for (const value of body) {
-      const item = parseInboxItem(value);
-      if (!item || seen.has(item.callId)) {
+      const entry = parseInboxEntry(value);
+      if (!entry) {
         throw new Error("inbox response contains invalid data");
       }
-      seen.add(item.callId);
-      items.push(item);
+      const key = inboxConversationKey(entry.conversation);
+      if (seen.has(key)) {
+        throw new Error("inbox response lists a conversation twice");
+      }
+      seen.add(key);
+      entries.push(entry);
     }
-    return items;
+    return entries;
   }
 
   async listPendingChatPrompts(): Promise<PendingChatPrompt[]> {

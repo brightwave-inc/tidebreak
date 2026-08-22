@@ -1942,8 +1942,11 @@ async fn the_inbox_lists_parked_work_until_its_own_route_resolves_it() {
     let approval_call = park_tool_approval_for_route_test(&*store, approval_chat.id).await;
 
     let listed = list_inbox(&router, &bearer).await;
+    // The queue is conversations now (decision 48 step 3), each carrying the
+    // calls parked behind it. Four chats, one parked call each.
     let kinds = listed
         .iter()
+        .flat_map(|entry| entry["items"].as_array().expect("items is a list"))
         .map(|item| {
             (
                 item["call_id"].as_str().unwrap().to_owned(),
@@ -1966,14 +1969,28 @@ async fn the_inbox_lists_parked_work_until_its_own_route_resolves_it() {
         .collect::<std::collections::BTreeMap<_, _>>(),
     );
 
-    // Each item carries the chat and the parked call, which is what a deep
-    // link needs to reopen the transcript where it stopped.
-    let approval_item = listed
+    // Every entry states why it is listed, in the vocabulary code mode uses.
+    for entry in &listed {
+        assert_eq!(
+            entry["attention"]["state"]["type"], "needs_you",
+            "a parked call must read as needs-you: {entry}"
+        );
+    }
+
+    // An entry carries its conversation and the parked call, which is what a
+    // deep link needs to reopen the transcript where it stopped. The
+    // conversation is tagged because chat and code ids are still separate
+    // spaces; step 5 collapses that.
+    let approval_entry = listed
         .iter()
-        .find(|item| item["call_id"] == approval_call.to_string())
+        .find(|entry| entry["conversation"]["chat_id"] == approval_chat.id.to_string())
         .expect("the parked approval is listed");
-    assert_eq!(approval_item["chat_id"], approval_chat.id.to_string());
-    assert_eq!(approval_item["action"], "search");
+    assert_eq!(approval_entry["conversation"]["surface"], "chat");
+    assert_eq!(
+        approval_entry["items"][0]["call_id"],
+        approval_call.to_string()
+    );
+    assert_eq!(approval_entry["items"][0]["action"], "search");
 
     // Resolution goes through each kind's established route, unchanged.
     assert_eq!(

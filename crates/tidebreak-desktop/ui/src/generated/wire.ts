@@ -2348,6 +2348,36 @@ height: number,
 byte_len: number, };
 
 /**
+ * Which conversation an entry belongs to.
+ *
+ * Tagged because chat ids and code session ids are still separate spaces
+ * (the repository check `chat_and_code_entities_do_not_cross_reference`
+ * enforces it). When step 5 merges the entities this collapses to one id.
+ */
+export type InboxConversation = { "surface": "chat", chat_id: ChatId, } | { "surface": "code", session_id: CodeSessionId, workspace_id: WorkspaceId, };
+
+/**
+ * One conversation that wants the reader, and why.
+ */
+export type InboxEntrySnapshot = { conversation: InboxConversation, 
+/**
+ * Absent, not null, while the conversation is still untitled.
+ */
+title?: string, attention: Attention, 
+/**
+ * The parked calls behind this attention, oldest first.
+ *
+ * Empty for a code conversation: its approvals are answered through the
+ * code approval route, which carries the verbatim payload decision 33
+ * requires and which a deep link reaches.
+ */
+items: Array<InboxItemSnapshot>, 
+/**
+ * When the oldest thing here started waiting, for ordering.
+ */
+waiting_since: string, };
+
+/**
  * What kind of decision one inbox item is waiting for.
  *
  * The set is closed and each variant names an existing park/resume surface,
@@ -2361,14 +2391,10 @@ export type InboxItemKind = "tool_approval" | "question" | "plan_review" | "fold
  */
 export type InboxItemSnapshot = { 
 /**
- * The conversation to open. With `call_id`, the deep link back to the
- * exact transcript position the item paused at.
+ * With the entry's conversation, the deep link back to the exact
+ * transcript position the item paused at.
  */
-chat_id: ChatId, 
-/**
- * Absent, not null, while the conversation is still untitled.
- */
-chat_title?: string, turn_id: TurnId, call_id: CallId, kind: InboxItemKind, 
+turn_id: TurnId, call_id: CallId, kind: InboxItemKind, 
 /**
  * The tool under review, for an approval. Absent for the other kinds,
  * whose tool is implied by the kind. Closed renderer vocabulary: an

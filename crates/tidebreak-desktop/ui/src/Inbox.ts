@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { InboxItem } from "./api";
+import { inboxConversationKey, type InboxEntry } from "./api";
 
 /**
  * Everything parked on the reader, in one place.
@@ -12,28 +12,44 @@ import type { InboxItem } from "./api";
  * the next poll no longer finds its journal row parked.
  */
 export type InboxStore = {
-  items: InboxItem[];
+  entries: InboxEntry[];
   /** Whether a first read has landed, so an empty list can be told from "not yet". */
   loaded: boolean;
-  setItems: (items: InboxItem[]) => void;
+  setEntries: (entries: InboxEntry[]) => void;
   clear: () => void;
 };
 
-function sameItems(left: InboxItem[], right: InboxItem[]): boolean {
+/**
+ * Whether two reads describe the same queue.
+ *
+ * Compares the conversation and its attention, not the parked calls: a chat
+ * can change what it is waiting on without the queue changing, and a code
+ * conversation has no calls here at all.
+ */
+function sameEntries(left: InboxEntry[], right: InboxEntry[]): boolean {
   return (
     left.length === right.length &&
-    left.every((item, index) => item.callId === right[index]?.callId)
+    left.every((entry, index) => {
+      const other = right[index];
+      if (!other) return false;
+      return (
+        inboxConversationKey(entry.conversation) ===
+          inboxConversationKey(other.conversation) &&
+        entry.attention.state.type === other.attention.state.type &&
+        entry.items.length === other.items.length
+      );
+    })
   );
 }
 
 export const useInbox = create<InboxStore>()((set) => ({
-  items: [],
+  entries: [],
   loaded: false,
-  setItems: (items) =>
+  setEntries: (entries) =>
     set((state) =>
-      state.loaded && sameItems(state.items, items)
+      state.loaded && sameEntries(state.entries, entries)
         ? state
-        : { items, loaded: true },
+        : { entries, loaded: true },
     ),
-  clear: () => set({ items: [], loaded: false }),
+  clear: () => set({ entries: [], loaded: false }),
 }));
