@@ -55,6 +55,7 @@ import {
   sessionRowLabel,
   watchRowLabel,
   workspaceCardLabel,
+  workspacePrChipSummary,
   type CardDensity,
   isPutAway,
 } from "./workspaceCards";
@@ -302,6 +303,7 @@ function WorkspaceStateLine({
       ? workspaceWorkflowActionLabel(primary, model.stage)
       : null;
     const stateLabel = model.summary.replace(/^#\d+\s*·\s*/, "");
+    const prCountLabel = workspacePrChipSummary(digest?.pr_count);
 
     return (
       <>
@@ -314,7 +316,11 @@ function WorkspaceStateLine({
               FOCUS_RING_INSET,
               HOVER_TINT,
             )}
-            aria-label={`Open pull request #${pr.number}`}
+            aria-label={
+              prCountLabel
+                ? `Open pull request #${pr.number}, one of ${digest?.pr_count} this workspace worked on`
+                : `Open pull request #${pr.number}`
+            }
             title={model.detail}
             onClick={() => onCommand("open-pr")}
           >
@@ -323,6 +329,11 @@ function WorkspaceStateLine({
             <span className="min-w-0 truncate text-muted-foreground">
               {stateLabel}
             </span>
+            {prCountLabel && (
+              <span className="bg-muted text-muted-foreground shrink-0 rounded-full px-1.5 text-[10px] font-medium tabular-nums">
+                {prCountLabel}
+              </span>
+            )}
             <ExternalLink
               className="size-2.5 shrink-0 opacity-55"
               aria-hidden

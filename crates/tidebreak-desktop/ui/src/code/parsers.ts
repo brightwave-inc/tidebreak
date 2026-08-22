@@ -78,6 +78,9 @@ import type {
   CodeGitHubCapability,
   CodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget,
+  CodePullRequestRelation,
+  CodeWorkspacePullRequestFact,
+  CodeWorkspacePullRequests,
   PullRequestDigest,
   PullRequestComment,
   PullRequestCommentKind,
@@ -140,6 +143,8 @@ import type {
   CodeDeliverySourceError as WireCodeDeliverySourceError,
   CodeDeliveryWorkflowJob as WireCodeDeliveryWorkflowJob,
   CodeDeliveryWorkspaceLink as WireCodeDeliveryWorkspaceLink,
+  CodeWorkspacePullRequestFact as WireCodeWorkspacePullRequestFact,
+  CodeWorkspacePullRequests as WireCodeWorkspacePullRequests,
   CodeForkTranscript as WireCodeForkTranscript,
   CodeGitHubCapability as WireCodeGitHubCapability,
   CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
@@ -219,6 +224,11 @@ const WORKSPACE_STATUSES = new Set<CodeWorkspaceStatus>([
   "archived",
   "released",
 ]);
+const PULL_REQUEST_RELATIONS = new Set<CodePullRequestRelation>([
+  "authored",
+  "contributed",
+]);
+const PULL_REQUEST_FACT_STATES = new Set<string>(["open", "merged", "closed"]);
 const TURN_STATUSES = new Set<CodeTurnStatus>([
   "running",
   "completed",
@@ -405,13 +415,16 @@ function parseCodeDeliveryWorkspaceLink(
       "branch_name",
       "status",
       "exact",
+      "relation",
     ]) ||
     !nonEmpty(value.workspace_id) ||
     !nonEmpty(value.repo_id) ||
     !nonEmpty(value.title) ||
     !nonEmpty(value.branch_name) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
-    typeof value.exact !== "boolean"
+    typeof value.exact !== "boolean" ||
+    (value.relation !== undefined &&
+      !isMember(value.relation, PULL_REQUEST_RELATIONS))
   ) {
     return null;
   }
@@ -422,7 +435,96 @@ function parseCodeDeliveryWorkspaceLink(
     branch_name: value.branch_name,
     status: value.status,
     exact: value.exact,
+    ...(value.relation !== undefined ? { relation: value.relation } : {}),
   };
+}
+
+function parseCodeWorkspacePullRequestFact(
+  value: unknown,
+): CodeWorkspacePullRequestFact | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspacePullRequestFact>(value, [
+      "host",
+      "repo_owner",
+      "repo_name",
+      "number",
+      "url",
+      "title",
+      "state",
+      "draft",
+      "author",
+      "head_branch",
+      "base_branch",
+      "head_sha",
+      "relation",
+      "created_at",
+      "updated_at",
+      "merged_at",
+      "closed_at",
+      "last_seen_at",
+    ]) ||
+    !nonEmpty(value.host) ||
+    !nonEmpty(value.repo_owner) ||
+    !nonEmpty(value.repo_name) ||
+    !isFiniteNumber(value.number) ||
+    !nonEmpty(value.url) ||
+    typeof value.title !== "string" ||
+    !PULL_REQUEST_FACT_STATES.has(value.state as string) ||
+    typeof value.draft !== "boolean" ||
+    !optionalString(value.author) ||
+    typeof value.head_branch !== "string" ||
+    typeof value.base_branch !== "string" ||
+    !optionalString(value.head_sha) ||
+    !isMember(value.relation, PULL_REQUEST_RELATIONS) ||
+    !nonEmpty(value.created_at) ||
+    !nonEmpty(value.updated_at) ||
+    !optionalString(value.merged_at) ||
+    !optionalString(value.closed_at) ||
+    !nonEmpty(value.last_seen_at)
+  ) {
+    return null;
+  }
+  return {
+    host: value.host,
+    repo_owner: value.repo_owner,
+    repo_name: value.repo_name,
+    number: value.number,
+    url: value.url,
+    title: value.title,
+    state: value.state as string,
+    draft: value.draft,
+    ...(value.author !== undefined ? { author: value.author } : {}),
+    head_branch: value.head_branch,
+    base_branch: value.base_branch,
+    ...(value.head_sha !== undefined ? { head_sha: value.head_sha } : {}),
+    relation: value.relation,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    ...(value.merged_at !== undefined ? { merged_at: value.merged_at } : {}),
+    ...(value.closed_at !== undefined ? { closed_at: value.closed_at } : {}),
+    last_seen_at: value.last_seen_at,
+  };
+}
+
+export function parseCodeWorkspacePullRequests(
+  value: unknown,
+): CodeWorkspacePullRequests | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeWorkspacePullRequests>(value, ["items", "fetched_at"]) ||
+    !Array.isArray(value.items) ||
+    !nonEmpty(value.fetched_at)
+  ) {
+    return null;
+  }
+  const items: CodeWorkspacePullRequestFact[] = [];
+  for (const item of value.items) {
+    const parsed = parseCodeWorkspacePullRequestFact(item);
+    if (!parsed) return null;
+    items.push(parsed);
+  }
+  return { items, fetched_at: value.fetched_at };
 }
 
 function parseCodeDeliveryCheck(value: unknown): CodeDeliveryCheck | null {
@@ -3090,6 +3192,7 @@ export function parseCodeSessionDigest(
       "turn_count",
       "activity",
       "pr_state",
+      "pr_count",
       "watch_state",
       "watch_detail",
       "watch_cycles",
@@ -3103,6 +3206,7 @@ export function parseCodeSessionDigest(
     !isFiniteNumber(value.turn_count) ||
     (value.activity !== undefined &&
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
+    (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
     !optionalString(value.watch_detail) ||
@@ -3128,6 +3232,7 @@ export function parseCodeSessionDigest(
     turn_count: value.turn_count,
     ...(value.activity !== undefined ? { activity: value.activity } : {}),
     ...(pr_state ? { pr_state } : {}),
+    ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
     ...(value.watch_state !== undefined
       ? { watch_state: value.watch_state }
       : {}),
@@ -3175,6 +3280,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "turn_count",
           "activity",
           "pr_state",
+          "pr_count",
           "watch_state",
           "watch_detail",
           "watch_cycles",
@@ -3188,6 +3294,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !isFiniteNumber(value.turn_count) ||
         (value.activity !== undefined &&
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
+        (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
         (value.watch_state !== undefined &&
           !isMember(value.watch_state, WATCH_STATES)) ||
         !optionalString(value.watch_detail) ||
@@ -3217,6 +3324,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         turn_count: value.turn_count,
         ...(value.activity !== undefined ? { activity: value.activity } : {}),
         ...(pr_state ? { pr_state } : {}),
+        ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
         ...(value.watch_state !== undefined
           ? { watch_state: value.watch_state }
           : {}),

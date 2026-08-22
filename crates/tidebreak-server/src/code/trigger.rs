@@ -944,6 +944,7 @@ mod tests {
             branch_name: "feature".to_owned(),
             status,
             exact,
+            relation: None,
         }
     }
 

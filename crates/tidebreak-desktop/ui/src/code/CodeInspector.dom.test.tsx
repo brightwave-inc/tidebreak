@@ -80,6 +80,7 @@ function makeClient(): Pick<
   | "listCodeWorkspaceFiles"
   | "listCodeWorkspaceTree"
   | "getCodeWorkspacePr"
+  | "getCodeWorkspacePullRequests"
 > {
   return {
     getCodePrComments: vi.fn().mockResolvedValue({
@@ -116,6 +117,10 @@ function makeClient(): Pick<
       truncated: false,
     }),
     getCodeWorkspacePr: vi.fn().mockResolvedValue(null),
+    getCodeWorkspacePullRequests: vi.fn().mockResolvedValue({
+      items: [],
+      fetched_at: "2026-08-22T12:00:00Z",
+    }),
   };
 }
 
@@ -591,4 +596,83 @@ it("labels a turn by its ordinal among user items", () => {
       "t-b",
     ),
   ).toBe("Turn 2");
+});
+
+it("keys the attributed set on full identity, not the number", async () => {
+  const collidingFacts = [
+    {
+      host: "github.com",
+      repo_owner: "acme",
+      repo_name: "app",
+      number: 41,
+      url: "https://github.com/acme/app/pull/41",
+      title: "Fix login flow",
+      state: "open",
+      draft: false,
+      head_branch: "tidebreak/fix-login",
+      base_branch: "main",
+      relation: "authored" as const,
+      created_at: "2026-08-01T00:00:00Z",
+      updated_at: "2026-08-02T00:00:00Z",
+      last_seen_at: "2026-08-02T00:00:00Z",
+    },
+    {
+      host: "github.com",
+      repo_owner: "acme",
+      repo_name: "design-tokens",
+      number: 41,
+      url: "https://github.com/acme/design-tokens/pull/41",
+      title: "Token spacing pass",
+      state: "open",
+      draft: false,
+      head_branch: "tidebreak/tokens",
+      base_branch: "main",
+      relation: "contributed" as const,
+      created_at: "2026-08-01T00:00:00Z",
+      updated_at: "2026-08-02T00:00:00Z",
+      last_seen_at: "2026-08-02T00:00:00Z",
+    },
+  ];
+  const client = {
+    ...makeClient(),
+    getCodeWorkspacePullRequests: vi.fn().mockResolvedValue({
+      items: collidingFacts,
+      fetched_at: "2026-08-02T00:01:00Z",
+    }),
+  };
+  render(
+    <CodeInspector
+      client={client as never}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, pr: OPEN_PR } as never}
+      contentRevision={0}
+      requestedTab={{ tab: "pr", revision: 1 }}
+    />,
+  );
+
+  const list = await screen.findByRole("navigation", {
+    name: "Pull requests this workspace worked on",
+  });
+  const rows = await waitFor(() => {
+    const buttons = list.querySelectorAll("button");
+    expect(buttons).toHaveLength(2);
+    return buttons;
+  });
+
+  // The live number matches both repositories, so no row may claim to be
+  // current: treating either as the primary would collapse two identities.
+  expect(list.querySelectorAll("[aria-current='true']")).toHaveLength(0);
+
+  // Selecting the cross-repo row shows that row's stored snapshot — never
+  // the live resource its number collides with.
+  await userEvent.click(rows[1]);
+  const panelTitle = await screen.findByRole("link", {
+    name: "Token spacing pass",
+  });
+  expect(panelTitle.getAttribute("href")).toBe(
+    "https://github.com/acme/design-tokens/pull/41",
+  );
+  const current = list.querySelectorAll("[aria-current='true']");
+  expect(current).toHaveLength(1);
+  expect(current[0].textContent).toContain("design-tokens");
 });

@@ -95,6 +95,7 @@ import {
   type CodeWorkspaceBlob,
   type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
+  type CodeWorkspacePullRequests,
   type CodeTriggerAction,
   type CodeTriggerCondition,
   type CodeTriggerSnapshot,
@@ -167,6 +168,7 @@ import {
   parseCodeWorkspaceBlob,
   parseCodeWorkspaceTree,
   parseCodeWorkspacePr,
+  parseCodeWorkspacePullRequests,
   parseCodeTrigger,
   parseCodeTriggers,
   parseCodeWatch,
@@ -2626,6 +2628,23 @@ export class ApiClient {
         ),
       ),
       "code pull request",
+    );
+  }
+
+  /** Every pull request attributed to the workspace (decision 62). */
+  async getCodeWorkspacePullRequests(
+    workspaceId: string,
+  ): Promise<CodeWorkspacePullRequests> {
+    return requireParsed(
+      parseCodeWorkspacePullRequests(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pull-requests`,
+          {
+            headers: this.headers(),
+          },
+        ),
+      ),
+      "code workspace pull requests",
     );
   }
 

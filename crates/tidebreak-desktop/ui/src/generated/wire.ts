@@ -1013,7 +1013,13 @@ export type CodeDeliveryWorkflowJob = { id: number, name: string, status: string
 /**
  * One Tidebreak workspace that plausibly produced a remote delivery item.
  */
-export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: RepoId, title: string, branch_name: string, status: CodeWorkspaceStatus, exact: boolean, };
+export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: RepoId, title: string, branch_name: string, status: CodeWorkspaceStatus, exact: boolean, 
+/**
+ * Durable attribution behind this link, when one is stored: the
+ * workspace authored or contributed to the pull request (decision 62).
+ * Absent on links the live heuristic derived.
+ */
+relation?: CodePullRequestRelation, };
 
 /**
  * One event in an external agent-engine session's journal.
@@ -1238,6 +1244,16 @@ comments: Array<PullRequestComment>, };
 export type CodePrMergeMethod = "squash" | "merge" | "rebase";
 
 /**
+ * How strongly a workspace is tied to a pull request (decision 62).
+ *
+ * Only two acts mint attribution: `gh pr create` (authored) and a push whose
+ * branch is or becomes a pull request's head (contributed). Reading,
+ * checking out, commenting on, closing, or merging a pull request never
+ * does, so review and triage agents stay out of the attributed set.
+ */
+export type CodePullRequestRelation = "authored" | "contributed";
+
+/**
  * Result of pushing the workspace branch.
  */
 export type CodePushSnapshot = { branch: string, remote: string, };
@@ -1292,6 +1308,11 @@ export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId
  * What the live turn is occupied with, while running.
  */
 activity?: CodeSessionActivity, pr_state?: PullRequestDigest, 
+/**
+ * How many pull requests hold a durable attribution to this workspace
+ * (decision 62). Absent when none do.
+ */
+pr_count?: number, 
 /**
  * Watch progress, present only on `kind: watch` digests.
  */
@@ -1444,6 +1465,11 @@ activity?: CodeSessionActivity,
  */
 pr_state?: PullRequestDigest, 
 /**
+ * How many pull requests hold a durable attribution to this
+ * workspace (decision 62). Absent when none do.
+ */
+pr_count?: number, 
+/**
  * Watch progress, present only on `kind: watch` digests.
  */
 watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, 
@@ -1545,6 +1571,30 @@ export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: bool
  * PR + checks digest plus the local git facts the PR card needs.
  */
 export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, watch?: CodeWatchSnapshot, };
+
+/**
+ * One pull request attributed to a workspace, from the durable fact store
+ * (decision 62). A projection of the stored snapshot — no live host read.
+ */
+export type CodeWorkspacePullRequestFact = { host: string, repo_owner: string, repo_name: string, number: number, url: string, title: string, 
+/**
+ * Coarse lifecycle: `open`, `merged`, or `closed`.
+ */
+state: string, draft: boolean, author?: string, head_branch: string, base_branch: string, head_sha?: string, 
+/**
+ * How the workspace is tied to it.
+ */
+relation: CodePullRequestRelation, created_at: string, updated_at: string, merged_at?: string, closed_at?: string, 
+/**
+ * When the store last confirmed this snapshot against the host.
+ */
+last_seen_at: string, };
+
+/**
+ * Response of `GET /code/workspaces/{id}/pull-requests`: every pull request
+ * this workspace authored or contributed to, open first, newest first.
+ */
+export type CodeWorkspacePullRequests = { items: Array<CodeWorkspacePullRequestFact>, fetched_at: string, };
 
 /**
  * Bounded content-search response for `GET /code/workspaces/{id}/search`.

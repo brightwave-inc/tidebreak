@@ -516,3 +516,15 @@ export const PR_ICON_TONE_CLASSES: Record<PrChipTone, string> =
 /** Chip classes per tone. */
 export const PR_CHIP_TONE_CLASSES: Record<PrChipTone, string> =
   prToneClasses(STATUS_CHIP);
+
+/**
+ * The chip suffix for a workspace's attributed pull-request set
+ * (decision 62): a count once there is more than one, nothing otherwise —
+ * the single-PR chip already names its one pull request.
+ */
+export function workspacePrChipSummary(
+  prCount: number | undefined,
+): string | null {
+  if (prCount === undefined || prCount <= 1) return null;
+  return `${prCount} PRs`;
+}
