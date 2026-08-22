@@ -799,6 +799,7 @@ fn every_code_table_carries_an_owner_column() {
             "code_event",
             "code_repo",
             "code_session",
+            "code_session_image",
             "code_trigger",
             "code_trigger_fire",
             "code_turn",

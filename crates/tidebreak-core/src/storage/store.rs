@@ -2511,6 +2511,33 @@ pub trait Store: Send + Sync {
         image_publication_storage_unavailable()
     }
 
+    /// Reserve one validated image for a code session.
+    ///
+    /// The code-mode counterpart of [`Store::publish_chat_image`], and it
+    /// exists for the same reason: the blob store is owner-blind, so a blob id
+    /// is a capability to whoever learns one. Without a publication, any known
+    /// id could be bound into any session.
+    async fn publish_code_session_image(
+        &self,
+        _owner: &OwnerId,
+        _session_id: crate::CodeSessionId,
+        _image: &ImageRef,
+        _created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        image_publication_storage_unavailable()
+    }
+
+    /// Resolve one image blob only when this owner published it to this
+    /// session. Another owner's publication is absent, not merely unreadable.
+    async fn get_published_code_session_image(
+        &self,
+        _owner: &OwnerId,
+        _session_id: crate::CodeSessionId,
+        _blob_id: uuid::Uuid,
+    ) -> Result<Option<ImageRef>> {
+        image_publication_storage_unavailable()
+    }
+
     /// Resolve one image blob only when it was explicitly published to
     /// `chat_id`.
     async fn get_published_chat_image(

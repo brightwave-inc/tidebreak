@@ -475,9 +475,12 @@ impl ScopedCode {
 
     pub(crate) async fn resolve_turn_attachments(
         &self,
+        session_id: CodeSessionId,
         requested: &[(uuid::Uuid, String)],
-    ) -> Result<Vec<tidebreak_core::CodeTurnAttachment>, ServerError> {
-        self.runtime.resolve_turn_attachments(requested).await
+    ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
+        self.runtime
+            .resolve_turn_attachments(&self.owner, session_id, requested)
+            .await
     }
 
     pub(crate) async fn submit_turn(
@@ -486,7 +489,7 @@ impl ScopedCode {
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
-        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+        attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         self.runtime
             .submit_turn(
@@ -583,6 +586,23 @@ impl ScopedCode {
     // per-harness unrecognized-event counts beside them are summed over the
     // principal's own sessions.
     // ------------------------------------------------------------------
+
+    /// Reserve a validated image for one of the principal's sessions.
+    pub(crate) async fn publish_session_image(
+        &self,
+        session_id: CodeSessionId,
+        image: &tidebreak_core::ImageRef,
+    ) -> Result<(), ServerError> {
+        tidebreak_core::db::code::publish_session_image(
+            &self.runtime.db,
+            &self.owner,
+            session_id,
+            image,
+            chrono::Utc::now(),
+        )
+        .await?;
+        Ok(())
+    }
 
     pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
         self.runtime.list_sessions(&self.owner).await

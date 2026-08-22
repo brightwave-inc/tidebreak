@@ -300,6 +300,18 @@ pub(super) fn code_turn_attachment_table() -> TableCreateStatement {
                 .string_len(64)
                 .not_null(),
         )
+        // Dimensions were established at publication and are carried here so
+        // a renderer can lay the image out without reading the bytes back.
+        .col(
+            ColumnDef::new(CodeTurnAttachment::Width)
+                .integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeTurnAttachment::Height)
+                .integer()
+                .not_null(),
+        )
         .col(
             ColumnDef::new(CodeTurnAttachment::ByteLen)
                 .big_integer()
@@ -321,6 +333,14 @@ pub(super) fn code_turn_attachment_table() -> TableCreateStatement {
         .check(Expr::col(CodeTurnAttachment::Ordinal).gte(0))
         .check(
             Expr::col(CodeTurnAttachment::Ordinal).lt(crate::model::MAX_MESSAGE_ATTACHMENTS as i32),
+        )
+        .check(
+            Expr::col(CodeTurnAttachment::Width)
+                .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+        )
+        .check(
+            Expr::col(CodeTurnAttachment::Height)
+                .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
         )
         .check(Expr::col(CodeTurnAttachment::MediaType).is_in([
             crate::image::ImageMediaType::Png.as_str(),
@@ -619,4 +639,91 @@ pub(super) fn code_trigger_fire_indexes() -> Vec<IndexCreateStatement> {
         .table(CodeTriggerFire::Table)
         .col(CodeTriggerFire::WorkspaceId)
         .to_owned()]
+}
+
+/// Reserves one validated content-addressed image for one code session.
+///
+/// The code-mode counterpart of `chat_image_publication`, and it exists for
+/// the same reason that table gives: publication is authority, not merely a
+/// blob upload, so knowing another conversation's content id must not let a
+/// caller bind those bytes into this one. The blob store is content-addressed
+/// and has no owner awareness, so without this row any known blob id could be
+/// attached to any session and read back through the session's own image
+/// route.
+///
+/// Metadata is retained so resolution can verify the blob still matches the
+/// validated record, which is also where a turn attachment's dimensions come
+/// from.
+pub(super) fn code_session_image_table() -> TableCreateStatement {
+    Table::create()
+        .table(CodeSessionImage::Table)
+        .col(
+            ColumnDef::new(CodeSessionImage::SessionId)
+                .uuid()
+                .not_null(),
+        )
+        .col(ColumnDef::new(CodeSessionImage::BlobId).uuid().not_null())
+        .col(owner_column(CodeSessionImage::Owner))
+        .col(
+            ColumnDef::new(CodeSessionImage::MediaType)
+                .string_len(64)
+                .not_null(),
+        )
+        .col(ColumnDef::new(CodeSessionImage::Width).integer().not_null())
+        .col(
+            ColumnDef::new(CodeSessionImage::Height)
+                .integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeSessionImage::ByteLen)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(CodeSessionImage::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .primary_key(
+            Index::create()
+                .col(CodeSessionImage::SessionId)
+                .col(CodeSessionImage::BlobId),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_session_image_session")
+                .from(CodeSessionImage::Table, CodeSessionImage::SessionId)
+                .to(CodeSession::Table, CodeSession::Id)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .check(Expr::col(CodeSessionImage::BlobId).ne(uuid::Uuid::nil()))
+        .check(Expr::col(CodeSessionImage::MediaType).is_in([
+            crate::image::ImageMediaType::Png.as_str(),
+            crate::image::ImageMediaType::Jpeg.as_str(),
+            crate::image::ImageMediaType::Webp.as_str(),
+            crate::image::ImageMediaType::Gif.as_str(),
+        ]))
+        .check(
+            Expr::col(CodeSessionImage::Width).between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+        )
+        .check(
+            Expr::col(CodeSessionImage::Height)
+                .between(1, crate::image::MAX_IMAGE_DIMENSION as i32),
+        )
+        .check(
+            Expr::col(CodeSessionImage::ByteLen).between(1, crate::image::MAX_IMAGE_BYTES as i64),
+        )
+        .to_owned()
+}
+
+pub(super) fn code_session_image_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        // Retirement asks whether any session still reserves the shared blob.
+        Index::create()
+            .name("idx_code_session_image_blob")
+            .table(CodeSessionImage::Table)
+            .col(CodeSessionImage::BlobId)
+            .to_owned(),
+    ]
 }

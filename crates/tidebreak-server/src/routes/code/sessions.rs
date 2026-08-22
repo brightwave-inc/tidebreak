@@ -69,7 +69,7 @@ pub async fn submit_turn(
         .iter()
         .map(|item| (item.blob_id, item.media_type.clone()))
         .collect::<Vec<_>>();
-    let attachments = code.resolve_turn_attachments(&requested).await?;
+    let attachments = code.resolve_turn_attachments(id, &requested).await?;
     // From the front of the submit, like chat titling from the front of a
     // turn: a code turn can run for minutes, and the derived name should land
     // while the engine works, not after.
@@ -239,6 +239,11 @@ pub async fn publish_session_image(
     require_declared_type_matches(&headers, image.media_type)?;
     let _blob_write = state.blob_writes.acquire(image.blob_id).await?;
     state.blobs.put(image.blob_id, bytes).await?;
+    // Publication is the authority a later turn attachment is checked against.
+    // Storing the bytes is not enough: the blob store is content-addressed and
+    // owner-blind, so without this row any known id could be bound into any
+    // session and read back through this session's own image route.
+    code.publish_session_image(id, &image).await?;
     Ok((
         StatusCode::CREATED,
         crate::extract::Json(PublishedImageAttachment::from(image)),

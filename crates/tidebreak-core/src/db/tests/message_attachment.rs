@@ -654,7 +654,7 @@ enum ReferenceClass {
     Document,
     ChatImagePublication,
     MessageAttachment,
-    CodeTurnAttachment,
+    ImageRef,
 }
 
 impl ReferenceClass {
@@ -662,7 +662,7 @@ impl ReferenceClass {
         Self::Document,
         Self::ChatImagePublication,
         Self::MessageAttachment,
-        Self::CodeTurnAttachment,
+        Self::ImageRef,
     ];
 
     /// Create one live reference of this class to `blob`.
@@ -700,7 +700,7 @@ impl ReferenceClass {
                 };
                 accept_turn_with_images(store, chat.id, "keep this blob", &[image]).await;
             }
-            Self::CodeTurnAttachment => {
+            Self::ImageRef => {
                 pin_code_turn_attachment(store, blob).await;
             }
         }
@@ -710,10 +710,11 @@ impl ReferenceClass {
 async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     use crate::code::{
         CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTurn,
-        CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
-        HarnessKind, RepoId, WorkspaceId,
+        CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId,
+        WorkspaceId,
     };
     use crate::db::code::{insert_repo, insert_session, insert_turn, insert_workspace};
+    use crate::image::ImageRef;
 
     let now = Utc::now();
     let repo_id = RepoId::new();
@@ -794,9 +795,11 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             status: CodeTurnStatus::Completed,
             user_input: "look".into(),
             user_input_blob_id: None,
-            attachments: vec![CodeTurnAttachment {
+            attachments: vec![ImageRef {
                 blob_id: blob.id,
                 media_type: ImageMediaType::Png,
+                width: 16,
+                height: 16,
                 byte_len: blob.byte_len,
             }],
             checkpoint_ref: None,

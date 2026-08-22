@@ -6741,3 +6741,123 @@ async fn reclaim_refuses_a_checkout_tidebreak_did_not_clone() {
         .unwrap();
     assert!(listed.is_empty(), "a removed registration leaves the list");
 }
+
+/// A blob id is not a capability. Publication is.
+///
+/// The blob store is content-addressed and owner-blind, so before this an
+/// attachment resolved on the strength of the bytes existing anywhere. That
+/// let a session bind an id it had merely learned, and then read the pixels
+/// back through its own image route. Chat has bound this with
+/// `chat_image_publication` since it shipped; this is the code-mode
+/// equivalent, and the assertion is that publishing to one session does not
+/// authorize another.
+#[tokio::test]
+async fn a_session_cannot_attach_an_image_published_to_another_session() {
+    // The capability gate refuses attachments before authority is consulted,
+    // so an engine that declares image input is what puts this test on the
+    // path it means to exercise.
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Supported);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let start = |workspace_id: String| {
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            let response = client
+                .post(format!(
+                    "http://{addr}/code/workspaces/{workspace_id}/sessions"
+                ))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "harness": "claude_code",
+                    "permission_mode": "plan",
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+            let body: serde_json::Value = response.json().await.unwrap();
+            json_id(&body).to_owned()
+        }
+    };
+    let owning = start(json_id(&workspace).to_owned()).await;
+    let other = start(json_id(&workspace).to_owned()).await;
+
+    // A 1x1 PNG, published to the first session only.
+    let png: Vec<u8> = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let published = client
+        .post(format!(
+            "http://{addr}/code/sessions/{owning}/attachments/images"
+        ))
+        .bearer_auth(&token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(png)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        published.status(),
+        reqwest::StatusCode::CREATED,
+        "publish failed: {}",
+        published.text().await.unwrap()
+    );
+    let published: serde_json::Value = published.json().await.unwrap();
+    let blob_id = published["attachment_id"]
+        .as_str()
+        .or_else(|| published["blob_id"].as_str())
+        .expect("the publication names the blob")
+        .to_owned();
+
+    let submit = |session: String| {
+        let client = client.clone();
+        let token = token.clone();
+        let blob_id = blob_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "message": "look at this",
+                    "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+                }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // The session it was published to may attach it.
+    let owned = submit(owning).await;
+    assert!(
+        owned.status().is_success(),
+        "the publishing session must be able to attach its own image: {}",
+        owned.text().await.unwrap()
+    );
+
+    // A sibling session that merely knows the id may not — even though the
+    // bytes are plainly present in the shared blob store.
+    // Without the publication check this returns 202 with the image bound, so
+    // the assertion is load-bearing rather than incidentally true.
+    let stolen = submit(other).await;
+    let status = stolen.status();
+    let body = stolen.text().await.unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "knowing a blob id must not authorize attaching it: {body}"
+    );
+    assert!(
+        body.contains("was not published to session"),
+        "the refusal must name authority, not blob absence: {body}"
+    );
+}

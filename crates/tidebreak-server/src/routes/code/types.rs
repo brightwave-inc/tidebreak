@@ -156,7 +156,7 @@ pub struct CodeTurnSnapshot {
     pub ordinal: i64,
     pub status: CodeTurnStatus,
     pub user_input: String,
-    pub attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+    pub attachments: Vec<tidebreak_core::ImageRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub usage: Option<tidebreak_core::CodeUsage>,

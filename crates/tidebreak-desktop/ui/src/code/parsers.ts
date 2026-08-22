@@ -94,7 +94,7 @@ import type {
   CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   CodeWorkspaceBlob as WireCodeWorkspaceBlob,
   CodeWorkspaceTree as WireCodeWorkspaceTree,
-  CodeTurnAttachment as WireCodeTurnAttachment,
+  ImageRef as WireCodeTurnAttachment,
   CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
   CodeWorkspacePrSnapshot as WireCodeWorkspacePrSnapshot,
   CodeWatchSnapshot as WireCodeWatchSnapshot,
@@ -1829,20 +1829,24 @@ const IMAGE_MEDIA_TYPES = new Set<import("../generated/wire").ImageMediaType>([
 
 function parseCodeTurnAttachments(
   value: unknown,
-): import("../generated/wire").CodeTurnAttachment[] | null {
+): import("../generated/wire").ImageRef[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value)) return null;
-  const attachments: import("../generated/wire").CodeTurnAttachment[] = [];
+  const attachments: import("../generated/wire").ImageRef[] = [];
   for (const item of value) {
     if (
       !isRecord(item) ||
       !onlyKeys<WireCodeTurnAttachment>(item, [
         "blob_id",
         "media_type",
+        "width",
+        "height",
         "byte_len",
       ]) ||
       !nonEmpty(item.blob_id) ||
       !isMember(item.media_type, IMAGE_MEDIA_TYPES) ||
+      !isFiniteNumber(item.width) ||
+      !isFiniteNumber(item.height) ||
       !isFiniteNumber(item.byte_len)
     ) {
       return null;
@@ -1850,6 +1854,8 @@ function parseCodeTurnAttachments(
     attachments.push({
       blob_id: item.blob_id,
       media_type: item.media_type,
+      width: item.width,
+      height: item.height,
       byte_len: item.byte_len,
     });
   }
