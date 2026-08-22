@@ -701,6 +701,42 @@ describe("CodeComposer", () => {
     expect(text.defaultPrevented).toBe(false);
   });
 
+  it("answers an image paste on an engine with no image path", () => {
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        harness="opencode"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    // Left alone, the clipboard's text flavour — a file URL — would land in
+    // the draft and read as an attachment that took.
+    const image = pasteOn(box, [
+      new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+        type: "image/png",
+      }),
+    ]);
+    expect(image.defaultPrevented).toBe(true);
+    expect(screen.queryByLabelText("Attached images")).toBeNull();
+    expect(
+      screen.getByText("Tidebreak can’t send images to opencode yet."),
+    ).toBeInTheDocument();
+
+    // Writing again is the acknowledgement.
+    fireEvent.change(box, { target: { value: "describe it instead" } });
+    expect(
+      screen.queryByText("Tidebreak can’t send images to opencode yet."),
+    ).toBeNull();
+
+    const text = pasteOn(box, []);
+    expect(text.defaultPrevented).toBe(false);
+  });
+
   it("opens the image picker from the tools menu", async () => {
     const user = userEvent.setup();
     renderComposer(

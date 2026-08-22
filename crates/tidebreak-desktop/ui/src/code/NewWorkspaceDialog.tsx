@@ -330,12 +330,29 @@ export function NewWorkspaceDialog({
           trigger.focus();
         }}
         onKeyDownCapture={(event) => {
+          if (event.key !== "Enter") return;
           // Cmd+Enter (Ctrl+Enter off macOS) creates with what is on screen,
-          // whichever field has focus. Plain Enter stays field-local.
-          if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey))
+          // whichever field has focus. An open picker portals its list out of
+          // this element, but React still routes the key through here, so the
+          // chord works with a dropdown up as well.
+          if (event.metaKey || event.ctrlKey) {
+            event.preventDefault();
+            void create();
             return;
-          event.preventDefault();
-          void create();
+          }
+          // Plain Enter stays field-local. A single-line input inside a form
+          // submits it, so Enter on Title or Base ref used to cut a worktree
+          // from a keystroke that only meant "done typing" — and the create
+          // it started left the chord looking broken for the rest of the
+          // dialog's life. The check is on this element rather than on each
+          // field so a picker's own search box, which lives in a portal, is
+          // left to handle its own Enter.
+          if (
+            event.target instanceof HTMLInputElement &&
+            event.currentTarget.contains(event.target)
+          ) {
+            event.preventDefault();
+          }
         }}
       >
         <DialogHeader>

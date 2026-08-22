@@ -779,13 +779,14 @@ async fn resolve_run_session(
         .ok_or_else(|| AgentError::msg(format!("workspace {workspace} has no active session")))
 }
 
-/// Desktop create default: Ask when the engine can honor it, otherwise the
-/// most autonomous non-bypass mode. Allow is an explicit `--mode`.
+/// Desktop create default: the most autonomous posture the engine honors,
+/// walking Allow -> Auto -> Ask -> Plan (decision 0039, amended 2026-08-18).
+/// `resolve_start_mode` states whichever posture that is before the turn runs.
 fn default_create_permission_mode(caps: Option<&HarnessCaps>) -> PermissionMode {
     match caps {
-        Some(caps) if caps.structured_approvals == CapLevel::Supported => PermissionMode::Ask,
+        Some(caps) if caps.allow_mode == CapLevel::Supported => PermissionMode::Allow,
         Some(caps) if caps.auto_mode == CapLevel::Supported => PermissionMode::Auto,
-        Some(caps) if caps.plan_mode == CapLevel::Supported => PermissionMode::Plan,
+        Some(caps) if caps.structured_approvals == CapLevel::Supported => PermissionMode::Ask,
         _ => PermissionMode::Plan,
     }
 }
@@ -2694,12 +2695,24 @@ mod tests {
                 slash_commands: CapLevel::Unknown,
             }
         }
+        // Every engine honors Allow, so every engine starts there.
         assert_eq!(
             default_create_permission_mode(Some(&caps(
                 CapLevel::Supported,
                 CapLevel::Supported,
                 CapLevel::Supported,
                 CapLevel::Supported,
+            ))),
+            PermissionMode::Allow
+        );
+        // Ask is the fallback for an engine with an approval channel and no
+        // more autonomous posture, not the default.
+        assert_eq!(
+            default_create_permission_mode(Some(&caps(
+                CapLevel::Supported,
+                CapLevel::Supported,
+                CapLevel::Unsupported,
+                CapLevel::Unsupported,
             ))),
             PermissionMode::Ask
         );

@@ -448,6 +448,19 @@ pub trait HarnessAdapter: Send + Sync {
         prefer_gateway_models(list_cli_models(binary, &["models"], &probe.env).await)
     }
 
+    /// Whether relaunching a session composes a permission mode that changed
+    /// after it started.
+    ///
+    /// True for every engine that takes its posture from the launch plan: a
+    /// relaunch rebuilds that plan from the stored mode, so the new one lands.
+    /// False where the engine fixes its posture when the session is *created*
+    /// and resuming an existing one does not re-apply it — there the relaunch
+    /// is silent about the change, and the caller must refuse rather than let
+    /// the record and the engine disagree.
+    fn relaunch_composes_permission_mode(&self) -> bool {
+        true
+    }
+
     /// Spawn or connect for one session.
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError>;
 }

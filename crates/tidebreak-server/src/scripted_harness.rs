@@ -85,6 +85,9 @@ pub(crate) struct ScriptedAdapter {
     reasoning_levels: CapLevel,
     /// Whether this engine takes a new mode without being relaunched.
     live_mode_switch: bool,
+    /// Whether this engine fixes its posture when it creates its session and
+    /// keeps it across a resume, the way opencode does.
+    posture_fixed: bool,
     /// The effort each turn ran at, and every mode a live switch moved this
     /// engine onto. Shared with the session so both survive a relaunch.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
@@ -116,6 +119,7 @@ impl ScriptedAdapter {
             image_input: CapLevel::Unknown,
             reasoning_levels: CapLevel::Unsupported,
             live_mode_switch: false,
+            posture_fixed: false,
             turns: Arc::new(std::sync::Mutex::new(Vec::new())),
             modes: Arc::new(std::sync::Mutex::new(Vec::new())),
             child_pid: None,
@@ -189,6 +193,14 @@ impl ScriptedAdapter {
     /// the way Claude Code and Codex do. Left off, the runtime relaunches.
     pub(crate) fn with_live_mode_switch(mut self) -> Self {
         self.live_mode_switch = true;
+        self
+    }
+
+    /// Model opencode: the posture rides session creation, the session reports
+    /// a resume ref, and resuming it does not re-apply the posture — so a
+    /// relaunch would come back running the old mode.
+    pub(crate) fn with_posture_fixed_at_session_start(mut self) -> Self {
+        self.posture_fixed = true;
         self
     }
 
@@ -297,6 +309,10 @@ impl HarnessAdapter for ScriptedAdapter {
         }
     }
 
+    fn relaunch_composes_permission_mode(&self) -> bool {
+        !self.posture_fixed
+    }
+
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
         self.launched_approvals
             .lock()
@@ -323,6 +339,7 @@ impl HarnessAdapter for ScriptedAdapter {
             unrecognized_per_turn: self.unrecognized_per_turn,
             approver: self.approver.clone(),
             live_mode_switch: self.live_mode_switch,
+            posture_fixed: self.posture_fixed,
             turns: self.turns.clone(),
             modes: self.modes.clone(),
         }))
@@ -346,6 +363,7 @@ struct ScriptedSession {
     unrecognized_per_turn: u64,
     approver: Arc<ScriptedApprover>,
     live_mode_switch: bool,
+    posture_fixed: bool,
     /// Shared with the adapter so a test can read what the engine was told
     /// after the runtime has dropped and relaunched the session.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
@@ -469,7 +487,11 @@ impl HarnessSession for ScriptedSession {
     }
 
     fn resume_ref(&self) -> Option<String> {
-        None
+        // Only the posture-fixed engine reports one: it is what makes a
+        // relaunch resume rather than create, and therefore what makes the
+        // relaunch silent about a mode change.
+        self.posture_fixed
+            .then(|| "scripted-fixed-posture".to_owned())
     }
 
     fn child_pid(&self) -> Option<i64> {

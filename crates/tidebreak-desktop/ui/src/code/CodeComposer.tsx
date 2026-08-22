@@ -1,5 +1,12 @@
 import { useCallback, useMemo, useRef, useState, useEffect } from "react";
-import { Check, ChevronDown, Gauge, Search, Sparkles } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Gauge,
+  List,
+  Search,
+  Sparkles,
+} from "lucide-react";
 
 import type {
   PermissionMode,
@@ -39,6 +46,7 @@ import {
   codeModelVendor,
   effortLadder,
   groupCodeModelOptions,
+  noImagePathNote,
   type CodeModelOption,
   PERMISSION_MODE_UNAVAILABLE_REASON,
   SESSION_PERMISSION_MODE_LOCKED,
@@ -105,6 +113,9 @@ export function PermissionModePicker({
   );
 }
 
+/** Rail entry that lifts the vendor filter off a mixed catalog. */
+const ALL_MODELS = "all";
+
 const HARNESS_ICONS: Record<HarnessKind, typeof ClaudeIcon> = {
   claude_code: ClaudeIcon,
   codex: OpenAIIcon,
@@ -169,16 +180,28 @@ export function HarnessModelMenu({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
+  const currentRow = useRef<HTMLDivElement>(null);
   const groups = useMemo(() => groupCodeModelOptions(options), [options]);
   const currentGroupId =
     groups.find((group) =>
       group.options.some((option) => option.id === current?.id),
     )?.id ?? null;
+  // A vendor-neutral engine lists a mixed catalog, and opening on the current
+  // model's vendor showed one block of it — a menu with a single row, next to
+  // a rail of unlabelled marks. Such a catalog opens on everything instead,
+  // and the rail narrows from there.
+  const mixed = groups.length > 1;
+  const openingGroupId = mixed ? ALL_MODELS : currentGroupId;
   const [activeGroupId, setActiveGroupId] = useState<string | null>(
-    currentGroupId,
+    openingGroupId,
   );
   const activeGroup =
-    groups.find((group) => group.id === activeGroupId) ?? groups[0] ?? null;
+    activeGroupId === ALL_MODELS && mixed
+      ? null
+      : (groups.find((group) => group.id === activeGroupId) ??
+        groups[0] ??
+        null);
+  const showingAll = activeGroup === null && mixed;
   const searching = query.trim().length > 0;
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -192,8 +215,21 @@ export function HarnessModelMenu({
           option.source.toLowerCase().includes(needle),
       );
   }, [groups, query]);
-  const visible = searching ? matches : (activeGroup?.options ?? []);
+  const visible = searching
+    ? matches
+    : showingAll
+      ? groups.flatMap((group) => group.options)
+      : (activeGroup?.options ?? []);
   const locked = disabled || !onChange;
+  useEffect(() => {
+    // A mixed catalog opens on the whole list, which runs past the fold. The
+    // row the session is on is put on screen rather than left to be found.
+    if (!open) return;
+    const frame = requestAnimationFrame(() =>
+      currentRow.current?.scrollIntoView({ block: "nearest" }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
   if (!current) {
     if (variant !== "field" && !loading) return null;
     const label = loading ? "Loading models…" : "Default model";
@@ -220,6 +256,7 @@ export function HarnessModelMenu({
     return (
       <DropdownMenuItem
         key={`${option.source}:${option.id}`}
+        ref={selected ? currentRow : undefined}
         onSelect={() => onChange?.(option.id)}
         className="flex items-center gap-2"
       >
@@ -248,7 +285,7 @@ export function HarnessModelMenu({
         setOpen(next);
         if (next) {
           setQuery("");
-          setActiveGroupId(currentGroupId);
+          setActiveGroupId(openingGroupId);
         }
       }}
     >
@@ -316,6 +353,29 @@ export function HarnessModelMenu({
             role="tablist"
             aria-label="Vendors"
           >
+            {mixed && (
+              <WithTooltip label="All models" side="right">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={showingAll}
+                  aria-label="All models"
+                  className={cn(
+                    "relative flex size-9 items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    showingAll ? "bg-accent" : "hover:bg-accent/60",
+                  )}
+                  onClick={() => setActiveGroupId(ALL_MODELS)}
+                >
+                  <List className="size-4" />
+                  {showingAll && (
+                    <span
+                      aria-hidden
+                      className="absolute -right-1 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-l-full bg-primary"
+                    />
+                  )}
+                </button>
+              </WithTooltip>
+            )}
             {groups.map((group) => {
               const selected = activeGroup?.id === group.id;
               return (
@@ -869,6 +929,9 @@ export function CodeComposer({
         contextUsage={contextUsage}
         pathMentions={pathMentions}
         slash={slash}
+        imagesUnavailable={
+          harness && !imageInput ? noImagePathNote(harness) : undefined
+        }
         images={
           imageInput
             ? {

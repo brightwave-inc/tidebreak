@@ -96,6 +96,15 @@ impl HarnessAdapter for OpencodeAdapter {
         }
     }
 
+    /// The agent and permission ruleset ride `POST /session`, and resuming is
+    /// `GET /session/{id}` — 1.18.18 captured no way to re-apply either to a
+    /// session that already exists. A relaunch onto a stored resume ref would
+    /// therefore keep the posture the session was created with while the
+    /// record said otherwise, so the change is refused instead.
+    fn relaunch_composes_permission_mode(&self) -> bool {
+        false
+    }
+
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
         if !spec.binary.is_absolute() {
             return Err(HarnessError::NotFound);

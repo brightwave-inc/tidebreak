@@ -1906,6 +1906,20 @@ impl CodeRuntime {
             return Ok(session);
         }
 
+        // A relaunch is the fallback, and it only works where rebuilding the
+        // launch plan carries the mode. An engine that fixed its posture when
+        // it created the session, and cannot re-apply it on resume, would come
+        // back running the old one while the record claimed the new one.
+        if !adapter.relaunch_composes_permission_mode() && session.harness_resume_ref.is_some() {
+            return Err(ServerError::conflict_kind(
+                "permission_mode_fixed",
+                format!(
+                    "{} fixes its permission mode when the session starts; start a new session to pick a different one",
+                    session.harness_kind
+                ),
+            ));
+        }
+
         let handle = self.workers.lock().expect("code workers").remove(&id);
         if let Some(handle) = handle {
             Self::shut_down_worker(id, handle).await;
