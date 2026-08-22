@@ -1109,7 +1109,8 @@ pub(crate) async fn import_legacy_setting(
         Err(_) => {
             tracing::warn!(
                 "legacy provisioned policy setting does not decode; \
-                 leaving it for the next schema-epoch reset to remove"
+                 leaving it, since the sidecar file is what this profile \
+                 reads and the row is inert"
             );
             Ok(())
         }

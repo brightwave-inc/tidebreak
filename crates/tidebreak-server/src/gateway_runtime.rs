@@ -4478,12 +4478,12 @@ mod tests {
         );
     }
 
-    /// The durability the policy file exists for: a pre-v1 schema-epoch
-    /// reset deletes the SQLite profile, and the provisioned policy — a
-    /// sidecar file in the data directory — must survive it. The session it
-    /// authorizes is then retained: before the policy lived in the file, the
-    /// reset resolved the profile unmanaged and boot retired the session,
-    /// forcing a full re-pair after every epoch bump.
+    /// The durability the policy file exists for: a profile below the
+    /// migration pin is deleted and rebuilt on first boot, and the
+    /// provisioned policy — a sidecar file in the data directory — must
+    /// survive that. The session it authorizes is then retained: before the
+    /// policy lived in the file, the reset resolved the profile unmanaged and
+    /// boot retired the session, forcing a full re-pair.
     #[tokio::test]
     async fn a_schema_epoch_reset_keeps_the_policy_and_its_session() {
         let directory = tempfile::tempdir().unwrap();
