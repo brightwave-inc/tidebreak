@@ -1338,6 +1338,33 @@ export type CodeTerminalRead = { id: CodeTerminalId, workspace_id: WorkspaceId, 
 export type CodeTerminalSnapshot = { id: CodeTerminalId, workspace_id: WorkspaceId, cols: number, rows: number, ended: boolean, created_at: string, };
 
 /**
+ * What a trigger does when its condition fires.
+ *
+ * Two actions in v1. Merge, auto-merge, and mark-ready stay with the user
+ * (decision 42), and shell commands and webhooks need their own record.
+ */
+export type CodeTriggerAction = "deliver" | "notify";
+
+/**
+ * A pull-request fact a trigger fires on.
+ *
+ * The vocabulary is the watch classifier's, minus the states nothing can act
+ * on. A trigger fires on the *transition* into one of these, once per head
+ * SHA — see [`CodeTriggerFire`] (decision 60).
+ */
+export type CodeTriggerCondition = "checks_failed" | "conflicts" | "changes_requested" | "review_required" | "behind" | "ready_to_merge" | "merged" | "closed";
+
+/**
+ * Identifies one durable trigger rule bound to a repository.
+ */
+export type CodeTriggerId = string;
+
+/**
+ * One armed trigger, as the interface reads it.
+ */
+export type CodeTriggerSnapshot = { id: CodeTriggerId, repo_id: RepoId, condition: CodeTriggerCondition, action: CodeTriggerAction, enabled: boolean, created_at: string, updated_at: string, };
+
+/**
  * Identifies one user→engine cycle inside a code session.
  */
 export type CodeTurnId = string;
@@ -1703,6 +1730,11 @@ method: ConsentMethodSnapshot, granted_at: string, };
  * The class of action a consent statement allows.
  */
 export type ConsentVerb = { "kind": "tool", action: RendererToolName, approval: ToolApprovalKind, } | { "kind": "capability", capability: HostCapability, };
+
+/**
+ * Arm a trigger on a repository.
+ */
+export type CreateCodeTriggerBody = { condition: CodeTriggerCondition, action: CodeTriggerAction, };
 
 /**
  * Where the resolved credential value is placed on the request.
@@ -4099,6 +4131,12 @@ export type TurnFailureCategory = "rate_limited" | "auth" | "provider_access" | 
  * Identifies one turn: a single user input through to the final answer.
  */
 export type TurnId = string;
+
+/**
+ * Switch a trigger on or off. The row survives either way, so the scoping
+ * does not have to be rebuilt to turn a rule back on.
+ */
+export type UpdateCodeTriggerBody = { enabled: boolean, };
 
 /**
  * One bounded question shown to the user.
