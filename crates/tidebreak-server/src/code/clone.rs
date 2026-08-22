@@ -20,9 +20,14 @@ use super::bus::{CloneProgress, CodeLiveUpdate};
 use super::gh::{self, resolve_github_clone_url};
 use super::runtime::CodeRuntime;
 use crate::error::ServerError;
-use crate::routes::code::{CodeCloneDefaults, CodeCloneJobSnapshot};
+use crate::routes::code::{
+    CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSource, CodeRepoSources,
+};
 
 const CLONE_TIMEOUT: Duration = Duration::from_secs(900);
+/// Long enough for a cold binary to answer, short enough that a machine
+/// without git reports so rather than stalling the dialog that asked.
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_CHARS: usize = 4_096;
 pub(crate) const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
 
@@ -118,7 +123,10 @@ pub(crate) fn owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
 pub(crate) struct CloneRequest {
     pub url: Option<String>,
     pub github: Option<String>,
-    pub parent_dir: String,
+    /// Where to put the checkout. Optional: a machine whose operator
+    /// configured a destination places clones itself, so a caller who cannot
+    /// see the machine's filesystem — anyone attached to it — names nothing.
+    pub parent_dir: Option<String>,
     pub name: Option<String>,
 }
 
@@ -134,6 +142,73 @@ impl CodeRuntime {
         })
     }
 
+    /// What this machine can add a repository from.
+    ///
+    /// Every answer here is about the machine, never about who is asking or
+    /// from where. A client pairs it with what it knows about itself — whether
+    /// it can open a directory picker the machine would resolve — and renders
+    /// the intersection.
+    pub(crate) async fn repo_sources(&self) -> Result<CodeRepoSources, ServerError> {
+        let git = git_available().await;
+        let gh = gh::observe_gh(self.gh_search_path().as_deref()).await;
+        let no_git = || {
+            Some(
+                "This machine has no git. Install it there, or use a machine that has it."
+                    .to_owned(),
+            )
+        };
+        let github_available = git && gh.found && gh.authenticated == Some(true);
+        let sources = vec![
+            // Always offered: a machine can always register a checkout that
+            // is already on its own disk. Whether the caller can name one is
+            // the caller's question, not this one.
+            CodeRepoSource {
+                kind: "local".to_owned(),
+                available: true,
+                remediation: None,
+            },
+            CodeRepoSource {
+                kind: "git_url".to_owned(),
+                available: git,
+                remediation: if git { None } else { no_git() },
+            },
+            CodeRepoSource {
+                kind: "github".to_owned(),
+                available: github_available,
+                remediation: if github_available {
+                    None
+                } else if !git {
+                    no_git()
+                } else {
+                    Some(gh.remediation.clone())
+                },
+            },
+        ];
+        Ok(CodeRepoSources {
+            sources,
+            chooses_destination: read_clone_parent_dir(&*self.db).await?.is_some(),
+        })
+    }
+
+    /// The parent directory a clone lands under: what the caller asked for, or
+    /// the destination the machine already remembers.
+    ///
+    /// Preferring the caller keeps a desktop working on its own machine
+    /// exactly as before. Falling back to the setting is what lets a caller
+    /// who cannot see the filesystem clone at all.
+    async fn clone_parent(&self, requested: Option<&str>) -> Result<PathBuf, ServerError> {
+        if let Some(value) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(value));
+        }
+        match read_clone_parent_dir(&*self.db).await? {
+            Some(configured) => Ok(PathBuf::from(configured)),
+            None => Err(ServerError::bad_request_kind(
+                "clone_parent_missing",
+                "this machine has no clone destination configured, so the request must name one",
+            )),
+        }
+    }
+
     pub(crate) fn get_clone_job(&self, id: Uuid) -> Result<CodeCloneJobSnapshot, ServerError> {
         self.clone_jobs
             .snapshot(id)
@@ -146,7 +221,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         request: CloneRequest,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
-        let parent = PathBuf::from(request.parent_dir.trim());
+        let parent = self.clone_parent(request.parent_dir.as_deref()).await?;
         validate_parent_dir(&parent).await?;
         let source = resolve_clone_source(&request, self.gh_search_path()).await?;
         let name = request
@@ -315,6 +390,29 @@ async fn resolve_clone_source(
                 })
         }
     }
+}
+
+/// Whether this machine can spawn `git` at all.
+///
+/// Probed by running it rather than by walking `PATH`. What matters is that
+/// the clone below can spawn it, and a `PATH` entry that is not executable —
+/// or a Windows extension a walk missed — would answer a different question
+/// than the one asked.
+pub(crate) async fn git_available() -> bool {
+    matches!(
+        timeout(
+            GIT_PROBE_TIMEOUT,
+            Command::new("git")
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await,
+        Ok(Ok(status)) if status.success()
+    )
 }
 
 async fn validate_parent_dir(parent: &Path) -> Result<(), ServerError> {

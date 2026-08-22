@@ -349,3 +349,96 @@ exit 3
     assert!(finished["error"].is_null(), "{finished}");
     assert!(finished["repo_id"].is_string());
 }
+
+#[tokio::test]
+async fn a_machine_that_remembers_a_destination_clones_without_being_given_one() {
+    let (router, token, _runtime, dir) = code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let origin = init_bare_origin(dir.path());
+    let parent = dir.path().join("checkouts");
+    std::fs::create_dir_all(&parent).unwrap();
+
+    // Nothing remembered yet, and nothing named: refuse rather than invent a
+    // directory. This is the state a fresh machine is in.
+    let sources: serde_json::Value = client
+        .get(format!("http://{addr}/code/repos/sources"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sources["chooses_destination"], false);
+    let kinds: Vec<&str> = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"local"),
+        "a machine can always register a checkout it already holds"
+    );
+    assert!(kinds.contains(&"git_url"));
+    assert!(kinds.contains(&"github"));
+
+    let unaimed = client
+        .post(format!("http://{addr}/code/repos/clone"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "url": origin }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unaimed.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = unaimed.json().await.unwrap();
+    assert_eq!(body["kind"], "clone_parent_missing");
+
+    // One clone that names a destination is what teaches the machine where
+    // its checkouts live.
+    let first = client
+        .post(format!("http://{addr}/code/repos/clone"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "url": origin,
+            "parent_dir": parent,
+            "name": "first",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::ACCEPTED);
+    let job: serde_json::Value = first.json().await.unwrap();
+    let finished = wait_job(&client, addr, &token, job["id"].as_str().unwrap()).await;
+    assert!(finished["error"].is_null(), "{finished:?}");
+
+    let sources: serde_json::Value = client
+        .get(format!("http://{addr}/code/repos/sources"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sources["chooses_destination"], true);
+
+    // Now a caller who cannot see the machine's filesystem can clone: no
+    // path, and the checkout still lands under the remembered destination.
+    let second = client
+        .post(format!("http://{addr}/code/repos/clone"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "url": origin, "name": "second" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::ACCEPTED);
+    let job: serde_json::Value = second.json().await.unwrap();
+    let finished = wait_job(&client, addr, &token, job["id"].as_str().unwrap()).await;
+    assert!(finished["error"].is_null(), "{finished:?}");
+    assert!(
+        parent.join("second").exists(),
+        "the clone lands under the remembered destination"
+    );
+}

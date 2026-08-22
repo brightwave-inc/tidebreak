@@ -103,6 +103,7 @@ import {
   type CodePrMergeMethod,
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
+  type CodeRepoSources,
   type CodeWorktreeRoot,
   type CodeForkTranscript,
   type CodeCloneJobSnapshot,
@@ -142,6 +143,7 @@ import {
 import {
   parseCodeApproval,
   parseCodeCloneDefaults,
+  parseCodeRepoSources,
   parseCodeWorktreeRoot,
   parseCodeForkTranscript,
   parseCodeCloneJob,
@@ -1919,6 +1921,22 @@ export class ApiClient {
     });
   }
 
+  /**
+   * What this machine can add a repository from.
+   *
+   * Member-plane, unlike `getCodeCloneDefaults`, which is administrator-only:
+   * on a shared machine the person adding a repository is usually not an
+   * administrator, and a dialog that cannot read its own options is no dialog.
+   */
+  async getCodeRepoSources(): Promise<CodeRepoSources> {
+    return requireParsed(
+      parseCodeRepoSources(
+        await this.json("/code/repos/sources", { headers: this.headers() }),
+      ),
+      "repo sources",
+    );
+  }
+
   async getCodeCloneDefaults(): Promise<CodeCloneDefaults> {
     return requireParsed(
       parseCodeCloneDefaults(
@@ -1930,10 +1948,14 @@ export class ApiClient {
     );
   }
 
+  /**
+   * Start a clone. `parent_dir` is omitted when the machine places clones
+   * itself — see `CodeRepoSources.chooses_destination`.
+   */
   async startCodeClone(body: {
     url?: string;
     github?: string;
-    parent_dir: string;
+    parent_dir?: string;
     name?: string;
   }): Promise<CodeCloneJobSnapshot> {
     return requireParsed(

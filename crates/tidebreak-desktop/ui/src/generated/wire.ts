@@ -1236,6 +1236,33 @@ export type CodePushSnapshot = { branch: string, remote: string, };
 export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, created_at: string, };
 
 /**
+ * One way of adding a repository, and whether this machine can serve it.
+ *
+ * `kind` is `local`, `git_url`, or `github`. `remediation` says what would
+ * make an unavailable source available, and is absent when it is available.
+ */
+export type CodeRepoSource = { kind: string, available: boolean, remediation?: string, };
+
+/**
+ * What this machine can add a repository from: `GET /code/repos/sources`.
+ *
+ * The machine answers for itself — whether it can spawn `git`, whether it has
+ * a GitHub credential — and the client decides separately whether it can
+ * offer a picker for any of it. Those are different questions: a desktop on
+ * the same computer as its machine can browse for a path, and a window
+ * attached to a machine elsewhere cannot, while the machine's own answer is
+ * identical either way.
+ *
+ * `chooses_destination` says the machine places clones under the destination
+ * its operator configured, so a caller names no path — which is what lets a
+ * shared machine keep its filesystem layout to itself.
+ *
+ * Unknown source kinds are ignored by clients rather than rendered, so this
+ * set may grow without a client release (decision 17).
+ */
+export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
+
+/**
  * What a running interactive session is actually occupied with. This is
  * intentionally coarser than a transcript tool name: list surfaces need to
  * distinguish agent generation, a shell, a passive monitor, and delegated

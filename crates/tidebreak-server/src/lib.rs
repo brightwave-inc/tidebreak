@@ -800,6 +800,7 @@ pub fn app(state: AppState) -> Router {
             "/code/repos",
             post(routes::code::create_repo).get(routes::code::list_repos),
         )
+        .route("/code/repos/sources", get(routes::code::repo_sources))
         .route("/code/repos/clone", post(routes::code::start_clone))
         .route("/code/repos/clone/{job}", get(routes::code::get_clone_job))
         .route(

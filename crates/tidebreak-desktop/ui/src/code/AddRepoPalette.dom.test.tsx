@@ -22,6 +22,14 @@ function app(
         gh_found: false,
         gh_remediation: "gh is not installed. Install the GitHub CLI.",
       })),
+      getCodeRepoSources: vi.fn(async () => ({
+        sources: [
+          { kind: "local", available: true },
+          { kind: "git_url", available: true },
+          { kind: "github", available: true },
+        ],
+        chooses_destination: false,
+      })),
       startCodeClone: vi.fn(),
       getCodeRepo: vi.fn(),
       createCodeRepo: vi.fn(),
@@ -177,6 +185,100 @@ describe("AddRepoPalette", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(
       screen.getByPlaceholderText("https://example.com/acme/app.git"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("AddRepoPalette on a machine that answers for itself", () => {
+  it("hides a source the machine cannot serve and says what would fix it", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            {
+              kind: "git_url",
+              available: false,
+              remediation: "This machine has no git.",
+            },
+            {
+              kind: "github",
+              available: false,
+              remediation: "This machine has no git.",
+            },
+          ],
+          chooses_destination: false,
+        })),
+      } as never),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: /Git URL/ }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("option", { name: /GitHub repository/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: /Local folder/ }),
+    ).toBeInTheDocument();
+    // Absent with no reason reads as a broken dialog; the machine's own
+    // sentence is what makes it legible.
+    expect(
+      screen.getAllByText(/This machine has no git\./).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("asks for no destination when the machine places clones itself", async () => {
+    const startCodeClone = vi.fn(async (_body: { parent_dir?: string }) => ({
+      id: "job-1",
+      phase: "starting",
+      done: false,
+    }));
+    await renderPalette(
+      app({
+        startCodeClone,
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            { kind: "github", available: true },
+          ],
+          chooses_destination: true,
+        })),
+      } as never),
+    );
+    const search = await screen.findByPlaceholderText("Filter sources");
+    fireEvent.change(search, { target: { value: "Git URL" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    const url = await screen.findByPlaceholderText(
+      "https://example.com/acme/app.git",
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Destination folder")).not.toBeInTheDocument(),
+    );
+    fireEvent.change(url, {
+      target: { value: "https://example.com/acme/app.git" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Clone" }));
+    await waitFor(() => expect(startCodeClone).toHaveBeenCalled());
+    // The machine owns its filesystem layout, so the request names no path.
+    expect(startCodeClone.mock.calls[0]?.[0].parent_dir).toBeUndefined();
+  });
+
+  it("stays usable when the administrator-only defaults read is refused", async () => {
+    await renderPalette(
+      app({
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    // A member on a shared machine gets that refusal every time. The dialog
+    // is the thing they came for, so it must survive it.
+    expect(
+      await screen.findByRole("option", { name: /Local folder/ }),
     ).toBeInTheDocument();
   });
 });
