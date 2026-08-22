@@ -168,6 +168,7 @@ async fn claimed_trigger_delivery(
     let at = now();
     arm_trigger(
         store,
+        owner,
         &CodeTrigger {
             id: CodeTriggerId::new(),
             owner: owner.clone(),
@@ -205,6 +206,7 @@ async fn claimed_trigger_delivery(
     let lease_token = uuid::Uuid::new_v4();
     lease_trigger_fire_delivery(
         store,
+        owner,
         fire.delivery_id,
         lease_token,
         at,
@@ -1538,7 +1540,7 @@ async fn arming_a_condition_twice_edits_the_rule() {
         created_at: now(),
         updated_at: now(),
     };
-    arm_trigger(&store, &armed).await.unwrap();
+    arm_trigger(&store, &owner, &armed).await.unwrap();
 
     let rearmed = CodeTrigger {
         id: CodeTriggerId::new(),
@@ -1546,7 +1548,7 @@ async fn arming_a_condition_twice_edits_the_rule() {
         updated_at: now() + chrono::Duration::minutes(1),
         ..armed.clone()
     };
-    arm_trigger(&store, &rearmed).await.unwrap();
+    arm_trigger(&store, &owner, &rearmed).await.unwrap();
 
     let stored = list_triggers_for_repo(&store, &owner, repo_id)
         .await
@@ -1554,6 +1556,162 @@ async fn arming_a_condition_twice_edits_the_rule() {
     assert_eq!(stored.len(), 1, "re-arming created a second rule");
     assert_eq!(stored[0].action, CodeTriggerAction::Deliver);
     assert_eq!(stored[0].id, armed.id, "the identity moved on an edit");
+}
+
+/// Trigger writes must carry the owner through every persistence boundary.
+/// A system sweep may discover another owner's delivery id, but that id alone
+/// must not authorize a lease, retry, acknowledgment, or repository binding.
+#[tokio::test]
+async fn trigger_persistence_rejects_another_owner() {
+    use crate::code::{
+        CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerFireIdentity,
+        CodeTriggerId,
+    };
+    use crate::db::code::{
+        acknowledge_trigger_fire_delivery, arm_trigger, insert_or_load_trigger_fire,
+        lease_trigger_fire_delivery, list_fires_for_workspace, list_repos, list_triggers_for_repo,
+        reschedule_trigger_fire_delivery_failure,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::new("alice").unwrap();
+    let bob = OwnerId::new("bob").unwrap();
+    let (alice_session_id, _) = seed_owner(&store, &alice, "trigger-alice").await;
+    seed_owner(&store, &bob, "trigger-bob").await;
+    let alice_repo_id = list_repos(&store, &alice).await.unwrap()[0].id;
+    let bob_repo_id = list_repos(&store, &bob).await.unwrap()[0].id;
+    let alice_workspace_id = get_session(&store, &alice, alice_session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+    let at = now();
+
+    let foreign_repo_trigger = CodeTrigger {
+        id: CodeTriggerId::new(),
+        owner: alice.clone(),
+        repo_id: bob_repo_id,
+        condition: CodeTriggerCondition::Conflicts,
+        action: CodeTriggerAction::Notify,
+        enabled: true,
+        created_at: at,
+        updated_at: at,
+    };
+    assert!(arm_trigger(&store, &alice, &foreign_repo_trigger)
+        .await
+        .is_err());
+    assert!(list_triggers_for_repo(&store, &bob, bob_repo_id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let trigger = CodeTrigger {
+        id: CodeTriggerId::new(),
+        owner: alice.clone(),
+        repo_id: alice_repo_id,
+        condition: CodeTriggerCondition::ChecksFailed,
+        action: CodeTriggerAction::Deliver,
+        enabled: true,
+        created_at: at,
+        updated_at: at,
+    };
+    arm_trigger(&store, &alice, &trigger).await.unwrap();
+    let fire = insert_or_load_trigger_fire(
+        &store,
+        &CodeTriggerFireIdentity {
+            trigger_id: trigger.id,
+            owner: alice.clone(),
+            workspace_id: alice_workspace_id,
+            pr_number: 42,
+            head_sha: "owner-boundary".to_owned(),
+        },
+        &trigger_payload(trigger.action, trigger.condition),
+        at,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(lease_trigger_fire_delivery(
+        &store,
+        &bob,
+        fire.delivery_id,
+        uuid::Uuid::new_v4(),
+        at,
+        at + chrono::Duration::minutes(1),
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let lease_token = uuid::Uuid::new_v4();
+    let lease_expires_at = at + chrono::Duration::minutes(1);
+    lease_trigger_fire_delivery(
+        &store,
+        &alice,
+        fire.delivery_id,
+        lease_token,
+        at,
+        lease_expires_at,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !acknowledge_trigger_fire_delivery(&store, &bob, fire.delivery_id, lease_token, at,)
+            .await
+            .unwrap()
+    );
+    assert!(reschedule_trigger_fire_delivery_failure(
+        &store,
+        &bob,
+        fire.delivery_id,
+        lease_token,
+        at,
+        "wrong owner",
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let still_leased = list_fires_for_workspace(&store, &alice, alice_workspace_id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(still_leased.lease_token, Some(lease_token));
+
+    let retry_at = reschedule_trigger_fire_delivery_failure(
+        &store,
+        &alice,
+        fire.delivery_id,
+        lease_token,
+        at,
+        "retry",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let next_token = uuid::Uuid::new_v4();
+    lease_trigger_fire_delivery(
+        &store,
+        &alice,
+        fire.delivery_id,
+        next_token,
+        retry_at,
+        retry_at + chrono::Duration::minutes(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(acknowledge_trigger_fire_delivery(
+        &store,
+        &alice,
+        fire.delivery_id,
+        next_token,
+        retry_at,
+    )
+    .await
+    .unwrap());
 }
 
 /// Pull request number is part of the fire identity. A host may reuse a head
@@ -1587,7 +1745,7 @@ async fn trigger_fire_identity_includes_pull_request_number() {
         created_at: now(),
         updated_at: now(),
     };
-    arm_trigger(&store, &trigger).await.unwrap();
+    arm_trigger(&store, &owner, &trigger).await.unwrap();
 
     let fired_at = now();
     let pull_40 = CodeTriggerFireIdentity {
@@ -1667,7 +1825,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
         created_at: now(),
         updated_at: now(),
     };
-    arm_trigger(&store, &trigger).await.unwrap();
+    arm_trigger(&store, &owner, &trigger).await.unwrap();
 
     let fired_at = now();
     let fire = insert_or_load_trigger_fire(
@@ -1689,6 +1847,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let first_expiry = fired_at + chrono::Duration::seconds(30);
     let first_lease = lease_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         first_token,
         fired_at,
@@ -1702,6 +1861,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     assert_eq!(first_lease.lease_token, Some(first_token));
     assert!(lease_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         uuid::Uuid::new_v4(),
         fired_at,
@@ -1714,6 +1874,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let failed_at = fired_at + chrono::Duration::seconds(1);
     let retry_at = reschedule_trigger_fire_delivery_failure(
         &store,
+        &owner,
         fire.delivery_id,
         first_token,
         failed_at,
@@ -1749,6 +1910,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     );
     assert!(lease_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         uuid::Uuid::new_v4(),
         retry_at - chrono::Duration::milliseconds(1),
@@ -1762,6 +1924,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let second_expiry = retry_at + chrono::Duration::seconds(30);
     let second_lease = lease_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         second_token,
         retry_at,
@@ -1777,6 +1940,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let long_error = "x".repeat(CodeTriggerFire::MAX_LAST_ERROR_CHARS + 16);
     let second_retry_at = reschedule_trigger_fire_delivery_failure(
         &store,
+        &owner,
         fire.delivery_id,
         second_token,
         second_failed_at,
@@ -1799,6 +1963,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let third_expiry = second_retry_at + chrono::Duration::seconds(30);
     let third_lease = lease_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         third_token,
         second_retry_at,
@@ -1814,6 +1979,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let fourth_expiry = third_expiry + chrono::Duration::seconds(30);
     let fourth_lease = lease_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         fourth_token,
         third_expiry,
@@ -1826,6 +1992,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     assert_eq!(fourth_lease.attempt_count, 4);
     assert!(!acknowledge_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         third_token,
         third_expiry,
@@ -1836,6 +2003,7 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
     let delivered_at = third_expiry + chrono::Duration::seconds(1);
     assert!(acknowledge_trigger_fire_delivery(
         &store,
+        &owner,
         fire.delivery_id,
         fourth_token,
         delivered_at,
@@ -1890,7 +2058,7 @@ async fn deleting_a_trigger_clears_its_fires() {
         created_at: now(),
         updated_at: now(),
     };
-    arm_trigger(&store, &trigger).await.unwrap();
+    arm_trigger(&store, &owner, &trigger).await.unwrap();
     insert_or_load_trigger_fire(
         &store,
         &CodeTriggerFireIdentity {
@@ -1950,7 +2118,7 @@ async fn trigger_mutations_have_field_specific_serialization() {
         created_at,
         updated_at: created_at,
     };
-    arm_trigger(&store, &trigger).await.unwrap();
+    arm_trigger(&store, &owner, &trigger).await.unwrap();
     let fire_identity = CodeTriggerFireIdentity {
         trigger_id: trigger.id,
         owner: owner.clone(),
@@ -2019,7 +2187,7 @@ async fn trigger_mutations_have_field_specific_serialization() {
         updated_at: created_at + chrono::Duration::minutes(2),
         ..trigger.clone()
     };
-    arm_trigger(&store, &rearmed).await.unwrap();
+    arm_trigger(&store, &owner, &rearmed).await.unwrap();
     let stored = list_triggers_for_repo(&store, &owner, repo_id)
         .await
         .unwrap()
@@ -2174,6 +2342,67 @@ async fn trigger_attention_acceptance_is_atomic_and_global() {
     assert!(!trigger_delivery_accepted(&store, &owner, missing_delivery)
         .await
         .unwrap());
+
+    let other_owner = OwnerId::new("attention-other").unwrap();
+    let (other_owner_session_id, _) = seed_owner(&store, &other_owner, "attention-other").await;
+    let (foreign_delivery, foreign_lease) = claimed_trigger_delivery(
+        &store,
+        &owner,
+        session_id,
+        CodeTriggerCondition::ChangesRequested,
+        CodeTriggerAction::Notify,
+    )
+    .await;
+    assert!(accept_trigger_attention_delivery(
+        &store,
+        &owner,
+        foreign_delivery,
+        foreign_lease,
+        other_owner_session_id,
+        &next,
+        now(),
+    )
+    .await
+    .is_err());
+    assert!(!trigger_delivery_accepted(&store, &owner, foreign_delivery)
+        .await
+        .unwrap());
+
+    let (policy_session_id, _) = seed_owner(&store, &owner, "attention-policy").await;
+    let manual = Attention::manual("keep this state");
+    replace_session_attention(&store, &owner, policy_session_id, &manual, true)
+        .await
+        .unwrap();
+    let (policy_delivery, policy_lease) = claimed_trigger_delivery(
+        &store,
+        &owner,
+        policy_session_id,
+        CodeTriggerCondition::Conflicts,
+        CodeTriggerAction::Notify,
+    )
+    .await;
+    assert!(!accept_trigger_attention_delivery(
+        &store,
+        &owner,
+        policy_delivery,
+        policy_lease,
+        policy_session_id,
+        &next,
+        now(),
+    )
+    .await
+    .unwrap());
+    assert!(trigger_delivery_accepted(&store, &owner, policy_delivery)
+        .await
+        .unwrap());
+    assert_eq!(
+        get_session(&store, &owner, policy_session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attention,
+        manual
+    );
 
     let (delivery_id, lease_token) = claimed_trigger_delivery(
         &store,

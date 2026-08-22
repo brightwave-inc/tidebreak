@@ -2066,7 +2066,8 @@ describe("code delivery API", () => {
     };
     const actionResult = {
       success: false,
-      message: "Failed jobs queued for one workflow run; one workflow run failed.",
+      message:
+        "Failed jobs queued for one workflow run; one workflow run failed.",
       rerun_outcomes: [
         { workflow_run_id: 77, success: true },
         { workflow_run_id: 78, success: false, error: "HTTP 503" },

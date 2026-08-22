@@ -4,7 +4,7 @@
 //! fingerprint that makes a trigger fire on an edge rather than on every sweep
 //! that still finds its condition true.
 
-use sea_orm::sea_query::{Expr, OnConflict, Query};
+use sea_orm::sea_query::{Expr, ExprTrait, OnConflict, Query};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     TransactionTrait,
@@ -164,6 +164,22 @@ pub async fn accept_trigger_attention_delivery(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     validate_claimed_delivery_on(&transaction, owner, delivery_id, lease_token, accepted_at)
         .await?;
+    if !super::acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Err(AgentError::Store(format!(
+            "code trigger attention session {session_id} not found"
+        )));
+    }
+    let session_exists = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if !session_exists {
+        return Err(AgentError::Store(format!(
+            "code trigger attention session {session_id} not found"
+        )));
+    }
     let accepted = insert_delivery_receipt_on(
         &transaction,
         owner,
@@ -307,10 +323,28 @@ where
 /// and the stored id stay unchanged. A concurrent enabled toggle writes only
 /// that bit, so database serialization decides the shared enabled value while
 /// neither operation can overwrite the other's unrelated columns.
-pub async fn arm_trigger(store: &DbStore, trigger: &CodeTrigger) -> Result<()> {
+pub async fn arm_trigger(store: &DbStore, owner: &OwnerId, trigger: &CodeTrigger) -> Result<()> {
+    if trigger.owner != *owner {
+        return Err(AgentError::Store(
+            "code trigger owner does not match the requested owner".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let repo_exists = entities::code_repo::Entity::find_by_id(trigger.repo_id.0)
+        .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if !repo_exists {
+        return Err(AgentError::Store(format!(
+            "code trigger repository {} not found",
+            trigger.repo_id
+        )));
+    }
     entities::code_trigger::Entity::insert(entities::code_trigger::ActiveModel {
         id: Set(trigger.id.0),
-        owner: Set(trigger.owner.as_str().to_owned()),
+        owner: Set(owner.as_str().to_owned()),
         repo_id: Set(trigger.repo_id.0),
         condition: Set(trigger.condition.as_str().to_owned()),
         action: Set(trigger.action.as_str().to_owned()),
@@ -331,9 +365,10 @@ pub async fn arm_trigger(store: &DbStore, trigger: &CodeTrigger) -> Result<()> {
         ])
         .to_owned(),
     )
-    .exec(&store.conn)
+    .exec(&transaction)
     .await
     .map_err(store_err)?;
+    transaction.commit().await.map_err(store_err)?;
     Ok(())
 }
 
@@ -566,6 +601,7 @@ pub async fn insert_or_load_trigger_fire(
 /// the lease. A live lease or a row that is not due returns `None`.
 pub async fn lease_trigger_fire_delivery(
     store: &DbStore,
+    owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
@@ -587,6 +623,7 @@ pub async fn lease_trigger_fire_delivery(
             Expr::col(entities::code_trigger_fire::Column::AttemptCount).add(1),
         )
         .filter(entities::code_trigger_fire::Column::DeliveryId.eq(delivery_id.0))
+        .filter(entities::code_trigger_fire::Column::Owner.eq(owner.as_str()))
         .filter(
             entities::code_trigger_fire::Column::State.eq(CodeTriggerFireState::Pending.as_str()),
         )
@@ -610,6 +647,7 @@ pub async fn lease_trigger_fire_delivery(
 
     let fire = entities::code_trigger_fire::Entity::find()
         .filter(entities::code_trigger_fire::Column::DeliveryId.eq(delivery_id.0))
+        .filter(entities::code_trigger_fire::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_trigger_fire::Column::LeaseToken.eq(lease_token))
         .one(&transaction)
         .await
@@ -663,6 +701,7 @@ pub async fn list_due_trigger_fire_deliveries_all_owners(
 /// Mark a pending delivery as delivered when the caller still owns its lease.
 pub async fn acknowledge_trigger_fire_delivery(
     store: &DbStore,
+    owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
     delivered_at: chrono::DateTime<chrono::Utc>,
@@ -694,6 +733,7 @@ pub async fn acknowledge_trigger_fire_delivery(
             Expr::value(Option::<String>::None),
         )
         .filter(entities::code_trigger_fire::Column::DeliveryId.eq(delivery_id.0))
+        .filter(entities::code_trigger_fire::Column::Owner.eq(owner.as_str()))
         .filter(
             entities::code_trigger_fire::Column::State.eq(CodeTriggerFireState::Pending.as_str()),
         )
@@ -707,6 +747,7 @@ pub async fn acknowledge_trigger_fire_delivery(
 /// Keep a failed delivery pending and schedule its next bounded retry.
 pub async fn reschedule_trigger_fire_delivery_failure(
     store: &DbStore,
+    owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
     failed_at: chrono::DateTime<chrono::Utc>,
@@ -716,6 +757,7 @@ pub async fn reschedule_trigger_fire_delivery_failure(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let Some(current) = entities::code_trigger_fire::Entity::find()
         .filter(entities::code_trigger_fire::Column::DeliveryId.eq(delivery_id.0))
+        .filter(entities::code_trigger_fire::Column::Owner.eq(owner.as_str()))
         .filter(
             entities::code_trigger_fire::Column::State.eq(CodeTriggerFireState::Pending.as_str()),
         )
@@ -756,6 +798,7 @@ pub async fn reschedule_trigger_fire_delivery_failure(
             Expr::value(Some(bounded_error)),
         )
         .filter(entities::code_trigger_fire::Column::DeliveryId.eq(delivery_id.0))
+        .filter(entities::code_trigger_fire::Column::Owner.eq(owner.as_str()))
         .filter(
             entities::code_trigger_fire::Column::State.eq(CodeTriggerFireState::Pending.as_str()),
         )

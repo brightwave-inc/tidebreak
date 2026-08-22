@@ -639,6 +639,7 @@ mod tests {
         .with_delay(std::time::Duration::from_secs(30))
         .launch(tidebreak_harness::SessionSpec {
             worktree: _dir.path().join("wt"),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
@@ -660,7 +661,7 @@ mod tests {
             sink,
             crate::code::session_worker::AttachmentStore {
                 blobs: None,
-                worktree: _dir.path().join("wt"),
+                private_root: _dir.path().join("private"),
                 engine_reads_images: false,
             },
             std::sync::Arc::new(tokio::sync::Mutex::new(())),

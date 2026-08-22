@@ -1682,8 +1682,8 @@ impl CodeRuntime {
         }
         // No capability gate on attachments. An engine that states image input
         // is handed the bytes on its own protocol; every other one is handed a
-        // file under the checkout and a path in the prompt, which is a thing
-        // each of them can already read. The worker picks between the two.
+        // private file and an absolute path in the prompt. The worker picks
+        // between the two.
         let handle = self.require_worker(id)?;
         // Both stick: a composer choice is the session's from here on, exactly
         // as the engines' own pickers behave. The outer `Option` on effort is
@@ -2384,7 +2384,7 @@ impl CodeRuntime {
             created_at: now,
             updated_at: now,
         };
-        arm_trigger(&self.db, &trigger).await?;
+        arm_trigger(&self.db, owner, &trigger).await?;
         // Read back rather than returning what we just built. Two arms of the
         // same condition racing each other both see no row and both mint an
         // id; only one is stored, and the loser would otherwise answer 201
@@ -2531,12 +2531,10 @@ impl CodeRuntime {
         Ok((session, turns, events.events))
     }
 
-    /// Write this session's transcript into its worktree for a fork to read.
+    /// Write this session's transcript into private storage for a fork to read.
     ///
-    /// The child is a sibling session in the same worktree, so the file only
-    /// has to exist where the engine already works. Nothing is handed over
-    /// here: the caller creates the child and names the path in its first
-    /// message.
+    /// The caller creates the child and names the absolute path in its first
+    /// message. Git cannot index the transcript or its attachments.
     pub(crate) async fn fork_transcript(
         &self,
         owner: &OwnerId,
@@ -2546,10 +2544,14 @@ impl CodeRuntime {
         let workspace = self
             .require_live_workspace(owner, session.workspace_id)
             .await?;
+        let private_root =
+            super::scratch::workspace_root(&self.data_dir, workspace.id).map_err(|err| {
+                ServerError::internal(format!("could not open private storage: {err}"))
+            })?;
         let turns = list_turns(&self.db, owner, session_id).await?;
         let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
         fork::write_transcript(
-            std::path::Path::new(&workspace.worktree_path),
+            &private_root,
             self.blobs.as_ref(),
             &session,
             &turns,
@@ -2851,8 +2853,13 @@ impl CodeRuntime {
             _ => None,
         };
 
+        let private_root =
+            super::scratch::workspace_root(&self.data_dir, workspace.id).map_err(|err| {
+                ServerError::internal(format!("could not open private storage: {err}"))
+            })?;
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
+            allowed_read_roots: vec![private_root.clone()],
             permission_mode: session.permission_mode,
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort,
@@ -2906,10 +2913,9 @@ impl CodeRuntime {
             sink,
             AttachmentStore {
                 blobs: Some(self.blobs.clone()),
-                worktree: PathBuf::from(&workspace.worktree_path),
+                private_root,
                 // Only an engine that states image input takes the bytes on
-                // its own protocol. The rest are handed paths under the
-                // checkout, which every engine can read.
+                // its own protocol. The rest receive absolute private paths.
                 engine_reads_images: adapter.capabilities(&probe).image_input
                     == CapLevel::Supported,
             },

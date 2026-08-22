@@ -703,8 +703,8 @@ describe("CodeComposer", () => {
   });
 
   it("attaches an image on an engine with no protocol for one", () => {
-    // The bytes reach the engine as a file under the checkout, so the
-    // composer offers attachment whatever the engine's own input path is.
+    // The bytes reach the engine through a private file, so the composer
+    // offers attachment whatever the engine's own input path is.
     renderComposer(
       <CodeComposer
         running={false}

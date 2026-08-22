@@ -161,7 +161,7 @@ async fn retry_due_deliveries(runtime: &Arc<CodeRuntime>) {
         }
     };
     for fire in due {
-        if let Err(err) = lease_and_deliver(runtime, fire.delivery_id).await {
+        if let Err(err) = lease_and_deliver(runtime, &fire.identity.owner, fire.delivery_id).await {
             warn!(
                 delivery = %fire.delivery_id,
                 trigger = %fire.identity.trigger_id,
@@ -425,18 +425,20 @@ async fn fire_one(
     else {
         return Ok(());
     };
-    lease_and_deliver(runtime, fire.delivery_id).await
+    lease_and_deliver(runtime, owner, fire.delivery_id).await
 }
 
 /// Lease one pending row by id, then deliver from its stored payload.
 async fn lease_and_deliver(
     runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
 ) -> Result<(), ServerError> {
     let now = Utc::now();
     let lease_token = uuid::Uuid::new_v4();
     let Some(fire) = lease_trigger_fire_delivery(
         &runtime.db,
+        owner,
         delivery_id,
         lease_token,
         now,
@@ -468,6 +470,7 @@ async fn deliver_leased_fire(
     if trigger_delivery_accepted(&runtime.db, owner, fire.delivery_id).await? {
         if !acknowledge_trigger_fire_delivery(
             &runtime.db,
+            owner,
             fire.delivery_id,
             lease_token,
             Utc::now(),
@@ -511,8 +514,14 @@ async fn deliver_leased_fire(
         reschedule_delivery_failure(runtime, &fire, lease_token, delivery_error.message()).await;
         return Err(delivery_error);
     }
-    if !acknowledge_trigger_fire_delivery(&runtime.db, fire.delivery_id, lease_token, Utc::now())
-        .await?
+    if !acknowledge_trigger_fire_delivery(
+        &runtime.db,
+        owner,
+        fire.delivery_id,
+        lease_token,
+        Utc::now(),
+    )
+    .await?
     {
         warn!(
             delivery = %fire.delivery_id,
@@ -546,6 +555,7 @@ async fn reschedule_delivery_failure(
 ) {
     match reschedule_trigger_fire_delivery_failure(
         &runtime.db,
+        &fire.identity.owner,
         fire.delivery_id,
         lease_token,
         Utc::now(),

@@ -294,150 +294,150 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
       repositoryRequest = { client, promise };
       return promise;
     },
-  rememberManualRepositories: (repositories) => {
-    const byKey = new Map(
-      get().manualRepositories.map((repository) => [
-        codeDeliveryRepositoryKey(repository),
-        repository,
-      ]),
-    );
-    for (const repository of repositories) {
-      byKey.set(codeDeliveryRepositoryKey(repository), repository);
-    }
-    set({ manualRepositories: [...byKey.values()] });
-    persistCurrent();
-  },
-  removeManualRepository: (key) => {
-    set({
-      manualRepositories: get().manualRepositories.filter(
-        (repository) => codeDeliveryRepositoryKey(repository) !== key,
-      ),
-      pinnedRepositoryKeys: get().pinnedRepositoryKeys.filter(
-        (repositoryKey) => repositoryKey !== key,
-      ),
-    });
-    persistCurrent();
-  },
-  setRegisteredRepositoryExcluded: (repoId, excluded) => {
-    const next = new Set(get().excludedRegisteredRepoIds);
-    if (excluded) next.add(repoId);
-    else next.delete(repoId);
-    set({ excludedRegisteredRepoIds: [...next] });
-    persistCurrent();
-  },
-  setRepositoryPinned: (key, pinned) => {
-    const next = new Set(get().pinnedRepositoryKeys);
-    if (pinned) next.add(key);
-    else next.delete(key);
-    set({ pinnedRepositoryKeys: [...next] });
-    persistCurrent();
-  },
-  upsertSavedView: (view) => {
-    set({
-      savedViews: [
-        view,
-        ...get().savedViews.filter((candidate) => candidate.id !== view.id),
-      ],
-    });
-    persistCurrent();
-  },
-  removeSavedView: (id) => {
-    set({ savedViews: get().savedViews.filter((view) => view.id !== id) });
-    persistCurrent();
-  },
-  updateNotificationRule: (id, patch) => {
-    set({
-      notificationRules: get().notificationRules.map((rule) =>
-        rule.id === id ? { ...rule, ...patch, id } : rule,
-      ),
-    });
-    persistCurrent();
-  },
-  ingestDeliveryPoll: (
-    pullRequests,
-    runs,
-    receivedAt = new Date().toISOString(),
-  ) => {
-    const next = buildDeliveryPoll(get(), pullRequests, runs, receivedAt);
-    if (next.changed) {
+    rememberManualRepositories: (repositories) => {
+      const byKey = new Map(
+        get().manualRepositories.map((repository) => [
+          codeDeliveryRepositoryKey(repository),
+          repository,
+        ]),
+      );
+      for (const repository of repositories) {
+        byKey.set(codeDeliveryRepositoryKey(repository), repository);
+      }
+      set({ manualRepositories: [...byKey.values()] });
+      persistCurrent();
+    },
+    removeManualRepository: (key) => {
+      set({
+        manualRepositories: get().manualRepositories.filter(
+          (repository) => codeDeliveryRepositoryKey(repository) !== key,
+        ),
+        pinnedRepositoryKeys: get().pinnedRepositoryKeys.filter(
+          (repositoryKey) => repositoryKey !== key,
+        ),
+      });
+      persistCurrent();
+    },
+    setRegisteredRepositoryExcluded: (repoId, excluded) => {
+      const next = new Set(get().excludedRegisteredRepoIds);
+      if (excluded) next.add(repoId);
+      else next.delete(repoId);
+      set({ excludedRegisteredRepoIds: [...next] });
+      persistCurrent();
+    },
+    setRepositoryPinned: (key, pinned) => {
+      const next = new Set(get().pinnedRepositoryKeys);
+      if (pinned) next.add(key);
+      else next.delete(key);
+      set({ pinnedRepositoryKeys: [...next] });
+      persistCurrent();
+    },
+    upsertSavedView: (view) => {
+      set({
+        savedViews: [
+          view,
+          ...get().savedViews.filter((candidate) => candidate.id !== view.id),
+        ],
+      });
+      persistCurrent();
+    },
+    removeSavedView: (id) => {
+      set({ savedViews: get().savedViews.filter((view) => view.id !== id) });
+      persistCurrent();
+    },
+    updateNotificationRule: (id, patch) => {
+      set({
+        notificationRules: get().notificationRules.map((rule) =>
+          rule.id === id ? { ...rule, ...patch, id } : rule,
+        ),
+      });
+      persistCurrent();
+    },
+    ingestDeliveryPoll: (
+      pullRequests,
+      runs,
+      receivedAt = new Date().toISOString(),
+    ) => {
+      const next = buildDeliveryPoll(get(), pullRequests, runs, receivedAt);
+      if (next.changed) {
+        set({
+          notifications: next.notifications,
+          seenFingerprints: next.seenFingerprints,
+        });
+        persistCurrent();
+      }
+      return next.added;
+    },
+    completeDeliveryPoll: (pullRequests, runs, at) => {
+      const next = buildDeliveryPoll(get(), pullRequests, runs, at);
       set({
         notifications: next.notifications,
         seenFingerprints: next.seenFingerprints,
+        polling: false,
+        monitorError: null,
+        lastPollAt: at,
+        lastSuccessfulPollAt: at,
       });
       persistCurrent();
-    }
-    return next.added;
-  },
-  completeDeliveryPoll: (pullRequests, runs, at) => {
-    const next = buildDeliveryPoll(get(), pullRequests, runs, at);
-    set({
-      notifications: next.notifications,
-      seenFingerprints: next.seenFingerprints,
-      polling: false,
-      monitorError: null,
-      lastPollAt: at,
-      lastSuccessfulPollAt: at,
-    });
-    persistCurrent();
-    return next.added;
-  },
-  markNotificationRead: (id, read = true) => {
-    const at = new Date().toISOString();
-    set({
-      notifications: get().notifications.map((notification) =>
-        notification.id === id
-          ? {
-              ...notification,
-              ...(read ? { readAt: at } : { readAt: undefined }),
-            }
-          : notification,
-      ),
-    });
-    persistCurrent();
-  },
-  markAllNotificationsRead: () => {
-    const at = new Date().toISOString();
-    set({
-      notifications: get().notifications.map((notification) => ({
-        ...notification,
-        readAt: notification.readAt ?? at,
-      })),
-    });
-    persistCurrent();
-  },
-  clearNotifications: () => {
-    set({ notifications: [] });
-    persistCurrent();
-  },
-  setPollState: (polling, error = get().monitorError) => {
-    set({ polling, monitorError: error });
-  },
-  finishPoll: (at) => {
-    set({
-      polling: false,
-      monitorError: null,
-      lastPollAt: at,
-      lastSuccessfulPollAt: at,
-    });
-    persistCurrent();
-  },
-  reset: () => {
-    repositoryGeneration += 1;
-    repositoryRequest = null;
-    const fresh = emptyPersistedState();
-    set({
-      ...fresh,
-      polling: false,
-      monitorError: null,
-      lastSuccessfulPollAt: null,
-      repositorySnapshot: null,
-      repositoryLoading: false,
-      repositoryError: null,
-      repositoryFetchedAt: null,
-      persistenceError: null,
-    });
-    persistCurrent();
-  },
+      return next.added;
+    },
+    markNotificationRead: (id, read = true) => {
+      const at = new Date().toISOString();
+      set({
+        notifications: get().notifications.map((notification) =>
+          notification.id === id
+            ? {
+                ...notification,
+                ...(read ? { readAt: at } : { readAt: undefined }),
+              }
+            : notification,
+        ),
+      });
+      persistCurrent();
+    },
+    markAllNotificationsRead: () => {
+      const at = new Date().toISOString();
+      set({
+        notifications: get().notifications.map((notification) => ({
+          ...notification,
+          readAt: notification.readAt ?? at,
+        })),
+      });
+      persistCurrent();
+    },
+    clearNotifications: () => {
+      set({ notifications: [] });
+      persistCurrent();
+    },
+    setPollState: (polling, error = get().monitorError) => {
+      set({ polling, monitorError: error });
+    },
+    finishPoll: (at) => {
+      set({
+        polling: false,
+        monitorError: null,
+        lastPollAt: at,
+        lastSuccessfulPollAt: at,
+      });
+      persistCurrent();
+    },
+    reset: () => {
+      repositoryGeneration += 1;
+      repositoryRequest = null;
+      const fresh = emptyPersistedState();
+      set({
+        ...fresh,
+        polling: false,
+        monitorError: null,
+        lastSuccessfulPollAt: null,
+        repositorySnapshot: null,
+        repositoryLoading: false,
+        repositoryError: null,
+        repositoryFetchedAt: null,
+        persistenceError: null,
+      });
+      persistCurrent();
+    },
   };
 });
 

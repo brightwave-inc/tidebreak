@@ -388,6 +388,8 @@ impl BrowserChannelSpec {
 pub struct SessionSpec {
     /// Worktree the engine should use as its working directory.
     pub worktree: PathBuf,
+    /// Absolute directory roots that engine tools may read outside the worktree.
+    pub allowed_read_roots: Vec<PathBuf>,
     /// Permission mode. Adapters refuse a mode they cannot honor.
     pub permission_mode: PermissionMode,
     /// Engine model id, when the session chose one.
@@ -600,6 +602,9 @@ pub enum HarnessError {
     /// A composed launch plan contained a forbidden flag.
     #[error(transparent)]
     LaunchRejected(#[from] BypassFlagError),
+    /// An allowed read root was not absolute.
+    #[error("allowed read root must be absolute: {0}")]
+    AllowedReadRootNotAbsolute(String),
     /// The engine cannot honor the requested permission mode.
     #[error("permission mode {0} is not available on this engine")]
     PermissionModeUnsupported(PermissionMode),

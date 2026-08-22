@@ -29,7 +29,7 @@ mod idens;
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
 
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use sea_orm_migration::prelude::*;
 
 pub struct Migrator;
@@ -641,7 +641,7 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
             .to_owned();
         manager
             .get_connection()
-            .execute(backend.build(&insert))
+            .execute(&backend.build(&insert))
             .await?;
     }
 

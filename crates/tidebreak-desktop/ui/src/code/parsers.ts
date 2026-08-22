@@ -796,7 +796,9 @@ function parseCodeDeliveryRunSummary(
     !nonEmpty(value.id) ||
     !isMember(value.kind, DELIVERY_RUN_KINDS) ||
     !isPositiveInteger(value.github_id) ||
-    !(value.run_attempt === undefined || isPositiveInteger(value.run_attempt)) ||
+    !(
+      value.run_attempt === undefined || isPositiveInteger(value.run_attempt)
+    ) ||
     !nonEmpty(value.name) ||
     !nonEmpty(value.url) ||
     !nonEmpty(value.status) ||
@@ -1010,9 +1012,10 @@ function parseCodeDeliveryRerunOutcome(
 ): NonNullable<CodeDeliveryActionResult["rerun_outcomes"]>[number] | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<
-      NonNullable<CodeDeliveryActionResult["rerun_outcomes"]>[number]
-    >(value, ["workflow_run_id", "success", "error"]) ||
+    !onlyKeys<NonNullable<CodeDeliveryActionResult["rerun_outcomes"]>[number]>(
+      value,
+      ["workflow_run_id", "success", "error"],
+    ) ||
     !isPositiveInteger(value.workflow_run_id) ||
     typeof value.success !== "boolean" ||
     !optionalString(value.error)

@@ -1,20 +1,21 @@
-//! `.tidebreak/`: files an engine reads from its worktree.
+//! Private files that an engine reads outside its Git worktree.
 //!
-//! Every path is opened relative to a pinned worktree directory. Each child
-//! directory and final file refuses symlinks, so a repository cannot redirect
-//! private bytes outside the checkout.
+//! Every path is opened relative to the profile data directory. Each child
+//! directory and final file refuses symlinks, so repository content cannot
+//! redirect private bytes into a path that Git can index.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
+use tidebreak_core::WorkspaceId;
 use tokio::io::AsyncWriteExt as _;
 
-/// Root of the scratch tree, relative to the worktree.
-pub(crate) const SCRATCH_DIR: &str = ".tidebreak";
+const CODE_DIR: &str = "code";
+const PRIVATE_DIR: &str = "private";
 
 /// An open scratch directory whose path components were all opened without
 /// following symlinks.
@@ -89,27 +90,65 @@ impl Drop for ScratchScope {
     }
 }
 
-/// Open or create one directory below `.tidebreak`, refusing symlinks at
-/// every component.
-pub(crate) fn scratch_dir(worktree: &Path, relative: &str) -> io::Result<ScratchDir> {
+/// Create the private root for one workspace under the profile data directory.
+pub(crate) fn workspace_root(data_dir: &Path, workspace_id: WorkspaceId) -> io::Result<PathBuf> {
+    let data_dir = absolute_path(data_dir)?;
+    let root = open_root(&data_dir)?;
+    reject_git_indexable_root(&std::fs::canonicalize(&data_dir)?)?;
+    let code = ensure_child_dir(&root, OsStr::new(CODE_DIR))?;
+    let private = ensure_child_dir(&code, OsStr::new(PRIVATE_DIR))?;
+    let workspace_name = workspace_id.to_string();
+    ensure_child_dir(&private, OsStr::new(&workspace_name))?;
+    Ok(data_dir
+        .join(CODE_DIR)
+        .join(PRIVATE_DIR)
+        .join(workspace_name))
+}
+
+fn absolute_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
+}
+
+fn reject_git_indexable_root(root: &Path) -> io::Result<()> {
+    for ancestor in root.ancestors() {
+        if ancestor.file_name().is_some_and(|name| name == ".git") {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private storage cannot be inside a Git worktree",
+            ));
+        }
+        match std::fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(metadata) if metadata.is_dir() || metadata.is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private storage cannot be inside a Git worktree",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Open or create one directory below a workspace's private root.
+pub(crate) fn scratch_dir(root: &Path, relative: &str) -> io::Result<ScratchDir> {
     let components = scratch_components(relative)?;
-    let worktree = open_worktree(worktree)?;
-    let scratch = ensure_child_dir(&worktree, OsStr::new(SCRATCH_DIR))?;
-    ignore_scratch_dir(&scratch)?;
-    let mut current = scratch;
-    for component in components.into_iter().skip(1) {
+    let mut current = open_root(root)?;
+    for component in components {
         current = ensure_child_dir(&current, &component)?;
     }
     Ok(ScratchDir { dir: current })
 }
 
 /// Open an existing scratch directory without creating any path component.
-pub(crate) fn scratch_dir_if_exists(
-    worktree: &Path,
-    relative: &str,
-) -> io::Result<Option<ScratchDir>> {
+pub(crate) fn scratch_dir_if_exists(root: &Path, relative: &str) -> io::Result<Option<ScratchDir>> {
     let components = scratch_components(relative)?;
-    let mut current = open_worktree(worktree)?;
+    let mut current = open_root(root)?;
     for component in components {
         let metadata = match current.symlink_metadata(&component) {
             Ok(metadata) => metadata,
@@ -129,12 +168,12 @@ pub(crate) fn scratch_dir_if_exists(
 
 /// Create a session-and-turn-specific directory below `relative`.
 pub(crate) fn scratch_scope(
-    worktree: &Path,
+    root: &Path,
     relative: &str,
     session_id: uuid::Uuid,
     turn_id: uuid::Uuid,
 ) -> io::Result<ScratchScope> {
-    let root = scratch_dir(worktree, relative)?;
+    let root = scratch_dir(root, relative)?;
     let session_name: OsString = session_id.to_string().into();
     let turn_name: OsString = turn_id.to_string().into();
     let session = ensure_child_dir(&root.dir, &session_name)?;
@@ -153,8 +192,8 @@ pub(crate) fn scratch_scope(
 /// Only UUID-named session directories and legacy UUID-named image files are
 /// Tidebreak-owned. Unknown entries stay untouched. Symlinks are unlinked,
 /// never followed.
-pub(crate) fn sweep_scopes(worktree: &Path, relative: &str) -> io::Result<()> {
-    let Some(root) = scratch_dir_if_exists(worktree, relative)? else {
+pub(crate) fn sweep_scopes(root: &Path, relative: &str) -> io::Result<()> {
+    let Some(root) = scratch_dir_if_exists(root, relative)? else {
         return Ok(());
     };
     for entry in root.read_dir()? {
@@ -197,21 +236,21 @@ fn scratch_components(relative: &str) -> io::Result<Vec<OsString>> {
             }
         }
     }
-    if components.first().is_none_or(|name| name != SCRATCH_DIR) {
+    if components.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "scratch path must start with .tidebreak",
+            "scratch path must name a private directory",
         ));
     }
     Ok(components)
 }
 
-fn open_worktree(path: &Path) -> io::Result<Dir> {
+fn open_root(path: &Path) -> io::Result<Dir> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "worktree is not a regular directory",
+            "private storage root is not a regular directory",
         ));
     }
     let directory = Dir::open_ambient_dir(path, ambient_authority())?;
@@ -224,7 +263,7 @@ fn open_worktree(path: &Path) -> io::Result<Dir> {
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "worktree changed while it was opened",
+                "private storage root changed while it was opened",
             ));
         }
     }
@@ -246,13 +285,6 @@ fn ensure_child_dir(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
         Err(error) => return Err(error),
     }
     parent.open_dir_nofollow(name)
-}
-
-fn ignore_scratch_dir(scratch: &Dir) -> io::Result<()> {
-    // A repository may already track an unsafe marker. Replace every regular
-    // marker before creating child storage so Git ignores every Tidebreak-owned
-    // child.
-    publish_file_blocking(scratch, OsStr::new(".gitignore"), b"*\n")
 }
 
 async fn publish_file(directory: &Dir, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
@@ -281,37 +313,6 @@ async fn publish_file(directory: &Dir, name: &OsStr, bytes: &[u8]) -> io::Result
         directory.rename(&staged, directory, name)
     }
     .await;
-    if result.is_err() {
-        let _ = directory.remove_file(&staged);
-    }
-    result
-}
-
-fn publish_file_blocking(directory: &Dir, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-
-    validate_file_name(name)?;
-    reject_non_regular_destination(directory, name)?;
-    let staged: OsString =
-        format!(".{}.{}.part", name.to_string_lossy(), uuid::Uuid::new_v4()).into();
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .follow(FollowSymlinks::No);
-    let result = (|| {
-        let mut file = directory.open_with(&staged, &options)?;
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "staged scratch path is not a regular file",
-            ));
-        }
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        directory.rename(&staged, directory, name)
-    })();
     if result.is_err() {
         let _ = directory.remove_file(&staged);
     }
@@ -413,11 +414,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn rejects_a_symlinked_scratch_root() {
-        let worktree = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), worktree.path().join(SCRATCH_DIR)).unwrap();
+        let root = parent.path().join("private");
+        std::os::unix::fs::symlink(outside.path(), &root).unwrap();
 
-        let result = scratch_dir(worktree.path(), ".tidebreak/attachments");
+        let result = scratch_dir(&root, "attachments");
 
         assert!(result.is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -426,16 +428,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn rejects_a_symlinked_nested_directory() {
-        let worktree = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::fs::create_dir(worktree.path().join(SCRATCH_DIR)).unwrap();
-        std::os::unix::fs::symlink(
-            outside.path(),
-            worktree.path().join(".tidebreak/attachments"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("attachments")).unwrap();
 
-        let result = scratch_dir(worktree.path(), ".tidebreak/attachments");
+        let result = scratch_dir(root.path(), "attachments");
 
         assert!(result.is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -443,46 +440,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_a_dangling_gitignore_symlink() {
-        let worktree = tempfile::tempdir().unwrap();
-        std::fs::create_dir(worktree.path().join(SCRATCH_DIR)).unwrap();
-        std::os::unix::fs::symlink(
-            worktree.path().join("missing"),
-            worktree.path().join(".tidebreak/.gitignore"),
-        )
-        .unwrap();
+    fn workspace_root_rejects_a_symlinked_private_parent() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), data_dir.path().join(CODE_DIR)).unwrap();
 
-        assert!(scratch_dir(worktree.path(), ".tidebreak/attachments").is_err());
-        assert!(!worktree.path().join("missing").exists());
+        assert!(workspace_root(data_dir.path(), WorkspaceId::new()).is_err());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn workspace_root_rejects_a_repository_local_data_directory() {
+        let worktree = tempfile::tempdir().unwrap();
+        assert_git_success(worktree.path(), &["init", "-b", "main"]);
+        let data_dir = worktree.path().join(".tidebreak");
+        std::fs::create_dir(&data_dir).unwrap();
+
+        let error = workspace_root(&data_dir, WorkspaceId::new()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_git_success(worktree.path(), &["add", "-A"]);
+        let indexed = git(
+            worktree.path(),
+            &["ls-files", "--cached", "--", ".tidebreak/code/private"],
+        );
+        assert!(indexed.status.success());
+        assert!(indexed.stdout.is_empty());
     }
 
     #[tokio::test]
-    async fn repairs_a_tracked_unsafe_marker_before_publishing_private_files() {
+    async fn a_tracked_unsafe_marker_cannot_make_private_files_indexable() {
         let worktree = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
         assert_git_success(worktree.path(), &["init", "-b", "main"]);
-        std::fs::create_dir(worktree.path().join(SCRATCH_DIR)).unwrap();
+        std::fs::create_dir(worktree.path().join(".tidebreak")).unwrap();
         std::fs::write(worktree.path().join(".tidebreak/.gitignore"), b"").unwrap();
         assert_git_success(worktree.path(), &["add", ".tidebreak/.gitignore"]);
+        std::fs::write(worktree.path().join(".tidebreak/.gitignore"), b"*\n").unwrap();
 
         let session_id = uuid::Uuid::new_v4();
         let turn_id = uuid::Uuid::new_v4();
-        let scope = scratch_scope(
-            worktree.path(),
-            ".tidebreak/attachments",
-            session_id,
-            turn_id,
-        )
-        .unwrap();
+        let scope = scratch_scope(private.path(), "attachments", session_id, turn_id).unwrap();
         scope
             .publish(OsStr::new("image.png"), b"private")
             .await
             .unwrap();
         scope.keep();
 
-        assert_eq!(
-            std::fs::read(worktree.path().join(".tidebreak/.gitignore")).unwrap(),
-            b"*\n"
-        );
+        assert_git_success(worktree.path(), &["restore", ".tidebreak/.gitignore"]);
         assert_git_success(worktree.path(), &["add", "-A"]);
         let indexed = git(
             worktree.path(),
@@ -491,30 +496,36 @@ mod tests {
         assert!(indexed.status.success());
         assert!(
             indexed.stdout.is_empty(),
-            "private scratch files entered the Git index: {}",
+            "a private file entered the Git index: {}",
             String::from_utf8_lossy(&indexed.stdout)
+        );
+        assert_eq!(
+            std::fs::read(
+                private
+                    .path()
+                    .join("attachments")
+                    .join(session_id.to_string())
+                    .join(turn_id.to_string())
+                    .join("image.png")
+            )
+            .unwrap(),
+            b"private"
         );
     }
 
     #[tokio::test]
     async fn scope_cleanup_removes_only_its_session_tree() {
-        let worktree = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
         let session_id = uuid::Uuid::new_v4();
         let turn_id = uuid::Uuid::new_v4();
-        let scope = scratch_scope(
-            worktree.path(),
-            ".tidebreak/attachments",
-            session_id,
-            turn_id,
-        )
-        .unwrap();
+        let scope = scratch_scope(private.path(), "attachments", session_id, turn_id).unwrap();
         scope
             .publish(OsStr::new("image.png"), b"private")
             .await
             .unwrap();
-        let turn_path = worktree
+        let turn_path = private
             .path()
-            .join(".tidebreak/attachments")
+            .join("attachments")
             .join(session_id.to_string())
             .join(turn_id.to_string());
         assert_eq!(
@@ -527,7 +538,7 @@ mod tests {
 
         assert!(!turn_path.exists());
         assert!(!turn_path.parent().unwrap().exists());
-        assert!(worktree.path().join(".tidebreak/attachments").is_dir());
+        assert!(private.path().join("attachments").is_dir());
     }
 
     #[cfg(unix)]
@@ -535,23 +546,17 @@ mod tests {
     async fn failed_cleanup_can_be_retried_without_losing_the_scope() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let worktree = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
         let session_id = uuid::Uuid::new_v4();
         let turn_id = uuid::Uuid::new_v4();
-        let mut scope = scratch_scope(
-            worktree.path(),
-            ".tidebreak/attachments",
-            session_id,
-            turn_id,
-        )
-        .unwrap();
+        let mut scope = scratch_scope(private.path(), "attachments", session_id, turn_id).unwrap();
         scope
             .publish(OsStr::new("image.png"), b"private")
             .await
             .unwrap();
-        let session_path = worktree
+        let session_path = private
             .path()
-            .join(".tidebreak/attachments")
+            .join("attachments")
             .join(session_id.to_string());
         std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o500)).unwrap();
 
@@ -566,15 +571,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sweep_unlinks_scoped_symlinks_without_touching_their_targets() {
-        let worktree = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("keep.txt"), b"keep").unwrap();
-        let root = worktree.path().join(".tidebreak/attachments");
+        let root = private.path().join("attachments");
         std::fs::create_dir_all(&root).unwrap();
         let session_id = uuid::Uuid::new_v4();
         std::os::unix::fs::symlink(outside.path(), root.join(session_id.to_string())).unwrap();
 
-        sweep_scopes(worktree.path(), ".tidebreak/attachments").unwrap();
+        sweep_scopes(private.path(), "attachments").unwrap();
 
         assert!(!root.join(session_id.to_string()).exists());
         assert_eq!(

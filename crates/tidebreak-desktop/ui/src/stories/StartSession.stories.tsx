@@ -92,7 +92,7 @@ export const ForkedFromAnotherAgent: Story = {
     workspaceFiles: {
       items: [
         forkTranscriptFile({
-          path: ".tidebreak/forks/9c1f4a2e.md",
+          path: "/private/forks/9c1f4a2e.md",
           byte_len: 48_120,
           turns: 14,
           truncated: false,
@@ -109,7 +109,7 @@ export const ForkedFromALongSession: Story = {
     workspaceFiles: {
       items: [
         forkTranscriptFile({
-          path: ".tidebreak/forks/3b70de55.md",
+          path: "/private/forks/3b70de55.md",
           byte_len: 524_288,
           turns: 6,
           truncated: true,

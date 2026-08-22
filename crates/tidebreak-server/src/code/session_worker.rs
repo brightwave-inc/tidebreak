@@ -163,14 +163,14 @@ struct WorktreeTurn<'a> {
 /// Two routes, and the engine picks which. Claude Code takes image bytes on
 /// its own protocol, so they ride `TurnInput::images`. Every other engine
 /// reads attachments off disk with the file tools it already has, so the bytes
-/// are written under the checkout and the prompt carries paths — the same
-/// route a fork's transcript takes.
+/// are written under Tidebreak's private data directory and the prompt carries
+/// absolute paths. Git cannot index those files.
 #[derive(Clone)]
 pub(crate) struct AttachmentStore {
     /// Published bytes, addressed by blob id.
     pub blobs: Option<Arc<dyn BlobStore>>,
-    /// The session's checkout, where a file-reading engine is handed paths.
-    pub worktree: PathBuf,
+    /// Private storage for this workspace, outside every Git worktree.
+    pub private_root: PathBuf,
     /// Whether this engine consumes images over its own protocol.
     pub engine_reads_images: bool,
 }
@@ -946,7 +946,7 @@ async fn drive_turn_inner(
     // Clear files a crashed worker left behind before this turn exposes any
     // new bytes. The worktree lock proves no live turn in this checkout still
     // owns one of these directories.
-    sweep_attachment_leftovers_or_fence(db, bus, session, &store.worktree).await?;
+    sweep_attachment_leftovers_or_fence(db, bus, session, &store.private_root).await?;
     let mut staged_attachments = if store.engine_reads_images {
         None
     } else {
@@ -955,7 +955,7 @@ async fn drive_turn_inner(
         } else {
             Some(
                 write_turn_attachments(
-                    &store.worktree,
+                    &store.private_root,
                     session.id,
                     turn.id,
                     &turn.attachments,
@@ -1329,15 +1329,15 @@ async fn drive_turn_inner(
 
 /// Sweep crash-leftover attachment scopes while the caller holds the worktree.
 ///
-/// A failed sweep leaves private bytes in the checkout. Persist the fence
-/// before returning so another turn cannot retry against the same unsafe tree.
+/// A failed sweep leaves private bytes behind. Persist the fence before
+/// returning so another turn cannot reuse the same private root.
 async fn sweep_attachment_leftovers_or_fence(
     db: &DbStore,
     bus: &CodeEventBus,
     session: &mut CodeSession,
-    worktree: &Path,
+    private_root: &Path,
 ) -> Result<(), WorkerError> {
-    let Err(error) = super::scratch::sweep_scopes(worktree, ATTACHMENTS_DIR) else {
+    let Err(error) = super::scratch::sweep_scopes(private_root, ATTACHMENTS_DIR) else {
         return Ok(());
     };
     let detail = format!("sweep attachments: {error}");
@@ -1383,27 +1383,28 @@ fn code_turn_is_error(result: &Result<CodeTurn, WorkerError>) -> bool {
     )
 }
 
-/// Directory holding a turn's attachments, relative to the worktree root.
-pub(crate) const ATTACHMENTS_DIR: &str = ".tidebreak/attachments";
+/// Directory holding a turn's attachments below the workspace's private root.
+pub(crate) const ATTACHMENTS_DIR: &str = "attachments";
 
 struct StagedTurnAttachments {
     scope: super::scratch::ScratchScope,
     paths: Vec<String>,
 }
 
-/// Write a turn's attachments under the checkout, returning worktree-relative
-/// paths in the order they were attached.
+/// Write a turn's attachments outside the checkout, returning absolute paths
+/// in the order they were attached.
 ///
 /// The session and turn path prevents a later session from inheriting files
 /// from this one. The returned scope removes the directory on every exit.
 async fn write_turn_attachments(
-    worktree: &Path,
+    private_root: &Path,
     session_id: CodeSessionId,
     turn_id: CodeTurnId,
     attachments: &[tidebreak_core::ImageRef],
     images: &[TurnImage],
 ) -> std::io::Result<StagedTurnAttachments> {
-    let scope = super::scratch::scratch_scope(worktree, ATTACHMENTS_DIR, session_id.0, turn_id.0)?;
+    let scope =
+        super::scratch::scratch_scope(private_root, ATTACHMENTS_DIR, session_id.0, turn_id.0)?;
     let mut written = Vec::with_capacity(images.len());
     for (attachment, image) in attachments.iter().zip(images) {
         let name = format!(
@@ -1414,7 +1415,15 @@ async fn write_turn_attachments(
         scope
             .publish(std::ffi::OsStr::new(&name), &image.bytes)
             .await?;
-        written.push(format!("{ATTACHMENTS_DIR}/{session_id}/{turn_id}/{name}"));
+        written.push(
+            private_root
+                .join(ATTACHMENTS_DIR)
+                .join(session_id.to_string())
+                .join(turn_id.to_string())
+                .join(name)
+                .display()
+                .to_string(),
+        );
     }
     Ok(StagedTurnAttachments {
         scope,
@@ -1437,7 +1446,7 @@ fn message_naming_attachments(message: &str, paths: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let noun = if paths.len() == 1 { "image" } else { "images" };
-    let body = format!("{noun} attached to this message, in this worktree:\n{list}");
+    let body = format!("{noun} attached to this message:\n{list}");
     let text = message.trim();
     if text.is_empty() {
         body
@@ -2171,8 +2180,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let (directory, store, sink, session_id) = seeded_sink().await;
-        let worktree = directory.path().join("wt");
-        let attachment_root = worktree.join(ATTACHMENTS_DIR);
+        let private_root = directory.path().join("private");
+        let attachment_root = private_root.join(ATTACHMENTS_DIR);
         let leftover = attachment_root.join(CodeSessionId::new().to_string());
         std::fs::create_dir_all(&leftover).unwrap();
         std::fs::write(leftover.join("private.png"), b"private").unwrap();
@@ -2183,7 +2192,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let result =
-            sweep_attachment_leftovers_or_fence(&store, &sink.bus, &mut session, &worktree).await;
+            sweep_attachment_leftovers_or_fence(&store, &sink.bus, &mut session, &private_root)
+                .await;
 
         std::fs::set_permissions(&attachment_root, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(result, Err(WorkerError::Failed(_))));
@@ -2270,7 +2280,7 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_images_live_only_in_the_session_turn_scope() {
-        let worktree = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
         let session_id = CodeSessionId::new();
         let turn_id = CodeTurnId::new();
         let attachment = ImageRef {
@@ -2281,7 +2291,7 @@ mod tests {
             byte_len: 4,
         };
         let staged = write_turn_attachments(
-            worktree.path(),
+            private.path(),
             session_id,
             turn_id,
             std::slice::from_ref(&attachment),
@@ -2292,20 +2302,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let expected = format!(
-            "{ATTACHMENTS_DIR}/{session_id}/{turn_id}/{}.png",
-            attachment.blob_id
-        );
+        let expected = private
+            .path()
+            .join(ATTACHMENTS_DIR)
+            .join(session_id.to_string())
+            .join(turn_id.to_string())
+            .join(format!("{}.png", attachment.blob_id))
+            .display()
+            .to_string();
         assert_eq!(staged.paths, vec![expected.clone()]);
-        assert_eq!(
-            std::fs::read(worktree.path().join(expected)).unwrap(),
-            [1, 2, 3, 4]
-        );
+        assert_eq!(std::fs::read(&expected).unwrap(), [1, 2, 3, 4]);
 
         let mut staged = staged;
         staged.scope.cleanup().unwrap();
 
-        assert!(!worktree
+        assert!(!private
             .path()
             .join(ATTACHMENTS_DIR)
             .join(session_id.to_string())
@@ -2318,7 +2329,7 @@ mod tests {
             message_naming_attachments("compare these", &["first.png".into(), "second.png".into()]);
         assert_eq!(
             message,
-            "compare these\n\nimages attached to this message, in this worktree:\n- `first.png`\n- `second.png`"
+            "compare these\n\nimages attached to this message:\n- `first.png`\n- `second.png`"
         );
     }
 }

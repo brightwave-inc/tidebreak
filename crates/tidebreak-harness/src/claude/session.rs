@@ -379,6 +379,15 @@ impl ClaudeSession {
             argv.push("--resume".into());
             argv.push(resume);
         }
+        for root in &self.spec.allowed_read_roots {
+            if !root.is_absolute() {
+                return Err(HarnessError::AllowedReadRootNotAbsolute(
+                    root.to_string_lossy().into_owned(),
+                ));
+            }
+            argv.push("--add-dir".into());
+            argv.push(root.to_string_lossy().into_owned());
+        }
         argv.extend(self.spec.extra_argv.iter().cloned());
         let mut env = self.spec.extra_env.clone();
         env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
@@ -963,6 +972,7 @@ mod tests {
     ) -> ClaudeSession {
         ClaudeSession::new(SessionSpec {
             worktree: worktree.to_path_buf(),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
@@ -1052,6 +1062,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Ask,
             model: None,
             reasoning_effort: Some(ReasoningEffort::Ultra),
@@ -1084,6 +1095,97 @@ mod tests {
         assert_eq!(live_mode_token(PermissionMode::Ask), Some("manual"));
         assert_eq!(live_mode_token(PermissionMode::Auto), Some("acceptEdits"));
         assert_eq!(live_mode_token(PermissionMode::Allow), None);
+    }
+
+    #[test]
+    fn allowed_read_roots_precede_extra_argv_in_every_permission_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = [dir.path().join("forks"), dir.path().join("attachments")];
+
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::Ask,
+            PermissionMode::Auto,
+            PermissionMode::Allow,
+        ] {
+            let mut session = session_with(
+                PathBuf::from("/usr/bin/claude"),
+                dir.path(),
+                Arc::new(Discard),
+            );
+            session.spec.permission_mode = mode;
+            session.spec.allowed_read_roots = roots.to_vec();
+            session.spec.extra_argv = vec!["--append-system-prompt".into(), "extra".into()];
+
+            let plan = session.compose_plan_for(None, None).unwrap();
+            let add_dir_indexes: Vec<usize> = plan
+                .argv
+                .iter()
+                .enumerate()
+                .filter_map(|(index, arg)| (arg == "--add-dir").then_some(index))
+                .collect();
+            let extra_index = plan
+                .argv
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .unwrap();
+
+            assert_eq!(add_dir_indexes.len(), roots.len(), "mode: {mode:?}");
+            for (index, root) in add_dir_indexes.into_iter().zip(&roots) {
+                assert_eq!(plan.argv[index + 1], root.to_string_lossy());
+                assert!(index < extra_index, "mode: {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn allowed_read_roots_must_be_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session_with(
+            PathBuf::from("/usr/bin/claude"),
+            dir.path(),
+            Arc::new(Discard),
+        );
+        session.spec.allowed_read_roots = vec![PathBuf::from("relative/private")];
+
+        let err = session.compose_plan_for(None, None).unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessError::AllowedReadRootNotAbsolute(root) if root == "relative/private"
+        ));
+    }
+
+    #[test]
+    fn extra_argv_bypass_policy_still_tracks_permission_mode() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::Ask,
+            PermissionMode::Auto,
+        ] {
+            let mut session = session_with(
+                PathBuf::from("/usr/bin/claude"),
+                dir.path(),
+                Arc::new(Discard),
+            );
+            session.spec.permission_mode = mode;
+            session.spec.extra_argv = vec!["--dangerously-skip-permissions".into()];
+
+            assert!(matches!(
+                session.compose_plan_for(None, None),
+                Err(HarnessError::LaunchRejected(_))
+            ));
+        }
+
+        let mut allow = session_with(
+            PathBuf::from("/usr/bin/claude"),
+            dir.path(),
+            Arc::new(Discard),
+        );
+        allow.spec.permission_mode = PermissionMode::Allow;
+        allow.spec.extra_argv = vec!["--dangerously-skip-permissions".into()];
+        allow.compose_plan_for(None, None).unwrap();
     }
 
     /// With no child up there is nothing to tell, so the mode is recorded and
@@ -1132,6 +1234,7 @@ mod tests {
         );
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
@@ -1185,6 +1288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
             worktree: dir.path().to_path_buf(),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,

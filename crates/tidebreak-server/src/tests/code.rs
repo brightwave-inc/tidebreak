@@ -1831,7 +1831,9 @@ async fn a_mode_change_a_relaunch_cannot_carry_is_refused_rather_than_recorded()
 /// route a fork's transcript already takes.
 #[tokio::test]
 async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
-    let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Unsupported);
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_image_input(CapLevel::Unsupported)
+        .with_delay(std::time::Duration::from_millis(100));
     let engine = adapter.clone();
     let (router, token, _runtime, dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
@@ -1859,32 +1861,24 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
     let attachment: serde_json::Value = published.json().await.unwrap();
     let blob_id = attachment["attachment_id"].as_str().unwrap().to_owned();
 
-    let accepted = client
-        .post(format!("http://{addr}/code/sessions/{session}/turns"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({
-            "message": "what is in this",
-            "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
-        }))
-        .send()
-        .await
-        .unwrap();
-    let accepted_status = accepted.status();
-    let accepted_body: serde_json::Value = accepted.json().await.unwrap();
-    assert_eq!(
-        accepted_status,
-        reqwest::StatusCode::ACCEPTED,
-        "{accepted_body}"
-    );
-
-    let relative = format!(".tidebreak/attachments/{blob_id}.png");
-    let written = worktree.join(&relative);
-    wait_until(|| written.exists()).await;
-    assert_eq!(
-        std::fs::read(&written).unwrap(),
-        pixels,
-        "the engine reads the bytes that were published"
-    );
+    let turn_request = {
+        let client = client.clone();
+        let token = token.clone();
+        let blob_id = blob_id.clone();
+        let turn_url = format!("http://{addr}/code/sessions/{session}/turns");
+        tokio::spawn(async move {
+            client
+                .post(turn_url)
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "message": "what is in this",
+                    "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+                }))
+                .send()
+                .await
+                .unwrap()
+        })
+    };
 
     wait_until(|| !engine.turn_inputs().is_empty()).await;
     let handed = engine.turn_inputs().remove(0);
@@ -1897,10 +1891,35 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
         "the message the person wrote leads: {:?}",
         handed.text
     );
+    let path = handed
+        .text
+        .lines()
+        .find_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
+        .map(std::path::PathBuf::from)
+        .expect("the prompt names the attachment path");
+    assert!(path.is_absolute(), "the engine receives an absolute path");
     assert!(
-        handed.text.contains(&relative),
-        "the prompt names the path: {:?}",
-        handed.text
+        !path.starts_with(&worktree),
+        "private attachment storage must stay outside the Git worktree: {}",
+        path.display()
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        pixels,
+        "the engine reads the bytes while the turn is active"
+    );
+
+    let accepted = turn_request.await.unwrap();
+    let accepted_status = accepted.status();
+    let accepted_body: serde_json::Value = accepted.json().await.unwrap();
+    assert_eq!(
+        accepted_status,
+        reqwest::StatusCode::ACCEPTED,
+        "{accepted_body}"
+    );
+    assert!(
+        !path.exists(),
+        "the worker removes the private attachment after the turn"
     );
 
     // The transcript keeps what was typed, not what the engine was handed.
@@ -1915,10 +1934,9 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
         .unwrap();
     assert_eq!(turns[0]["user_input"], "what is in this");
 
-    // `.tidebreak/` hides itself, so none of this shows up as a change.
-    assert_eq!(
-        std::fs::read_to_string(worktree.join(".tidebreak/.gitignore")).unwrap(),
-        "*\n"
+    assert!(
+        !worktree.join(".tidebreak").exists(),
+        "fallback delivery does not write private bytes into the worktree"
     );
 }
 
@@ -1929,13 +1947,11 @@ async fn an_engine_with_no_image_protocol_is_handed_the_file_and_its_path() {
 async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
     let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Supported);
     let engine = adapter.clone();
-    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
     let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
-    let worktree =
-        std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap().to_owned());
     let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
         .await
         .remove(0);
@@ -1976,7 +1992,13 @@ async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
         "nothing is appended to a prompt that carries the image itself"
     );
     assert!(
-        !worktree.join(".tidebreak/attachments").exists(),
+        !runtime
+            .data_dir
+            .join("code")
+            .join("private")
+            .join(workspace["id"].as_str().unwrap())
+            .join("attachments")
+            .exists(),
         "no file is written for an engine that never needs to read one"
     );
 }

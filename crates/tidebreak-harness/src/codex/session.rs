@@ -1401,6 +1401,7 @@ done
     fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
         CodexSession::new(SessionSpec {
             worktree: PathBuf::from("."),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,
@@ -1452,6 +1453,7 @@ done
     ) -> SessionSpec {
         SessionSpec {
             worktree: dir.to_path_buf(),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,

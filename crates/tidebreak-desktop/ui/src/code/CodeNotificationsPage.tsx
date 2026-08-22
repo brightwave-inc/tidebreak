@@ -157,9 +157,7 @@ function CodeNotificationsBody() {
         to: "/code/delivery/pull-requests",
         search: {
           view:
-            notification.rule === "pull_request_ready"
-              ? "ready"
-              : "attention",
+            notification.rule === "pull_request_ready" ? "ready" : "attention",
           repoHost: notification.target.repository.host,
           repoOwner: notification.target.repository.owner,
           repoName: notification.target.repository.name,
@@ -233,9 +231,7 @@ function CodeNotificationsBody() {
 
       {repositoryError && (
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
-          <span>
-            GitHub repositories could not refresh: {repositoryError}
-          </span>
+          <span>GitHub repositories could not refresh: {repositoryError}</span>
           <Button
             type="button"
             size="xs"
@@ -266,7 +262,8 @@ function CodeNotificationsBody() {
         <div className="flex shrink-0 items-start gap-2 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
           <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
           <span>
-            Delivery history could not be saved on this device: {persistenceError}
+            Delivery history could not be saved on this device:{" "}
+            {persistenceError}
           </span>
         </div>
       )}
