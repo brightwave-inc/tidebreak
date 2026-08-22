@@ -118,14 +118,57 @@ async fn expire_postgres_turn_admission(url: &str, turn_id: TurnId) {
     assert_eq!(updated.rows_affected(), 1);
 }
 
+/// Create a sibling of the configured database and return its URL.
+///
+/// Cargo runs this crate's Postgres test binaries at the same time, against
+/// the one database `TIDEBREAK_POSTGRES_TEST_URL` names, so emptying that
+/// database is not something a single test can do: the truncate lands
+/// underneath whatever `postgres_code_owner` is halfway through, and its
+/// duplicate-path assertion fails because the row it just wrote is gone. A
+/// test that has to scan an empty store needs one no other process is writing.
+///
+/// The database is left behind on purpose. Creating it and migrating it is the
+/// slow part, and the caller empties it before it reads anything.
+async fn private_postgres_database(url: &str, suffix: &str) -> String {
+    let (prefix, database, query) = split_postgres_url(url);
+    // Postgres truncates an identifier past 63 bytes, which would silently hand
+    // two suffixes the same database.
+    let head: String = database
+        .chars()
+        .take(62usize.saturating_sub(suffix.len()))
+        .collect();
+    let name = format!("{head}_{suffix}");
+    // Ignore the error: the usual one is "already exists", from the run before
+    // this one. Anything else surfaces at the connect that follows, which says
+    // which database it could not reach.
+    let _ = Database::connect(url)
+        .await
+        .unwrap()
+        .execute_unprepared(&format!("CREATE DATABASE \"{name}\""))
+        .await;
+    format!("{prefix}{name}{query}")
+}
+
+/// Split a Postgres URL into everything before the database name, the name,
+/// and everything after it.
+fn split_postgres_url(url: &str) -> (&str, &str, &str) {
+    let (base, query) = match url.find('?') {
+        Some(at) => url.split_at(at),
+        None => (url, ""),
+    };
+    let at = base
+        .rfind('/')
+        .expect("TIDEBREAK_POSTGRES_TEST_URL names a database");
+    (&base[..=at], &base[at + 1..], query)
+}
+
 /// Delete every row the product owns, leaving the migrated schema in place.
 ///
-/// The tests in this file share one database and serialize on
-/// [`POSTGRES_TEST_LOCK`], which keeps them from running at once but not from
-/// reading each other's leftovers. A test that asserts on a scan across the
-/// whole store has to start from an empty one, or it passes only against a
-/// database no run has touched — which is exactly what CI hands it, and why
-/// running the suite twice locally used to fail.
+/// A test that asserts on a scan across the whole store has to start from an
+/// empty one, or it passes only against a database no run has touched — which
+/// is exactly what CI hands it, and why running the suite twice locally used
+/// to fail. Pair this with [`private_postgres_database`]: emptying the shared
+/// database would take the sibling binary's rows with it.
 ///
 /// The table list comes from the catalog rather than a constant, so a new table
 /// is covered without anyone remembering to add it. Two tables are held back:
@@ -2675,12 +2718,15 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         }
         Err(_) => return,
     };
-    let store = Arc::new(DbStore::connect(&url).await.unwrap());
     // The claims below race over the whole queue, not over one chat, and this
-    // test asserts the winner is its own turn. Every other test in this file
-    // leaves queued turns behind, and so does every earlier run of this one
-    // against the same database. Start from an empty queue so a global claim
-    // really is global over one turn.
+    // test asserts its own turn wins and that the other seven racers find
+    // nothing at all. Both hold only against a queue nobody else is filling:
+    // every other test in this file leaves turns behind, so does every earlier
+    // run of this one, and the sibling `postgres_code_owner` binary runs at
+    // the same time against the same database. So take a database of this
+    // test's own and empty it.
+    let url = private_postgres_database(&url, "claim_scan").await;
+    let store = Arc::new(DbStore::connect(&url).await.unwrap());
     empty_postgres_tables(&url).await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
