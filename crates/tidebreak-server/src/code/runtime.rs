@@ -10,18 +10,19 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 
 use tidebreak_core::db::code::{
-    delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session,
-    get_workspace, insert_repo, insert_session, insert_workspace, list_approvals, list_events,
-    list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
-    list_sessions_for_workspace, list_turns, list_workspaces, mark_repo_removed, save_approval,
-    save_repo, save_session, save_workspace, MAX_REPLAY_EVENTS,
+    delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
+    get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
+    list_events, list_repos, list_repos_all_owners, list_sessions, list_sessions_all_owners,
+    list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
+    mark_repo_removed, save_approval, save_repo, save_session, save_trigger, save_workspace,
+    MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
     CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    Diffstat, FenceReason, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId,
-    WorkspaceId,
+    CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId,
+    CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat, FenceReason,
+    HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -2083,6 +2084,89 @@ impl CodeRuntime {
         }
         let guard = super::watch::WatchSweepGuard::spawn(Arc::downgrade(self));
         *self.watch_sweep.lock().expect("watch sweep") = Some(guard);
+    }
+
+    /// Triggers armed on one repository.
+    pub(crate) async fn list_triggers(
+        &self,
+        owner: &OwnerId,
+        repo_id: RepoId,
+    ) -> Result<Vec<CodeTrigger>, ServerError> {
+        // Refuses an unknown repository rather than returning an empty list,
+        // so a stale id reads as an error and not as "none armed".
+        self.get_repo(owner, repo_id).await?;
+        Ok(list_triggers_for_repo(&self.db, owner, repo_id).await?)
+    }
+
+    /// Arm a trigger on a repository.
+    ///
+    /// One row per `(repository, condition, action)`: arming the same rule
+    /// twice returns the row already there rather than making a second one
+    /// that would deliver the same message twice.
+    pub(crate) async fn create_trigger(
+        &self,
+        owner: &OwnerId,
+        repo_id: RepoId,
+        condition: CodeTriggerCondition,
+        action: CodeTriggerAction,
+    ) -> Result<CodeTrigger, ServerError> {
+        self.get_repo(owner, repo_id).await?;
+        let existing = list_triggers_for_repo(&self.db, owner, repo_id).await?;
+        if let Some(found) = existing
+            .into_iter()
+            .find(|t| t.condition == condition && t.action == action)
+        {
+            return Ok(found);
+        }
+        let now = Utc::now();
+        let trigger = CodeTrigger {
+            id: CodeTriggerId::new(),
+            owner: owner.clone(),
+            repo_id,
+            condition,
+            action,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        save_trigger(&self.db, &trigger).await?;
+        Ok(trigger)
+    }
+
+    /// Switch a trigger on or off, keeping the row so the scoping survives.
+    pub(crate) async fn set_trigger_enabled(
+        &self,
+        owner: &OwnerId,
+        repo_id: RepoId,
+        id: CodeTriggerId,
+        enabled: bool,
+    ) -> Result<CodeTrigger, ServerError> {
+        let mut trigger = list_triggers_for_repo(&self.db, owner, repo_id)
+            .await?
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| ServerError::not_found("trigger not found"))?;
+        if trigger.enabled == enabled {
+            return Ok(trigger);
+        }
+        trigger.enabled = enabled;
+        trigger.updated_at = Utc::now();
+        save_trigger(&self.db, &trigger).await?;
+        Ok(trigger)
+    }
+
+    /// Remove a trigger. Its recorded fires stay: they are what the transcript
+    /// already explained.
+    pub(crate) async fn delete_trigger(
+        &self,
+        owner: &OwnerId,
+        id: CodeTriggerId,
+    ) -> Result<(), ServerError> {
+        if delete_trigger(&self.db, owner, id).await? {
+            Ok(())
+        } else {
+            Err(ServerError::not_found("trigger not found"))
+        }
     }
 
     /// Start the trigger sweep once. Same weak-handle shape as the watch

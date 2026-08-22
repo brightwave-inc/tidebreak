@@ -23,8 +23,9 @@ use axum::http::request::Parts;
 
 use tidebreak_core::{
     CodeApproval, CodeApprovalId, CodeApprovalState, CodeRepo, CodeSession, CodeSessionId,
-    CodeTurn, CodeTurnId, CodeWorkspace, Diffstat, HarnessKind, OwnerId, PermissionMode,
-    ReasoningEffort, RepoId, SequencedCodeEvent, WorkspaceId,
+    CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeTurn, CodeTurnId,
+    CodeWorkspace, Diffstat, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId,
+    SequencedCodeEvent, WorkspaceId,
 };
 use tidebreak_harness::ApprovalDecision;
 
@@ -341,6 +342,39 @@ impl ScopedCode {
 
     pub(crate) async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
         self.runtime.push_workspace(&self.owner, id).await
+    }
+
+    pub(crate) async fn list_triggers(
+        &self,
+        repo_id: RepoId,
+    ) -> Result<Vec<CodeTrigger>, ServerError> {
+        self.runtime.list_triggers(&self.owner, repo_id).await
+    }
+
+    pub(crate) async fn create_trigger(
+        &self,
+        repo_id: RepoId,
+        condition: CodeTriggerCondition,
+        action: CodeTriggerAction,
+    ) -> Result<CodeTrigger, ServerError> {
+        self.runtime
+            .create_trigger(&self.owner, repo_id, condition, action)
+            .await
+    }
+
+    pub(crate) async fn set_trigger_enabled(
+        &self,
+        repo_id: RepoId,
+        id: CodeTriggerId,
+        enabled: bool,
+    ) -> Result<CodeTrigger, ServerError> {
+        self.runtime
+            .set_trigger_enabled(&self.owner, repo_id, id, enabled)
+            .await
+    }
+
+    pub(crate) async fn delete_trigger(&self, id: CodeTriggerId) -> Result<(), ServerError> {
+        self.runtime.delete_trigger(&self.owner, id).await
     }
 
     pub(crate) async fn workspace_pr(
