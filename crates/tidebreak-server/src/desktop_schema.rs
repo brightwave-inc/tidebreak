@@ -39,7 +39,7 @@ const VECTOR_DIRECTORY: &str = "vectors";
 const MAX_MARKER_BYTES: u64 = 1_024;
 
 /// Bump this whenever the pre-v1 schema baseline changes incompatibly.
-const DESKTOP_SCHEMA_EPOCH: u32 = 40;
+const DESKTOP_SCHEMA_EPOCH: u32 = 41;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
