@@ -60,7 +60,7 @@ import { prMergeControls, prWorkflowStatus } from "./prActions";
 import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { useWorkspacePullRequests } from "./useWorkspacePullRequests";
-import { digestFromFact, WorkspacePrList } from "./WorkspacePrList";
+import { digestFromFact, factKey, WorkspacePrList } from "./WorkspacePrList";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 
 export type InspectorTab = "files" | "source" | "pr";
@@ -321,6 +321,11 @@ export function inspectorTurnLabel(
  * list stays hidden and this is exactly the live panel it always was.
  * Selecting a non-primary row shows its stored snapshot; the primary row
  * returns to the live resource.
+ *
+ * Numbers repeat across repositories and the live digest carries no
+ * repository identity, so the primary is resolved only when exactly one
+ * attributed fact carries the live number. A colliding row is never treated
+ * as the primary: selecting it shows its own stored snapshot.
  */
 function WorkspacePrTab({
   client,
@@ -345,15 +350,25 @@ function WorkspacePrTab({
     setSelected(null);
   }, [workspaceId]);
   const items = attributed.data?.items ?? [];
+  const primaryMatches =
+    pr === undefined ? [] : items.filter((item) => item.number === pr.number);
+  const primary = primaryMatches.length === 1 ? primaryMatches[0] : undefined;
+  const selectedKey = selected
+    ? factKey(selected)
+    : primary
+      ? factKey(primary)
+      : undefined;
   const shownPr = selected ? digestFromFact(selected) : pr;
   return (
     <>
       {items.length > 1 && (
         <WorkspacePrList
           items={items}
-          selectedNumber={shownPr?.number}
+          selectedKey={selectedKey}
           onSelect={(item) =>
-            setSelected(item.number === pr?.number ? null : item)
+            setSelected(
+              primary && factKey(item) === factKey(primary) ? null : item,
+            )
           }
         />
       )}

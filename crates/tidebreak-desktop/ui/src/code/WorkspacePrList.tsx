@@ -14,18 +14,26 @@ import {
 } from "./workspaceCards";
 
 /**
+ * One fact's full identity. Numbers repeat across repositories, so every
+ * selection and highlight decision keys on this, never on the number.
+ */
+export function factKey(fact: CodeWorkspacePullRequestFact): string {
+  return `${fact.host}/${fact.repo_owner}/${fact.repo_name}#${fact.number}`;
+}
+
+/**
  * Every pull request attributed to the workspace (decision 62), as a compact
  * selector above the single-PR panel. Rendered only when there is more than
  * one, so the common one-PR workspace keeps today's surface untouched.
  */
 export function WorkspacePrList({
   items,
-  selectedNumber,
+  selectedKey,
   onSelect,
 }: {
   items: readonly CodeWorkspacePullRequestFact[];
-  /** The pull request the panel below is showing. */
-  selectedNumber?: number;
+  /** Full identity of the pull request the panel below is showing. */
+  selectedKey?: string;
   onSelect: (item: CodeWorkspacePullRequestFact) => void;
 }) {
   return (
@@ -35,10 +43,10 @@ export function WorkspacePrList({
     >
       {items.map((item) => {
         const tone = prTone(item);
-        const selected = item.number === selectedNumber;
+        const selected = factKey(item) === selectedKey;
         return (
           <button
-            key={`${item.host}/${item.repo_owner}/${item.repo_name}#${item.number}`}
+            key={factKey(item)}
             type="button"
             aria-current={selected ? "true" : undefined}
             aria-label={`Pull request #${item.number}: ${item.title}, ${prToneLabel(item)}${
