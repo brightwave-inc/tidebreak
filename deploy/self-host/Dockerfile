@@ -54,7 +54,10 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 # ca-certificates: the binary's TLS stack is rustls (no OpenSSL anywhere in
 # the lockfile), but parts of the graph resolve platform roots, so the system
 # trust store must exist for outbound model-provider calls.
-# curl: the container healthcheck below, and nothing else.
+# curl: the container healthcheck below, and the two downloads that follow.
+# git: code mode's only VCS. Clone, worktree, checkpoint, commit, and push all
+# spawn it (crates/tidebreak-server/src/code/{clone,worktree,checkpoint,gh}.rs),
+# so without it a repository cannot even be registered.
 #
 # Debian snapshots are immutable, so the digest-pinned base plus this dated
 # repository set resolve the same transitive packages on every rebuild. Bump
@@ -70,9 +73,81 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get install -y --no-install-recommends \
        ca-certificates=20250419~deb12u1 \
        curl=7.88.1-10+deb12u15 \
+       git=1:2.39.5-0+deb12u3 \
     && rm -rf /var/lib/apt/lists/*
 
+# The GitHub CLI, which code mode spawns for pull-request create, status,
+# review reads, and merge (crates/tidebreak-server/src/code/gh.rs), and which
+# the coding agents reach for themselves. Tidebreak observes its
+# authentication and never reads or stores a token (decision record 34), so a
+# container authenticates it the way `gh` supports without a terminal:
+# `GH_TOKEN` in the environment. See docs/self-hosting.md.
+#
+# This comes from the project's own release rather than Debian, which carries
+# 2.23.0. That build has no `autoMergeRequest` JSON field, and Tidebreak asks
+# for it in one request with every other field, so the whole pull-request
+# digest fails against it. Pinned by version and SHA-256 from the release's
+# published checksums; bump both together as a deliberate update.
+RUN set -eu; \
+    version=2.98.0; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) platform=linux_amd64; \
+             sha256=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de ;; \
+      arm64) platform=linux_arm64; \
+             sha256=cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86 ;; \
+      *) echo "no gh pin for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    archive="gh_${version}_${platform}.tar.gz"; \
+    curl -fsSL --proto '=https' --tlsv1.2 -o "/tmp/${archive}" \
+        "https://github.com/cli/cli/releases/download/v${version}/${archive}"; \
+    printf '%s  /tmp/%s\n' "${sha256}" "${archive}" | sha256sum --check --strict -; \
+    tar -xzf "/tmp/${archive}" -C /tmp "gh_${version}_${platform}/bin/gh"; \
+    install -m 0755 "/tmp/gh_${version}_${platform}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "/tmp/${archive}" "/tmp/gh_${version}_${platform}"; \
+    gh --version
+
+# The managed Node runtime code mode installs its pinned harness packages with.
+#
+# Only the desktop downloads Node; the server never does. So a server image
+# without it answers every harness install with "the verified managed Node
+# runtime is not installed in this Tidebreak data directory" and code mode
+# stays gated. The contract the server verifies lives in
+# crates/tidebreak-code-execution/src/managed_node.rs: one exact directory
+# carrying `bin/node`, `bin/npm`, and an `installed.json` naming this version
+# and the digest of the artifact the tree was unpacked from. Nothing is
+# scanned and `PATH` is never consulted, so a Node that is merely installed
+# somewhere does not count.
+#
+# The artifact is the official nodejs.org tarball, pinned by version and
+# SHA-256 exactly as the desktop pins it. These three constants must match
+# `MANAGED_NODE_VERSION` and the Linux entries of `CURRENT_PIN`; bump them
+# together, and scripts/self-host-image-pins.test.mjs fails the build when
+# they drift apart.
+RUN set -eu; \
+    version=20.20.2; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) platform=linux-x64; \
+             sha256=19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b ;; \
+      arm64) platform=linux-arm64; \
+             sha256=47ef73d543ecf6eb19435f6c03a0ac4809b3bf0dd6b26c7c571efc2a6572a74d ;; \
+      *) echo "no managed Node pin for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    archive="node-v${version}-${platform}.tar.gz"; \
+    curl -fsSL --proto '=https' --tlsv1.2 \
+        -o "/tmp/${archive}" "https://nodejs.org/dist/v${version}/${archive}"; \
+    printf '%s  /tmp/%s\n' "${sha256}" "${archive}" | sha256sum --check --strict -; \
+    mkdir -p /opt/tidebreak/node; \
+    tar -xzf "/tmp/${archive}" -C /opt/tidebreak/node; \
+    mv "/opt/tidebreak/node/node-v${version}-${platform}" "/opt/tidebreak/node/${version}"; \
+    rm -f "/tmp/${archive}"; \
+    printf '{\n  "version": "%s",\n  "artifactSha256": "%s"\n}\n' \
+        "${version}" "${sha256}" > "/opt/tidebreak/node/${version}/installed.json"; \
+    export PATH="/opt/tidebreak/node/${version}/bin:${PATH}"; \
+    node --version; \
+    npm --version
+
 COPY --from=build /src/target/release/tidebreak /usr/local/bin/tidebreak
+COPY deploy/self-host/entrypoint.sh /usr/local/bin/tidebreak-entrypoint
 
 # The server runs unprivileged. The uid is fixed rather than assigned by
 # adduser so a data volume initialized from this layer carries an ownership
@@ -80,6 +155,7 @@ COPY --from=build /src/target/release/tidebreak /usr/local/bin/tidebreak
 RUN groupadd --gid 10001 tidebreak \
     && useradd --uid 10001 --gid 10001 --home-dir /home/tidebreak --create-home \
        --shell /usr/sbin/nologin tidebreak \
+    && chmod 0755 /usr/local/bin/tidebreak-entrypoint \
     && mkdir -p /var/lib/tidebreak \
     && chown -R tidebreak:tidebreak /var/lib/tidebreak /home/tidebreak
 
@@ -105,4 +181,8 @@ USER tidebreak:tidebreak
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
     CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 
-ENTRYPOINT ["/usr/local/bin/tidebreak", "serve"]
+# The entrypoint publishes the image's managed Node runtime into the data
+# directory before starting the server; see entrypoint.sh for why that cannot
+# happen at build time. Arguments still append to `serve`, and overriding
+# `--entrypoint` reaches the binary directly.
+ENTRYPOINT ["/usr/local/bin/tidebreak-entrypoint"]

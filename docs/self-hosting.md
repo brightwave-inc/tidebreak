@@ -225,6 +225,51 @@ The stack publishes `127.0.0.1:8080` deliberately. Nothing in
 `docker-compose.yml` terminates TLS, and the database port is not published
 at all.
 
+## What the image provides
+
+Code mode runs agents on the machine, so the image carries the tools it
+spawns. Read this before you swap in a base image of your own: the server
+does not install any of it, and reports a missing piece as an unavailable
+engine rather than an installation prompt.
+
+| Tool | Version | Why it is there |
+| --- | --- | --- |
+| Managed Node runtime | 20.20.2, at `/opt/tidebreak/node/20.20.2` | The runtime every harness install runs `npm` from. |
+| `git` | 2.39.5 (Debian bookworm) | Clone, worktree, checkpoint, commit, and push. |
+| `gh` | 2.98.0 (the project's own release) | Pull-request create, status, review reads, and merge. |
+| `curl`, `ca-certificates` | Debian bookworm | The container healthcheck and the system trust store. |
+
+The Node runtime is the strict one. The server accepts it from exactly one
+path, `$TIDEBREAK_DATA_DIR/tools/node/<version>`, and only when that directory
+holds `bin/node`, `bin/npm`, and an `installed.json` naming the version and
+the SHA-256 of the official nodejs.org artifact it was unpacked from. Nothing
+is scanned and `PATH` is never consulted, so a Node installed elsewhere in
+your image does not count. The image keeps its copy under `/opt` and the
+container entrypoint links the data directory at it on every start, because
+that path sits under a volume mount and anything the image layer puts there
+disappears the moment an operator mounts one.
+
+Harness packages install into the data directory on demand, at the versions
+Tidebreak pins, so give the volume room for them — a few hundred megabytes
+per engine.
+
+Two things the image deliberately does not decide for you:
+
+- **A GitHub identity.** Tidebreak observes `gh`'s authentication and never
+  reads or stores a token ([decision record
+  34](decisions/0034-harness-discovery-credentials.md)), and a container has
+  no terminal to run `gh auth login` in. Set `GH_TOKEN` in the server's
+  environment and `gh` picks it up. Everyone on the deployment then acts as
+  that one account; per-user GitHub identity is not built yet.
+- **A commit identity.** `git commit` needs a name and an email, and the image
+  invents neither. Set `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+  `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` in the server's environment,
+  or mount a `.gitconfig` into the container's home directory. Without one,
+  commits from code mode fail and the checkpoint history is what still works.
+
+The image ships no SSH client and no known-hosts file, so clone over HTTPS.
+An SSH clone URL fails.
+
 ## Putting it behind a reverse proxy
 
 Terminate TLS in front of the server, on infrastructure you already operate,
@@ -289,12 +334,14 @@ docker compose up -d --build
 docker image prune -f     # optional
 ```
 
-The runtime image pins both Debian base images by digest and installs its small
+The runtime image pins both Debian base images by digest and installs its
 runtime package set from a dated Debian snapshot with exact direct versions.
-That keeps a rebuild of one commit from silently picking up different `curl`,
-CA-certificate, or transitive package bytes. Updating the snapshot date and
-package pins is therefore an explicit dependency-maintenance change rather
-than an incidental effect of rebuilding.
+The two artifacts it fetches from outside Debian — the managed Node runtime
+and `gh` — are pinned by version and SHA-256 and verified before they are
+unpacked. That keeps a rebuild of one commit from silently picking up
+different `curl`, CA-certificate, Node, `gh`, or transitive package bytes.
+Updating the snapshot date and the pins is therefore an explicit
+dependency-maintenance change rather than an incidental effect of rebuilding.
 
 The server applies its own schema migrations on boot. Take a database backup
 before an upgrade: Tidebreak is pre-1.0 and persisted formats may change
