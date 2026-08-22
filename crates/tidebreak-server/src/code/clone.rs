@@ -157,7 +157,13 @@ impl CodeRuntime {
                     .to_owned(),
             )
         };
-        let github_available = git && gh.found && gh.authenticated == Some(true);
+        // GitHub needs exactly what a git URL needs. Without a `gh`
+        // credential `resolve_github_clone_url` falls back to the public
+        // HTTPS URL, so `owner/repo` still clones anything public — hiding
+        // the form would take away a path that works. What `gh` buys is
+        // private repositories, so its absence rides along as a hint on an
+        // available source rather than as unavailability.
+        let github_credential = gh.found && gh.authenticated == Some(true);
         let sources = vec![
             // Always offered: a machine can always register a checkout that
             // is already on its own disk. Whether the caller can name one is
@@ -174,11 +180,11 @@ impl CodeRuntime {
             },
             CodeRepoSource {
                 kind: "github".to_owned(),
-                available: github_available,
-                remediation: if github_available {
-                    None
-                } else if !git {
+                available: git,
+                remediation: if !git {
                     no_git()
+                } else if github_credential {
+                    None
                 } else {
                     Some(gh.remediation.clone())
                 },

@@ -127,6 +127,15 @@ export function AddRepoPalette({
       ),
     [sources],
   );
+  // What the machine says about GitHub while still offering it: no `gh`
+  // credential means public repositories only. Read from the probe rather
+  // than from `getCodeCloneDefaults`, which is administrator-only — a member
+  // on a shared machine would otherwise be told nothing at all.
+  const githubHint = useMemo(() => {
+    const github = sources?.sources.find((source) => source.kind === "github");
+    if (github?.available && github.remediation) return github.remediation;
+    return null;
+  }, [sources]);
 
   useEffect(() => {
     if (!open) return;
@@ -417,6 +426,7 @@ export function AddRepoPalette({
             parentDir={parentDir}
             name={cloneName}
             defaults={defaults}
+            hint={githubHint}
             busy={busy}
             error={error}
             onGithub={setGithub}
@@ -616,6 +626,7 @@ function GithubStage({
   parentDir,
   name,
   defaults,
+  hint,
   busy,
   error,
   onGithub,
@@ -630,6 +641,8 @@ function GithubStage({
   parentDir: string;
   name: string;
   defaults: CodeCloneDefaults | null;
+  /** The machine's note about GitHub, when it still offers it. */
+  hint: string | null;
   busy: boolean;
   error: string | null;
   onGithub: (value: string) => void;
@@ -640,10 +653,13 @@ function GithubStage({
   onBrowse: () => void;
   onSubmit: () => void;
 }) {
+  // The machine's own note first; the administrator-only defaults read is
+  // the fallback for a profile whose probe predates this field.
   const ghHint =
-    defaults && (!defaults.gh_found || defaults.gh_authenticated === false)
+    hint ??
+    (defaults && (!defaults.gh_found || defaults.gh_authenticated === false)
       ? defaults.gh_remediation
-      : null;
+      : null);
   return (
     <form
       className="flex flex-col gap-3"

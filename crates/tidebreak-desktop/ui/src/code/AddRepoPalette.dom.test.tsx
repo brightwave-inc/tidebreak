@@ -282,3 +282,38 @@ describe("AddRepoPalette on a machine that answers for itself", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("AddRepoPalette and a machine without a GitHub credential", () => {
+  it("still offers owner/repo, and says what the missing credential costs", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: true,
+              remediation: "gh is not installed. Install the GitHub CLI.",
+            },
+          ],
+          chooses_destination: false,
+        })),
+        // Administrator-only, and refused here: the hint must come from the
+        // member-plane probe or a member sees nothing.
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    // The clone path falls back to the public HTTPS URL without gh, so
+    // hiding this form would take away something that works.
+    const github = await screen.findByRole("option", {
+      name: /GitHub repository/,
+    });
+    fireEvent.click(github);
+    expect(await screen.findByTestId("gh-absent-hint")).toHaveTextContent(
+      /gh is not installed/,
+    );
+  });
+});

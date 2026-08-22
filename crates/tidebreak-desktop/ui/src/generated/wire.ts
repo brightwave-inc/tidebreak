@@ -1238,8 +1238,10 @@ export type CodeRepoSnapshot = { id: RepoId, root_path: string, display_name: st
 /**
  * One way of adding a repository, and whether this machine can serve it.
  *
- * `kind` is `local`, `git_url`, or `github`. `remediation` says what would
- * make an unavailable source available, and is absent when it is available.
+ * `kind` is `local`, `git_url`, or `github`. `remediation` says what stands in
+ * the way, and rides on an available source too: `github` clones anything
+ * public without a `gh` credential, so its absence is a note about private
+ * repositories rather than a reason to withhold the form.
  */
 export type CodeRepoSource = { kind: string, available: boolean, remediation?: string, };
 

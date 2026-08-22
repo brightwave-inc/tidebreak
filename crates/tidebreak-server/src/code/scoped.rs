@@ -42,7 +42,8 @@ use crate::routes::code::types::{
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
     CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
     CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
-    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, ResolveCodeDeliveryRepositoriesBody,
+    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, CodeRepoSources,
+    ResolveCodeDeliveryRepositoriesBody,
 };
 use crate::state::AppState;
 
@@ -127,6 +128,10 @@ impl ScopedCode {
 
     pub(crate) async fn clone_defaults(&self) -> Result<CodeCloneDefaults, ServerError> {
         self.runtime.clone_defaults().await
+    }
+
+    pub(crate) async fn repo_sources(&self) -> Result<CodeRepoSources, ServerError> {
+        self.runtime.repo_sources().await
     }
 
     pub(crate) async fn start_clone(
