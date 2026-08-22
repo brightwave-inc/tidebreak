@@ -3,11 +3,10 @@ use sea_orm::{
     QueryOrder, Set, TransactionTrait,
 };
 
-use crate::code::{
-    CodeSessionId, CodeTurn, CodeTurnAttachment, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat,
-};
+use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
 use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
+use crate::image::ImageRef;
 use crate::model::MAX_MESSAGE_ATTACHMENTS;
 use crate::OwnerId;
 
@@ -47,7 +46,7 @@ pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> R
     Ok(())
 }
 
-fn validate_attachments(attachments: &[CodeTurnAttachment]) -> Result<()> {
+fn validate_attachments(attachments: &[ImageRef]) -> Result<()> {
     if attachments.len() > MAX_MESSAGE_ATTACHMENTS {
         return Err(AgentError::Store(format!(
             "a code turn may carry at most {MAX_MESSAGE_ATTACHMENTS} image attachments"
@@ -75,7 +74,7 @@ async fn insert_attachments_on<C>(
     conn: &C,
     owner: &OwnerId,
     turn_id: CodeTurnId,
-    attachments: &[CodeTurnAttachment],
+    attachments: &[ImageRef],
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -99,6 +98,8 @@ where
                 ordinal: Set(ordinal),
                 blob_id: Set(attachment.blob_id),
                 media_type: Set(attachment.media_type.as_str().to_owned()),
+                width: Set(i32::try_from(attachment.width).unwrap_or(i32::MAX)),
+                height: Set(i32::try_from(attachment.height).unwrap_or(i32::MAX)),
                 byte_len: Set(byte_len),
             })
         })
@@ -120,7 +121,7 @@ async fn load_attachments_on<C>(
     conn: &C,
     owner: &OwnerId,
     turn_id: CodeTurnId,
-) -> Result<Vec<CodeTurnAttachment>>
+) -> Result<Vec<ImageRef>>
 where
     C: ConnectionTrait,
 {
@@ -144,9 +145,11 @@ where
                     "code_turn_attachment {turn_id} has a negative byte length"
                 ))
             })?;
-            Ok(CodeTurnAttachment {
+            Ok(ImageRef {
                 blob_id: row.blob_id,
                 media_type,
+                width: u32::try_from(row.width).unwrap_or(0),
+                height: u32::try_from(row.height).unwrap_or(0),
                 byte_len,
             })
         })

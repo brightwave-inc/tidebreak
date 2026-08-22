@@ -1538,10 +1538,17 @@ impl CodeRuntime {
             .ok_or_else(|| ServerError::not_found(format!("session {id} not found")))
     }
 
+    /// Resolve requested attachments for one session, or refuse.
+    ///
+    /// Takes the owner and session because publication is per-session
+    /// authority. Resolving without them — as this did — could only check that
+    /// the bytes existed somewhere, which is not the same question.
     pub(crate) async fn resolve_turn_attachments(
         &self,
+        owner: &OwnerId,
+        session_id: CodeSessionId,
         requested: &[(uuid::Uuid, String)],
-    ) -> Result<Vec<tidebreak_core::CodeTurnAttachment>, ServerError> {
+    ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
         if requested.len() > tidebreak_core::MAX_MESSAGE_ATTACHMENTS {
             return Err(ServerError::bad_request(format!(
                 "a turn may carry at most {} image attachments",
@@ -1558,29 +1565,43 @@ impl CodeRuntime {
             let media_type = parse_turn_media_type(media_type).ok_or_else(|| {
                 ServerError::bad_request(format!("unsupported attachment media type {media_type}"))
             })?;
-            let Some(meta) = self
-                .blobs
-                .metadata(*blob_id)
-                .await
-                .map_err(|err| ServerError::internal(format!("blob metadata: {err}")))?
-            else {
-                return Err(ServerError::bad_request(format!(
-                    "attachment blob {blob_id} was not found"
-                )));
+            // Publication is the authority, not the blob's existence. The blob
+            // store is content-addressed and owner-blind, so checking only
+            // that the bytes are present would let any known id be bound into
+            // this session and read back through its own image route. An
+            // unpublished id is refused as not-found, so the failure cannot
+            // confirm the blob exists somewhere else.
+            let unpublished = || {
+                ServerError::bad_request(format!(
+                    "attachment blob {blob_id} was not published to session {session_id}"
+                ))
             };
-            if meta.byte_len == 0 {
-                return Err(ServerError::bad_request("attachment blob is empty"));
+            let published = tidebreak_core::db::code::get_published_session_image(
+                &self.db, owner, session_id, *blob_id,
+            )
+            .await?
+            .ok_or_else(unpublished)?;
+            if published.media_type != media_type {
+                return Err(ServerError::bad_request(format!(
+                    "attachment blob {blob_id} was published as {}",
+                    published.media_type
+                )));
             }
-            if meta.byte_len > tidebreak_core::MAX_IMAGE_BYTES {
-                return Err(ServerError::bad_request(
-                    "attachment exceeds the maximum image size",
-                ));
+            // Re-derive from the bytes, the way chat's resolution does: an id
+            // is a content address, so bytes that no longer hash back to it,
+            // or that no longer match the reserved descriptor, are unresolved
+            // rather than merely mismatched.
+            let bytes = self
+                .blobs
+                .get(*blob_id)
+                .await
+                .map_err(|err| ServerError::internal(format!("blob read: {err}")))?
+                .ok_or_else(unpublished)?;
+            let image = crate::routes::inspect_image_bytes(&bytes)?;
+            if image.blob_id != *blob_id || image != published {
+                return Err(unpublished());
             }
-            resolved.push(tidebreak_core::CodeTurnAttachment {
-                blob_id: *blob_id,
-                media_type,
-                byte_len: meta.byte_len,
-            });
+            resolved.push(image);
         }
         Ok(resolved)
     }
@@ -1592,7 +1613,7 @@ impl CodeRuntime {
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
-        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+        attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let mut session = self.get_session(owner, id).await?;
         if session.lifecycle == CodeSessionLifecycle::Fenced {
@@ -1694,7 +1715,7 @@ impl CodeRuntime {
         handle: &WorkerHandle,
         session: &CodeSession,
         message: String,
-        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+        attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         if !queue_follow_up(
             handle,

@@ -2204,6 +2204,25 @@ impl Store for DbStore {
         ops::chat_image_publication::publish(self, chat_id, image, Some(owner)).await
     }
 
+    async fn publish_code_session_image(
+        &self,
+        owner: &OwnerId,
+        session_id: crate::CodeSessionId,
+        image: &crate::ImageRef,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        ops::code::publish_session_image(self, owner, session_id, image, created_at).await
+    }
+
+    async fn get_published_code_session_image(
+        &self,
+        owner: &OwnerId,
+        session_id: crate::CodeSessionId,
+        blob_id: uuid::Uuid,
+    ) -> Result<Option<crate::ImageRef>> {
+        ops::code::get_published_session_image(self, owner, session_id, blob_id).await
+    }
+
     async fn get_published_chat_image(
         &self,
         chat_id: ChatId,

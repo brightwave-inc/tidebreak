@@ -878,6 +878,8 @@ pub(crate) enum CodeTurnAttachment {
     Ordinal,
     BlobId,
     MediaType,
+    Width,
+    Height,
     ByteLen,
     Owner,
 }
@@ -944,5 +946,20 @@ pub(crate) enum CodeTriggerFire {
     PrNumber,
     HeadSha,
     FiredAt,
+    Owner,
+}
+
+/// Reserves one validated image for one code session, mirroring
+/// [`ChatImagePublication`]. Publication is authority, not upload.
+#[derive(DeriveIden)]
+pub(crate) enum CodeSessionImage {
+    Table,
+    SessionId,
+    BlobId,
+    MediaType,
+    Width,
+    Height,
+    ByteLen,
+    CreatedAt,
     Owner,
 }

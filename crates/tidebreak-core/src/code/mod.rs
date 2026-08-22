@@ -18,6 +18,7 @@ pub use event::{
 };
 
 use crate::attention::{Attention, FenceReason};
+use crate::image::ImageRef;
 use crate::PermissionMode;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -769,7 +770,7 @@ pub struct CodeTurn {
     /// Bounded image references on this user turn. Bytes live in the blob
     /// store; these rows pin them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<CodeTurnAttachment>,
+    pub attachments: Vec<ImageRef>,
     /// Hidden checkpoint ref recorded at turn end, when any.
     pub checkpoint_ref: Option<String>,
     /// Diffstat of the turn's checkpoint, when recorded.
@@ -786,18 +787,6 @@ pub struct CodeTurn {
 
 /// Bounded image reference recorded on a code-mode user turn.
 ///
-/// Identity only: the journal never carries pixels. `byte_len` is the blob
-/// store's length at submit time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-pub struct CodeTurnAttachment {
-    /// Content-addressed blob holding the pixels.
-    pub blob_id: Uuid,
-    /// Format declared on submit, already validated.
-    pub media_type: crate::image::ImageMediaType,
-    /// Size of the stored bytes.
-    pub byte_len: u64,
-}
-
 /// State of a persisted watch task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]

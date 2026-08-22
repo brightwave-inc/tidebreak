@@ -1338,26 +1338,6 @@ export type CodeTerminalRead = { id: CodeTerminalId, workspace_id: WorkspaceId, 
 export type CodeTerminalSnapshot = { id: CodeTerminalId, workspace_id: WorkspaceId, cols: number, rows: number, ended: boolean, created_at: string, };
 
 /**
- * Bounded image reference recorded on a code-mode user turn.
- *
- * Identity only: the journal never carries pixels. `byte_len` is the blob
- * store's length at submit time.
- */
-export type CodeTurnAttachment = { 
-/**
- * Content-addressed blob holding the pixels.
- */
-blob_id: string, 
-/**
- * Format declared on submit, already validated.
- */
-media_type: ImageMediaType, 
-/**
- * Size of the stored bytes.
- */
-byte_len: number, };
-
-/**
  * Identifies one user→engine cycle inside a code session.
  */
 export type CodeTurnId = string;
@@ -1365,7 +1345,7 @@ export type CodeTurnId = string;
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, attachments: Array<CodeTurnAttachment>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
 
 /**
  * Status of one user→engine turn.
@@ -1468,6 +1448,8 @@ export type CodeWatchId = string;
 export type CodeWatchSnapshot = { id: CodeWatchId, workspace_id: WorkspaceId, session_id: CodeSessionId, pr_number: number, state: CodeWatchState, detail?: string, cycles: number, created_at: string, updated_at: string, };
 
 /**
+ * Bounded image reference recorded on a code-mode user turn.
+ *
  * State of a persisted watch task.
  */
 export type CodeWatchState = "watching" | "fixing" | "blocked" | "done" | "stopped" | "failed";

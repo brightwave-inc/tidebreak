@@ -1118,7 +1118,7 @@ function CodeTurnImages({
   attachments,
 }: {
   sessionId: string;
-  attachments: readonly import("../generated/wire").CodeTurnAttachment[];
+  attachments: readonly import("../generated/wire").ImageRef[];
 }) {
   const { client } = useApp();
   return (

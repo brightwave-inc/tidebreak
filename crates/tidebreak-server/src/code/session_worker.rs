@@ -46,7 +46,7 @@ pub(crate) enum WorkerCommand {
         message: String,
         model: Option<String>,
         reasoning_effort: Option<ReasoningEffort>,
-        attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+        attachments: Vec<tidebreak_core::ImageRef>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
     },
     SetPermissionMode {
@@ -151,7 +151,7 @@ pub(crate) struct QueuedFollowUp {
     pub message: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    pub attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+    pub attachments: Vec<tidebreak_core::ImageRef>,
 }
 
 pub(crate) struct LiveSink {
@@ -450,7 +450,7 @@ pub(crate) fn queue_follow_up(
     message: String,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    attachments: Vec<tidebreak_core::CodeTurnAttachment>,
+    attachments: Vec<tidebreak_core::ImageRef>,
 ) -> bool {
     let mut pending = handle.queue.pending.lock().expect("code turn queue");
     if pending.is_some() {
@@ -1182,7 +1182,7 @@ fn code_turn_is_error(result: &Result<CodeTurn, WorkerError>) -> bool {
 
 async fn hydrate_turn_images(
     blobs: Option<&dyn BlobStore>,
-    attachments: &[tidebreak_core::CodeTurnAttachment],
+    attachments: &[tidebreak_core::ImageRef],
 ) -> Result<Vec<TurnImage>, WorkerError> {
     if attachments.is_empty() {
         return Ok(Vec::new());

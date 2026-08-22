@@ -48,7 +48,7 @@ export type CodeTranscriptItem =
       text: string;
       /** When the server accepted the turn, for the message footer's time. */
       createdAt: string;
-      attachments?: import("../generated/wire").CodeTurnAttachment[];
+      attachments?: import("../generated/wire").ImageRef[];
     }
   | {
       kind: "assistant";

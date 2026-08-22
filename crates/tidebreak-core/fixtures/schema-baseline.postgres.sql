@@ -1308,16 +1308,39 @@ CREATE TABLE "code_turn_attachment" (
     "ordinal" integer NOT NULL,
     "blob_id" uuid NOT NULL,
     "media_type" varchar(64) NOT NULL,
+    "width" integer NOT NULL,
+    "height" integer NOT NULL,
     "byte_len" bigint NOT NULL, PRIMARY KEY ("turn_id",
     "ordinal"), CONSTRAINT "fk_code_turn_attachment_turn" FOREIGN KEY ("turn_id") REFERENCES "code_turn" ("id") ON DELETE CASCADE,
     CHECK ("blob_id" <> '00000000-0000-0000-0000-000000000000'),
     CHECK ("ordinal" >= 0),
     CHECK ("ordinal" < 16),
+    CHECK ("width" BETWEEN 1 AND 8000),
+    CHECK ("height" BETWEEN 1 AND 8000),
     CHECK ("media_type" IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif')),
     CHECK ("byte_len" BETWEEN 1 AND 16777216)
 );
 
 CREATE INDEX "idx_code_turn_attachment_blob" ON "code_turn_attachment" ("blob_id");
+
+CREATE TABLE "code_session_image" (
+    "session_id" uuid NOT NULL,
+    "blob_id" uuid NOT NULL,
+    "owner" text NOT NULL DEFAULT 'local',
+    "media_type" varchar(64) NOT NULL,
+    "width" integer NOT NULL,
+    "height" integer NOT NULL,
+    "byte_len" bigint NOT NULL,
+    "created_at" timestamp with time zone NOT NULL, PRIMARY KEY ("session_id",
+    "blob_id"), CONSTRAINT "fk_code_session_image_session" FOREIGN KEY ("session_id") REFERENCES "code_session" ("id") ON DELETE RESTRICT,
+    CHECK ("blob_id" <> '00000000-0000-0000-0000-000000000000'),
+    CHECK ("media_type" IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif')),
+    CHECK ("width" BETWEEN 1 AND 8000),
+    CHECK ("height" BETWEEN 1 AND 8000),
+    CHECK ("byte_len" BETWEEN 1 AND 16777216)
+);
+
+CREATE INDEX "idx_code_session_image_blob" ON "code_session_image" ("blob_id");
 
 CREATE TABLE "code_event" (
     "owner" text NOT NULL DEFAULT 'local',

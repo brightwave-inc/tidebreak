@@ -1789,7 +1789,33 @@ pub mod code_turn_attachment {
         pub owner: String,
         pub blob_id: Uuid,
         pub media_type: String,
+        pub width: i32,
+        pub height: i32,
         pub byte_len: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_session_image {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_session_image")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub blob_id: Uuid,
+        pub owner: String,
+        pub media_type: String,
+        pub width: i32,
+        pub height: i32,
+        pub byte_len: i64,
+        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
