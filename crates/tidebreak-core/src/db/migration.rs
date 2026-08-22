@@ -46,7 +46,284 @@ impl MigratorTrait for Migrator {
             Box::new(CodeSessionImages),
             Box::new(TriggerFireOutbox),
             Box::new(TriggerDeliveryReceipts),
+            Box::new(CodePullRequestFacts),
         ]
+    }
+}
+
+/// Durable pull-request facts and workspace attribution (decision 62).
+///
+/// `code_pull_request` records confirmed observations of pull requests,
+/// keyed by full repository identity so a pull request in a repository with
+/// no local checkout is representable. `code_pull_request_attribution` ties
+/// a workspace to a pull request it authored or contributed to. `code_repo`
+/// gains nullable origin identity columns so facts join to local
+/// repositories without a git subprocess per read.
+struct CodePullRequestFacts;
+
+impl MigrationName for CodePullRequestFacts {
+    fn name(&self) -> &str {
+        "m20260822_000009_code_pull_request_facts"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodePullRequestFacts {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // SQLite accepts one ADD COLUMN per ALTER, so each origin column is
+        // its own guarded statement.
+        for (name, column) in [
+            ("origin_host", idens::CodeRepo::OriginHost),
+            ("origin_owner", idens::CodeRepo::OriginOwner),
+            ("origin_name", idens::CodeRepo::OriginName),
+        ] {
+            if manager.has_column("code_repo", name).await? {
+                continue;
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeRepo::Table)
+                        .add_column(ColumnDef::new(column).text())
+                        .to_owned(),
+                )
+                .await?;
+        }
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodePullRequest::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Host)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::RepoOwner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::RepoName)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Number)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Url)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Title)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::State)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::Draft)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(idens::CodePullRequest::Author).text())
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::HeadBranch)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::BaseBranch)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodePullRequest::HeadSha).text())
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::MergedAt).timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::ClosedAt).timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::FirstSeenAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequest::LastSeenAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(Expr::col(idens::CodePullRequest::Number).gte(1))
+                    .check(
+                        Expr::col(idens::CodePullRequest::State)
+                            .is_in(["open", "merged", "closed"]),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .unique()
+                    .name("uq_code_pull_request_identity")
+                    .table(idens::CodePullRequest::Table)
+                    .col(idens::CodePullRequest::Owner)
+                    .col(idens::CodePullRequest::Host)
+                    .col(idens::CodePullRequest::RepoOwner)
+                    .col(idens::CodePullRequest::RepoName)
+                    .col(idens::CodePullRequest::Number)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_code_pull_request_owner_updated")
+                    .table(idens::CodePullRequest::Table)
+                    .col(idens::CodePullRequest::Owner)
+                    .col(idens::CodePullRequest::UpdatedAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodePullRequestAttribution::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodePullRequestAttribution::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequestAttribution::PullRequestId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequestAttribution::WorkspaceId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequestAttribution::Relation)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodePullRequestAttribution::DiscoveredVia)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodePullRequestAttribution::SessionId).uuid())
+                    .col(ColumnDef::new(idens::CodePullRequestAttribution::ParentCallId).text())
+                    .col(
+                        ColumnDef::new(idens::CodePullRequestAttribution::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(idens::CodePullRequestAttribution::PullRequestId)
+                            .col(idens::CodePullRequestAttribution::WorkspaceId),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_pull_request_attribution_pr")
+                            .from(
+                                idens::CodePullRequestAttribution::Table,
+                                idens::CodePullRequestAttribution::PullRequestId,
+                            )
+                            .to(idens::CodePullRequest::Table, idens::CodePullRequest::Id),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_pull_request_attribution_workspace")
+                            .from(
+                                idens::CodePullRequestAttribution::Table,
+                                idens::CodePullRequestAttribution::WorkspaceId,
+                            )
+                            .to(idens::CodeWorkspace::Table, idens::CodeWorkspace::Id),
+                    )
+                    .check(
+                        Expr::col(idens::CodePullRequestAttribution::Relation)
+                            .is_in(["authored", "contributed"]),
+                    )
+                    .check(
+                        Expr::col(idens::CodePullRequestAttribution::DiscoveredVia)
+                            .is_in(["command", "reconcile"]),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_code_pull_request_attribution_workspace")
+                    .table(idens::CodePullRequestAttribution::Table)
+                    .col(idens::CodePullRequestAttribution::WorkspaceId)
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // The `code_repo` origin columns stay: SQLite cannot drop them in
+        // place, and nullable columns cost a rolled-back database nothing.
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodePullRequestAttribution::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodePullRequest::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -909,6 +1186,7 @@ mod tests {
                 "m20260822_000006_code_session_images",
                 "m20260822_000007_trigger_fire_outbox",
                 "m20260822_000008_trigger_delivery_receipts",
+                "m20260822_000009_code_pull_request_facts",
             ]
         );
         assert!(db

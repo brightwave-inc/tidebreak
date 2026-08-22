@@ -417,6 +417,9 @@ mod tests {
                 created_at: now(),
                 removed_at: None,
                 cloned_from: None,
+                origin_host: None,
+                origin_owner: None,
+                origin_name: None,
             },
         )
         .await
@@ -625,6 +628,7 @@ mod tests {
             session.spawn_epoch,
             None,
             session.subagents.clone(),
+            None,
         );
         let private_root = _dir.path().join("private");
         std::fs::create_dir(&private_root).unwrap();

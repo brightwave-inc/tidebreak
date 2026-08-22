@@ -16,6 +16,7 @@ pub(crate) mod delivery;
 pub(crate) mod fork;
 pub(crate) mod gh;
 pub(crate) mod harness_install;
+pub(crate) mod pr_facts;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod scoped;

@@ -12,6 +12,7 @@ use super::super::{entities, store_err};
 
 pub mod approval;
 pub mod journal;
+pub mod pull_request;
 pub mod repo;
 pub mod session;
 mod session_image;
@@ -22,6 +23,7 @@ pub mod workspace;
 
 pub use approval::*;
 pub use journal::*;
+pub use pull_request::*;
 pub use repo::*;
 pub use session::*;
 pub use session_image::*;

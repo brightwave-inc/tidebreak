@@ -652,6 +652,9 @@ impl CodeRuntime {
             created_at: Utc::now(),
             removed_at: None,
             cloned_from,
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
         };
         insert_repo(&self.db, &repo).await?;
         self.delivery_cache.invalidate_owner(owner);
@@ -1215,12 +1218,41 @@ impl CodeRuntime {
         id: WorkspaceId,
     ) -> Result<PushOutcome, ServerError> {
         let workspace = self.require_live_workspace(owner, id).await?;
-        gh::push_branch(
-            std::path::Path::new(&workspace.worktree_path),
-            &workspace.branch_name,
-        )
-        .await
-        .map_err(map_gh)
+        let worktree = std::path::PathBuf::from(&workspace.worktree_path);
+        let outcome = gh::push_branch(&worktree, &workspace.branch_name)
+            .await
+            .map_err(map_gh)?;
+        // Best-effort contributed fact (decision 62): a user push to a branch
+        // that is a pull request's head is the same act the detector mints
+        // for. Failures are silent; the reconcile sweep corrects.
+        let gh_path = self.gh_search_path_owned();
+        if let Ok(target) = super::delivery::repository_target_from_path(&worktree).await {
+            if let Ok(values) = gh::list_pull_requests_for_head_raw(
+                &target.host,
+                &target.owner,
+                &target.name,
+                &workspace.branch_name,
+                gh_path.as_deref(),
+            )
+            .await
+            {
+                if let Some(value) = values.first() {
+                    super::pr_facts::record_confirmed_fact(
+                        &self.db,
+                        owner,
+                        workspace.id,
+                        None,
+                        None,
+                        &target,
+                        value,
+                        tidebreak_core::CodePullRequestRelation::Contributed,
+                        tidebreak_core::CodePullRequestDiscovery::Command,
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn workspace_pr(
@@ -1344,8 +1376,38 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
+        let created_number = digest.number;
         workspace.pr = Some(digest);
         self.save_workspace(&workspace).await?;
+        // Best-effort authored fact (decision 62). The digest just came from
+        // the host, and the repository-qualified re-read gives the row full
+        // identity and timestamps. Failures are silent; the reconcile sweep
+        // corrects.
+        let worktree = std::path::PathBuf::from(&workspace.worktree_path);
+        if let Ok(target) = super::delivery::repository_target_from_path(&worktree).await {
+            if let Ok(value) = gh::view_pull_request_raw(
+                &target.host,
+                &target.owner,
+                &target.name,
+                created_number,
+                gh_path.as_deref(),
+            )
+            .await
+            {
+                super::pr_facts::record_confirmed_fact(
+                    &self.db,
+                    owner,
+                    workspace.id,
+                    None,
+                    None,
+                    &target,
+                    &value,
+                    tidebreak_core::CodePullRequestRelation::Authored,
+                    tidebreak_core::CodePullRequestDiscovery::Command,
+                )
+                .await;
+            }
+        }
         self.workspace_pr(owner, id).await
     }
 
@@ -2827,6 +2889,7 @@ impl CodeRuntime {
             attached.spawn_epoch,
             None,
             attached.subagents.clone(),
+            self.gh_search_path_owned(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
 

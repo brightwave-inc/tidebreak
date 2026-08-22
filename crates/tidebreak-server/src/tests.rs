@@ -46,6 +46,8 @@ mod code_browser;
 mod code_clone;
 #[cfg(unix)]
 mod code_git;
+#[cfg(unix)]
+mod code_pr_facts;
 mod code_terminals;
 mod code_titling;
 mod compaction;

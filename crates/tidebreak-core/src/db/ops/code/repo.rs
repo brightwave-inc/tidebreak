@@ -21,6 +21,9 @@ pub async fn insert_repo(store: &DbStore, repo: &CodeRepo) -> Result<()> {
         created_at: Set(repo.created_at),
         removed_at: Set(repo.removed_at),
         cloned_from: Set(repo.cloned_from.clone()),
+        origin_host: Set(repo.origin_host.clone()),
+        origin_owner: Set(repo.origin_owner.clone()),
+        origin_name: Set(repo.origin_name.clone()),
     }
     .insert(&store.conn)
     .await
@@ -154,6 +157,40 @@ pub async fn mark_repo_removed(
     Ok(result.rows_affected == 1)
 }
 
+/// Record the GitHub identity parsed from a repository's origin remote.
+///
+/// Written by the reconcile sweep whenever the resolved identity differs from
+/// what is stored, so a retargeted origin refreshes on its next resolve
+/// (decision 62).
+pub async fn set_repo_origin(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: RepoId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+) -> Result<bool> {
+    let result = entities::code_repo::Entity::update_many()
+        .col_expr(
+            entities::code_repo::Column::OriginHost,
+            sea_orm::sea_query::Expr::value(Some(host.to_owned())),
+        )
+        .col_expr(
+            entities::code_repo::Column::OriginOwner,
+            sea_orm::sea_query::Expr::value(Some(repo_owner.to_owned())),
+        )
+        .col_expr(
+            entities::code_repo::Column::OriginName,
+            sea_orm::sea_query::Expr::value(Some(repo_name.to_owned())),
+        )
+        .filter(entities::code_repo::Column::Id.eq(id.0))
+        .filter(entities::code_repo::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 pub(super) fn repo_from_row(row: entities::code_repo::Model) -> Result<CodeRepo> {
     let quick_actions = serde_json::from_value::<Vec<QuickAction>>(row.quick_actions)
         .map_err(|err| AgentError::Store(format!("code_repo {} quick_actions: {err}", row.id)))?;
@@ -170,5 +207,8 @@ pub(super) fn repo_from_row(row: entities::code_repo::Model) -> Result<CodeRepo>
         created_at: row.created_at,
         removed_at: row.removed_at,
         cloned_from: row.cloned_from,
+        origin_host: row.origin_host,
+        origin_owner: row.origin_owner,
+        origin_name: row.origin_name,
     })
 }

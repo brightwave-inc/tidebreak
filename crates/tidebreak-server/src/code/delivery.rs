@@ -1443,7 +1443,18 @@ async fn require_authenticated(runtime: &CodeRuntime) -> Result<GhObservation, S
 pub(crate) async fn repository_target_from_local(
     repo: &CodeRepo,
 ) -> Result<CodeGitHubRepositoryTarget, String> {
-    let remote = git_read(Path::new(&repo.root_path), &["remote", "get-url", "origin"])
+    repository_target_from_path(Path::new(&repo.root_path)).await
+}
+
+/// Resolve any checkout's origin remote to a GitHub identity.
+///
+/// The pull-request fact detector calls this on a command's recorded cwd,
+/// which may be a worktree or a clone the agent made outside every
+/// registered repository (decision 62).
+pub(crate) async fn repository_target_from_path(
+    path: &Path,
+) -> Result<CodeGitHubRepositoryTarget, String> {
+    let remote = git_read(path, &["remote", "get-url", "origin"])
         .await
         .map_err(|message| format!("could not read origin remote: {message}"))?;
     parse_repository_input(&remote)
@@ -1548,7 +1559,7 @@ fn live_catalog_target_keys(
         .collect()
 }
 
-fn parse_repository_input(input: &str) -> Result<CodeGitHubRepositoryTarget, String> {
+pub(crate) fn parse_repository_input(input: &str) -> Result<CodeGitHubRepositoryTarget, String> {
     let value = input.trim().trim_end_matches('/').trim_end_matches(".git");
     if value.is_empty() {
         return Err("repository cannot be empty".into());
@@ -2836,7 +2847,7 @@ async fn run_api_json(binary: &Path, host: &str, endpoint: &str) -> Result<Value
     serde_json::from_str(&raw).map_err(|error| format!("invalid GitHub response: {error}"))
 }
 
-async fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) async fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -3095,6 +3106,9 @@ mod tests {
             created_at: Utc::now(),
             removed_at: None,
             cloned_from: None,
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
         }
     }
 

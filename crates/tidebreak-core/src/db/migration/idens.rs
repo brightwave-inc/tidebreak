@@ -808,6 +808,47 @@ pub(crate) enum CodeRepo {
     Owner,
     RemovedAt,
     ClonedFrom,
+    OriginHost,
+    OriginOwner,
+    OriginName,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodePullRequest {
+    Table,
+    Id,
+    Owner,
+    Host,
+    RepoOwner,
+    RepoName,
+    Number,
+    Url,
+    Title,
+    State,
+    Draft,
+    Author,
+    HeadBranch,
+    BaseBranch,
+    HeadSha,
+    CreatedAt,
+    UpdatedAt,
+    MergedAt,
+    ClosedAt,
+    FirstSeenAt,
+    LastSeenAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodePullRequestAttribution {
+    Table,
+    Owner,
+    PullRequestId,
+    WorkspaceId,
+    Relation,
+    DiscoveredVia,
+    SessionId,
+    ParentCallId,
+    CreatedAt,
 }
 
 #[derive(DeriveIden)]

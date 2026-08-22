@@ -110,6 +110,10 @@ code_id_type!(
     /// Identifies one durable trigger delivery across every retry.
     CodeTriggerDeliveryId
 );
+code_id_type!(
+    /// Identifies one observed pull request across every repository.
+    CodePullRequestId
+);
 
 /// Which external agent engine a session is bound to.
 ///
@@ -610,6 +614,17 @@ pub struct CodeRepo {
     /// `None` means the user registered a directory that already existed.
     /// Only a checkout Tidebreak created is Tidebreak's to delete.
     pub cloned_from: Option<String>,
+    /// GitHub host parsed from the origin remote, e.g. `github.com`.
+    ///
+    /// Populated lazily the first time the origin resolves and refreshed when
+    /// it changes; `None` until then, and for repositories whose origin is
+    /// not GitHub-shaped. Persisted so pull-request facts join to local
+    /// repositories without a git subprocess per read (decision 62).
+    pub origin_host: Option<String>,
+    /// Repository owner login parsed from the origin remote.
+    pub origin_owner: Option<String>,
+    /// Repository name parsed from the origin remote.
+    pub origin_name: Option<String>,
 }
 
 /// Persisted workspace record.
@@ -645,6 +660,196 @@ pub struct CodeWorkspace {
     /// Size of the stored bundle. Kept for the reclaim surface, which has to
     /// report what a release actually bought without stat-ing every file.
     pub bundle_bytes: Option<i64>,
+}
+
+/// Coarse lifecycle of an observed pull request (decision 62).
+///
+/// Deliberately narrower than the digest's free-form `state` string: the fact
+/// table stores only what stack derivation and trigger edges key on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodePullRequestState {
+    /// Open, draft or not.
+    Open,
+    /// Merged.
+    Merged,
+    /// Closed without merging.
+    Closed,
+}
+
+impl CodePullRequestState {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(Self::Open),
+            "merged" => Some(Self::Merged),
+            "closed" => Some(Self::Closed),
+            _ => None,
+        }
+    }
+}
+
+/// How strongly a workspace is tied to a pull request (decision 62).
+///
+/// Only two acts mint attribution: `gh pr create` (authored) and a push whose
+/// branch is or becomes a pull request's head (contributed). Reading,
+/// checking out, commenting on, closing, or merging a pull request never
+/// does, so review and triage agents stay out of the attributed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodePullRequestRelation {
+    /// The workspace opened the pull request.
+    Authored,
+    /// The workspace pushed commits to the pull request's head branch.
+    Contributed,
+}
+
+impl CodePullRequestRelation {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authored => "authored",
+            Self::Contributed => "contributed",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "authored" => Some(Self::Authored),
+            "contributed" => Some(Self::Contributed),
+            _ => None,
+        }
+    }
+}
+
+/// Which observer first tied a workspace to a pull request (decision 62).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodePullRequestDiscovery {
+    /// The post-turn detector saw the act in the session's journaled shell
+    /// commands and confirmed it against the host.
+    Command,
+    /// The reconcile sweep matched the pull request to the workspace by
+    /// number or head SHA.
+    Reconcile,
+}
+
+impl CodePullRequestDiscovery {
+    /// Stable database token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Reconcile => "reconcile",
+        }
+    }
+
+    /// Parse a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "command" => Some(Self::Command),
+            "reconcile" => Some(Self::Reconcile),
+            _ => None,
+        }
+    }
+}
+
+/// Durable observation of one pull request (decision 62).
+///
+/// GitHub stays authoritative; a row is a confirmed observation, never a
+/// guess. Identity is `(owner, host, repo_owner, repo_name, number)`, so a
+/// pull request in a repository with no local checkout is representable.
+/// Checks, review decisions, and mergeability stay live-only in the delivery
+/// reads; this snapshot keeps what stack derivation, trigger edges, and list
+/// rows need.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodePullRequestFact {
+    /// Stable id.
+    pub id: CodePullRequestId,
+    /// Principal whose credential observed the pull request.
+    pub owner: crate::OwnerId,
+    /// Host, e.g. `github.com`.
+    pub host: String,
+    /// Repository owner login.
+    pub repo_owner: String,
+    /// Repository name.
+    pub repo_name: String,
+    /// Pull request number.
+    pub number: u64,
+    /// Web URL.
+    pub url: String,
+    /// Title at last observation.
+    pub title: String,
+    /// Coarse lifecycle.
+    pub state: CodePullRequestState,
+    /// Draft flag at last observation.
+    pub draft: bool,
+    /// Author login, when the host reported one.
+    pub author: Option<String>,
+    /// Head branch name.
+    pub head_branch: String,
+    /// Base branch name at last observation. Stack derivation keys on this.
+    pub base_branch: String,
+    /// Head commit at last observation.
+    pub head_sha: Option<String>,
+    /// When the host says the pull request was opened.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the host says it last changed.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Merge time, when merged.
+    pub merged_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Close time, when closed.
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this store first observed the pull request. Trigger `pr_opened`
+    /// edges key on this; an upsert never moves it.
+    pub first_seen_at: chrono::DateTime<chrono::Utc>,
+    /// When this store last confirmed the snapshot.
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One workspace's tie to one pull request (decision 62).
+///
+/// At most one row per `(pull_request, workspace)`; `relation` holds the
+/// strongest claim, upgraded from contributed to authored when authoring
+/// evidence appears. Plain foreign keys, no cascade: workspace rows are
+/// soft-removed, so attribution survives archive and release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodePullRequestAttribution {
+    /// Principal the attribution belongs to.
+    pub owner: crate::OwnerId,
+    /// The observed pull request.
+    pub pull_request_id: CodePullRequestId,
+    /// The workspace that worked on it.
+    pub workspace_id: WorkspaceId,
+    /// Strongest claim so far.
+    pub relation: CodePullRequestRelation,
+    /// Which observer minted the row.
+    pub discovered_via: CodePullRequestDiscovery,
+    /// Session whose act minted the row, when the detector minted it.
+    pub session_id: Option<CodeSessionId>,
+    /// The subagent `Task` span the minting command ran inside, when one did
+    /// (decision 52). Absent when the parent session acted itself.
+    pub parent_call_id: Option<String>,
+    /// When the row was minted.
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Most subagent rows kept on one session. Done entries fall off first.

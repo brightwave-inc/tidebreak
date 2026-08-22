@@ -733,6 +733,9 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             created_at: now,
             removed_at: None,
             cloned_from: None,
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
         },
     )
     .await
