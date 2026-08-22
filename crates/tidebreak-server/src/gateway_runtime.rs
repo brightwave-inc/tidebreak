@@ -4670,6 +4670,7 @@ mod tests {
                     gateway_version: "1".into(),
                     public_url: new_base.clone(),
                     auth_mode: "oauth".into(),
+                    tidebreak_machine_url: None,
                     surfaces: None,
                 },
                 identity: crate::connectors::GatewayIdentity {
