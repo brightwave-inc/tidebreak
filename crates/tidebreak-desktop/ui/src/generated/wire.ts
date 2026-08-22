@@ -2428,7 +2428,25 @@ export type InputModality = "text" | "image";
  * Renderer-safe resolved policy. Carries only what surfaces need to render
  * managed state: the verdict, the locked gateway URL, and its authority.
  */
-export type ManagedPolicy = { managed: boolean, gateway_url?: string, source: ManagedPolicySource, 
+export type ManagedPolicy = { managed: boolean, gateway_url?: string, 
+/**
+ * The gateway a hosted deployment authenticates its own callers against
+ * (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`).
+ *
+ * Deliberately not [`ManagedPolicy::gateway_url`], and deliberately no
+ * effect on `managed`. Those two say "this profile must hold a session
+ * at this gateway", and that is false here: a caller authenticates *to*
+ * a hosted machine with their own gateway token, never *through* it. A
+ * hosted machine can therefore never report a session, so asserting
+ * management over it would raise a sign-in gate nothing could ever
+ * satisfy.
+ *
+ * This names the deployment for the surfaces that describe it, and
+ * nothing else. Surfaces that lock a profile down read `managed`; a
+ * hosted machine locks nothing, and its stored provider configuration
+ * still wins (decision 51, rule 3).
+ */
+hosted_gateway_url?: string, source: ManagedPolicySource, 
 /**
  * True when `source` asserted management but its gateway URL is missing,
  * unreadable, or invalid. The profile stays managed with no usable URL —

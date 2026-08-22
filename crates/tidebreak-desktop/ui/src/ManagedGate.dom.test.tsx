@@ -75,6 +75,13 @@ function PolicyProbe() {
   return <p>policy: {policy.managed ? "managed" : "unmanaged"}</p>;
 }
 
+/** Stands in for the Model Gateway section, which names the deployment's
+ * gateway from the policy the gate published. */
+function HostedGatewayProbe() {
+  const policy = useManagedPolicy();
+  return <p>gateway: {policy.hosted_gateway_url ?? "none"}</p>;
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -355,6 +362,35 @@ describe("ManagedGate", () => {
 
     expect(await screen.findByText("the open product")).toBeInTheDocument();
     expect(screen.queryByText("Sign in to continue")).not.toBeInTheDocument();
+    expect(client.getGatewayStatus).not.toHaveBeenCalled();
+  });
+
+  it("a hosted machine names its gateway and never asks anyone to sign in", async () => {
+    // The client authenticated *to* this machine with its own gateway token.
+    // The machine holds no session of its own and can never report one, so a
+    // gate here would be one nothing could ever satisfy.
+    const client = api({
+      getPolicy: vi.fn().mockResolvedValue({
+        managed: false,
+        source: "unmanaged",
+        misconfigured: false,
+        allow_local_mcp_servers: false,
+        hosted_gateway_url: "https://gateway.example/",
+      }),
+    });
+    render(
+      <ManagedGate client={client}>
+        <HostedGatewayProbe />
+      </ManagedGate>,
+    );
+
+    expect(
+      await screen.findByText("gateway: https://gateway.example/"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Sign in to continue")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Managed policy unavailable"),
+    ).not.toBeInTheDocument();
     expect(client.getGatewayStatus).not.toHaveBeenCalled();
   });
 

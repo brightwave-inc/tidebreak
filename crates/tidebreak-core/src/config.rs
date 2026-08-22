@@ -186,6 +186,25 @@ impl Config {
         self.data_dir.join("plugin-data")
     }
 
+    /// The Model Gateway this deployment authenticates its callers against,
+    /// when it is a gateway-authenticated hosted machine.
+    ///
+    /// One reading of "hosted machine" for every surface that describes the
+    /// deployment: the self-host profile with a gateway named by
+    /// [`Config::auth_gateway_url`]. The public identity URL, deliberately —
+    /// [`Config::auth_gateway_verifier_url`] is a server-to-server detour and
+    /// names nothing a person recognizes.
+    ///
+    /// `None` everywhere else: the desktop profile, and a self-host server on
+    /// static tokens. Neither holds a caller's gateway credential.
+    #[must_use]
+    pub fn hosted_gateway_url(&self) -> Option<&str> {
+        if self.profile != Profile::SelfHost {
+            return None;
+        }
+        self.auth_gateway_url.as_deref()
+    }
+
     /// A desktop-profile config rooted at `data_dir`.
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
         Self {

@@ -90,6 +90,13 @@ default only for a provider the deployment states no other path to. It also
 requires Gateway authentication: a server running on static tokens has no
 caller token to exchange and keeps its environment-configured providers.
 
+An attached client shows the Gateway under Settings → Model Gateway, read-only:
+the machine names the Gateway it authenticates you against, and there is
+nothing to sign in to or sign out of there. You already signed in on your own
+computer, and the machine runs your work with that account. It never asks a
+client to sign in to it, because it holds no Gateway session of its own and
+could never report one.
+
 ## Generating tokens for standalone compatibility
 
 The token file is the credential-to-principal map, and it is also where roles

@@ -206,7 +206,7 @@ pub async fn put_rest_connected_app(
     Path(id): Path<ConnectedAppId>,
     Json(body): Json<RestConnectedAppUpsert>,
 ) -> Result<Json<ConnectedAppsInfo>, ServerError> {
-    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
+    let policy = state.managed_policy()?;
     if policy.managed {
         return Err(managed_profile_refusal(
             "REST connected apps are managed by your organization's gateway",
@@ -456,7 +456,7 @@ pub async fn post_rest_spec_preview(
     State(state): State<AppState>,
     Json(body): Json<SpecPreviewRequest>,
 ) -> Result<Json<SpecPreviewInfo>, ServerError> {
-    let policy = crate::managed_policy::resolve(&*state.provisioned_policy, &*state.os_policy)?;
+    let policy = state.managed_policy()?;
     if policy.managed {
         return Err(managed_profile_refusal(
             "REST connected apps are managed by your organization's gateway",

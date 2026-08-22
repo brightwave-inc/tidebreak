@@ -105,3 +105,21 @@ export const Attached: Story = {
     machine: stubMachine(machineAttached),
   },
 };
+
+/**
+ * Attached to a gateway-authenticated hosted machine.
+ *
+ * The reader signed in to the gateway on their own computer and attached with
+ * that account, so the machine holds their credential and none of its own. It
+ * can never report a session, which is why the gateway is named read-only
+ * with no sign-in, no sign-out, and no sync.
+ */
+export const HostedMachine: Story = {
+  args: {
+    client: stubClient(gatewaySignedOut),
+    managed: false,
+    gatewayUrl: null,
+    hostedGatewayUrl: "https://gateway.example.com/",
+    machine: stubMachine(machineAttached),
+  },
+};

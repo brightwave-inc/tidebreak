@@ -2003,7 +2003,7 @@ pub async fn collect_routes(
         }
         // A hosted machine resolves this provider per caller only where the
         // deployment states no other path to it (decision 51, rule 3).
-        if kind == ProviderKind::Anthropic {
+        if kind == ON_BEHALF_OF_PROVIDER {
             if let Some((source, base_url)) = on_behalf_of.clone() {
                 if on_behalf_of_states_the_only_path(store, secrets, kind).await {
                     routes.push(tidebreak_router::Route {
@@ -2098,6 +2098,41 @@ pub async fn collect_routes(
         });
     }
     routes
+}
+
+/// The provider a hosted machine's on-behalf-of route serves.
+///
+/// One statement of it, read by both halves that must agree: the route
+/// [`collect_routes`] builds, and the availability
+/// [`provider_is_usable`] reports for it. The gateway's Anthropic-compatible
+/// surface is what an exchanged inference token authenticates against
+/// ([`crate::obo_inference::OboInference::inference_base_url`]).
+const ON_BEHALF_OF_PROVIDER: ProviderKind = ProviderKind::Anthropic;
+
+/// Whether this deployment serves `kind` with the caller's own gateway
+/// credential.
+///
+/// True only on a gateway-authenticated hosted machine, only for the provider
+/// the on-behalf-of route serves, and only where the deployment states no
+/// other path to it (decision 51, rule 3).
+///
+/// This reads the policy projection where [`collect_routes`] reads the
+/// runtime handle, and the two agree by construction: `OboInference` is
+/// assembled for exactly the configuration `Config::hosted_gateway_url`
+/// answers for. Disagreement would show a caller a model no route serves.
+async fn on_behalf_of_is_the_path(
+    store: &dyn Store,
+    secrets: &dyn SecretProvider,
+    kind: ProviderKind,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> bool {
+    if policy.managed || policy.hosted_gateway_url.is_none() {
+        return false;
+    }
+    if kind != ON_BEHALF_OF_PROVIDER {
+        return false;
+    }
+    on_behalf_of_states_the_only_path(store, secrets, kind).await
 }
 
 /// Whether per-caller inference is the only path this deployment states to
@@ -2220,6 +2255,11 @@ pub async fn resolve_model_policy(
 /// The deployment match matters after an MDM re-point: the superseded
 /// session is unroutable (`route_token_source` filters it), so counting it
 /// usable would advertise models no route can serve.
+///
+/// A gateway-authenticated hosted machine is the one profile that is usable
+/// with nothing stored at all: it resolves the credential per caller
+/// (`on_behalf_of_is_the_path`), so the stored-row walk below would call
+/// every provider unusable and leave every caller's picker empty.
 pub async fn provider_is_usable(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -2246,6 +2286,9 @@ pub async fn provider_is_usable(
     }
     if kind == ProviderKind::ModelGateway {
         return Ok(false);
+    }
+    if on_behalf_of_is_the_path(store, secrets, kind, policy).await {
+        return Ok(true);
     }
     let config = read_config(store, kind).await?;
     if !config.enabled {

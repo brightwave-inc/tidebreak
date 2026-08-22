@@ -81,6 +81,24 @@ pub(crate) struct ManagedPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub(crate) gateway_url: Option<String>,
+    /// The gateway a hosted deployment authenticates its own callers against
+    /// (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`).
+    ///
+    /// Deliberately not [`ManagedPolicy::gateway_url`], and deliberately no
+    /// effect on `managed`. Those two say "this profile must hold a session
+    /// at this gateway", and that is false here: a caller authenticates *to*
+    /// a hosted machine with their own gateway token, never *through* it. A
+    /// hosted machine can therefore never report a session, so asserting
+    /// management over it would raise a sign-in gate nothing could ever
+    /// satisfy.
+    ///
+    /// This names the deployment for the surfaces that describe it, and
+    /// nothing else. Surfaces that lock a profile down read `managed`; a
+    /// hosted machine locks nothing, and its stored provider configuration
+    /// still wins (decision 51, rule 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub(crate) hosted_gateway_url: Option<String>,
     pub(crate) source: ManagedPolicySource,
     /// True when `source` asserted management but its gateway URL is missing,
     /// unreadable, or invalid. The profile stays managed with no usable URL —
@@ -117,6 +135,7 @@ impl ManagedPolicy {
         Self {
             managed: true,
             gateway_url: None,
+            hosted_gateway_url: None,
             source,
             misconfigured: true,
             pending_gateway_url: None,
@@ -876,7 +895,45 @@ pub(crate) fn resolve(
     provisioned: &dyn ProvisionedPolicySource,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
+    resolve_with_deployment(provisioned, os_policy, None)
+}
+
+/// [`resolve`], plus the gateway this deployment authenticates its own
+/// callers against — the hosted-machine tier
+/// (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`).
+///
+/// The tier describes; it never governs. It leaves `managed`, `source`, and
+/// `gateway_url` exactly as [`resolve`] left them, so no lockdown, no sign-in
+/// gate, and no route collection changes because a deployment named a
+/// gateway. Only [`ManagedPolicy::hosted_gateway_url`] moves.
+///
+/// Callers that describe the deployment to a client resolve through here;
+/// callers that enforce something use [`resolve`]. Forgetting therefore costs
+/// a surface its description and never its enforcement, which is the failure
+/// direction to have. Routes get it for free: [`crate::state::AppState`]
+/// resolves through this with the deployment's own configuration.
+///
+/// A URL that fails the gateway contract is dropped with a warning rather
+/// than failing the profile closed: the deployment is already up and
+/// authenticating callers against it, so a URL this side cannot render is a
+/// display fault, not an authority in need of repair.
+pub(crate) fn resolve_with_deployment(
+    provisioned: &dyn ProvisionedPolicySource,
+    os_policy: &dyn OsPolicySource,
+    hosted_gateway_url: Option<&str>,
+) -> Result<ManagedPolicy> {
     let mut policy = resolve_gateway(provisioned, os_policy)?;
+    policy.hosted_gateway_url =
+        hosted_gateway_url.and_then(|url| match validated_gateway_url(url) {
+            Ok(url) => Some(url),
+            Err(error) => {
+                tracing::warn!(
+                    "this deployment's own gateway URL fails the gateway contract: \
+                     {error}; clients will not be told which gateway authenticates them"
+                );
+                None
+            }
+        });
     // The ceiling is asserted per key, independent of the gateway verdict: an
     // MDM profile can cap the mode without deploying a gateway URL, and the
     // cap rides on whatever policy the gateway resolution produced. A broken
@@ -941,6 +998,7 @@ fn resolve_gateway(
     Ok(ManagedPolicy {
         managed: false,
         gateway_url: None,
+        hosted_gateway_url: None,
         source: ManagedPolicySource::Unmanaged,
         misconfigured: false,
         pending_gateway_url: None,
@@ -956,6 +1014,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
         Ok(gateway_url) => ManagedPolicy {
             managed: true,
             gateway_url: Some(gateway_url),
+            hosted_gateway_url: None,
             source,
             misconfigured: false,
             pending_gateway_url: None,

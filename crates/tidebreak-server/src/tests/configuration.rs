@@ -5918,3 +5918,224 @@ async fn a_cached_provider_is_never_shared_between_callers() {
     // A turn no owner can be named for is offered no credential at all.
     assert_eq!(resolver.resolve_for(None).await.id().0, "unconfigured");
 }
+
+/// A gateway-authenticated hosted machine (decision 49) with the deployment's
+/// own configuration as `AppState` resolves it.
+fn hosted_machine_policy() -> crate::managed_policy::ManagedPolicy {
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    crate::managed_policy::resolve_with_deployment(
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+        Some("https://gateway.example"),
+    )
+    .unwrap()
+}
+
+/// The projection a client attached to a hosted machine reads: which gateway
+/// authenticates it, and no claim of management over it.
+///
+/// The second half is the load-bearing one. A hosted machine holds no gateway
+/// session and can never report one — its callers authenticate *to* it — so
+/// asserting management would raise a sign-in gate nothing could satisfy.
+#[test]
+fn a_hosted_machine_names_its_gateway_without_asserting_management() {
+    let policy = hosted_machine_policy();
+
+    assert_eq!(
+        policy.hosted_gateway_url.as_deref(),
+        Some("https://gateway.example/"),
+        "the client must be told which gateway authenticates it"
+    );
+    assert!(
+        !policy.managed,
+        "a hosted machine holds no session, so it must never raise the sign-in gate"
+    );
+    assert_eq!(
+        policy.source,
+        crate::managed_policy::ManagedPolicySource::Unmanaged
+    );
+    assert!(
+        policy.gateway_url.is_none(),
+        "no authority locks this profile to a gateway it must sign in to"
+    );
+    assert!(!policy.misconfigured);
+    assert!(
+        policy.pending_gateway_url.is_none(),
+        "the deployment's own gateway is not a pairing awaiting consent"
+    );
+}
+
+/// The deployment tier describes; it never governs. A device-managed profile
+/// keeps its authority, its locked URL, and its lockdown whatever the
+/// deployment names beside it.
+#[test]
+fn the_deployment_tier_never_overrides_an_asserting_authority() {
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
+    let policy = crate::managed_policy::resolve_with_deployment(
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+        Some("https://gateway.example"),
+    )
+    .unwrap();
+
+    assert!(policy.managed);
+    assert_eq!(policy.gateway_url.as_deref(), Some("https://corp.gateway/"));
+    assert_eq!(
+        policy.source,
+        crate::managed_policy::ManagedPolicySource::Provisioned
+    );
+}
+
+/// A deployment URL this side cannot render is a display fault, not an
+/// authority in need of repair: the machine is already up and authenticating
+/// callers against it, so the projection drops the URL rather than failing
+/// the profile closed.
+#[test]
+fn an_unusable_deployment_url_leaves_the_profile_open() {
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy = crate::managed_policy::resolve_with_deployment(
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+        Some("not a url"),
+    )
+    .unwrap();
+
+    assert!(policy.hosted_gateway_url.is_none());
+    assert!(!policy.managed);
+    assert!(!policy.misconfigured);
+}
+
+/// The wiring: a hosted machine's own configuration reaches the policy every
+/// route reads, and a desktop profile's does not.
+#[tokio::test]
+async fn app_state_projects_the_deployments_own_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+    let hosted = {
+        let mut config = Config::desktop(dir.path());
+        config.profile = Profile::SelfHost;
+        config.auth_gateway_url = Some("https://gateway.example".to_owned());
+        config.public_url = Some("https://machine.example".to_owned());
+        config
+    };
+    let state = AppState::new(
+        hosted,
+        store.clone(),
+        Arc::new(resolver::ConfiguredResolver::new(
+            store.clone(),
+            secrets.clone(),
+            crate::gateway_runtime::GatewayRuntime::new(
+                store.clone(),
+                secrets.clone(),
+                crate::managed_policy::MemoryProvisionedPolicy::new(),
+                Arc::new(crate::managed_policy::NoOsPolicy),
+            ),
+            Arc::new(
+                crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone())
+                    .unwrap(),
+            ),
+            crate::managed_policy::MemoryProvisionedPolicy::new(),
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        )),
+        secrets.clone(),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig::default(),
+    );
+
+    let policy = state.managed_policy().unwrap();
+    assert_eq!(
+        policy.hosted_gateway_url.as_deref(),
+        Some("https://gateway.example/")
+    );
+    assert!(!policy.managed);
+}
+
+/// The picker a caller starts a conversation from.
+///
+/// A hosted machine stores no provider configuration of its own — it resolves
+/// the credential per caller — so the stored-row walk would call every
+/// provider unusable and offer nobody a model to select.
+#[tokio::test]
+async fn a_hosted_machine_offers_the_caller_a_model_to_start_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let hosted = hosted_machine_policy();
+
+    assert!(
+        providers::provider_is_usable(
+            &*store,
+            &*secrets,
+            providers::ProviderKind::Anthropic,
+            &hosted,
+        )
+        .await
+        .unwrap(),
+        "the provider the caller's own credential serves must be usable"
+    );
+
+    let catalog = providers::catalog_models(&*store, &*secrets, &hosted)
+        .await
+        .unwrap();
+    assert!(
+        catalog
+            .iter()
+            .any(|entry| entry.available
+                && entry.policy.provider == providers::ProviderKind::Anthropic),
+        "the catalog must offer at least one selectable model"
+    );
+
+    // The same deployment without gateway authentication is unchanged: a
+    // self-host server on static tokens states no path to this provider.
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let unmanaged =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+    assert!(!providers::provider_is_usable(
+        &*store,
+        &*secrets,
+        providers::ProviderKind::Anthropic,
+        &unmanaged,
+    )
+    .await
+    .unwrap());
+}
+
+/// Decision 51, rule 3, in the catalog as well as in route collection: a
+/// stored provider configuration states the deployment's inference path, and
+/// per-caller availability does not overrule it.
+#[tokio::test]
+async fn a_stored_provider_configuration_still_decides_availability() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Anthropic,
+        &providers::ProviderConfig {
+            enabled: false,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+
+    assert!(
+        !providers::provider_is_usable(
+            &*store,
+            &*secrets,
+            providers::ProviderKind::Anthropic,
+            &hosted_machine_policy(),
+        )
+        .await
+        .unwrap(),
+        "a disabled provider row must leave the provider unusable"
+    );
+}

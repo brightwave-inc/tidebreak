@@ -92,6 +92,7 @@ function GatewaySection() {
       client={client}
       managed={policy.managed}
       gatewayUrl={policy.gateway_url ?? null}
+      hostedGatewayUrl={policy.hosted_gateway_url ?? null}
       onChanged={() => void refreshCatalog()}
       onOpenConnectedApps={() => void navigate({ to: connectedAppsPath })}
     />
