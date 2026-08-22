@@ -71,7 +71,10 @@ fn write_gh_shim(dir: &std::path::Path, log: &std::path::Path) {
     let body = format!(
         "#!/bin/sh\n\
          echo \"$@\" >> {log}\n\
-         if [ \"$1\" = auth ]; then echo logged in; exit 0; fi\n\
+         if [ \"$1\" = auth ]; then\n\
+           echo '{{\"hosts\":{{\"github.com\":[{{\"active\":true,\"state\":\"success\",\"login\":\"tester\"}}]}}}}'\n\
+           exit 0\n\
+         fi\n\
          if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n\
            echo '{VIEW_JSON}'\n\
            exit 0\n\

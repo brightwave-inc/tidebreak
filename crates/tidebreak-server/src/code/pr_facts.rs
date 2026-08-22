@@ -769,8 +769,24 @@ mod tests {
     }
 
     #[test]
-    fn obfuscated_commands_parse_to_nothing() {
-        assert!(simple_command_argvs("gh pr create --repo $(cat target)").is_none());
+    fn substituted_repo_flags_never_resolve() {
+        // The extractor surfaces a command substitution — the inner command
+        // becomes its own argv — rather than refusing the line. Whatever it
+        // yields, a recognized create whose flag carries substitution text
+        // must fail repository resolution, so the candidate mints nothing.
+        let Some(argvs) = simple_command_argvs("gh pr create --repo $(cat target)") else {
+            return;
+        };
+        for argv in &argvs {
+            if let Some(create) = parse_create(argv) {
+                if let Some(flag) = create.repo_flag {
+                    assert!(
+                        parse_repository_input(&flag).is_err(),
+                        "{flag:?} resolved to a repository"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
