@@ -82,6 +82,41 @@ import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
 
+/**
+ * Raised by the native "Close Tab" menu item, which owns Cmd+W.
+ *
+ * The item exists so that chord can never reach macOS's close-window command:
+ * this app has one window, so closing it ends the app, and a reader reaching
+ * for Cmd+W means the tab in front of them.
+ */
+const CLOSE_TAB_REQUESTED_EVENT = "desktop-close-tab-requested";
+
+/**
+ * Run `handler` whenever the native host raises `event`.
+ *
+ * The handler is read through a ref so the listener registers once for the
+ * shell's lifetime instead of being torn down and rebound every time a
+ * callback changes identity between renders. Outside the desktop app there is
+ * no host to raise anything, so nothing is registered at all.
+ */
+function useNativeHostEvent(event: string, handler: () => void): void {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen(event, () => handlerRef.current()).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [event]);
+}
+
 /** Move focus to whichever composer the current route has on screen. */
 function focusComposer(): void {
   document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.focus();
@@ -194,25 +229,11 @@ export function AppShell() {
   // The native "Check for Updates…" menu item lands the reader on the
   // Updates settings panel and runs the same explicit check the panel's
   // button does, so the result (up to date, or an update staged) is visible.
-  const checkForUpdateRef = useRef(desktopUpdates.check);
-  checkForUpdateRef.current = desktopUpdates.check;
-  useEffect(() => {
-    if (!isTauri()) return;
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    void listen(UPDATE_CHECK_REQUESTED_EVENT, () => {
-      const updatesPath: string = "/settings/updates";
-      void navigate({ to: updatesPath });
-      void checkForUpdateRef.current();
-    }).then((stop) => {
-      if (cancelled) stop();
-      else unlisten = stop;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [navigate]);
+  useNativeHostEvent(UPDATE_CHECK_REQUESTED_EVENT, () => {
+    const updatesPath: string = "/settings/updates";
+    void navigate({ to: updatesPath });
+    void desktopUpdates.check();
+  });
 
   /**
    * Put the workspace's layout through one change and write it back.
@@ -271,6 +292,27 @@ export function AppShell() {
       params: { workspaceId: next },
     });
   }
+
+  /**
+   * Close whichever tab the reader is looking at.
+   *
+   * A closed tab is the one case the pure function reports with `null`, since
+   * "nothing here to close" is not the same as "closing changed nothing".
+   * Finding nothing declines the key and does nothing else: Cmd+W used to
+   * reach the native close-window item and end the app, which is never what
+   * the reader meant by it.
+   */
+  function closeTab(): boolean | void {
+    return applyCodeLayout((layout) => closeFocusedCodeTab(layout) ?? layout);
+  }
+
+  // macOS claims a menu accelerator before the key reaches the webview, so on
+  // the packaged app Cmd+W arrives as this event and never as a keydown the
+  // shortcut table could match. Both paths run the same close, so the chord
+  // means one thing whether the menu or the browser delivered it.
+  useNativeHostEvent(CLOSE_TAB_REQUESTED_EVENT, () => {
+    closeTab();
+  });
 
   // Shell shortcuts are defined here because these actions outlive any one
   // route: toggling the frame, starting a chat, reaching the composer, and
@@ -333,9 +375,7 @@ export function AppShell() {
         return position === null ? layout : selectCenterTab(layout, position);
       }),
     "code-split-editor": () => applyCodeLayout(splitFocusedEditor),
-    // A closed tab is the one case the pure function reports with `null`, since
-    // "nothing here to close" is not the same as "closing changed nothing".
-    "close-tab": () => applyCodeLayout((l) => closeFocusedCodeTab(l) ?? l),
+    "close-tab": closeTab,
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,
