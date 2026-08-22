@@ -410,6 +410,55 @@ async fn register_and_workspace(
     (repo_body, workspace)
 }
 
+/// The smallest valid PNG: a 1x1 RGBA pixel.
+///
+/// Attachment paths run the real ingest, which reads dimensions out of the
+/// header, so a signature followed by filler is not an image and never was —
+/// it only used to reach the turn because resolution trusted the blob store
+/// rather than a publication.
+fn one_pixel_png() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ]
+}
+
+/// Publish one image to a session and return its blob id.
+///
+/// Publication is the authority a turn attachment is checked against, so a
+/// test that attaches an image has to reserve it the way a client does.
+async fn publish_one_pixel_png(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: &str,
+) -> String {
+    let response = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id}/attachments/images"
+        ))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(one_pixel_png())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::CREATED,
+        "publishing the fixture image failed"
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    body["attachment_id"]
+        .as_str()
+        .or_else(|| body["blob_id"].as_str())
+        .expect("the publication names the blob")
+        .to_owned()
+}
+
 fn json_id(value: &serde_json::Value) -> &str {
     value["id"].as_str().expect("id is a string")
 }
@@ -5774,7 +5823,7 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
 #[tokio::test]
 async fn attachments_are_rejected_unless_the_adapter_declares_image_input() {
     let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Unsupported);
-    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
@@ -5795,12 +5844,7 @@ async fn attachments_are_rejected_unless_the_adapter_declares_image_input() {
     assert_eq!(session.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = session.json().await.unwrap();
 
-    let blob = tidebreak_core::DocumentBlob::from_bytes(b"\x89PNG\r\n\x1a\n pretend pixels");
-    runtime
-        .blobs
-        .put(blob.id, b"\x89PNG\r\n\x1a\n pretend pixels".to_vec())
-        .await
-        .unwrap();
+    let blob_id = publish_one_pixel_png(&client, addr, &token, json_id(&session)).await;
 
     let refused = client
         .post(format!(
@@ -5811,7 +5855,7 @@ async fn attachments_are_rejected_unless_the_adapter_declares_image_input() {
         .json(&serde_json::json!({
             "message": "look at this",
             "attachments": [{
-                "blob_id": blob.id,
+                "blob_id": blob_id,
                 "media_type": "image/png",
             }],
         }))
@@ -5834,7 +5878,7 @@ async fn attachments_are_rejected_unless_the_adapter_declares_image_input() {
 #[tokio::test]
 async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_support() {
     let adapter = ScriptedAdapter::new(plain_text_script()).with_image_input(CapLevel::Supported);
-    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
@@ -5855,9 +5899,8 @@ async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_suppor
     assert_eq!(session.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = session.json().await.unwrap();
 
-    let pixels = b"\x89PNG\r\n\x1a\n pretend pixels";
-    let blob = tidebreak_core::DocumentBlob::from_bytes(pixels);
-    runtime.blobs.put(blob.id, pixels.to_vec()).await.unwrap();
+    let pixels = one_pixel_png();
+    let blob_id = publish_one_pixel_png(&client, addr, &token, json_id(&session)).await;
 
     let accepted = client
         .post(format!(
@@ -5868,7 +5911,7 @@ async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_suppor
         .json(&serde_json::json!({
             "message": "look at this",
             "attachments": [{
-                "blob_id": blob.id,
+                "blob_id": blob_id,
                 "media_type": "image/png",
             }],
         }))
@@ -5877,7 +5920,7 @@ async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_suppor
         .unwrap();
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
     let turn: serde_json::Value = accepted.json().await.unwrap();
-    assert_eq!(turn["attachments"][0]["blob_id"], blob.id.to_string());
+    assert_eq!(turn["attachments"][0]["blob_id"], blob_id);
     assert_eq!(turn["attachments"][0]["media_type"], "png");
     assert_eq!(turn["attachments"][0]["byte_len"], pixels.len() as u64);
     assert!(
@@ -5897,7 +5940,7 @@ async fn attachments_are_accepted_and_journaled_when_the_adapter_declares_suppor
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    assert_eq!(listed[0]["attachments"][0]["blob_id"], blob.id.to_string());
+    assert_eq!(listed[0]["attachments"][0]["blob_id"], blob_id);
     assert_eq!(listed[0]["attachments"][0]["byte_len"], pixels.len() as u64);
 }
 
