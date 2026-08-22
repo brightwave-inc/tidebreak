@@ -2132,26 +2132,45 @@ impl CodeRuntime {
         action: CodeTriggerAction,
     ) -> Result<CodeTrigger, ServerError> {
         self.get_repo(owner, repo_id).await?;
-        let existing = list_triggers_for_repo(&self.db, owner, repo_id).await?;
-        if let Some(found) = existing
+        // Match the store's unique key, which is (owner, repo, condition) —
+        // not the condition and action together. `save_trigger` upserts on
+        // that key and updates action and enabled without touching the stored
+        // id, so re-arming one condition with a different action keeps the row
+        // that is already there.
+        let existing = list_triggers_for_repo(&self.db, owner, repo_id)
+            .await?
             .into_iter()
-            .find(|t| t.condition == condition && t.action == action)
-        {
-            return Ok(found);
-        }
+            .find(|trigger| trigger.condition == condition);
         let now = Utc::now();
-        let trigger = CodeTrigger {
-            id: CodeTriggerId::new(),
-            owner: owner.clone(),
-            repo_id,
-            condition,
-            action,
-            enabled: true,
-            created_at: now,
-            updated_at: now,
+        let trigger = match existing {
+            Some(found) if found.action == action && found.enabled => return Ok(found),
+            Some(mut found) => {
+                found.action = action;
+                found.enabled = true;
+                found.updated_at = now;
+                found
+            }
+            None => CodeTrigger {
+                id: CodeTriggerId::new(),
+                owner: owner.clone(),
+                repo_id,
+                condition,
+                action,
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            },
         };
         save_trigger(&self.db, &trigger).await?;
-        Ok(trigger)
+        // Read back rather than returning what we just built. Two arms of the
+        // same condition racing each other both see no row and both mint an
+        // id; only one is stored, and the loser would otherwise answer 201
+        // with an id that GET, PATCH and DELETE cannot find.
+        list_triggers_for_repo(&self.db, owner, repo_id)
+            .await?
+            .into_iter()
+            .find(|trigger| trigger.condition == condition)
+            .ok_or_else(|| ServerError::internal("the trigger vanished after it was saved"))
     }
 
     /// Switch a trigger on or off, keeping the row so the scoping survives.
