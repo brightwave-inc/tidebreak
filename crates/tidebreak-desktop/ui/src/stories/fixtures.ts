@@ -258,6 +258,7 @@ export const codeSession: CodeSessionSnapshot = {
   harness_kind: "claude_code",
   harness_version: "2.1.234 (Claude Code)",
   permission_mode: "ask",
+  fast_mode: false,
   lifecycle: "running",
   attention: attentionWorking,
   unrecognized_event_count: 0,

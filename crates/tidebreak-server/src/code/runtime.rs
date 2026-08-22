@@ -198,6 +198,8 @@ pub(crate) struct NewSessionSettings {
     pub model: Option<String>,
     /// `None` leaves the engine's own default in force.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether the session starts armed for the engine's fast mode.
+    pub fast_mode: bool,
 }
 
 impl CodeRuntime {
@@ -1422,6 +1424,7 @@ impl CodeRuntime {
             permission_mode,
             model,
             reasoning_effort,
+            fast_mode,
         }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
@@ -1497,6 +1500,7 @@ impl CodeRuntime {
             permission_mode,
             model: normalize_model(model),
             reasoning_effort,
+            fast_mode,
             lifecycle: CodeSessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
@@ -1639,8 +1643,18 @@ impl CodeRuntime {
         // opinion" — the inner `None` is a real choice.
         let mut changed = false;
         if let Some(model) = normalize_model(model) {
+            let switched = session.model.as_deref() != Some(model.as_str());
             session.model = Some(model);
             changed = true;
+            // A session armed for fast mode on one model must not carry that
+            // arming onto a model that cannot serve the tier: the engines
+            // reject the request rather than quietly running standard, and a
+            // toggle the picker has already hidden must not keep spending.
+            // Checked only on a real switch, which is rare — the model list
+            // costs a process on some engines.
+            if switched && session.fast_mode && !self.model_serves_fast_mode(&session).await? {
+                session.fast_mode = false;
+            }
         }
         if let Some(effort) = reasoning_effort {
             if session.reasoning_effort != effort {
@@ -2054,6 +2068,71 @@ impl CodeRuntime {
         session.reasoning_effort = effort;
         save_session(&self.db, &session).await?;
         Ok(session)
+    }
+
+    /// Arm or disarm the engine's fast mode for a session.
+    ///
+    /// Refused mid-turn and after the session ends, on the rule the effort
+    /// route already applies. Not refused for a model that cannot serve the
+    /// tier, deliberately: the composer's model choice is local until a turn
+    /// carries it, so gating here would reject the arming the picker just
+    /// offered for the model the user can see selected. This stores intent;
+    /// whether a given turn actually runs fast is decided by the adapter
+    /// against the model that turn really sends — see the launch-time check
+    /// in the Claude adapter. That keeps a stale bit inert rather than
+    /// letting it claim a premium the model would not run.
+    pub(crate) async fn set_fast_mode(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        fast_mode: bool,
+    ) -> Result<CodeSession, ServerError> {
+        let mut session = self.get_session(owner, id).await?;
+        if session.fast_mode == fast_mode {
+            return Ok(session);
+        }
+        match session.lifecycle {
+            CodeSessionLifecycle::Running => {
+                return Err(ServerError::conflict_kind(
+                    "turn_running",
+                    "finish or interrupt the running turn before changing fast mode",
+                ));
+            }
+            CodeSessionLifecycle::Ended => {
+                return Err(ServerError::conflict_kind(
+                    "session_ended",
+                    "this session has ended; start a new one to run it in fast mode",
+                ));
+            }
+            _ => {}
+        }
+        session.fast_mode = fast_mode;
+        save_session(&self.db, &session).await?;
+        Ok(session)
+    }
+
+    /// Whether the session's persisted model advertises fast mode.
+    ///
+    /// Read off the engine's own listing rather than a table here, so a model
+    /// that gains or loses the tier upstream needs no change in this repo. A
+    /// model the engine does not list reads as no fast mode.
+    ///
+    /// Only called when a turn actually switches model, never on the arming
+    /// route: listing costs a process on Codex, and gating the route on the
+    /// persisted id would reject arming for the model the composer is already
+    /// showing as selected.
+    async fn model_serves_fast_mode(&self, session: &CodeSession) -> Result<bool, ServerError> {
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let listed = adapter.list_models(&probe).await;
+        let selected = session.model.as_deref();
+        Ok(listed
+            .iter()
+            .find(|model| match selected {
+                Some(selected) => model.id == selected,
+                None => model.default,
+            })
+            .is_some_and(|model| model.fast_mode))
     }
 
     pub(crate) async fn set_attention(
@@ -2626,6 +2705,7 @@ impl CodeRuntime {
             permission_mode: session.permission_mode,
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort,
+            fast_mode: session.fast_mode,
             resume_ref: session.harness_resume_ref.clone(),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),

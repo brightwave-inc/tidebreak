@@ -187,9 +187,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "GPT 5.6 Sol",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -264,9 +266,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "Sonnet",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -321,9 +325,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "Sonnet",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -373,9 +379,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "Sonnet",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           }),
     );
     await renderWithRouter(
@@ -408,6 +416,7 @@ describe("NewWorkspaceDialog", () => {
             label: "GPT 5.6 Luna",
             default: true,
             reasoning_efforts: [],
+            fast_mode: false,
           },
         ],
         reasoning_efforts: [],
@@ -438,9 +447,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "Sonnet",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -490,9 +501,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "GPT 5.6 Luna",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -546,9 +559,11 @@ describe("NewWorkspaceDialog", () => {
                 label: "Sonnet",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -596,15 +611,18 @@ describe("NewWorkspaceDialog", () => {
                 label: "GPT 5.6 Sol",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
               {
                 id: "claude-opus-5",
                 label: "Claude Opus 5",
                 default: false,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >
@@ -656,21 +674,25 @@ describe("NewWorkspaceDialog", () => {
                 label: "GPT 5.6 Sol",
                 default: true,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
               {
                 id: "claude-opus-5",
                 label: "Claude Opus 5",
                 default: false,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
               {
                 id: "grok-4.5",
                 label: "Grok 4.5",
                 default: false,
                 reasoning_efforts: [],
+                fast_mode: false,
               },
             ],
             reasoning_efforts: [],
+            fast_mode: false,
           })),
         })}
       >

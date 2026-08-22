@@ -42,6 +42,7 @@ impl MigratorTrait for Migrator {
             Box::new(AppOwner),
             Box::new(CodeOwner),
             Box::new(BaselineRepair),
+            Box::new(CodeSessionFastMode),
         ]
     }
 }
@@ -266,6 +267,52 @@ impl MigrationTrait for BaselineRepair {
     }
 }
 
+struct CodeSessionFastMode;
+
+impl MigrationName for CodeSessionFastMode {
+    fn name(&self) -> &str {
+        "m20260822_000005_code_session_fast_mode"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeSessionFastMode {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_table("code_session").await? {
+            return Ok(());
+        }
+        if manager.has_column("code_session", "fast_mode").await? {
+            return Ok(());
+        }
+        // NOT NULL with a false default rather than a nullable tri-state:
+        // fast mode is a spend switch, off is what every engine does unasked,
+        // and so every session that predates this column was not in it. There
+        // is no "no opinion" to record, unlike the effort column beside it.
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Alias::new("code_session"))
+                    .add_column(
+                        ColumnDef::new(idens::CodeSession::FastMode)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: the column belongs to `code_session`, and
+        // `Baseline::down` drops that table outright. Unlike `AppOwner`, the
+        // frozen baseline does not declare this column, so a rolled-back
+        // database gets it again from this migration's `up` on the way back.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -317,6 +364,7 @@ mod tests {
                 "m20260814_000002_app_owner",
                 "m20260814_000003_code_owner",
                 "m20260822_000004_baseline_repair",
+                "m20260822_000005_code_session_fast_mode",
             ]
         );
         assert!(db

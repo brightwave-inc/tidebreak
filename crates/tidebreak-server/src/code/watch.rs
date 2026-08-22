@@ -278,6 +278,10 @@ impl CodeRuntime {
                     // session that spawned it, but not an effort a person
                     // picked for their own conversation.
                     reasoning_effort: None,
+                    // Nor the premium. Fast mode is a spend choice made for a
+                    // conversation someone is watching, and a watch task runs
+                    // unattended where nobody is waiting on the tokens.
+                    fast_mode: false,
                 },
             )
             .await?;

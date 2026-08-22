@@ -949,6 +949,7 @@ async fn drive_turn_inner(
         text: engine_text,
         model: session.model.clone(),
         reasoning_effort: session.reasoning_effort,
+        fast_mode: session.fast_mode,
         images,
     });
     tokio::pin!(run);
@@ -1905,6 +1906,7 @@ mod tests {
                 permission_mode: PermissionMode::Plan,
                 model: None,
                 reasoning_effort: None,
+                fast_mode: false,
                 lifecycle: CodeSessionLifecycle::Running,
                 fence_reason: None,
                 child_pid: None,

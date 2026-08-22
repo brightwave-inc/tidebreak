@@ -539,6 +539,7 @@ mod tests {
             permission_mode: tidebreak_core::PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,

@@ -119,6 +119,9 @@ pub struct CodeSessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether this session runs its turns in the engine's fast mode.
+    #[serde(default)]
+    pub fast_mode: bool,
     pub lifecycle: CodeSessionLifecycle,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -140,6 +143,7 @@ impl From<CodeSession> for CodeSessionSnapshot {
             permission_mode: session.permission_mode,
             model: session.model,
             reasoning_effort: session.reasoning_effort,
+            fast_mode: session.fast_mode,
             lifecycle: session.lifecycle,
             fence_reason: session.fence_reason,
             attention: session.attention,
@@ -267,6 +271,10 @@ pub struct HarnessModel {
     /// Effort levels this row accepts, ascending. Empty hides the control.
     #[serde(default)]
     pub reasoning_efforts: Vec<ReasoningEffort>,
+    /// Whether this row can serve the engine's fast mode. `false` hides the
+    /// control, the same way an empty effort ladder does.
+    #[serde(default)]
+    pub fast_mode: bool,
 }
 
 /// `GET /code/harnesses/{kind}/models`.
@@ -1113,6 +1121,8 @@ pub struct CreateSessionBody {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub fast_mode: bool,
 }
 
 /// Body of `POST /code/sessions/{id}/mode`.
@@ -1130,6 +1140,13 @@ pub struct SetPermissionModeBody {
 #[serde(deny_unknown_fields)]
 pub struct SetReasoningEffortBody {
     pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Body of `POST /code/sessions/{id}/fast-mode`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetFastModeBody {
+    pub fast_mode: bool,
 }
 
 /// Body of `POST /code/sessions/{id}/turns`.

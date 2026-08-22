@@ -426,6 +426,13 @@ pub struct ListedHarnessModel {
     /// Per model, not per engine: Codex advertises a different ladder for a
     /// gateway row than for its own, and only some rows reach `ultra`.
     pub reasoning_efforts: Vec<tidebreak_core::ReasoningEffort>,
+    /// Whether this row can serve the engine's fast mode.
+    ///
+    /// Per model, not per engine, for the same reason the effort ladder is:
+    /// Anthropic serves fast mode on part of the Opus line only, and Codex
+    /// advertises the tier per row. `false` hides the toggle rather than
+    /// letting a user arm a premium that the selected model would ignore.
+    pub fast_mode: bool,
 }
 
 /// Stamp one engine-wide effort ladder over every listed row.
@@ -585,6 +592,10 @@ fn push_listed(models: &mut Vec<ListedHarnessModel>, id: String, default: bool) 
         // A line of `<engine> models` output says nothing about effort. An
         // adapter with a ladder fills this in over the parsed rows.
         reasoning_efforts: Vec::new(),
+        // Nor does it say anything about fast mode. Off is the safe read:
+        // arming a premium the row cannot serve would spend nothing extra but
+        // would tell the user something untrue about the turn.
+        fast_mode: false,
     });
 }
 

@@ -201,6 +201,13 @@ export type CodeModelOption = {
    * Absent falls back to the engine's own ladder; see [`effortLadder`].
    */
   reasoning_efforts?: readonly ReasoningEffort[];
+  /**
+   * Whether this row serves the engine's fast mode. Absent reads as no: a row
+   * the engine did not list, or a server that predates the field, cannot
+   * promise a tier, and offering one it will not honor is worse than hiding
+   * the control.
+   */
+  fast_mode?: boolean;
 };
 
 /**
@@ -281,6 +288,7 @@ export function harnessCodeModels(
     label: string;
     default?: boolean;
     reasoning_efforts?: readonly ReasoningEffort[];
+    fast_mode?: boolean;
   }[],
   kind: HarnessKind,
 ): CodeModelOption[] {
@@ -292,6 +300,7 @@ export function harnessCodeModels(
     vendor: vendorForModelId(option.id),
     default: option.default,
     reasoning_efforts: option.reasoning_efforts,
+    fast_mode: option.fast_mode,
   }));
 }
 

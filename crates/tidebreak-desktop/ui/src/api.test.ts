@@ -1703,8 +1703,10 @@ describe("code workspace sessions", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
+    // The payload omits `fast_mode`, as a server predating the field does.
+    // It reads as off, which is what such a session was actually running.
     await expect(client.listCodeWorkspaceSessions("ws-1")).resolves.toEqual([
-      session,
+      { ...session, fast_mode: false },
     ]);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/sessions");

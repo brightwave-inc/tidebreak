@@ -13,8 +13,8 @@ use axum::response::{IntoResponse, Response};
 
 use super::types::{
     CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
-    SequencedCodeEventFrame, SetAttentionBody, SetPermissionModeBody, SetReasoningEffortBody,
-    SteerBody, SubmitTurnBody,
+    SequencedCodeEventFrame, SetAttentionBody, SetFastModeBody, SetPermissionModeBody,
+    SetReasoningEffortBody, SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
@@ -32,6 +32,7 @@ pub async fn create_session(
                 permission_mode: body.permission_mode,
                 model: body.model,
                 reasoning_effort: body.reasoning_effort,
+                fast_mode: body.fast_mode,
             },
         )
         .await?;
@@ -220,6 +221,21 @@ pub async fn set_session_reasoning_effort(
     Json(body): Json<SetReasoningEffortBody>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     let session = code.set_reasoning_effort(id, body.reasoning_effort).await?;
+    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+}
+
+/// `POST /code/sessions/{id}/fast-mode` — arm or disarm the engine's fast mode.
+///
+/// Fast mode buys output speed at a premium rate, so this is a spend switch
+/// rather than a quality one. Refused while a turn is running and after the
+/// session ends, on the rule the mode and effort routes share, and refused
+/// when the session's model does not serve the tier.
+pub async fn set_session_fast_mode(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+    Json(body): Json<SetFastModeBody>,
+) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+    let session = code.set_fast_mode(id, body.fast_mode).await?;
     Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
 }
 

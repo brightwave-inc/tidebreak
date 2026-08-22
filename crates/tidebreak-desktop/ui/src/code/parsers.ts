@@ -1751,6 +1751,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "permission_mode",
       "model",
       "reasoning_effort",
+      "fast_mode",
       "lifecycle",
       "fence_reason",
       "attention",
@@ -1766,6 +1767,9 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !optionalString(value.model) ||
     (value.reasoning_effort !== undefined &&
       !isMember(value.reasoning_effort, REASONING_EFFORTS)) ||
+    // Serialized unconditionally, but tolerate its absence: a session row
+    // written before fast mode existed reads as off, which is what it was.
+    (value.fast_mode !== undefined && typeof value.fast_mode !== "boolean") ||
     !isMember(value.permission_mode, PERMISSION_MODES) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
@@ -1790,6 +1794,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     attention,
     unrecognized_event_count: value.unrecognized_event_count,
     created_at: value.created_at,
+    fast_mode: value.fast_mode === true,
     ...(value.harness_version !== undefined
       ? { harness_version: value.harness_version }
       : {}),
@@ -2264,6 +2269,7 @@ export type ParsedHarnessModel = {
   label: string;
   default: boolean;
   reasoning_efforts: ReasoningEffort[];
+  fast_mode: boolean;
 };
 
 function parseEfforts(value: unknown): ReasoningEffort[] {
@@ -2303,6 +2309,9 @@ export function parseHarnessModelList(value: unknown): {
       label: item.label,
       default: item.default,
       reasoning_efforts: parseEfforts(item.reasoning_efforts),
+      // A server that predates the field offers no fast mode, which is the
+      // same thing a row without the tier says.
+      fast_mode: item.fast_mode === true,
     });
   }
   return {

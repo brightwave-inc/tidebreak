@@ -148,6 +148,7 @@ const SESSION: CodeSessionSnapshot = {
   kind: "interactive" as const,
   harness_kind: "claude_code" as const,
   permission_mode: "ask" as const,
+  fast_mode: false,
   lifecycle: "idle" as const,
   attention: {
     state: { type: "done_unreviewed" as const },
@@ -1468,6 +1469,7 @@ describe("CodeWorkspacePage", () => {
       id: "sess-watch",
       kind: "watch" as const,
       permission_mode: "auto" as const,
+      fast_mode: false,
       lifecycle: "idle" as const,
     };
     client.listCodeWorkspaceSessions.mockResolvedValue([SESSION, watchSession]);

@@ -1795,6 +1795,7 @@ function CodeSessionPane({
   const [settings, setSettings] = useState({
     permissionMode: session.permission_mode,
     reasoningEffort: session.reasoning_effort ?? null,
+    fastMode: session.fast_mode,
   });
 
   useEffect(() => {
@@ -1805,8 +1806,14 @@ function CodeSessionPane({
     setSettings({
       permissionMode: session.permission_mode,
       reasoningEffort: session.reasoning_effort ?? null,
+      fastMode: session.fast_mode,
     });
-  }, [session.id, session.permission_mode, session.reasoning_effort]);
+  }, [
+    session.id,
+    session.permission_mode,
+    session.reasoning_effort,
+    session.fast_mode,
+  ]);
 
   useEffect(() => {
     // An empty list is a finished fetch: this engine advertised no models.
@@ -1950,6 +1957,7 @@ function CodeSessionPane({
       setSettings({
         permissionMode: updated.permission_mode,
         reasoningEffort: updated.reasoning_effort ?? null,
+        fastMode: updated.fast_mode,
       });
     } catch (err) {
       setSettings((current) => ({ ...current, permissionMode: previous }));
@@ -1968,10 +1976,27 @@ function CodeSessionPane({
       setSettings({
         permissionMode: updated.permission_mode,
         reasoningEffort: updated.reasoning_effort ?? null,
+        fastMode: updated.fast_mode,
       });
     } catch (err) {
       setSettings((current) => ({ ...current, reasoningEffort: previous }));
       toast.error(friendlyErrorMessage(err, "Could not change the reasoning"));
+    }
+  }
+
+  async function changeFastMode(fastMode: boolean) {
+    const previous = settings.fastMode;
+    setSettings((current) => ({ ...current, fastMode }));
+    try {
+      const updated = await client.setCodeSessionFastMode(session.id, fastMode);
+      setSettings({
+        permissionMode: updated.permission_mode,
+        reasoningEffort: updated.reasoning_effort ?? null,
+        fastMode: updated.fast_mode,
+      });
+    } catch (err) {
+      setSettings((current) => ({ ...current, fastMode: previous }));
+      toast.error(friendlyErrorMessage(err, "Could not change fast mode"));
     }
   }
 
@@ -2054,6 +2079,7 @@ function CodeSessionPane({
           permissionMode={settings.permissionMode}
           availableModes={availableModes}
           reasoningEffort={settings.reasoningEffort}
+          fastMode={settings.fastMode}
           engineEfforts={engineEfforts}
           harness={session.harness_kind}
           model={model ?? undefined}
@@ -2078,6 +2104,7 @@ function CodeSessionPane({
               ? undefined
               : changeReasoningEffort
           }
+          onFastModeChange={changeFastMode}
           contextUsage={
             lastUsage
               ? {

@@ -318,6 +318,13 @@ export type ComposerProps = {
   modelMenu?: ReactNode;
   /** Sits immediately to the right of `modelMenu` when the surface offers one. */
   effortMenu?: ReactNode;
+  /**
+   * Fast-mode switch, between the model and the effort control. It sits with
+   * them because all three describe how the next turn runs, and next to the
+   * effort control specifically because those two are the pair that costs
+   * money to change.
+   */
+  fastModeToggle?: ReactNode;
   permissionMenu?: ReactNode;
   /**
    * Context-window reading, shown with the composer's own controls. Null
@@ -370,6 +377,7 @@ export function Composer({
   history = [],
   modelMenu,
   effortMenu,
+  fastModeToggle,
   permissionMenu,
   contextUsage,
   network,
@@ -1143,6 +1151,7 @@ export function Composer({
             }
           />
           {modelMenu}
+          {fastModeToggle}
           {effortMenu}
         </div>
         <div className="flex items-center gap-2">

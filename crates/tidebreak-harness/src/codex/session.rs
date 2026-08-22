@@ -28,6 +28,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 
+/// The service-tier id Codex serves fast mode under.
+///
+/// Its catalog advertises the tier two ways — `additionalSpeedTiers` lists it
+/// as `fast`, while `serviceTiers` carries the id a request sends. The request
+/// takes the latter.
+const FAST_SERVICE_TIER: &str = "priority";
+
 /// Live Codex session: one app-server child for the session lifetime.
 pub struct CodexSession {
     spec: SessionSpec,
@@ -837,6 +844,13 @@ impl HarnessSession for CodexSession {
         if let Some(effort) = self.resolved_effort(input.reasoning_effort) {
             params["effort"] = json!(effort.as_str());
         }
+        // Codex spells fast mode as a service tier, and `priority` is the id
+        // its own catalog labels "Fast". Sent only when armed: an explicit
+        // `standard` on every turn would be the same noise the comment above
+        // warns about, and off is already the thread's default.
+        if input.fast_mode {
+            params["serviceTier"] = json!(FAST_SERVICE_TIER);
+        }
         let posture_unsent = self.posture_unsent.load(Ordering::SeqCst);
         if posture_unsent {
             let (sandbox, approval) = turn_start_policy(self.permission_mode());
@@ -1390,6 +1404,7 @@ done
             permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             resume_ref: Some("THREAD-1".into()),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
@@ -1440,6 +1455,7 @@ done
             permission_mode: PermissionMode::Auto,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             resume_ref,
             extra_argv: Vec::new(),
             extra_env: vec![(
@@ -1486,6 +1502,7 @@ done
                 text: "first turn".into(),
                 model: None,
                 reasoning_effort: None,
+                fast_mode: false,
                 images: Vec::new(),
             })
             .await
@@ -1830,6 +1847,7 @@ done
                         text: "first turn".into(),
                         model: None,
                         reasoning_effort: None,
+                        fast_mode: false,
                         images: Vec::new(),
                     })
                     .await

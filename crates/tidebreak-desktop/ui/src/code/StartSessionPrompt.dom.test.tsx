@@ -218,9 +218,11 @@ describe("StartSessionPrompt", () => {
             label: "Claude Opus 5",
             default: true,
             reasoning_efforts: [],
+            fast_mode: false,
           },
         ],
         reasoning_efforts: [],
+        fast_mode: false,
       })),
     };
     await renderWithRouter(
@@ -271,9 +273,11 @@ describe("StartSessionPrompt", () => {
                   label: "Sonnet",
                   default: true,
                   reasoning_efforts: [],
+                  fast_mode: false,
                 },
               ],
               reasoning_efforts: [],
+              fast_mode: false,
             }),
       ),
     };
@@ -313,6 +317,7 @@ describe("StartSessionPrompt", () => {
             label: "GPT 5.6 Luna",
             default: true,
             reasoning_efforts: [],
+            fast_mode: false,
           },
         ],
         reasoning_efforts: [],

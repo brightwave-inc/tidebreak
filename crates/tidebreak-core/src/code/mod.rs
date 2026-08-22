@@ -733,6 +733,15 @@ pub struct CodeSession {
     /// default in force, which no level on the ladder is equivalent to.
     #[serde(default)]
     pub reasoning_effort: Option<crate::model::ReasoningEffort>,
+    /// Whether this session runs its turns in the engine's fast mode.
+    ///
+    /// Fast mode buys output speed at a higher price per token, so it is a
+    /// spend decision rather than a quality one — unlike the effort ladder,
+    /// which trades thinking depth for the same rate. Off is the engines' own
+    /// default, so `false` is the honest starting value rather than a missing
+    /// opinion, and a model that cannot serve fast mode ignores it.
+    #[serde(default)]
+    pub fast_mode: bool,
     /// Session lifecycle.
     pub lifecycle: CodeSessionLifecycle,
     /// Why the session is fenced, when it is.

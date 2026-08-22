@@ -773,6 +773,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
+            fast_mode: false,
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,

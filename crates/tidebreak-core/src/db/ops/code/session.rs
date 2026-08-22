@@ -31,6 +31,7 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
         reasoning_effort: Set(session
             .reasoning_effort
             .map(|effort| effort.as_str().to_owned())),
+        fast_mode: Set(session.fast_mode),
         lifecycle: Set(session.lifecycle.as_str().to_owned()),
         fence_reason: Set(match &session.fence_reason {
             Some(reason) => Some(serde_json::to_value(reason)?),
@@ -256,6 +257,10 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
             ),
         )
         .col_expr(
+            entities::code_session::Column::FastMode,
+            sea_orm::sea_query::Expr::value(session.fast_mode),
+        )
+        .col_expr(
             entities::code_session::Column::Lifecycle,
             sea_orm::sea_query::Expr::value(session.lifecycle.as_str().to_owned()),
         )
@@ -405,6 +410,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         permission_mode,
         model: row.model,
         reasoning_effort,
+        fast_mode: row.fast_mode,
         lifecycle,
         fence_reason,
         child_pid: row.child_pid,

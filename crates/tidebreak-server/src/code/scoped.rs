@@ -547,6 +547,14 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn set_fast_mode(
+        &self,
+        id: CodeSessionId,
+        fast_mode: bool,
+    ) -> Result<CodeSession, ServerError> {
+        self.runtime.set_fast_mode(&self.owner, id, fast_mode).await
+    }
+
     pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
         // Authorize the session first: without this the worker registry would
         // answer for a session id whatever owner holds it.

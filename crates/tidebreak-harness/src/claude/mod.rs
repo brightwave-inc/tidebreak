@@ -43,6 +43,26 @@ pub(crate) const EFFORT_LADDER: &[ReasoningEffort] = &[
     ReasoningEffort::Ultra,
 ];
 
+/// Whether `claude` can serve fast mode for this model id.
+///
+/// Anthropic offers fast mode on part of the Opus line only, and rejects
+/// `speed` elsewhere. The engine states no machine-readable capability for it,
+/// so this matches the ids it does serve rather than guessing from the family:
+/// a wrong `true` arms a toggle whose turns quietly run at the standard speed
+/// while reading as fast, which is worse than not offering it.
+///
+/// Ids reach us from `settings.json`, so they carry whatever prefix the user's
+/// route uses — a gateway row is `anthropic-us-claude-opus-5`, not
+/// `claude-opus-5`. Match on the leaf and let a prefixed row through.
+#[must_use]
+pub(crate) fn model_serves_fast_mode(id: &str) -> bool {
+    const FAST_MODE_MODELS: &[&str] = &["claude-opus-5", "claude-opus-4-8"];
+    let id = id.trim();
+    FAST_MODE_MODELS
+        .iter()
+        .any(|model| id == *model || id.ends_with(&format!("-{model}")))
+}
+
 fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let Some(home) = home else {
@@ -72,6 +92,7 @@ fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
             models.push(crate::ListedHarnessModel {
                 label: crate::display_model_label(id),
                 default: current == Some(id),
+                fast_mode: model_serves_fast_mode(id),
                 id: id.to_owned(),
                 reasoning_efforts: EFFORT_LADDER.to_vec(),
             });
@@ -86,6 +107,7 @@ fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
                     id: current.to_owned(),
                     default: true,
                     reasoning_efforts: EFFORT_LADDER.to_vec(),
+                    fast_mode: model_serves_fast_mode(current),
                 },
             );
         }
