@@ -1,6 +1,6 @@
 # 2. Pre-v1 Schema and Persisted-Format Mutability
 
-- Status: Accepted
+- Status: Superseded by [decision 61](0061-schema-changes-are-migrations.md)
 - Date: 2026-08-07
 - Owners: core
 - Related: [`crates/tidebreak-core/src/db/migration.rs`](../../crates/tidebreak-core/src/db/migration.rs)

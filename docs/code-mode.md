@@ -98,8 +98,9 @@ pair. Nothing else: no git library, no editor component, no diff library
 
 ## Data model
 
-Baseline schema edit plus a `DESKTOP_SCHEMA_EPOCH` bump, per
-[`0002`](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md).
+A schema change here is an appended migration, per
+[`0061`](decisions/0061-schema-changes-are-migrations.md). The tables below
+describe the current schema, not the frozen baseline.
 
 - **`code_repo`** — `id`, `root_path` (unique, canonical toplevel),
   `display_name`, `default_base_ref`, `branch_prefix`, `setup_script`,

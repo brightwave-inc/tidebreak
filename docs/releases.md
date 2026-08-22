@@ -598,15 +598,16 @@ its local profile until this checklist is complete:
 1. Define the stable compatibility surface: persisted local data,
    configuration, CLI/API behavior, extension protocols, and supported upgrade
    window.
-2. Replace the pre-v1-only guard in
-   `crates/tidebreak-server/src/desktop_schema.rs` with the durable v1 lifecycle.
-   Re-squash the in-place `Baseline` again into a single clean first
-   migration — the public-opening squash is not the last v0 edit — and invert
-   [decision record 2](decisions/0002-pre-v1-schema-and-persisted-format-mutability.md)
-   in the same change: the journal and schema-baseline fixtures' failure
-   messages flip back from "bump the epoch" to "add an alias or write a
-   migration", the baseline becomes the first entry in a real migration chain,
-   and `reset_pre_v1_state` stops being reachable.
+2. Replace the product-major guard in
+   `crates/tidebreak-server/src/desktop_schema.rs` with the v1 lifecycle. Most
+   of what this item used to describe is already done:
+   [decision 61](decisions/0061-schema-changes-are-migrations.md) froze the
+   baseline, made every schema change an appended migration, and flipped the
+   journal fixtures' failure messages back to "add an alias or write a
+   migration". What is left is the release commitment itself — squash the chain
+   into a single clean first migration for `1.0.0`, move `LAST_RESET_EPOCH` to
+   that squash, and decide whether `reset_pre_v1_state` can finally go, which
+   depends on whether any profile below the pin can still reach a v1 binary.
    The lifecycle must preserve supported data, migrate transactionally, fail
    safely, and test upgrades from the latest 0.x state.
 3. Verify the provisioned release pipeline with clean install and 0.x upgrade

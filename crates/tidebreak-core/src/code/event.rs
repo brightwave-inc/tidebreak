@@ -555,9 +555,10 @@ mod tests {
     const JOURNAL_FIXTURE: &str = "fixtures/code-journal-events.json";
 
     /// `CodeEvent` is written into `code_event.event` and read back, so its
-    /// field names are a storage format. Pre-v1 this test is a change
-    /// detector: a payload change that ships without a
-    /// `DESKTOP_SCHEMA_EPOCH` bump would make old rows unreadable.
+    /// field names are a storage format. Rows in the old shape survive a
+    /// schema change now, so a diff here needs a `#[serde(alias)]` or a
+    /// migration, not a refreshed fixture on its own — see the same test on
+    /// `AgentEvent` in [`crate::event`].
     ///
     /// Regenerate with
     /// `UPDATE_CODE_JOURNAL_FIXTURE=1 cargo test -p tidebreak-core`.
@@ -577,9 +578,10 @@ mod tests {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         assert_eq!(
             existing, rendered,
-            "the code journal event shape changed; if this is deliberate, bump \
-             DESKTOP_SCHEMA_EPOCH in tidebreak-server so existing databases are \
-             discarded, then regenerate with UPDATE_CODE_JOURNAL_FIXTURE=1 cargo \
+            "the code journal event shape changed, and rows in this shape \
+             already exist in databases nothing deletes; make the change \
+             readable from the old shape with #[serde(alias)], or migrate the \
+             rows, then regenerate with UPDATE_CODE_JOURNAL_FIXTURE=1 cargo \
              test -p tidebreak-core"
         );
     }

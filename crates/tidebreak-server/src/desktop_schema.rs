@@ -1,19 +1,27 @@
-//! Pre-v1 lifecycle for the local SQLite profile.
+//! The lifecycle for the local SQLite profile.
 //!
-//! During `0.0.0` development we intentionally edit the schema baseline.
-//! SeaORM cannot detect that an already-recorded baseline changed, so the
-//! local profile keeps a small schema epoch outside SQLite. An older pre-v1
-//! epoch (or a database from before epochs existed) is disposable and gets
-//! rebuilt. Once the lifecycle changes for v1, pre-v1 binaries fail closed
-//! instead.
+//! A schema change is an appended migration in `tidebreak-core`'s
+//! `db::migration` chain, and an appended migration reaches an existing
+//! database without deleting it. So this file no longer decides whether to
+//! keep local data. It decides one thing: whether a database predates the pin
+//! the chain starts from.
+//!
+//! [`LAST_RESET_EPOCH`] is that pin. Before it, a schema change was an
+//! in-place baseline edit plus an epoch bump, and the bump deleted the
+//! database because no migration could reach it. A profile still sitting below
+//! the pin holds some baseline revision nothing recorded, so there is no
+//! migration anyone could write for it — it gets one last reset. A profile at
+//! the pin holds exactly the baseline the chain starts from, so it converges:
+//! the marker is re-stamped and the chain takes it from there. Neither case
+//! happens twice, and the epoch never moves again.
 //!
 //! The reset deletes the SQLite files (and the host-broker's durable
 //! authority, which keys on conversation ids the reset invalidates) — and
-//! nothing else in the data directory. Durable state that must survive an
-//! epoch bump lives in sidecar files here by design: the schema marker
-//! itself, and the provisioned gateway policy (`gateway-policy.json`, see
-//! [`crate::managed_policy`]), whose loss would resolve the profile
-//! unmanaged and orphan the gateway session it authorized.
+//! nothing else in the data directory. Durable state that must survive it
+//! lives in sidecar files here by design: the schema marker itself, and the
+//! provisioned gateway policy (`gateway-policy.json`, see
+//! [`crate::managed_policy`]), whose loss would resolve the profile unmanaged
+//! and orphan the gateway session it authorized.
 //!
 //! The data directory is not the whole story, though. Code worktrees live
 //! outside it on purpose (Decision 53), so dropping the database strands every
@@ -34,12 +42,24 @@ use tidebreak_core::{AgentError, Config, DbStore, Result};
 
 const DATABASE_FILE: &str = "tidebreak.db";
 const MARKER_FILE: &str = "tidebreak-schema.json";
+/// A profile whose schema still came from an in-place baseline edit, kept
+/// current by deleting it. Nothing writes this any more; it is read so a
+/// profile written before the pin can be recognized and converged.
 const PRE_V1_LIFECYCLE: &str = "pre_v1";
+/// A profile the migration chain maintains. Its schema changes by appended
+/// migration, and its data survives.
+const MIGRATED_LIFECYCLE: &str = "migrations";
 const VECTOR_DIRECTORY: &str = "vectors";
 const MAX_MARKER_BYTES: u64 = 1_024;
 
-/// Bump this whenever the pre-v1 schema baseline changes incompatibly.
-const DESKTOP_SCHEMA_EPOCH: u32 = 41;
+/// The last epoch that ever deleted a local database, and the baseline the
+/// migration chain starts from.
+///
+/// Frozen. Do not bump it for a schema change — append a migration instead, so
+/// the change reaches a database that already exists rather than only a fresh
+/// one. It moves again only at the `1.0.0` squash, when the chain collapses
+/// back into a single baseline.
+const LAST_RESET_EPOCH: u32 = 41;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,9 +71,15 @@ struct SchemaMarker {
 impl SchemaMarker {
     fn current() -> Self {
         Self {
-            lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-            epoch: DESKTOP_SCHEMA_EPOCH,
+            lifecycle: MIGRATED_LIFECYCLE.to_owned(),
+            epoch: LAST_RESET_EPOCH,
         }
+    }
+
+    /// A profile written before the pin, by a binary that kept the schema
+    /// current by deleting the database.
+    fn is_pre_pin(&self) -> bool {
+        self.lifecycle == PRE_V1_LIFECYCLE && self.epoch <= LAST_RESET_EPOCH
     }
 }
 
@@ -89,7 +115,7 @@ async fn prepare(data_dir: &Path) -> Result<bool> {
 async fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Result<bool> {
     if product_major != "0" {
         return Err(AgentError::config(format!(
-            "pre-v1 local SQLite schema lifecycle is disabled for product major {product_major}"
+            "local SQLite schema lifecycle is disabled for product major {product_major}"
         )));
     }
     let database = data_dir.join(DATABASE_FILE);
@@ -103,16 +129,25 @@ async fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Resu
             remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
             Ok(false)
         }
-        Some(saved)
-            if saved.lifecycle == PRE_V1_LIFECYCLE && saved.epoch < DESKTOP_SCHEMA_EPOCH =>
-        {
+        // At the pin, written by a binary from before the chain existed. The
+        // tables are already the ones the chain starts from, so there is
+        // nothing to repair: re-stamp the marker and let the migrations run.
+        // This is the only path that keeps a pre-v1 profile's data.
+        Some(saved) if saved.is_pre_pin() && saved.epoch == LAST_RESET_EPOCH => {
+            remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
+            Ok(true)
+        }
+        // Below the pin. The schema is some baseline revision that was edited
+        // in place and never recorded, so no migration can know what it holds.
+        // One last reset, and this profile never takes another.
+        Some(saved) if saved.is_pre_pin() => {
             remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
             reset_pre_v1_state(&database).await?;
             Ok(true)
         }
         None if database.exists() => {
             // Databases predating this marker are from the disposable pre-v1
-            // development line. The v1 lifecycle will always retain a marker.
+            // development line, below the pin by definition.
             remove_retired_vectors(&data_dir.join(VECTOR_DIRECTORY))?;
             reset_pre_v1_state(&database).await?;
             Ok(true)
@@ -125,8 +160,8 @@ async fn prepare_for_product_major(data_dir: &Path, product_major: &str) -> Resu
             Ok(true)
         }
         Some(saved) => Err(AgentError::config(format!(
-            "refusing to reset local SQLite database for schema marker lifecycle {:?}, epoch {}; this binary supports {:?}, epoch {}",
-            saved.lifecycle, saved.epoch, PRE_V1_LIFECYCLE, DESKTOP_SCHEMA_EPOCH
+            "refusing to open local SQLite database for schema marker lifecycle {:?}, epoch {}; this binary maintains {:?}, epoch {}",
+            saved.lifecycle, saved.epoch, MIGRATED_LIFECYCLE, LAST_RESET_EPOCH
         ))),
     }
 }
@@ -144,13 +179,13 @@ fn read_marker(marker: &Path) -> Result<Option<SchemaMarker>> {
     };
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(AgentError::config(format!(
-            "refusing to reset local SQLite database with non-regular schema marker {}",
+            "refusing to open local SQLite database with non-regular schema marker {}",
             marker.display()
         )));
     }
     if metadata.len() > MAX_MARKER_BYTES {
         return Err(AgentError::config(format!(
-            "refusing to reset local SQLite database with oversized schema marker {}",
+            "refusing to open local SQLite database with oversized schema marker {}",
             marker.display()
         )));
     }
@@ -165,7 +200,7 @@ fn read_marker(marker: &Path) -> Result<Option<SchemaMarker>> {
         })?;
     if bytes.len() as u64 > MAX_MARKER_BYTES {
         return Err(AgentError::config(format!(
-            "refusing to reset local SQLite database with oversized schema marker {}",
+            "refusing to open local SQLite database with oversized schema marker {}",
             marker.display()
         )));
     }
@@ -173,7 +208,7 @@ fn read_marker(marker: &Path) -> Result<Option<SchemaMarker>> {
         .map(Some)
         .map_err(|error| {
             AgentError::config(format!(
-                "refusing to reset local SQLite database with unreadable schema marker {}: {error}",
+                "refusing to open local SQLite database with unreadable schema marker {}: {error}",
                 marker.display()
             ))
         })
@@ -623,7 +658,7 @@ mod tests {
             data_dir.join(MARKER_FILE),
             serde_json::to_vec(&SchemaMarker {
                 lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-                epoch: DESKTOP_SCHEMA_EPOCH - 1,
+                epoch: LAST_RESET_EPOCH - 1,
             })
             .unwrap(),
         )
@@ -631,7 +666,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_schema_epoch_preserves_database_and_removes_retired_vectors() {
+    async fn a_migrated_profile_is_kept_and_its_retired_vectors_removed() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::desktop(dir.path());
         let first = connect(&config).await.unwrap();
@@ -651,8 +686,11 @@ mod tests {
         assert!(!vector.exists());
     }
 
+    /// Below the pin the schema is some in-place baseline revision nothing
+    /// recorded, so there is no migration anyone could write for it. This is
+    /// the last reset such a profile ever takes.
     #[tokio::test]
-    async fn older_pre_v1_epoch_resets_database() {
+    async fn a_profile_below_the_pin_takes_one_last_reset() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::desktop(dir.path());
         let first = connect(&config).await.unwrap();
@@ -665,6 +703,46 @@ mod tests {
         let reset = connect(&config).await.unwrap();
 
         assert!(reset.list_chats().await.unwrap().is_empty());
+    }
+
+    /// The promise the posture rests on: a profile written by the last pre-v1
+    /// binary holds exactly the baseline the chain starts from, so it keeps
+    /// its data and is re-stamped rather than deleted.
+    ///
+    /// This is the one migration path nobody gets to test twice. Every
+    /// contributor's profile is sitting at this marker right now, and the
+    /// arm that reads it runs once per profile and then never again.
+    #[tokio::test]
+    async fn a_pre_v1_profile_at_the_pin_keeps_its_data_and_converges() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::desktop(dir.path());
+        let first = connect(&config).await.unwrap();
+        let expected = chat();
+        first.create_chat(&expected).await.unwrap();
+        drop(first);
+        // What the last epoch-driven binary left behind.
+        std::fs::write(
+            dir.path().join(MARKER_FILE),
+            serde_json::to_vec(&SchemaMarker {
+                lifecycle: PRE_V1_LIFECYCLE.to_owned(),
+                epoch: LAST_RESET_EPOCH,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let converged = connect(&config).await.unwrap();
+
+        assert_eq!(
+            converged.get_chat(expected.id).await.unwrap(),
+            Some(expected),
+            "a profile at the pin must survive the switch to migrations"
+        );
+        assert_eq!(
+            read_marker(&dir.path().join(MARKER_FILE)).unwrap(),
+            Some(SchemaMarker::current()),
+            "the profile must be re-stamped, so the next boot takes the migrated path"
+        );
     }
 
     #[tokio::test]
@@ -689,7 +767,7 @@ mod tests {
             Ok(_) => panic!("future lifecycle marker was accepted"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("refusing to reset"));
+        assert!(error.to_string().contains("refusing to open"));
 
         let unchanged = DbStore::connect(&config.database_url().unwrap())
             .await
@@ -705,7 +783,7 @@ mod tests {
         assert_rejected_marker_preserves_database(
             serde_json::to_vec(&SchemaMarker {
                 lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-                epoch: DESKTOP_SCHEMA_EPOCH + 1,
+                epoch: LAST_RESET_EPOCH + 1,
             })
             .unwrap(),
         )
@@ -742,7 +820,7 @@ mod tests {
         let config = Config::desktop(dir.path());
         let older = SchemaMarker {
             lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-            epoch: DESKTOP_SCHEMA_EPOCH - 1,
+            epoch: LAST_RESET_EPOCH - 1,
         };
         std::fs::write(
             dir.path().join(MARKER_FILE),
@@ -770,7 +848,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let old = serde_json::to_vec(&SchemaMarker {
             lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-            epoch: DESKTOP_SCHEMA_EPOCH - 1,
+            epoch: LAST_RESET_EPOCH - 1,
         })
         .unwrap();
         std::fs::write(dir.path().join(MARKER_FILE), &old).unwrap();
@@ -788,7 +866,7 @@ mod tests {
             dir.path().join(MARKER_FILE),
             serde_json::to_vec(&SchemaMarker {
                 lifecycle: PRE_V1_LIFECYCLE.to_owned(),
-                epoch: DESKTOP_SCHEMA_EPOCH - 1,
+                epoch: LAST_RESET_EPOCH - 1,
             })
             .unwrap(),
         )
@@ -869,7 +947,7 @@ mod tests {
             Ok(_) => panic!("unsupported schema marker was accepted"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("refusing to reset"));
+        assert!(error.to_string().contains("refusing to open"));
 
         let unchanged = DbStore::connect(&config.database_url().unwrap())
             .await
