@@ -58,13 +58,17 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import { RouteFrame } from "@/RouteFrame";
 import type {
+  CodeDeliveryPullRequestDetail,
   CodeDeliveryPullRequestSummary,
+  CodeDeliveryPullRequestTarget,
   CodeDeliveryRunDetail,
   CodeDeliveryRunKind,
   CodeDeliveryRunSummary,
+  CodeDeliveryRunTarget,
   CodeDeliverySourceError,
   CodeGitHubCapability,
   CodeGitHubRepositoryRef,
+  CodeGitHubRepositoryTarget,
 } from "../api/types";
 import {
   codeDeliveryRepositoryKey,
@@ -77,6 +81,7 @@ import {
   type CodeDeliverySurface,
 } from "./CodeDeliveryStore";
 import { CodeSidebar } from "./CodeSidebar";
+import { RepositoryTriggerRules } from "./RepositoryTriggerRules";
 import {
   CheckTone,
   DetailSkeleton,
@@ -233,21 +238,67 @@ const RUN_BUILT_IN_VIEWS: readonly {
   },
 ];
 
+export type CodeDeliverySearch = {
+  view?: string;
+  repoHost?: string;
+  repoOwner?: string;
+  repoName?: string;
+  pr?: number;
+  runKind?: CodeDeliveryRunKind;
+  runId?: number;
+};
+
+export function codeDeliverySearchFrom(
+  search: Record<string, unknown>,
+): CodeDeliverySearch {
+  const runKind =
+    search.runKind === "workflow_run" || search.runKind === "deployment"
+      ? search.runKind
+      : undefined;
+  return {
+    ...(typeof search.view === "string" ? { view: search.view } : {}),
+    ...(typeof search.repoHost === "string"
+      ? { repoHost: search.repoHost }
+      : {}),
+    ...(typeof search.repoOwner === "string"
+      ? { repoOwner: search.repoOwner }
+      : {}),
+    ...(typeof search.repoName === "string"
+      ? { repoName: search.repoName }
+      : {}),
+    ...(positiveSearchInteger(search.pr) !== undefined
+      ? { pr: positiveSearchInteger(search.pr) }
+      : {}),
+    ...(runKind ? { runKind } : {}),
+    ...(positiveSearchInteger(search.runId) !== undefined
+      ? { runId: positiveSearchInteger(search.runId) }
+      : {}),
+  };
+}
+
 export function CodeDeliveryPage({
   surface,
+  search = {},
 }: {
   surface: CodeDeliverySurface;
+  search?: CodeDeliverySearch;
 }) {
   return (
     <RouteFrame sidebar={<CodeSidebar />}>
       <div className="content-container min-h-0 w-full min-w-0 flex-1 overflow-hidden">
-        <CodeDeliveryBody surface={surface} />
+        <CodeDeliveryBody surface={surface} search={search} />
       </div>
     </RouteFrame>
   );
 }
 
-function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
+function CodeDeliveryBody({
+  surface,
+  search,
+}: {
+  surface: CodeDeliverySurface;
+  search: CodeDeliverySearch;
+}) {
   const { client } = useApp();
   const navigate = useNavigate();
   const manualRepositories = useCodeDeliveryStore(
@@ -260,14 +311,18 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
     (state) => state.pinnedRepositoryKeys,
   );
   const savedViews = useCodeDeliveryStore((state) => state.savedViews);
-  const [discovered, setDiscovered] = useState<CodeGitHubRepositoryRef[]>([]);
-  const [capability, setCapability] = useState<CodeGitHubCapability | null>(
-    null,
+  const repositorySnapshot = useCodeDeliveryStore(
+    (state) => state.repositorySnapshot,
   );
-  const [repositoryErrors, setRepositoryErrors] = useState<
+  const repositoryLoading = useCodeDeliveryStore(
+    (state) => state.repositoryLoading,
+  );
+  const repositoryError = useCodeDeliveryStore(
+    (state) => state.repositoryError,
+  );
+  const [resolutionErrors, setResolutionErrors] = useState<
     CodeDeliverySourceError[]
   >([]);
-  const [repositoriesLoading, setRepositoriesLoading] = useState(true);
   const [repositoriesDialogOpen, setRepositoriesDialogOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [activeViewId, setActiveViewId] = useState(
@@ -281,33 +336,63 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
   );
 
   useEffect(() => {
-    setActiveViewId(surface === "pull_requests" ? "attention" : "failures");
+    const builtInViews =
+      surface === "pull_requests" ? PR_BUILT_IN_VIEWS : RUN_BUILT_IN_VIEWS;
+    const defaultViewId =
+      surface === "pull_requests" ? "attention" : "failures";
+    const viewId = builtInViews.some((view) => view.id === search.view)
+      ? search.view!
+      : defaultViewId;
+    setActiveViewId(viewId);
     if (surface === "pull_requests") {
-      setPrFilters(clonePrFilters(PR_BUILT_IN_VIEWS[0]!.filters));
-    } else {
-      setRunFilters(cloneRunFilters(RUN_BUILT_IN_VIEWS[0]!.filters));
-    }
-  }, [surface]);
-
-  const loadRepositories = async () => {
-    setRepositoriesLoading(true);
-    try {
-      const snapshot = await client.getCodeDeliveryRepositories();
-      setDiscovered(snapshot.repositories);
-      setCapability(snapshot.capability);
-      setRepositoryErrors(snapshot.errors);
-    } catch (error) {
-      toast.error(
-        friendlyErrorMessage(error, "Could not load GitHub repositories."),
+      const view = PR_BUILT_IN_VIEWS.find(
+        (candidate) => candidate.id === viewId,
       );
-    } finally {
-      setRepositoriesLoading(false);
+      setPrFilters(clonePrFilters((view ?? PR_BUILT_IN_VIEWS[0]!).filters));
+    } else {
+      const view = RUN_BUILT_IN_VIEWS.find(
+        (candidate) => candidate.id === viewId,
+      );
+      setRunFilters(cloneRunFilters((view ?? RUN_BUILT_IN_VIEWS[0]!).filters));
+    }
+  }, [search.view, surface]);
+
+  const loadRepositories = async (force = false, notify = false) => {
+    try {
+      await useCodeDeliveryStore.getState().loadRepositories(client, { force });
+    } catch (error) {
+      if (notify) {
+        toast.error(
+          friendlyErrorMessage(error, "Could not load GitHub repositories."),
+        );
+      }
     }
   };
 
   useEffect(() => {
     void loadRepositories();
+    // The store owns the shared request and its visible error state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
+
+  const discovered = repositorySnapshot?.repositories ?? [];
+  const capability = repositorySnapshot?.capability ?? null;
+  const repositoryErrors = [
+    ...(repositorySnapshot?.errors ?? []),
+    ...resolutionErrors,
+  ];
+  const repositoriesLoading = repositoryLoading && !repositorySnapshot;
+  const routeRepository = useMemo<CodeGitHubRepositoryTarget | undefined>(
+    () =>
+      search.repoHost && search.repoOwner && search.repoName
+        ? {
+            host: search.repoHost,
+            owner: search.repoOwner,
+            name: search.repoName,
+          }
+        : undefined,
+    [search.repoHost, search.repoName, search.repoOwner],
+  );
 
   const repositories = useMemo(
     () =>
@@ -500,19 +585,46 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
         <PartialErrorBanner errors={repositoryErrors} />
       )}
 
+      {repositoryError && repositorySnapshot && (
+        <RepositoryRefreshWarning
+          message={repositoryError}
+          onRetry={() => void loadRepositories(true, true)}
+        />
+      )}
+
       {surface === "pull_requests" ? (
         <PullRequestsSurface
           repositories={repositories}
           capability={capability}
           loadingRepositories={repositoriesLoading}
+          repositoryLoaded={repositorySnapshot !== null}
+          repositoryError={repositoryError}
+          onRetryRepositories={() => void loadRepositories(true, true)}
           filters={prFilters}
+          target={
+            routeRepository && search.pr
+              ? { repository: routeRepository, number: search.pr }
+              : undefined
+          }
         />
       ) : (
         <RunsSurface
           repositories={repositories}
           capability={capability}
           loadingRepositories={repositoriesLoading}
+          repositoryLoaded={repositorySnapshot !== null}
+          repositoryError={repositoryError}
+          onRetryRepositories={() => void loadRepositories(true, true)}
           filters={runFilters}
+          target={
+            routeRepository && search.runKind && search.runId
+              ? {
+                  repository: routeRepository,
+                  kind: search.runKind,
+                  id: search.runId,
+                }
+              : undefined
+          }
         />
       )}
 
@@ -521,14 +633,14 @@ function CodeDeliveryBody({ surface }: { surface: CodeDeliverySurface }) {
         onOpenChange={setRepositoriesDialogOpen}
         discovered={discovered}
         onResolved={(resolved, errors) => {
-          setRepositoryErrors(errors);
+          setResolutionErrors(errors);
           if (resolved.length > 0) {
             useCodeDeliveryStore
               .getState()
               .rememberManualRepositories(resolved);
           }
         }}
-        onRefresh={() => void loadRepositories()}
+        onRefresh={() => void loadRepositories(true, true)}
       />
       <SaveViewDialog
         open={saveDialogOpen}
@@ -569,16 +681,30 @@ function DeliveryTab({
   );
 }
 
+type TargetDetailState<T> = {
+  key: string;
+  pending: boolean;
+  detail: T | null;
+};
+
 function PullRequestsSurface({
   repositories,
   capability,
   loadingRepositories,
+  repositoryLoaded,
+  repositoryError,
+  onRetryRepositories,
   filters,
+  target,
 }: {
   repositories: CodeGitHubRepositoryRef[];
   capability: CodeGitHubCapability | null;
   loadingRepositories: boolean;
+  repositoryLoaded: boolean;
+  repositoryError: string | null;
+  onRetryRepositories: () => void;
   filters: CodeDeliveryPrViewFilters;
+  target?: CodeDeliveryPullRequestTarget;
 }) {
   const { client } = useApp();
   const navigate = useNavigate();
@@ -590,6 +716,8 @@ function PullRequestsSurface({
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [targetDetailState, setTargetDetailState] =
+    useState<TargetDetailState<CodeDeliveryPullRequestDetail> | null>(null);
   const [revision, setRevision] = useState(0);
   // Set by Refresh and by a completed action; consumed by the next query that
   // actually runs. Only those two reach past the server's short list cache —
@@ -597,6 +725,7 @@ function PullRequestsSurface({
   // cross-repository read.
   const forceRefresh = useRef(false);
   const generation = useRef(0);
+  const routeSelectionFenced = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
@@ -604,9 +733,35 @@ function PullRequestsSurface({
     [items, selectedId],
   );
   const selectedRepositories = useMemo(
-    () => selectedRepositoryTargets(repositories, filters.repositoryKeys),
-    [repositories, filters.repositoryKeys],
+    () =>
+      selectedRepositoryTargets(
+        repositories,
+        filters.repositoryKeys,
+        target?.repository,
+      ),
+    [repositories, filters.repositoryKeys, target?.repository],
   );
+  const targetKey = target
+    ? `${codeDeliveryRepositoryKey(target.repository)}:pull-request:${target.number}`
+    : null;
+
+  useEffect(() => {
+    routeSelectionFenced.current = false;
+    setSelectedId(null);
+    setTargetDetailState(
+      targetKey ? { key: targetKey, pending: true, detail: null } : null,
+    );
+  }, [targetKey]);
+
+  const selectItem = (id: string) => {
+    routeSelectionFenced.current = true;
+    setSelectedId(id);
+  };
+
+  const closeDetail = () => {
+    routeSelectionFenced.current = true;
+    setSelectedId(null);
+  };
 
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
@@ -624,6 +779,44 @@ function PullRequestsSurface({
         setErrors([]);
         return;
       }
+      let detailRequest: Promise<{
+        detail?: CodeDeliveryPullRequestDetail;
+        detailError?: unknown;
+      }> = Promise.resolve({});
+      if (!append && target && targetKey) {
+        const requestKey = targetKey;
+        setTargetDetailState((current) => ({
+          key: requestKey,
+          pending: true,
+          detail: current?.key === requestKey ? current.detail : null,
+        }));
+        detailRequest = client
+          .getCodeDeliveryPullRequestDetail(target)
+          .then((detail) => {
+            if (token === generation.current) {
+              setTargetDetailState({
+                key: requestKey,
+                pending: false,
+                detail,
+              });
+              setItems((current) => dedupeRows([detail.summary, ...current]));
+              if (!routeSelectionFenced.current) {
+                setSelectedId(detail.summary.id);
+              }
+            }
+            return { detail };
+          })
+          .catch((detailError: unknown) => {
+            if (token === generation.current) {
+              setTargetDetailState((current) =>
+                current?.key === requestKey
+                  ? { ...current, pending: false }
+                  : current,
+              );
+            }
+            return { detailError };
+          });
+      }
       const page = await client.queryCodeDeliveryPullRequests({
         repositories: selectedRepositories,
         search: filters.search.trim() || undefined,
@@ -639,16 +832,41 @@ function PullRequestsSurface({
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
-      setItems((current) =>
-        append ? dedupeRows([...current, ...page.items]) : page.items,
-      );
+      setItems((current) => {
+        let nextItems = append ? [...current, ...page.items] : page.items;
+        const exactItem = target
+          ? current.find((item) => pullRequestMatchesTarget(item, target))
+          : undefined;
+        if (exactItem) nextItems = [exactItem, ...nextItems];
+        return dedupeRows(nextItems);
+      });
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
       setFetchedAt(page.fetched_at);
+      void detailRequest.then((targetResult) => {
+        if (
+          token === generation.current &&
+          target &&
+          targetResult.detailError
+        ) {
+          setError(
+            friendlyErrorMessage(
+              targetResult.detailError,
+              "Could not load this pull request.",
+            ),
+          );
+        }
+      });
     } catch (caught) {
       if (token !== generation.current) return;
       setError(friendlyErrorMessage(caught, "Could not load pull requests."));
-      if (!append) setItems([]);
+      if (!append) {
+        setItems((current) =>
+          target
+            ? current.filter((item) => pullRequestMatchesTarget(item, target))
+            : [],
+        );
+      }
     } finally {
       if (token === generation.current) {
         setLoading(false);
@@ -664,9 +882,17 @@ function PullRequestsSurface({
       generation.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, selectedRepositories, filters, revision]);
+  }, [client, selectedRepositories, filters, revision, targetKey]);
 
   if (loadingRepositories) return <DeliveryListSkeleton />;
+  if (!repositoryLoaded && repositoryError) {
+    return (
+      <InlineLoadError
+        message={`Could not load GitHub repositories: ${repositoryError}`}
+        onRetry={onRetryRepositories}
+      />
+    );
+  }
   if (capability && (!capability.found || capability.authenticated === false)) {
     return <GitHubUnavailable capability={capability} />;
   }
@@ -714,7 +940,7 @@ function PullRequestsSurface({
             <PullRequestList
               items={items}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectItem}
               scrollRef={scrollRef}
             />
             {nextCursor && (
@@ -734,11 +960,29 @@ function PullRequestsSurface({
           </>
         )}
       </div>
-      {selected && (
+      {selected &&
+      target &&
+      targetDetailState?.key === targetKey &&
+      targetDetailState.pending &&
+      !targetDetailState.detail &&
+      pullRequestMatchesTarget(selected, target) ? (
+        <PendingDetailPanel
+          context={`${selected.repository.name_with_owner} #${selected.number}`}
+          title={selected.title}
+          closeLabel="Close pull request details"
+          onClose={closeDetail}
+        />
+      ) : selected ? (
         <PullRequestDetailPanel
+          key={selected.id}
           client={client}
           summary={selected}
-          onClose={() => setSelectedId(null)}
+          initialDetail={
+            targetDetailState?.detail?.summary.id === selected.id
+              ? targetDetailState.detail
+              : undefined
+          }
+          onClose={closeDetail}
           onChanged={() => {
             forceRefresh.current = true;
             setRevision((value) => value + 1);
@@ -750,7 +994,7 @@ function PullRequestsSurface({
             })
           }
         />
-      )}
+      ) : null}
     </DeliverySplit>
   );
 }
@@ -759,12 +1003,20 @@ function RunsSurface({
   repositories,
   capability,
   loadingRepositories,
+  repositoryLoaded,
+  repositoryError,
+  onRetryRepositories,
   filters,
+  target,
 }: {
   repositories: CodeGitHubRepositoryRef[];
   capability: CodeGitHubCapability | null;
   loadingRepositories: boolean;
+  repositoryLoaded: boolean;
+  repositoryError: string | null;
+  onRetryRepositories: () => void;
   filters: CodeDeliveryRunViewFilters;
+  target?: CodeDeliveryRunTarget;
 }) {
   const { client } = useApp();
   const navigate = useNavigate();
@@ -776,6 +1028,8 @@ function RunsSurface({
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [targetDetailState, setTargetDetailState] =
+    useState<TargetDetailState<CodeDeliveryRunDetail> | null>(null);
   const [revision, setRevision] = useState(0);
   // Set by Refresh and by a completed action; consumed by the next query that
   // actually runs. Only those two reach past the server's short list cache —
@@ -783,6 +1037,7 @@ function RunsSurface({
   // cross-repository read.
   const forceRefresh = useRef(false);
   const generation = useRef(0);
+  const routeSelectionFenced = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
@@ -790,9 +1045,35 @@ function RunsSurface({
     [items, selectedId],
   );
   const selectedRepositories = useMemo(
-    () => selectedRepositoryTargets(repositories, filters.repositoryKeys),
-    [repositories, filters.repositoryKeys],
+    () =>
+      selectedRepositoryTargets(
+        repositories,
+        filters.repositoryKeys,
+        target?.repository,
+      ),
+    [repositories, filters.repositoryKeys, target?.repository],
   );
+  const targetKey = target
+    ? `${codeDeliveryRepositoryKey(target.repository)}:${target.kind}:${target.id}`
+    : null;
+
+  useEffect(() => {
+    routeSelectionFenced.current = false;
+    setSelectedId(null);
+    setTargetDetailState(
+      targetKey ? { key: targetKey, pending: true, detail: null } : null,
+    );
+  }, [targetKey]);
+
+  const selectItem = (id: string) => {
+    routeSelectionFenced.current = true;
+    setSelectedId(id);
+  };
+
+  const closeDetail = () => {
+    routeSelectionFenced.current = true;
+    setSelectedId(null);
+  };
 
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
@@ -809,6 +1090,44 @@ function RunsSurface({
         setNextCursor(undefined);
         setErrors([]);
         return;
+      }
+      let detailRequest: Promise<{
+        detail?: CodeDeliveryRunDetail;
+        detailError?: unknown;
+      }> = Promise.resolve({});
+      if (!append && target && targetKey) {
+        const requestKey = targetKey;
+        setTargetDetailState((current) => ({
+          key: requestKey,
+          pending: true,
+          detail: current?.key === requestKey ? current.detail : null,
+        }));
+        detailRequest = client
+          .getCodeDeliveryRunDetail(target)
+          .then((detail) => {
+            if (token === generation.current) {
+              setTargetDetailState({
+                key: requestKey,
+                pending: false,
+                detail,
+              });
+              setItems((current) => dedupeRows([detail.summary, ...current]));
+              if (!routeSelectionFenced.current) {
+                setSelectedId(detail.summary.id);
+              }
+            }
+            return { detail };
+          })
+          .catch((detailError: unknown) => {
+            if (token === generation.current) {
+              setTargetDetailState((current) =>
+                current?.key === requestKey
+                  ? { ...current, pending: false }
+                  : current,
+              );
+            }
+            return { detailError };
+          });
       }
       const page = await client.queryCodeDeliveryRuns({
         repositories: selectedRepositories,
@@ -828,18 +1147,43 @@ function RunsSurface({
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
-      setItems((current) =>
-        append ? dedupeRows([...current, ...page.items]) : page.items,
-      );
+      setItems((current) => {
+        let nextItems = append ? [...current, ...page.items] : page.items;
+        const exactItem = target
+          ? current.find((item) => runMatchesTarget(item, target))
+          : undefined;
+        if (exactItem) nextItems = [exactItem, ...nextItems];
+        return dedupeRows(nextItems);
+      });
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
       setFetchedAt(page.fetched_at);
+      void detailRequest.then((targetResult) => {
+        if (
+          token === generation.current &&
+          target &&
+          targetResult.detailError
+        ) {
+          setError(
+            friendlyErrorMessage(
+              targetResult.detailError,
+              "Could not load this run.",
+            ),
+          );
+        }
+      });
     } catch (caught) {
       if (token !== generation.current) return;
       setError(
         friendlyErrorMessage(caught, "Could not load runs and deployments."),
       );
-      if (!append) setItems([]);
+      if (!append) {
+        setItems((current) =>
+          target
+            ? current.filter((item) => runMatchesTarget(item, target))
+            : [],
+        );
+      }
     } finally {
       if (token === generation.current) {
         setLoading(false);
@@ -855,9 +1199,17 @@ function RunsSurface({
       generation.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, selectedRepositories, filters, revision]);
+  }, [client, selectedRepositories, filters, revision, targetKey]);
 
   if (loadingRepositories) return <DeliveryListSkeleton />;
+  if (!repositoryLoaded && repositoryError) {
+    return (
+      <InlineLoadError
+        message={`Could not load GitHub repositories: ${repositoryError}`}
+        onRetry={onRetryRepositories}
+      />
+    );
+  }
   if (capability && (!capability.found || capability.authenticated === false)) {
     return <GitHubUnavailable capability={capability} />;
   }
@@ -905,7 +1257,7 @@ function RunsSurface({
             <RunList
               items={items}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectItem}
               scrollRef={scrollRef}
             />
             {nextCursor && (
@@ -925,10 +1277,30 @@ function RunsSurface({
           </>
         )}
       </div>
-      {selected && (
+      {selected &&
+      target &&
+      targetDetailState?.key === targetKey &&
+      targetDetailState.pending &&
+      !targetDetailState.detail &&
+      runMatchesTarget(selected, target) ? (
+        <PendingDetailPanel
+          context={`${selected.repository.name_with_owner} ${
+            selected.kind === "deployment" ? "Deployment" : "Action"
+          }`}
+          title={selected.name}
+          closeLabel="Close run details"
+          onClose={closeDetail}
+        />
+      ) : selected ? (
         <RunDetailPanel
+          key={selected.id}
           summary={selected}
-          onClose={() => setSelectedId(null)}
+          initialDetail={
+            targetDetailState?.detail?.summary.id === selected.id
+              ? targetDetailState.detail
+              : undefined
+          }
+          onClose={closeDetail}
           onChanged={() => {
             forceRefresh.current = true;
             setRevision((value) => value + 1);
@@ -940,7 +1312,7 @@ function RunsSurface({
             })
           }
         />
-      )}
+      ) : null}
     </DeliverySplit>
   );
 }
@@ -961,6 +1333,36 @@ function DeliverySplit({
     >
       {children}
     </div>
+  );
+}
+
+function PendingDetailPanel({
+  context,
+  title,
+  closeLabel,
+  onClose,
+}: {
+  context: string;
+  title: string;
+  closeLabel: string;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="flex min-h-0 w-full flex-col border-l border-border-subtle bg-background lg:w-auto">
+      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-muted-foreground">{context}</div>
+          <h2 className="mt-1 text-base font-semibold leading-snug">{title}</h2>
+        </div>
+        <Button type="button" size="icon-xs" variant="ghost" onClick={onClose}>
+          <X />
+          <span className="sr-only">{closeLabel}</span>
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <DetailSkeleton />
+      </div>
+    </aside>
   );
 }
 
@@ -1266,25 +1668,43 @@ function RunList({
   );
 }
 
-function RunDetailPanel({
+export function RunDetailPanel({
   summary,
+  initialDetail,
   onClose,
   onChanged,
   onOpenWorkspace,
 }: {
   summary: CodeDeliveryRunSummary;
+  initialDetail?: CodeDeliveryRunDetail;
   onClose: () => void;
   onChanged: () => void;
   onOpenWorkspace: (workspaceId: string) => void;
 }) {
   const { client } = useApp();
-  const [detail, setDetail] = useState<CodeDeliveryRunDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [detail, setDetail] = useState<CodeDeliveryRunDetail | null>(
+    initialDetail ?? null,
+  );
+  const [loading, setLoading] = useState(!initialDetail);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
+  const activeTarget = useRef(summary.id);
+  const mounted = useRef(true);
+  activeTarget.current = summary.id;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const targetIsActive = (targetId: string) =>
+    mounted.current && activeTarget.current === targetId;
 
   const load = async () => {
+    const targetId = summary.id;
     const token = ++generation.current;
     setLoading(true);
     setError(null);
@@ -1294,25 +1714,36 @@ function RunDetailPanel({
         kind: summary.kind,
         id: summary.github_id,
       });
-      if (token === generation.current) setDetail(next);
+      if (token === generation.current && targetIsActive(targetId)) {
+        setDetail(next);
+      }
     } catch (caught) {
-      if (token === generation.current) {
+      if (token === generation.current && targetIsActive(targetId)) {
         setError(friendlyErrorMessage(caught, "Could not load this run."));
       }
     } finally {
-      if (token === generation.current) setLoading(false);
+      if (token === generation.current && targetIsActive(targetId)) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    void load();
+    if (initialDetail?.summary.id === summary.id) {
+      setDetail(initialDetail);
+      setLoading(false);
+    } else {
+      setDetail(null);
+      void load();
+    }
     return () => {
       generation.current += 1;
     };
-  }, [client, summary.id]);
+  }, [client, initialDetail, summary.id]);
 
   const rerun = async () => {
     if (busy) return;
+    const targetId = summary.id;
     setBusy(true);
     try {
       const result = await client.runCodeDeliveryRunAction({
@@ -1323,13 +1754,19 @@ function RunDetailPanel({
         },
         action: { type: "rerun_failed" },
       });
-      toast.success(result.message);
-      await load();
+      if (!targetIsActive(targetId)) return;
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        toast.warning(result.message);
+      }
       onChanged();
+      await load();
     } catch (caught) {
+      if (!targetIsActive(targetId)) return;
       toast.error(friendlyErrorMessage(caught, "Could not rerun failed jobs."));
     } finally {
-      setBusy(false);
+      if (targetIsActive(targetId)) setBusy(false);
     }
   };
 
@@ -1359,6 +1796,9 @@ function RunDetailPanel({
           <InlineLoadError message={error} onRetry={() => void load()} />
         ) : detail ? (
           <div className="flex flex-col gap-5">
+            {detail.errors.length > 0 && (
+              <PartialErrorBanner errors={detail.errors} compact />
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
@@ -1933,6 +2373,8 @@ function DeliveryRepositoriesDialog({
   const [input, setInput] = useState("");
   const [resolving, setResolving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [triggerRepository, setTriggerRepository] =
+    useState<CodeGitHubRepositoryRef | null>(null);
 
   const add = async () => {
     const repositories = input
@@ -2016,11 +2458,24 @@ function DeliveryRepositoriesDialog({
                           .getState()
                           .setRepositoryPinned(key, next)
                       }
+                      onManageTriggers={
+                        repository.tidebreak_repo_id
+                          ? () => setTriggerRepository(repository)
+                          : undefined
+                      }
                     />
                   );
                 })
               )}
             </div>
+            {triggerRepository && (
+              <div className="mt-4">
+                <RepositoryTriggerRules
+                  client={client}
+                  repository={triggerRepository}
+                />
+              </div>
+            )}
           </section>
 
           <section>
@@ -2101,6 +2556,7 @@ function RepositorySettingRow({
   onEnabledChange,
   onPinnedChange,
   onRemove,
+  onManageTriggers,
 }: {
   repository: CodeGitHubRepositoryRef;
   enabled: boolean;
@@ -2109,6 +2565,7 @@ function RepositorySettingRow({
   onEnabledChange: (enabled: boolean) => void;
   onPinnedChange: (pinned: boolean) => void;
   onRemove?: () => void;
+  onManageTriggers?: () => void;
 }) {
   return (
     <div className="flex items-center gap-3 border-b border-border-subtle px-3 py-2.5 last:border-b-0">
@@ -2136,6 +2593,16 @@ function RepositorySettingRow({
       >
         {pinned ? <PinOff /> : <Pin />}
       </Button>
+      {onManageTriggers && (
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          onClick={onManageTriggers}
+        >
+          Triggers
+        </Button>
+      )}
       {manual && onRemove && (
         <Button
           type="button"
@@ -2293,6 +2760,23 @@ function PartialErrorBanner({
           ? errors[0]!.message
           : `${errors.length} repositories could not be refreshed. Available results are still shown.`}
       </span>
+    </div>
+  );
+}
+
+function RepositoryRefreshWarning({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-3 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
+      <span>GitHub repository discovery is stale: {message}</span>
+      <Button type="button" size="xs" variant="outline" onClick={onRetry}>
+        Try again
+      </Button>
     </div>
   );
 }
@@ -2465,14 +2949,59 @@ function runTone(value: string): "success" | "critical" | "warning" | "muted" {
 function selectedRepositoryTargets(
   repositories: CodeGitHubRepositoryRef[],
   selected: string[],
-) {
+  required?: CodeGitHubRepositoryTarget,
+): CodeGitHubRepositoryTarget[] {
   const keys = new Set(selected);
-  return repositories
+  const targets = repositories
     .filter(
       (repository) =>
         keys.size === 0 || keys.has(codeDeliveryRepositoryKey(repository)),
     )
     .map(codeDeliveryRepositoryTarget);
+  if (
+    required &&
+    !targets.some(
+      (target) =>
+        codeDeliveryRepositoryKey(target) ===
+        codeDeliveryRepositoryKey(required),
+    )
+  ) {
+    targets.push(required);
+  }
+  return targets;
+}
+
+function pullRequestMatchesTarget(
+  item: CodeDeliveryPullRequestSummary,
+  target: CodeDeliveryPullRequestTarget,
+): boolean {
+  return (
+    item.number === target.number &&
+    codeDeliveryRepositoryKey(item.repository) ===
+      codeDeliveryRepositoryKey(target.repository)
+  );
+}
+
+function runMatchesTarget(
+  item: CodeDeliveryRunSummary,
+  target: CodeDeliveryRunTarget,
+): boolean {
+  return (
+    item.kind === target.kind &&
+    item.github_id === target.id &&
+    codeDeliveryRepositoryKey(item.repository) ===
+      codeDeliveryRepositoryKey(target.repository)
+  );
+}
+
+function positiveSearchInteger(value: unknown): number | undefined {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function clonePrFilters(

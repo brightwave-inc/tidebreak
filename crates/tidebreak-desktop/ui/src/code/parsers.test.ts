@@ -113,6 +113,7 @@ const DELIVERY_RUN = {
   repository: DELIVERY_REPOSITORY,
   kind: "workflow_run",
   github_id: 77,
+  run_attempt: 2,
   name: "Desktop CI",
   url: "https://github.com/brightwave-inc/tidebreak/actions/runs/77",
   status: "completed",
@@ -947,6 +948,17 @@ describe("code delivery wire parsers", () => {
           line: 420,
         },
       ],
+      errors: [
+        {
+          repository: {
+            host: "github.com",
+            owner: "brightwave-inc",
+            name: "tidebreak",
+          },
+          kind: "transient",
+          message: "Could not load reviews: GitHub did not answer in time.",
+        },
+      ],
       can_mark_ready: false,
       can_merge: false,
       can_rerun_failed: true,
@@ -1016,6 +1028,17 @@ describe("code delivery wire parsers", () => {
           created_at: "2026-08-20T12:04:00.000Z",
         },
       ],
+      errors: [
+        {
+          repository: {
+            host: "github.com",
+            owner: "brightwave-inc",
+            name: "tidebreak",
+          },
+          kind: "truncated",
+          message: "Jobs may be incomplete.",
+        },
+      ],
       can_rerun_failed: true,
     };
 
@@ -1052,6 +1075,7 @@ describe("code delivery wire parsers", () => {
           },
         ],
         deployment_statuses: [],
+        errors: [],
         can_rerun_failed: true,
       }),
     ).toBeNull();
@@ -1060,12 +1084,30 @@ describe("code delivery wire parsers", () => {
   it("accepts a bounded action result", () => {
     expect(
       parseCodeDeliveryActionResult({
-        success: true,
-        message: "Auto-merge enabled.",
+        success: false,
+        message: "One workflow run failed.",
+        rerun_outcomes: [
+          { workflow_run_id: 10, success: true },
+          { workflow_run_id: 11, success: false, error: "HTTP 503" },
+        ],
       }),
-    ).toEqual({ success: true, message: "Auto-merge enabled." });
+    ).toEqual({
+      success: false,
+      message: "One workflow run failed.",
+      rerun_outcomes: [
+        { workflow_run_id: 10, success: true },
+        { workflow_run_id: 11, success: false, error: "HTTP 503" },
+      ],
+    });
     expect(
       parseCodeDeliveryActionResult({ success: "yes", message: "done" }),
+    ).toBeNull();
+    expect(
+      parseCodeDeliveryActionResult({
+        success: false,
+        message: "failed",
+        rerun_outcomes: [{ workflow_run_id: 0, success: false }],
+      }),
     ).toBeNull();
   });
 });

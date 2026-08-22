@@ -1,25 +1,24 @@
-//! Fork: the parent session's transcript, written into the worktree as
+//! Fork: the parent session's transcript, written outside the Git worktree as
 //! markdown so a sibling agent of any engine can read it.
 //!
 //! Pure serialization of what the journal already holds. No model call and no
 //! summary — a generated one would be a second thing to be wrong, and the
 //! point of the file is that the child sees what the parent saw.
 //!
-//! The file lands in `.tidebreak/forks/` beside a `.gitignore` holding `*`,
-//! which is what keeps it out of `git status` without touching the repo's
-//! tracked ignore file or the shared `.git/info/exclude` that every other
-//! worktree of the same repository reads.
+//! The file lands under Tidebreak's profile data directory. Git cannot index
+//! the transcript or the retained attachment generations.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tidebreak_core::{
-    CodeEvent, CodeSession, CodeTurn, CodeTurnId, HarnessKind, SequencedCodeEvent, ToolDetail,
-    ToolOutcome,
+    BlobStore, CodeEvent, CodeSession, CodeTurn, CodeTurnId, DocumentBlob, HarnessKind,
+    SequencedCodeEvent, ToolDetail, ToolOutcome,
 };
 
-/// Directory holding fork transcripts, relative to the worktree root.
-pub(crate) const FORKS_DIR: &str = ".tidebreak/forks";
+/// Directory holding fork transcripts below the workspace's private root.
+pub(crate) const FORKS_DIR: &str = "forks";
 
 /// Largest transcript written, in bytes. Bounds the whole file, header
 /// included.
@@ -30,10 +29,39 @@ pub(crate) const FORKS_DIR: &str = ".tidebreak/forks";
 /// itself, so that one is cut rather than written past it.
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 
+/// Largest set of retained fork images materialized in one request.
+const MAX_FORK_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+
+type ForkLockRegistry = Mutex<
+    std::collections::HashMap<
+        (PathBuf, tidebreak_core::CodeSessionId),
+        Weak<tokio::sync::Mutex<()>>,
+    >,
+>;
+
+fn fork_lock_registry() -> &'static ForkLockRegistry {
+    static REGISTRY: OnceLock<ForkLockRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn fork_lock(
+    private_root: &Path,
+    session_id: tidebreak_core::CodeSessionId,
+) -> Arc<tokio::sync::Mutex<()>> {
+    let key = (private_root.to_path_buf(), session_id);
+    let mut registry = fork_lock_registry().lock().expect("fork write registry");
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = registry.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    registry.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
 /// A written fork transcript, as the route reports it.
 pub(crate) struct WrittenTranscript {
-    /// Worktree-relative path, in the form the composer shows and the engine
-    /// opens.
+    /// Absolute path, in the form the composer shows and the engine opens.
     pub(crate) path: String,
     /// Bytes on disk.
     pub(crate) byte_len: u64,
@@ -44,25 +72,61 @@ pub(crate) struct WrittenTranscript {
     pub(crate) truncated: bool,
 }
 
-/// Render one session's transcript and write it under the worktree.
+/// Render one session's transcript and write it under private storage.
 ///
 /// A session can be forked again over a file the last child is already
 /// reading, so the write is published by rename: a reader sees one whole
 /// version or another and never the middle of one. Each write stages its own
 /// sibling file, so two forks racing on one session cannot mix their bytes —
 /// the later rename simply wins.
+///
+/// Each image-bearing write keeps its immutable attachment generation for the
+/// worktree lifecycle. An earlier child can therefore keep reading paths from
+/// its transcript after a later fork publishes another generation.
 pub(crate) async fn write_transcript(
-    worktree: &Path,
+    private_root: &Path,
+    blobs: &dyn BlobStore,
     session: &CodeSession,
     turns: &[CodeTurn],
     events: &[SequencedCodeEvent],
 ) -> std::io::Result<WrittenTranscript> {
-    let rendered = render_transcript(session, turns, events);
-    let dir = super::scratch::scratch_dir(worktree, FORKS_DIR).await?;
-    let path = dir.join(format!("{}.md", session.id));
-    super::scratch::publish(&path, rendered.markdown.as_bytes()).await?;
+    let write_lock = fork_lock(private_root, session.id);
+    let _write = write_lock.lock().await;
+    let generation = uuid::Uuid::new_v4();
+    let rendered =
+        render_transcript_with_generation(private_root, session, turns, events, generation);
+    let retained = &turns[rendered.dropped..];
+    let has_attachments = retained.iter().any(|turn| !turn.attachments.is_empty());
+    let mut attachment_scope = if has_attachments {
+        let mut scope =
+            super::scratch::scratch_scope(private_root, FORKS_DIR, session.id.0, generation)?;
+        materialize_attachments(
+            private_root,
+            &mut scope,
+            blobs,
+            session,
+            retained,
+            generation,
+        )
+        .await?;
+        Some(scope)
+    } else {
+        None
+    };
+
+    let dir = super::scratch::scratch_dir(private_root, FORKS_DIR)?;
+    let name = format!("{}.md", session.id);
+    dir.publish(std::ffi::OsStr::new(&name), rendered.markdown.as_bytes())
+        .await?;
+    if let Some(scope) = attachment_scope.take() {
+        scope.keep();
+    }
     Ok(WrittenTranscript {
-        path: format!("{FORKS_DIR}/{}.md", session.id),
+        path: private_root
+            .join(FORKS_DIR)
+            .join(format!("{}.md", session.id))
+            .display()
+            .to_string(),
         byte_len: rendered.markdown.len() as u64,
         turns: rendered.turns,
         truncated: rendered.truncated,
@@ -74,6 +138,7 @@ struct RenderedTranscript {
     markdown: String,
     turns: u32,
     truncated: bool,
+    dropped: usize,
 }
 
 /// Serialize a session as markdown, newest turns kept when it will not fit.
@@ -81,15 +146,24 @@ struct RenderedTranscript {
 /// The result is never larger than [`MAX_TRANSCRIPT_BYTES`]. Turns are kept
 /// from the newest back; the header counts against the same budget, and a
 /// turn that is over the budget by itself is cut instead of overrunning it.
-fn render_transcript(
+fn render_transcript_with_generation(
+    private_root: &Path,
     session: &CodeSession,
     turns: &[CodeTurn],
     events: &[SequencedCodeEvent],
+    generation: uuid::Uuid,
 ) -> RenderedTranscript {
     let engine = harness_label(session.harness_kind);
     let mut sections: Vec<String> = Vec::with_capacity(turns.len());
     for turn in turns {
-        sections.push(render_turn(turn, events, engine));
+        sections.push(render_turn(
+            private_root,
+            session.id,
+            turn,
+            events,
+            engine,
+            generation,
+        ));
     }
 
     // The header is part of the file, so it is part of the budget. Its length
@@ -129,7 +203,112 @@ fn render_transcript(
         markdown: out,
         turns: kept as u32,
         truncated: dropped > 0 || clipped,
+        dropped,
     }
+}
+
+#[cfg(test)]
+fn render_transcript(
+    session: &CodeSession,
+    turns: &[CodeTurn],
+    events: &[SequencedCodeEvent],
+) -> RenderedTranscript {
+    render_transcript_with_generation(
+        Path::new("/private"),
+        session,
+        turns,
+        events,
+        uuid::Uuid::nil(),
+    )
+}
+
+async fn materialize_attachments(
+    private_root: &Path,
+    scope: &mut super::scratch::ScratchScope,
+    blobs: &dyn BlobStore,
+    session: &CodeSession,
+    turns: &[CodeTurn],
+    generation: uuid::Uuid,
+) -> std::io::Result<()> {
+    let total = turns
+        .iter()
+        .flat_map(|turn| &turn.attachments)
+        .try_fold(0u64, |total, image| total.checked_add(image.byte_len))
+        .ok_or_else(|| std::io::Error::other("fork attachment byte length overflow"))?;
+    if total > MAX_FORK_ATTACHMENT_BYTES {
+        return Err(std::io::Error::other(format!(
+            "fork attachments exceed the {MAX_FORK_ATTACHMENT_BYTES}-byte limit"
+        )));
+    }
+    for turn in turns {
+        for (ordinal, image) in turn.attachments.iter().enumerate() {
+            let bytes = blobs
+                .get(image.blob_id)
+                .await
+                .map_err(|error| std::io::Error::other(format!("read attachment blob: {error}")))?
+                .ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "fork attachment blob {} is missing",
+                        image.blob_id
+                    ))
+                })?;
+            let actual_len = u64::try_from(bytes.len())
+                .map_err(|_| std::io::Error::other("fork attachment length exceeds u64"))?;
+            if actual_len != image.byte_len
+                || tidebreak_core::ImageMediaType::sniff(&bytes) != Some(image.media_type)
+                || DocumentBlob::from_bytes(&bytes).id != image.blob_id
+            {
+                return Err(std::io::Error::other(format!(
+                    "fork attachment {} does not match its retained descriptor",
+                    image.blob_id
+                )));
+            }
+            let name = fork_attachment_name(turn, ordinal, image);
+            scope.publish(std::ffi::OsStr::new(&name), &bytes).await?;
+            debug_assert_eq!(
+                fork_attachment_path(private_root, session.id, generation, turn, ordinal, image),
+                private_root
+                    .join(FORKS_DIR)
+                    .join(session.id.to_string())
+                    .join(generation.to_string())
+                    .join(name)
+                    .display()
+                    .to_string()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn fork_attachment_name(
+    turn: &CodeTurn,
+    ordinal: usize,
+    image: &tidebreak_core::ImageRef,
+) -> String {
+    format!(
+        "turn-{}-{}-{}.{}",
+        turn.ordinal,
+        ordinal + 1,
+        image.blob_id,
+        image.media_type.extension()
+    )
+}
+
+fn fork_attachment_path(
+    private_root: &Path,
+    session_id: tidebreak_core::CodeSessionId,
+    generation: uuid::Uuid,
+    turn: &CodeTurn,
+    ordinal: usize,
+    image: &tidebreak_core::ImageRef,
+) -> String {
+    private_root
+        .join(FORKS_DIR)
+        .join(session_id.to_string())
+        .join(generation.to_string())
+        .join(fork_attachment_name(turn, ordinal, image))
+        .display()
+        .to_string()
 }
 
 /// The file's opening: where the transcript came from, and what is missing.
@@ -179,9 +358,32 @@ fn clip(section: &mut String, budget: usize) {
 }
 
 /// One turn: what the reader asked, then what the engine said and did.
-fn render_turn(turn: &CodeTurn, events: &[SequencedCodeEvent], engine: &str) -> String {
+fn render_turn(
+    private_root: &Path,
+    session_id: tidebreak_core::CodeSessionId,
+    turn: &CodeTurn,
+    events: &[SequencedCodeEvent],
+    engine: &str,
+    generation: uuid::Uuid,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "## Turn {} — you\n", turn.ordinal);
+    if !turn.attachments.is_empty() {
+        let noun = if turn.attachments.len() == 1 {
+            "Image"
+        } else {
+            "Images"
+        };
+        let _ = writeln!(out, "{noun} attached to this message:");
+        for (ordinal, image) in turn.attachments.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "- `{}`",
+                fork_attachment_path(private_root, session_id, generation, turn, ordinal, image)
+            );
+        }
+        out.push('\n');
+    }
     let asked = turn.user_input.trim();
     let _ = writeln!(
         out,
@@ -327,7 +529,8 @@ mod tests {
     use super::*;
     use tidebreak_core::{
         Attention, AttentionSource, BoundedError, CodeSessionId, CodeSessionKind,
-        CodeSessionLifecycle, CodeTurnStatus, OwnerId, PermissionMode, WorkspaceId,
+        CodeSessionLifecycle, CodeTurnStatus, FsBlobStore, ImageMediaType, ImageRef, OwnerId,
+        PermissionMode, WorkspaceId,
     };
 
     fn session() -> CodeSession {
@@ -578,16 +781,18 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let worktree = tempfile::tempdir().expect("tempdir");
+        let private = tempfile::tempdir().expect("tempdir");
+        let blob_root = tempfile::tempdir().expect("blob tempdir");
+        let blobs = FsBlobStore::new(blob_root.path());
         let session = session();
         let short = vec![turn(session.id, 1, "hello")];
         let long: Vec<CodeTurn> = (1..=20)
             .map(|ordinal| turn(session.id, ordinal, &"x".repeat(8 * 1024)))
             .collect();
-        write_transcript(worktree.path(), &session, &short, &[])
+        write_transcript(private.path(), &blobs, &session, &short, &[])
             .await
             .expect("first write");
-        let path = worktree
+        let path = private
             .path()
             .join(format!("{FORKS_DIR}/{}.md", session.id));
 
@@ -612,7 +817,7 @@ mod tests {
 
         for _ in 0..20 {
             for turns in [&long, &short] {
-                write_transcript(worktree.path(), &session, turns, &[])
+                write_transcript(private.path(), &blobs, &session, turns, &[])
                     .await
                     .expect("re-fork");
             }
@@ -621,34 +826,187 @@ mod tests {
         assert!(reader.await.expect("reader") > 0, "the reader never ran");
 
         // Nothing staged is left behind for the child engine to trip over.
-        let left: Vec<String> = std::fs::read_dir(worktree.path().join(FORKS_DIR))
+        let left: Vec<String> = std::fs::read_dir(private.path().join(FORKS_DIR))
             .expect("forks dir")
             .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
             .collect();
         assert_eq!(left, vec![format!("{}.md", session.id)]);
     }
 
-    /// The file has to be readable by the child engine and invisible to
-    /// `git status`, which is the whole reason for the `*` marker beside it.
+    /// The child engine reads an absolute path outside every Git worktree.
     #[tokio::test]
-    async fn writes_the_file_into_a_self_ignoring_directory() {
-        let worktree = tempfile::tempdir().expect("tempdir");
+    async fn writes_the_file_into_private_storage() {
+        let private = tempfile::tempdir().expect("tempdir");
+        let blob_root = tempfile::tempdir().expect("blob tempdir");
+        let blobs = FsBlobStore::new(blob_root.path());
         let session = session();
         let only = turn(session.id, 1, "hello");
 
-        let written = write_transcript(worktree.path(), &session, &[only], &[])
+        let written = write_transcript(private.path(), &blobs, &session, &[only], &[])
             .await
             .expect("write");
 
-        assert_eq!(written.path, format!("{FORKS_DIR}/{}.md", session.id));
+        assert_eq!(
+            written.path,
+            private
+                .path()
+                .join(FORKS_DIR)
+                .join(format!("{}.md", session.id))
+                .display()
+                .to_string()
+        );
         assert_eq!(written.turns, 1);
         assert!(!written.truncated);
-        let on_disk = std::fs::read_to_string(worktree.path().join(&written.path)).expect("read");
+        let on_disk = std::fs::read_to_string(&written.path).expect("read");
         assert_eq!(written.byte_len, on_disk.len() as u64);
         assert!(on_disk.contains("hello"));
-        assert_eq!(
-            std::fs::read_to_string(worktree.path().join(".tidebreak/.gitignore")).expect("marker"),
-            "*\n"
-        );
+    }
+
+    #[tokio::test]
+    async fn materializes_images_for_an_ended_session_from_the_explicit_blob_store() {
+        let private = tempfile::tempdir().unwrap();
+        let blob_root = tempfile::tempdir().unwrap();
+        let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(blob_root.path()));
+        let mut session = session();
+        session.lifecycle = CodeSessionLifecycle::Ended;
+        let mut only = turn(session.id, 1, "compare these screenshots");
+        let first_bytes = b"\x89PNG\r\n\x1a\nfirst".to_vec();
+        let second_bytes = b"GIF89asecond".to_vec();
+        let first = ImageRef {
+            blob_id: DocumentBlob::from_bytes(&first_bytes).id,
+            media_type: ImageMediaType::Png,
+            width: 1,
+            height: 1,
+            byte_len: first_bytes.len() as u64,
+        };
+        let second = ImageRef {
+            blob_id: DocumentBlob::from_bytes(&second_bytes).id,
+            media_type: ImageMediaType::Gif,
+            width: 1,
+            height: 1,
+            byte_len: second_bytes.len() as u64,
+        };
+        blobs.put(first.blob_id, first_bytes.clone()).await.unwrap();
+        blobs
+            .put(second.blob_id, second_bytes.clone())
+            .await
+            .unwrap();
+        only.attachments = vec![first, second];
+
+        let written = write_transcript(private.path(), blobs.as_ref(), &session, &[only], &[])
+            .await
+            .unwrap();
+
+        let markdown = std::fs::read_to_string(written.path).unwrap();
+        let paths: Vec<&str> = markdown
+            .lines()
+            .filter_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].contains("turn-1-1-"));
+        assert!(paths[1].contains("turn-1-2-"));
+        assert_eq!(std::fs::read(paths[0]).unwrap(), first_bytes);
+        assert_eq!(std::fs::read(paths[1]).unwrap(), second_bytes);
+        assert!(!private.path().join("attachments").exists());
+    }
+
+    #[tokio::test]
+    async fn a_refork_keeps_the_prior_image_generation_readable() {
+        let private = tempfile::tempdir().unwrap();
+        let blob_root = tempfile::tempdir().unwrap();
+        let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(blob_root.path()));
+        let session = session();
+        let first_bytes = b"\x89PNG\r\n\x1a\nfirst".to_vec();
+        let first_image = ImageRef {
+            blob_id: DocumentBlob::from_bytes(&first_bytes).id,
+            media_type: ImageMediaType::Png,
+            width: 1,
+            height: 1,
+            byte_len: first_bytes.len() as u64,
+        };
+        blobs
+            .put(first_image.blob_id, first_bytes.clone())
+            .await
+            .unwrap();
+        let mut first_turn = turn(session.id, 1, "look at the first image");
+        first_turn.attachments = vec![first_image];
+        let first_written =
+            write_transcript(private.path(), blobs.as_ref(), &session, &[first_turn], &[])
+                .await
+                .unwrap();
+        let first_markdown = std::fs::read_to_string(first_written.path).unwrap();
+        let first_path = first_markdown
+            .lines()
+            .find_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
+            .unwrap()
+            .to_owned();
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+
+        let second_bytes = b"GIF89asecond".to_vec();
+        let second_image = ImageRef {
+            blob_id: DocumentBlob::from_bytes(&second_bytes).id,
+            media_type: ImageMediaType::Gif,
+            width: 1,
+            height: 1,
+            byte_len: second_bytes.len() as u64,
+        };
+        blobs
+            .put(second_image.blob_id, second_bytes.clone())
+            .await
+            .unwrap();
+        let mut second_turn = turn(session.id, 2, "look at the second image");
+        second_turn.attachments = vec![second_image];
+        let second_written = write_transcript(
+            private.path(),
+            blobs.as_ref(),
+            &session,
+            &[second_turn],
+            &[],
+        )
+        .await
+        .unwrap();
+        let second_markdown = std::fs::read_to_string(second_written.path).unwrap();
+        let second_path = second_markdown
+            .lines()
+            .find_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
+            .unwrap();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+        assert_eq!(std::fs::read(second_path).unwrap(), second_bytes);
+        let session_dir = private.path().join(FORKS_DIR).join(session.id.to_string());
+        assert_eq!(std::fs::read_dir(session_dir).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_attachment_generation_over_the_byte_limit() {
+        let private = tempfile::tempdir().unwrap();
+        let blob_root = tempfile::tempdir().unwrap();
+        let blobs = FsBlobStore::new(blob_root.path());
+        let session = session();
+        let bytes = b"\x89PNG\r\n\x1a\nimage";
+        let image = ImageRef {
+            blob_id: DocumentBlob::from_bytes(bytes).id,
+            media_type: ImageMediaType::Png,
+            width: 1,
+            height: 1,
+            byte_len: MAX_FORK_ATTACHMENT_BYTES + 1,
+        };
+        let mut only = turn(session.id, 1, "look");
+        only.attachments = vec![image];
+
+        let error = match write_transcript(private.path(), &blobs, &session, &[only], &[]).await {
+            Ok(_) => panic!("an over-limit generation must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("fork attachments exceed"));
+        let session_dir = private.path().join(FORKS_DIR).join(session.id.to_string());
+        let retained = if session_dir.exists() {
+            std::fs::read_dir(session_dir).unwrap().count()
+        } else {
+            0
+        };
+        assert_eq!(retained, 0);
     }
 }

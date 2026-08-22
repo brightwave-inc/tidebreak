@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { StrictMode } from "react";
 import {
   cleanup,
   render,
@@ -7,6 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -23,7 +25,7 @@ afterEach(cleanup);
 
 vi.mock("@/openInBrowser", () => ({ openInBrowser: vi.fn() }));
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
 
 function client(overrides: Partial<Record<string, unknown>> = {}) {
@@ -62,6 +64,77 @@ async function renderPanel(number: number, api = client()) {
 }
 
 describe("PullRequestDetailPanel", () => {
+  it("accepts load, refresh, and mutation completions in Strict Mode", async () => {
+    vi.mocked(toast.success).mockClear();
+    const baseDetail = deliveryPullRequestDetails[2251]!;
+    const refreshedDetail = {
+      ...baseDetail,
+      errors: [
+        {
+          kind: "detail",
+          message: "Strict Mode refresh completed.",
+        },
+      ],
+    };
+    const mutatedDetail = {
+      ...baseDetail,
+      errors: [
+        {
+          kind: "detail",
+          message: "Strict Mode mutation refresh completed.",
+        },
+      ],
+    };
+    let phase: "load" | "refresh" | "mutation" = "load";
+    const getDetail = vi.fn(async () => {
+      if (phase === "refresh") return refreshedDetail;
+      if (phase === "mutation") return mutatedDetail;
+      return baseDetail;
+    });
+    const runAction = vi.fn(async () => ({
+      success: true,
+      message: "Posted.",
+    }));
+    const onChanged = vi.fn();
+
+    render(
+      <StrictMode>
+        <PullRequestDetailPanel
+          client={client({
+            getCodeDeliveryPullRequestDetail: getDetail,
+            runCodeDeliveryPullRequestAction: runAction,
+          })}
+          summary={summaryFor(2251)}
+          onClose={vi.fn()}
+          onChanged={onChanged}
+          onOpenWorkspace={vi.fn()}
+        />
+      </StrictMode>,
+    );
+
+    expect(
+      await screen.findByRole("tab", { name: /Conversation/ }),
+    ).toBeInTheDocument();
+    phase = "refresh";
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText("Strict Mode refresh completed."),
+    ).toBeInTheDocument();
+
+    phase = "mutation";
+    await userEvent.type(
+      screen.getByLabelText("Comment on this pull request"),
+      "Strict Mode comment",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Comment" }));
+
+    expect(
+      await screen.findByText("Strict Mode mutation refresh completed."),
+    ).toBeInTheDocument();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith("Posted.");
+  });
+
   it("names the lifecycle instead of leaving a settled pull request unlabeled", async () => {
     await renderPanel(2240);
     expect(await screen.findByText("Merged")).toBeInTheDocument();
@@ -148,6 +221,113 @@ describe("PullRequestDetailPanel", () => {
       action: { type: "comment", body: "Looks good." },
     });
     await waitFor(() => expect(box).toHaveValue(""));
+  });
+
+  it("warns when only some workflow reruns start", async () => {
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.warning).mockClear();
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: false,
+        message:
+          "Failed jobs queued for one workflow run; one workflow run failed",
+        rerun_outcomes: [
+          { workflow_run_id: 4401, success: true },
+          { workflow_run_id: 4402, success: false, error: "HTTP 503" },
+        ],
+      }),
+    );
+    await renderPanel(
+      2251,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Rerun failed" }));
+
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith(
+        "Failed jobs queued for one workflow run; one workflow run failed",
+        {
+          description: expect.stringContaining(
+            "Queued: desktop / storybook (run 4401).",
+          ),
+        },
+      ),
+    );
+    expect(vi.mocked(toast.warning).mock.calls[0]?.[1]).toEqual({
+      description: expect.stringContaining("Failed: Run 4402: HTTP 503."),
+    });
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("ignores a mutation completion after the selected pull request changes", async () => {
+    vi.mocked(toast.success).mockClear();
+    let resolveAction!: (value: { success: boolean; message: string }) => void;
+    const action = new Promise<{ success: boolean; message: string }>(
+      (resolve) => {
+        resolveAction = resolve;
+      },
+    );
+    const runAction = vi.fn(() => action);
+    const onChanged = vi.fn();
+    const api = client({ runCodeDeliveryPullRequestAction: runAction });
+    const props = {
+      client: api,
+      onClose: vi.fn(),
+      onChanged,
+      onOpenWorkspace: vi.fn(),
+    };
+    const view = render(
+      <PullRequestDetailPanel
+        {...props}
+        summary={summaryFor(2251)}
+        initialDetail={deliveryPullRequestDetails[2251]}
+      />,
+    );
+
+    const box = await screen.findByLabelText("Comment on this pull request");
+    await userEvent.type(box, "Slow comment");
+    await userEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(runAction).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <PullRequestDetailPanel
+        {...props}
+        summary={summaryFor(2247)}
+        initialDetail={deliveryPullRequestDetails[2247]}
+      />,
+    );
+    resolveAction({ success: true, message: "Posted." });
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Make workspace deep links durable",
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(onChanged).not.toHaveBeenCalled());
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("shows partial detail errors instead of presenting an empty read as complete", async () => {
+    const detail = {
+      ...deliveryPullRequestDetails[2251]!,
+      comments: [],
+      files: [],
+      errors: [
+        {
+          kind: "detail",
+          message: "Could not load reviews: HTTP 503",
+        },
+      ],
+    };
+    await renderPanel(
+      2251,
+      client({ getCodeDeliveryPullRequestDetail: async () => detail }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load reviews: HTTP 503",
+    );
   });
 
   it("keeps the comment button inert until there is something to say", async () => {

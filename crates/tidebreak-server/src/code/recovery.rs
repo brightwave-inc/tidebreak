@@ -10,8 +10,8 @@ use std::io::ErrorKind;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, save_session, save_turn,
-    set_session_subagents,
+    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, replace_session_attention,
+    save_session, save_turn, set_session_subagents,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
@@ -103,13 +103,23 @@ async fn persist_recovery_session(
     if !save_session(store, session).await? {
         return Ok(false);
     }
+    let _ = replace_session_attention(store, &session.owner, session.id, &session.attention, false)
+        .await?;
     if !set_session_subagents(store, &session.owner, session.id, &session.subagents).await? {
         return Err(tidebreak_core::AgentError::Store(format!(
             "code session {} disappeared while recovery settled subagents",
             session.id
         )));
     }
-    emit_digest(store, bus, session).await;
+    let stored = tidebreak_core::db::code::get_session(store, &session.owner, session.id)
+        .await?
+        .ok_or_else(|| {
+            tidebreak_core::AgentError::Store(format!(
+                "code session {} disappeared while recovery persisted it",
+                session.id
+            ))
+        })?;
+    emit_digest(store, bus, &stored).await;
     Ok(true)
 }
 
@@ -616,6 +626,8 @@ mod tests {
             None,
             session.subagents.clone(),
         );
+        let private_root = _dir.path().join("private");
+        std::fs::create_dir(&private_root).unwrap();
         let child_pid = i64::from(std::process::id());
         let engine = crate::scripted_harness::ScriptedAdapter::new(vec![
             tidebreak_harness::HarnessEvent::TurnStarted,
@@ -629,6 +641,7 @@ mod tests {
         .with_delay(std::time::Duration::from_secs(30))
         .launch(tidebreak_harness::SessionSpec {
             worktree: _dir.path().join("wt"),
+            allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
             model: None,
             reasoning_effort: None,
@@ -650,7 +663,7 @@ mod tests {
             sink,
             crate::code::session_worker::AttachmentStore {
                 blobs: None,
-                worktree: _dir.path().join("wt"),
+                private_root,
                 engine_reads_images: false,
             },
             std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -663,6 +676,7 @@ mod tests {
                 model: None,
                 reasoning_effort: None,
                 attachments: Vec::new(),
+                trigger_delivery: None,
                 reply,
             })
             .await
@@ -706,14 +720,17 @@ mod tests {
     #[tokio::test]
     async fn fenced_recovery_does_not_overwrite_a_manual_pin() {
         let (_dir, store, session_id, _) = seeded_running(Some(1)).await;
-        let mut session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
-            .await
-            .unwrap()
-            .unwrap();
-        session.attention = Attention::manual("hold");
-        tidebreak_core::db::code::save_session(&store, &session)
-            .await
-            .unwrap();
+        let pinned = Attention::manual("hold");
+        let changed = replace_session_attention(
+            &store,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+            &pinned,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed, Some(pinned));
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Alive)
             .await

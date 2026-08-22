@@ -271,7 +271,10 @@ async fn pr_create_and_view_use_path_shims_and_persist_the_digest() {
             r#"#!/bin/sh
 echo "$@" >> {log}
 if [ "$1" = merge ] || [ "$2" = merge ]; then exit 2; fi
-if [ "$1" = auth ]; then echo logged in; exit 0; fi
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
 if [ "$1" = pr ] && [ "$2" = create ]; then
   echo https://github.com/example/demo/pull/12
   exit 0

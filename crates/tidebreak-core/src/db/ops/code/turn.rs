@@ -17,6 +17,20 @@ use super::super::blob as blob_ops;
 pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<()> {
     validate_attachments(&turn.attachments)?;
     let txn = store.conn.begin().await.map_err(store_err)?;
+    insert_turn_on(&txn, owner, turn).await?;
+    txn.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
+pub(in crate::db) async fn insert_turn_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    turn: &CodeTurn,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    validate_attachments(&turn.attachments)?;
     entities::code_turn::ActiveModel {
         id: Set(turn.id.0),
         owner: Set(owner.as_str().to_owned()),
@@ -38,11 +52,10 @@ pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> R
         started_at: Set(turn.started_at),
         ended_at: Set(turn.ended_at),
     }
-    .insert(&txn)
+    .insert(conn)
     .await
     .map_err(store_err)?;
-    insert_attachments_on(&txn, owner, turn.id, &turn.attachments).await?;
-    txn.commit().await.map_err(store_err)?;
+    insert_attachments_on(conn, owner, turn.id, &turn.attachments).await?;
     Ok(())
 }
 

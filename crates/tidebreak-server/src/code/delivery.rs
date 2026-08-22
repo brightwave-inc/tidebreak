@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -18,7 +18,7 @@ use tokio::time::timeout;
 
 use tidebreak_core::{
     CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId, PullRequestCheckBucket,
-    PullRequestComment, PullRequestCommentKind,
+    PullRequestComment, PullRequestCommentKind, RepoId,
 };
 
 use super::gh::{self, GhObservation};
@@ -29,10 +29,10 @@ use crate::routes::code::types::{
     CodeDeliveryPrAttentionReason, CodeDeliveryPullRequestAction,
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestSummary, CodeDeliveryPullRequestTarget,
-    CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunAction,
-    CodeDeliveryRunActionBody, CodeDeliveryRunAttentionReason, CodeDeliveryRunDetail,
-    CodeDeliveryRunKind, CodeDeliveryRunQuery, CodeDeliveryRunSummary, CodeDeliveryRunTarget,
-    CodeDeliveryRunsPage, CodeDeliverySourceError, CodeDeliveryWorkflowJob,
+    CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRerunOutcome,
+    CodeDeliveryRunAction, CodeDeliveryRunActionBody, CodeDeliveryRunAttentionReason,
+    CodeDeliveryRunDetail, CodeDeliveryRunKind, CodeDeliveryRunQuery, CodeDeliveryRunSummary,
+    CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeDeliverySourceError, CodeDeliveryWorkflowJob,
     CodeDeliveryWorkspaceLink, CodeGitHubCapability, CodeGitHubRepositoryRef,
     CodeGitHubRepositoryTarget, CodePrMergeMethod, ResolveCodeDeliveryRepositoriesBody,
 };
@@ -48,12 +48,35 @@ const MAX_COMMENT_BYTES: usize = 60_000;
 /// Files rendered in the detail panel. The panel is a review aid rather than
 /// a diff viewer, and GitHub itself stops rendering a diff well past this.
 const MAX_DETAIL_FILES: usize = 300;
+const GITHUB_DETAIL_PAGE_SIZE: usize = 100;
 /// Transient GitHub failures (502/503/504, gateway timeouts) get one retry
 /// after a short pause. A cross-repository list fans out far enough that one
 /// unlucky repository would otherwise blank a whole column.
 const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(700);
 
-const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,statusCheckRollup";
+const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels";
+const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,statusCheckRollup";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PullRequestRemotePlan {
+    state: &'static str,
+    fields: &'static str,
+    checks_loaded: bool,
+}
+
+impl PullRequestRemotePlan {
+    fn cache_scope(self) -> String {
+        format!(
+            "{}:{}",
+            self.state,
+            if self.checks_loaded {
+                "checks"
+            } else {
+                "summary"
+            }
+        )
+    }
+}
 
 #[derive(Debug, Clone)]
 struct CachedAggregate<T> {
@@ -62,11 +85,44 @@ struct CachedAggregate<T> {
     errors: Vec<CodeDeliverySourceError>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedValue<T> {
+    fetched_at: Instant,
+    value: T,
+}
+
+#[derive(Debug, Clone)]
+struct OwnerRepositoryEntry {
+    repo: CodeRepo,
+    target: CodeGitHubRepositoryTarget,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OwnerRepositoryCatalog {
+    entries: Vec<OwnerRepositoryEntry>,
+    errors: Vec<CodeDeliverySourceError>,
+}
+
+#[derive(Debug, Default)]
+struct FetchedRuns {
+    items: Vec<CodeDeliveryRunSummary>,
+    errors: Vec<CodeDeliverySourceError>,
+}
+
 /// Short-lived owner/query caches. No GitHub response is durable.
 #[derive(Debug, Default)]
 pub(crate) struct DeliveryCache {
     pull_requests: Mutex<HashMap<String, CachedAggregate<CodeDeliveryPullRequestSummary>>>,
     runs: Mutex<HashMap<String, CachedAggregate<CodeDeliveryRunSummary>>>,
+    pull_request_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    run_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    repositories: Mutex<HashMap<String, CachedValue<CodeGitHubRepositoryRef>>>,
+    repository_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    owner_repositories: Mutex<HashMap<String, CachedValue<OwnerRepositoryCatalog>>>,
+    owner_repository_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    workspace_indexes: Mutex<HashMap<String, CachedValue<Vec<WorkspaceIndexEntry>>>>,
+    workspace_index_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    owner_cache_generations: Mutex<HashMap<String, u64>>,
 }
 
 impl DeliveryCache {
@@ -95,6 +151,15 @@ impl DeliveryCache {
             );
     }
 
+    fn pull_request_read(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.pull_request_reads
+            .lock()
+            .expect("delivery PR read locks")
+            .entry(key.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     fn runs(&self, key: &str) -> Option<CachedAggregate<CodeDeliveryRunSummary>> {
         let mut cache = self.runs.lock().expect("delivery run cache");
         cache.retain(|_, value| value.fetched_at.elapsed() <= LIST_CACHE_TTL);
@@ -117,6 +182,116 @@ impl DeliveryCache {
         );
     }
 
+    fn run_read(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.run_reads
+            .lock()
+            .expect("delivery run read locks")
+            .entry(key.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn repository(&self, key: &str) -> Option<CachedValue<CodeGitHubRepositoryRef>> {
+        cached_value(&self.repositories, key, "delivery repository cache")
+    }
+
+    fn put_repository(&self, key: String, value: CodeGitHubRepositoryRef) {
+        put_cached_value(&self.repositories, key, value, "delivery repository cache");
+    }
+
+    fn repository_read(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        cache_read_lock(
+            &self.repository_reads,
+            key,
+            "delivery repository read locks",
+        )
+    }
+
+    fn owner_repositories(&self, key: &str) -> Option<CachedValue<OwnerRepositoryCatalog>> {
+        self.owner_repositories
+            .lock()
+            .expect("delivery owner repository cache")
+            .get(key)
+            .cloned()
+    }
+
+    fn owner_cache_generation(&self, key: &str) -> u64 {
+        self.owner_cache_generations
+            .lock()
+            .expect("delivery owner cache generations")
+            .get(key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn put_owner_repositories_if_current(
+        &self,
+        key: &str,
+        generation: u64,
+        value: OwnerRepositoryCatalog,
+    ) -> bool {
+        let generations = self
+            .owner_cache_generations
+            .lock()
+            .expect("delivery owner cache generations");
+        if generations.get(key).copied().unwrap_or_default() != generation {
+            return false;
+        }
+        put_cached_value(
+            &self.owner_repositories,
+            key.to_owned(),
+            value,
+            "delivery owner repository cache",
+        );
+        true
+    }
+
+    fn owner_repository_read(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        cache_read_lock(
+            &self.owner_repository_reads,
+            key,
+            "delivery owner repository read locks",
+        )
+    }
+
+    fn workspace_index(&self, key: &str) -> Option<CachedValue<Vec<WorkspaceIndexEntry>>> {
+        cached_value(
+            &self.workspace_indexes,
+            key,
+            "delivery workspace index cache",
+        )
+    }
+
+    fn put_workspace_index_if_current(
+        &self,
+        key: &str,
+        generation: u64,
+        value: Vec<WorkspaceIndexEntry>,
+    ) -> bool {
+        let generations = self
+            .owner_cache_generations
+            .lock()
+            .expect("delivery owner cache generations");
+        if generations.get(key).copied().unwrap_or_default() != generation {
+            return false;
+        }
+        put_cached_value(
+            &self.workspace_indexes,
+            key.to_owned(),
+            value,
+            "delivery workspace index cache",
+        );
+        true
+    }
+
+    fn workspace_index_read(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        cache_read_lock(
+            &self.workspace_index_reads,
+            key,
+            "delivery workspace index read locks",
+        )
+    }
+
     pub(crate) fn invalidate(&self) {
         self.pull_requests
             .lock()
@@ -124,6 +299,74 @@ impl DeliveryCache {
             .clear();
         self.runs.lock().expect("delivery run cache").clear();
     }
+
+    pub(crate) fn invalidate_owner(&self, owner: &OwnerId) {
+        let owner_key = owner.to_string();
+        let aggregate_prefix = format!("{owner_key}:");
+        let mut generations = self
+            .owner_cache_generations
+            .lock()
+            .expect("delivery owner cache generations");
+        let generation = generations.entry(owner_key.clone()).or_default();
+        *generation = generation
+            .checked_add(1)
+            .expect("delivery owner cache generation overflow");
+        self.owner_repositories
+            .lock()
+            .expect("delivery owner repository cache")
+            .remove(&owner_key);
+        self.workspace_indexes
+            .lock()
+            .expect("delivery workspace index cache")
+            .remove(&owner_key);
+        drop(generations);
+        self.pull_requests
+            .lock()
+            .expect("delivery PR cache")
+            .retain(|key, _| !key.starts_with(&aggregate_prefix));
+        self.runs
+            .lock()
+            .expect("delivery run cache")
+            .retain(|key, _| !key.starts_with(&aggregate_prefix));
+    }
+}
+
+fn cached_value<T: Clone>(
+    cache: &Mutex<HashMap<String, CachedValue<T>>>,
+    key: &str,
+    label: &str,
+) -> Option<CachedValue<T>> {
+    let mut cache = cache.lock().expect(label);
+    cache.retain(|_, value| value.fetched_at.elapsed() <= LIST_CACHE_TTL);
+    cache.get(key).cloned()
+}
+
+fn put_cached_value<T>(
+    cache: &Mutex<HashMap<String, CachedValue<T>>>,
+    key: String,
+    value: T,
+    label: &str,
+) {
+    cache.lock().expect(label).insert(
+        key,
+        CachedValue {
+            fetched_at: Instant::now(),
+            value,
+        },
+    );
+}
+
+fn cache_read_lock(
+    cache: &Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    key: &str,
+    label: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
+    cache
+        .lock()
+        .expect(label)
+        .entry(key.to_owned())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 #[derive(Debug, Clone)]
@@ -133,49 +376,149 @@ struct WorkspaceIndexEntry {
     head_sha: Option<String>,
 }
 
+/// Read the exact pull requests that local workspaces already identify.
+///
+/// The trigger sweep uses this path instead of a bounded remote list. One
+/// owner-wide workspace index serves every read, and the shared concurrency
+/// limit bounds repository resolution and pull-request fetches separately.
+pub(crate) async fn query_pull_requests_by_number(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    repositories: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>,
+) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
+    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
+    let capability = github_capability(&observation);
+    let repositories = dedupe_numbered_targets(repositories)?;
+    if observation.authenticated != Some(true) {
+        return Ok(CodeDeliveryPullRequestsPage {
+            capability,
+            items: Vec::new(),
+            next_cursor: None,
+            errors: Vec::new(),
+            fetched_at: Utc::now(),
+        });
+    }
+
+    let binary = observation
+        .binary
+        .clone()
+        .expect("authenticated gh has a binary");
+    let workspaces = Arc::new(workspace_index(runtime, owner, false).await?);
+    let resolved = stream::iter(repositories)
+        .map(|(target, numbers)| {
+            let binary = binary.clone();
+            async move {
+                let repository = resolve_repository(&binary, &target, None)
+                    .await
+                    .map_err(|message| (target.clone(), message))?;
+                Ok((target, repository, numbers))
+            }
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut reads = Vec::new();
+    let mut errors = Vec::new();
+    for result in resolved {
+        match result {
+            Ok((target, repository, numbers)) => {
+                reads.extend(
+                    numbers
+                        .into_iter()
+                        .map(|number| (target.clone(), repository.clone(), number)),
+                );
+            }
+            Err((target, message)) => errors.push(source_error(Some(target), message)),
+        }
+    }
+
+    let results = stream::iter(reads)
+        .map(|(target, repository, number)| {
+            let binary = binary.clone();
+            let workspaces = Arc::clone(&workspaces);
+            async move {
+                with_transient_retry(|| {
+                    fetch_pull_request(&binary, &repository, number, &workspaces)
+                })
+                .await
+                .map_err(|message| (target, format!("pull request #{number}: {message}")))
+            }
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut items = Vec::new();
+    for result in results {
+        match result {
+            Ok(item) => items.push(item),
+            Err((target, message)) => errors.push(source_error(Some(target), message)),
+        }
+    }
+    items.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(CodeDeliveryPullRequestsPage {
+        capability,
+        items,
+        next_cursor: None,
+        errors,
+        fetched_at: Utc::now(),
+    })
+}
+
 pub(crate) async fn discover_repositories(
     runtime: &CodeRuntime,
     owner: &OwnerId,
+    refresh: bool,
 ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
-    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
-    let capability = github_capability(&observation).await;
-    let repos = runtime.list_repos(owner).await?;
-    let mut parsed = Vec::new();
-    let mut errors = Vec::new();
-
-    for repo in repos {
-        match repository_target_from_local(&repo).await {
-            Ok(target) => parsed.push((repo, target)),
-            Err(message) => errors.push(CodeDeliverySourceError {
-                repository: None,
-                kind: "not_github".into(),
-                message: format!("{}: {message}", repo.display_name),
-                retry_at: None,
-            }),
-        }
-    }
+    let search_path = runtime.gh_search_path_owned();
+    let observation = if refresh {
+        gh::refresh_gh_observation(search_path.as_deref()).await
+    } else {
+        gh::observe_gh(search_path.as_deref()).await
+    };
+    let capability = github_capability(&observation);
+    let catalog = owner_repository_catalog(runtime, owner, refresh).await?;
+    let mut errors = catalog.errors;
 
     let resolved = if observation.authenticated == Some(true) {
         let binary = observation
             .binary
             .clone()
             .expect("authenticated gh has a binary");
-        stream::iter(parsed)
-            .map(|(repo, target)| {
+        stream::iter(catalog.entries)
+            .map(|entry| {
                 let binary = binary.clone();
                 async move {
-                    resolve_repository(&binary, &target, Some(repo.id))
-                        .await
-                        .map_err(|message| (target, message))
+                    resolve_repository_cached(
+                        runtime,
+                        &binary,
+                        &entry.target,
+                        Some(entry.repo.id),
+                        refresh,
+                    )
+                    .await
+                    .map_err(|message| (entry.target, message))
                 }
             })
             .buffer_unordered(DELIVERY_CONCURRENCY)
             .collect::<Vec<_>>()
             .await
     } else {
-        parsed
+        catalog
+            .entries
             .into_iter()
-            .map(|(repo, target)| Ok(repository_ref_from_target(&target, Some(repo.id))))
+            .map(|entry| {
+                Ok(repository_ref_from_target(
+                    &entry.target,
+                    Some(entry.repo.id),
+                ))
+            })
             .collect()
     };
 
@@ -197,10 +540,10 @@ pub(crate) async fn discover_repositories(
 
 pub(crate) async fn resolve_repositories(
     runtime: &CodeRuntime,
+    owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     body: ResolveCodeDeliveryRepositoriesBody,
 ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
-    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
-    let capability = github_capability(&observation).await;
     if body.repositories.len() > MAX_REPOSITORIES {
         return Err(ServerError::bad_request(format!(
             "at most {MAX_REPOSITORIES} repositories may be resolved at once"
@@ -221,6 +564,10 @@ pub(crate) async fn resolve_repositories(
         }
     }
     targets = dedupe_targets(targets)?;
+    ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
+
+    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
+    let capability = github_capability(&observation);
 
     let mut repositories = Vec::new();
     if observation.authenticated == Some(true) {
@@ -232,7 +579,7 @@ pub(crate) async fn resolve_repositories(
             .map(|target| {
                 let binary = binary.clone();
                 async move {
-                    resolve_repository(&binary, &target, None)
+                    resolve_repository_cached(runtime, &binary, &target, None, false)
                         .await
                         .map_err(|message| (target, message))
                 }
@@ -247,9 +594,10 @@ pub(crate) async fn resolve_repositories(
             }
         }
     } else {
+        let kind = observation_error_kind(&observation);
         errors.extend(targets.into_iter().map(|target| CodeDeliverySourceError {
             repository: Some(target),
-            kind: "gh_signed_out".into(),
+            kind: kind.into(),
             message: capability.remediation.clone(),
             retry_at: None,
         }));
@@ -267,26 +615,40 @@ pub(crate) async fn resolve_repositories(
 pub(crate) async fn query_pull_requests(
     runtime: &CodeRuntime,
     owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     query: CodeDeliveryPullRequestQuery,
 ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
-    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
-    let capability = github_capability(&observation).await;
+    let force_refresh = query.refresh && query.cursor.is_none();
     let targets = dedupe_targets(query.repositories.clone())?;
+    ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
+    let search_path = runtime.gh_search_path_owned();
+    let observation = if force_refresh {
+        gh::refresh_gh_observation(search_path.as_deref()).await
+    } else {
+        gh::observe_gh(search_path.as_deref()).await
+    };
+    let capability = github_capability(&observation);
     if observation.authenticated != Some(true) {
         return Ok(CodeDeliveryPullRequestsPage {
             capability,
             items: Vec::new(),
             next_cursor: None,
-            errors: Vec::new(),
+            errors: vec![observation_source_error(&observation)],
             fetched_at: Utc::now(),
         });
     }
 
-    let cache_key = aggregate_cache_key(owner, "prs", &targets);
+    let remote_plan = pull_request_remote_plan(&query);
+    let cache_key = aggregate_cache_key(
+        owner,
+        &format!("prs:{}", remote_plan.cache_scope()),
+        &targets,
+    );
+    let request_started = Instant::now();
     // A user refresh must reach GitHub. Paging must not: following a cursor
     // against a freshly reread aggregate would renumber the offsets underneath
     // the reader and skip or repeat rows.
-    let cached = if query.refresh && query.cursor.is_none() {
+    let cached = if force_refresh {
         None
     } else {
         runtime.delivery_cache.pull_requests(&cache_key)
@@ -294,19 +656,33 @@ pub(crate) async fn query_pull_requests(
     let aggregate = match cached {
         Some(cached) => cached,
         None => {
+            let read = runtime.delivery_cache.pull_request_read(&cache_key);
+            let _guard = read.lock().await;
+            if let Some(cached) = runtime.delivery_cache.pull_requests(&cache_key) {
+                if !force_refresh || cached.fetched_at >= request_started {
+                    return pull_request_page(capability, cached, &query);
+                }
+            }
             let binary = observation
                 .binary
                 .clone()
                 .expect("authenticated gh has a binary");
-            let workspace_index = workspace_index(runtime, owner).await?;
+            let workspace_index = workspace_index(runtime, owner, force_refresh).await?;
             let results = stream::iter(targets.clone())
                 .map(|target| {
                     let binary = binary.clone();
                     let workspace_index = workspace_index.clone();
                     async move {
-                        fetch_pull_requests(&binary, &target, &workspace_index)
-                            .await
-                            .map_err(|message| (target, message))
+                        fetch_pull_requests(
+                            runtime,
+                            &binary,
+                            &target,
+                            &workspace_index,
+                            remote_plan,
+                            force_refresh,
+                        )
+                        .await
+                        .map_err(|message| (target, message))
                     }
                 })
                 .buffer_unordered(DELIVERY_CONCURRENCY)
@@ -338,11 +714,18 @@ pub(crate) async fn query_pull_requests(
             }
         }
     };
+    pull_request_page(capability, aggregate, &query)
+}
 
+fn pull_request_page(
+    capability: CodeGitHubCapability,
+    aggregate: CachedAggregate<CodeDeliveryPullRequestSummary>,
+    query: &CodeDeliveryPullRequestQuery,
+) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
     let filtered = aggregate
         .items
         .into_iter()
-        .filter(|item| pull_request_matches(item, &query))
+        .filter(|item| pull_request_matches(item, query))
         .collect::<Vec<_>>();
     let (items, next_cursor) = paginate(filtered, query.cursor.as_deref(), query.limit)?;
     Ok(CodeDeliveryPullRequestsPage {
@@ -357,17 +740,25 @@ pub(crate) async fn query_pull_requests(
 pub(crate) async fn pull_request_detail(
     runtime: &CodeRuntime,
     owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     target: CodeDeliveryPullRequestTarget,
 ) -> Result<CodeDeliveryPullRequestDetail, ServerError> {
+    ensure_delivery_targets(
+        runtime,
+        owner,
+        allow_unscoped_delivery,
+        std::slice::from_ref(&target.repository),
+    )
+    .await?;
     let observation = require_authenticated(runtime).await?;
     let binary = observation
         .binary
         .as_ref()
         .expect("authenticated gh has binary");
-    let repository = resolve_repository(binary, &target.repository, None)
+    let repository = resolve_repository_cached(runtime, binary, &target.repository, None, false)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
-    let workspace_index = workspace_index(runtime, owner).await?;
+    let workspace_index = workspace_index(runtime, owner, false).await?;
     let summary = fetch_pull_request(binary, &repository, target.number, &workspace_index)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
@@ -398,24 +789,66 @@ pub(crate) async fn pull_request_detail(
     );
     let pull = pull.map_err(|message| ServerError::bad_request_kind("github", message))?;
     let mut comments = Vec::new();
-    if let Ok(value) = issue_comments {
-        comments.extend(parse_issue_comments(&value));
+    let mut errors = Vec::new();
+    match issue_comments {
+        Ok(value) => {
+            record_full_detail_page(
+                &mut errors,
+                &target.repository,
+                "issue comments",
+                value.as_array().map(Vec::len),
+            );
+            comments.extend(parse_issue_comments(&value));
+        }
+        Err(message) => errors.push(detail_source_error(
+            &target.repository,
+            "issue comments",
+            message,
+        )),
     }
-    if let Ok(value) = reviews {
-        comments.extend(parse_reviews(&value));
+    match reviews {
+        Ok(value) => {
+            record_full_detail_page(
+                &mut errors,
+                &target.repository,
+                "reviews",
+                value.as_array().map(Vec::len),
+            );
+            comments.extend(parse_reviews(&value));
+        }
+        Err(message) => errors.push(detail_source_error(&target.repository, "reviews", message)),
     }
-    if let Ok(value) = inline_comments {
-        comments.extend(parse_inline_comments(&value));
+    match inline_comments {
+        Ok(value) => {
+            record_full_detail_page(
+                &mut errors,
+                &target.repository,
+                "inline comments",
+                value.as_array().map(Vec::len),
+            );
+            comments.extend(parse_inline_comments(&value));
+        }
+        Err(message) => errors.push(detail_source_error(
+            &target.repository,
+            "inline comments",
+            message,
+        )),
     }
     comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
 
     let changed_files = u64_field(&pull, "changed_files").unwrap_or(0);
-    let mut files = changed
-        .ok()
-        .map(|value| parse_pull_request_files(&value))
-        .unwrap_or_default();
-    let files_truncated = files.len() > MAX_DETAIL_FILES
-        || (!files.is_empty() && (files.len() as u64) < changed_files);
+    let mut files = match changed {
+        Ok(value) => parse_pull_request_files(&value),
+        Err(message) => {
+            errors.push(detail_source_error(
+                &target.repository,
+                "changed files",
+                message,
+            ));
+            Vec::new()
+        }
+    };
+    let files_truncated = pull_request_files_truncated(files.len(), changed_files);
     files.truncate(MAX_DETAIL_FILES);
 
     let open = summary.state == "open";
@@ -443,6 +876,7 @@ pub(crate) async fn pull_request_detail(
         files,
         files_truncated,
         comments,
+        errors,
         summary,
     })
 }
@@ -469,10 +903,61 @@ fn parse_pull_request_files(value: &Value) -> Vec<CodeDeliveryPullRequestFile> {
         .collect()
 }
 
+fn pull_request_files_truncated(returned: usize, changed_files: u64) -> bool {
+    returned > MAX_DETAIL_FILES || (returned as u64) < changed_files
+}
+
+fn delivery_action_result(message: String) -> CodeDeliveryActionResult {
+    CodeDeliveryActionResult {
+        success: true,
+        message,
+        rerun_outcomes: Vec::new(),
+    }
+}
+
+fn rerun_action_result(mut outcomes: Vec<CodeDeliveryRerunOutcome>) -> CodeDeliveryActionResult {
+    outcomes.sort_by_key(|outcome| outcome.workflow_run_id);
+    let succeeded = outcomes.iter().filter(|outcome| outcome.success).count();
+    let failed = outcomes.len().saturating_sub(succeeded);
+    let message = match (succeeded, failed) {
+        (1, 0) => "Failed jobs queued for one workflow run".into(),
+        (succeeded, 0) => format!("Failed jobs queued for {succeeded} workflow runs"),
+        (0, 1) => "Could not queue failed jobs for one workflow run".into(),
+        (0, failed) => format!("Could not queue failed jobs for {failed} workflow runs"),
+        (succeeded, failed) => format!(
+            "Failed jobs queued for {}; {} failed",
+            workflow_run_count(succeeded),
+            workflow_run_count(failed)
+        ),
+    };
+    CodeDeliveryActionResult {
+        success: failed == 0,
+        message,
+        rerun_outcomes: outcomes,
+    }
+}
+
+fn workflow_run_count(count: usize) -> String {
+    if count == 1 {
+        "one workflow run".into()
+    } else {
+        format!("{count} workflow runs")
+    }
+}
+
 pub(crate) async fn act_on_pull_request(
     runtime: &CodeRuntime,
+    owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     body: CodeDeliveryPullRequestActionBody,
 ) -> Result<CodeDeliveryActionResult, ServerError> {
+    ensure_delivery_targets(
+        runtime,
+        owner,
+        allow_unscoped_delivery,
+        std::slice::from_ref(&body.target.repository),
+    )
+    .await?;
     let search_path = runtime.gh_search_path_owned();
     let target = body.target;
     match body.action {
@@ -487,31 +972,16 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
-                success: true,
-                message: format!("Pull request #{} is ready for review", target.number),
-            })
+            Ok(delivery_action_result(format!(
+                "Pull request #{} is ready for review",
+                target.number
+            )))
         }
         CodeDeliveryPullRequestAction::Merge {
             method,
             auto,
             expected_head_sha,
         } => {
-            let current = gh::pull_request_head_sha(
-                &target.repository.host,
-                &target.repository.owner,
-                &target.repository.name,
-                target.number,
-                search_path.as_deref(),
-            )
-            .await
-            .map_err(map_gh_error)?;
-            if current != expected_head_sha {
-                return Err(ServerError::conflict_kind(
-                    "pr_head_changed",
-                    "the pull request head changed; refresh it before merging",
-                ));
-            }
             gh::merge_pull_request_target(
                 &target.repository.host,
                 &target.repository.owner,
@@ -519,19 +989,17 @@ pub(crate) async fn act_on_pull_request(
                 target.number,
                 merge_method(method),
                 auto,
+                &expected_head_sha,
                 search_path.as_deref(),
             )
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
-                success: true,
-                message: if auto {
-                    format!("Auto-merge enabled for pull request #{}", target.number)
-                } else {
-                    format!("Pull request #{} merged", target.number)
-                },
-            })
+            Ok(delivery_action_result(if auto {
+                format!("Auto-merge enabled for pull request #{}", target.number)
+            } else {
+                format!("Pull request #{} merged", target.number)
+            }))
         }
         CodeDeliveryPullRequestAction::RerunFailed { workflow_run_ids } => {
             let unique = workflow_run_ids.into_iter().collect::<HashSet<_>>();
@@ -540,22 +1008,55 @@ pub(crate) async fn act_on_pull_request(
                     "at least one workflow run id is required",
                 ));
             }
-            for run_id in unique {
-                gh::rerun_failed_jobs(
-                    &target.repository.host,
-                    &target.repository.owner,
-                    &target.repository.name,
-                    run_id,
-                    search_path.as_deref(),
-                )
-                .await
-                .map_err(map_gh_error)?;
+            let observation = require_authenticated(runtime).await?;
+            let results = stream::iter(unique)
+                .map(|run_id| {
+                    let observation = observation.clone();
+                    let repository = target.repository.clone();
+                    async move {
+                        (
+                            run_id,
+                            gh::rerun_failed_jobs_with_observation(
+                                &observation,
+                                &repository.host,
+                                &repository.owner,
+                                &repository.name,
+                                run_id,
+                            )
+                            .await,
+                        )
+                    }
+                })
+                .buffer_unordered(DELIVERY_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            let any_success = results.iter().any(|(_, result)| result.is_ok());
+            if any_success {
+                runtime.delivery_cache.invalidate();
             }
-            runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
-                success: true,
-                message: "Failed workflow jobs queued to rerun".into(),
-            })
+            let outcomes = results
+                .into_iter()
+                .map(|(workflow_run_id, result)| match result {
+                    Ok(()) => CodeDeliveryRerunOutcome {
+                        workflow_run_id,
+                        success: true,
+                        error: None,
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            workflow_run_id,
+                            partial_success = any_success,
+                            "GitHub workflow rerun failed"
+                        );
+                        CodeDeliveryRerunOutcome {
+                            workflow_run_id,
+                            success: false,
+                            error: Some(error.to_string()),
+                        }
+                    }
+                })
+                .collect();
+            Ok(rerun_action_result(outcomes))
         }
         CodeDeliveryPullRequestAction::Close => {
             gh::close_pull_request_target(
@@ -568,10 +1069,10 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
-                success: true,
-                message: format!("Pull request #{} closed", target.number),
-            })
+            Ok(delivery_action_result(format!(
+                "Pull request #{} closed",
+                target.number
+            )))
         }
         CodeDeliveryPullRequestAction::Reopen => {
             gh::reopen_pull_request_target(
@@ -584,10 +1085,10 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
-                success: true,
-                message: format!("Pull request #{} reopened", target.number),
-            })
+            Ok(delivery_action_result(format!(
+                "Pull request #{} reopened",
+                target.number
+            )))
         }
         CodeDeliveryPullRequestAction::Comment { body } => {
             let body = body.trim();
@@ -610,10 +1111,10 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
-                success: true,
-                message: format!("Comment posted on pull request #{}", target.number),
-            })
+            Ok(delivery_action_result(format!(
+                "Comment posted on pull request #{}",
+                target.number
+            )))
         }
     }
 }
@@ -621,23 +1122,33 @@ pub(crate) async fn act_on_pull_request(
 pub(crate) async fn query_runs(
     runtime: &CodeRuntime,
     owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     query: CodeDeliveryRunQuery,
 ) -> Result<CodeDeliveryRunsPage, ServerError> {
-    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
-    let capability = github_capability(&observation).await;
+    let force_refresh = query.refresh && query.cursor.is_none();
     let targets = dedupe_targets(query.repositories.clone())?;
+    ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
+    let search_path = runtime.gh_search_path_owned();
+    let observation = if force_refresh {
+        gh::refresh_gh_observation(search_path.as_deref()).await
+    } else {
+        gh::observe_gh(search_path.as_deref()).await
+    };
+    let capability = github_capability(&observation);
     if observation.authenticated != Some(true) {
         return Ok(CodeDeliveryRunsPage {
             capability,
             items: Vec::new(),
             next_cursor: None,
-            errors: Vec::new(),
+            errors: vec![observation_source_error(&observation)],
             fetched_at: Utc::now(),
         });
     }
 
-    let cache_key = aggregate_cache_key(owner, "runs", &targets);
-    let cached = if query.refresh && query.cursor.is_none() {
+    let (remote_scope, fetch_workflows, fetch_deployments) = run_remote_scope(&query);
+    let cache_key = aggregate_cache_key(owner, &format!("runs:{remote_scope}"), &targets);
+    let request_started = Instant::now();
+    let cached = if force_refresh {
         None
     } else {
         runtime.delivery_cache.runs(&cache_key)
@@ -645,19 +1156,34 @@ pub(crate) async fn query_runs(
     let aggregate = match cached {
         Some(cached) => cached,
         None => {
+            let read = runtime.delivery_cache.run_read(&cache_key);
+            let _guard = read.lock().await;
+            if let Some(cached) = runtime.delivery_cache.runs(&cache_key) {
+                if !force_refresh || cached.fetched_at >= request_started {
+                    return run_page(capability, cached, &query);
+                }
+            }
             let binary = observation
                 .binary
                 .clone()
                 .expect("authenticated gh has a binary");
-            let workspace_index = workspace_index(runtime, owner).await?;
+            let workspace_index = workspace_index(runtime, owner, force_refresh).await?;
             let results = stream::iter(targets.clone())
                 .map(|target| {
                     let binary = binary.clone();
                     let workspace_index = workspace_index.clone();
                     async move {
-                        fetch_runs(&binary, &target, &workspace_index)
-                            .await
-                            .map_err(|message| (target, message))
+                        fetch_runs(
+                            runtime,
+                            &binary,
+                            &target,
+                            &workspace_index,
+                            fetch_workflows,
+                            fetch_deployments,
+                            force_refresh,
+                        )
+                        .await
+                        .map_err(|message| (target, message))
                     }
                 })
                 .buffer_unordered(DELIVERY_CONCURRENCY)
@@ -667,7 +1193,10 @@ pub(crate) async fn query_runs(
             let mut errors = Vec::new();
             for result in results {
                 match result {
-                    Ok(mut repository_items) => items.append(&mut repository_items),
+                    Ok(mut fetched) => {
+                        items.append(&mut fetched.items);
+                        errors.append(&mut fetched.errors);
+                    }
                     Err((target, message)) => errors.push(source_error(Some(target), message)),
                 }
             }
@@ -687,11 +1216,18 @@ pub(crate) async fn query_runs(
             }
         }
     };
+    run_page(capability, aggregate, &query)
+}
 
+fn run_page(
+    capability: CodeGitHubCapability,
+    aggregate: CachedAggregate<CodeDeliveryRunSummary>,
+    query: &CodeDeliveryRunQuery,
+) -> Result<CodeDeliveryRunsPage, ServerError> {
     let filtered = aggregate
         .items
         .into_iter()
-        .filter(|item| run_matches(item, &query))
+        .filter(|item| run_matches(item, query))
         .collect::<Vec<_>>();
     let (items, next_cursor) = paginate(filtered, query.cursor.as_deref(), query.limit)?;
     Ok(CodeDeliveryRunsPage {
@@ -706,17 +1242,25 @@ pub(crate) async fn query_runs(
 pub(crate) async fn run_detail(
     runtime: &CodeRuntime,
     owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     target: CodeDeliveryRunTarget,
 ) -> Result<CodeDeliveryRunDetail, ServerError> {
+    ensure_delivery_targets(
+        runtime,
+        owner,
+        allow_unscoped_delivery,
+        std::slice::from_ref(&target.repository),
+    )
+    .await?;
     let observation = require_authenticated(runtime).await?;
     let binary = observation
         .binary
         .as_ref()
         .expect("authenticated gh has binary");
-    let repository = resolve_repository(binary, &target.repository, None)
+    let repository = resolve_repository_cached(runtime, binary, &target.repository, None, false)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
-    let workspace_index = workspace_index(runtime, owner).await?;
+    let workspace_index = workspace_index(runtime, owner, false).await?;
 
     match target.kind {
         CodeDeliveryRunKind::WorkflowRun => {
@@ -733,13 +1277,28 @@ pub(crate) async fn run_detail(
             let run = run.map_err(|message| ServerError::bad_request_kind("github", message))?;
             let summary = parse_workflow_run(&repository, &run, &workspace_index)
                 .ok_or_else(|| ServerError::not_found("workflow run not found"))?;
-            let jobs = jobs
-                .ok()
-                .and_then(|value| value.get("jobs").and_then(Value::as_array).cloned())
-                .unwrap_or_default()
-                .iter()
-                .filter_map(parse_workflow_job)
-                .collect::<Vec<_>>();
+            let mut errors = Vec::new();
+            let jobs = match jobs {
+                Ok(value) => value
+                    .get("jobs")
+                    .and_then(Value::as_array)
+                    .map(|jobs| {
+                        record_full_detail_page(
+                            &mut errors,
+                            &target.repository,
+                            "jobs",
+                            Some(jobs.len()),
+                        );
+                        jobs.iter()
+                            .filter_map(parse_workflow_job)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                Err(message) => {
+                    errors.push(detail_source_error(&target.repository, "jobs", message));
+                    Vec::new()
+                }
+            };
             Ok(CodeDeliveryRunDetail {
                 can_rerun_failed: jobs.iter().any(|job| {
                     matches!(
@@ -750,6 +1309,7 @@ pub(crate) async fn run_detail(
                 summary,
                 jobs,
                 deployment_statuses: Vec::new(),
+                errors,
             })
         }
         CodeDeliveryRunKind::Deployment => {
@@ -765,13 +1325,32 @@ pub(crate) async fn run_detail(
             );
             let deployment =
                 deployment.map_err(|message| ServerError::bad_request_kind("github", message))?;
-            let statuses = statuses
-                .ok()
-                .and_then(|value| value.as_array().cloned())
-                .unwrap_or_default()
-                .iter()
-                .filter_map(parse_deployment_status)
-                .collect::<Vec<_>>();
+            let mut errors = Vec::new();
+            let statuses = match statuses {
+                Ok(value) => value
+                    .as_array()
+                    .map(|statuses| {
+                        record_full_detail_page(
+                            &mut errors,
+                            &target.repository,
+                            "deployment statuses",
+                            Some(statuses.len()),
+                        );
+                        statuses
+                            .iter()
+                            .filter_map(parse_deployment_status)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                Err(message) => {
+                    errors.push(detail_source_error(
+                        &target.repository,
+                        "deployment statuses",
+                        message,
+                    ));
+                    Vec::new()
+                }
+            };
             let summary =
                 parse_deployment(&repository, &deployment, statuses.first(), &workspace_index)
                     .ok_or_else(|| ServerError::not_found("deployment not found"))?;
@@ -780,6 +1359,7 @@ pub(crate) async fn run_detail(
                 jobs: Vec::new(),
                 deployment_statuses: statuses,
                 can_rerun_failed: false,
+                errors,
             })
         }
     }
@@ -787,8 +1367,17 @@ pub(crate) async fn run_detail(
 
 pub(crate) async fn act_on_run(
     runtime: &CodeRuntime,
+    owner: &OwnerId,
+    allow_unscoped_delivery: bool,
     body: CodeDeliveryRunActionBody,
 ) -> Result<CodeDeliveryActionResult, ServerError> {
+    ensure_delivery_targets(
+        runtime,
+        owner,
+        allow_unscoped_delivery,
+        std::slice::from_ref(&body.target.repository),
+    )
+    .await?;
     match body.action {
         CodeDeliveryRunAction::RerunFailed => {
             if body.target.kind != CodeDeliveryRunKind::WorkflowRun {
@@ -796,48 +1385,31 @@ pub(crate) async fn act_on_run(
                     "only GitHub Actions workflow runs can be rerun",
                 ));
             }
-            let search_path = runtime.gh_search_path_owned();
-            gh::rerun_failed_jobs(
+            let observation = require_authenticated(runtime).await?;
+            gh::rerun_failed_jobs_with_observation(
+                &observation,
                 &body.target.repository.host,
                 &body.target.repository.owner,
                 &body.target.repository.name,
                 body.target.id,
-                search_path.as_deref(),
             )
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
-            Ok(CodeDeliveryActionResult {
+            Ok(rerun_action_result(vec![CodeDeliveryRerunOutcome {
+                workflow_run_id: body.target.id,
                 success: true,
-                message: "Failed workflow jobs queued to rerun".into(),
-            })
+                error: None,
+            }]))
         }
     }
 }
 
-async fn github_capability(observation: &GhObservation) -> CodeGitHubCapability {
-    let viewer_login = if observation.authenticated == Some(true) {
-        let binary = observation
-            .binary
-            .as_ref()
-            .expect("authenticated gh has binary");
-        gh::run_gh(
-            Path::new("."),
-            binary,
-            &["api", "user", "--jq", ".login"],
-            GH_READ_TIMEOUT,
-        )
-        .await
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    } else {
-        None
-    };
+fn github_capability(observation: &GhObservation) -> CodeGitHubCapability {
     CodeGitHubCapability {
         found: observation.found,
         authenticated: observation.authenticated,
-        viewer_login,
+        viewer_login: observation.viewer_login.clone(),
         remediation: observation.remediation.clone(),
     }
 }
@@ -850,11 +1422,20 @@ async fn require_authenticated(runtime: &CodeRuntime) -> Result<GhObservation, S
             observation.remediation,
         ));
     }
-    if observation.authenticated != Some(true) {
-        return Err(ServerError::conflict_kind(
-            "gh_signed_out",
-            observation.remediation,
-        ));
+    match observation.authenticated {
+        Some(true) => {}
+        Some(false) => {
+            return Err(ServerError::conflict_kind(
+                "gh_signed_out",
+                observation.remediation,
+            ));
+        }
+        None => {
+            return Err(ServerError::conflict_kind(
+                "gh_unavailable",
+                observation.remediation,
+            ));
+        }
     }
     Ok(observation)
 }
@@ -866,6 +1447,105 @@ pub(crate) async fn repository_target_from_local(
         .await
         .map_err(|message| format!("could not read origin remote: {message}"))?;
     parse_repository_input(&remote)
+}
+
+async fn owner_repository_catalog(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    force_refresh: bool,
+) -> Result<OwnerRepositoryCatalog, ServerError> {
+    let key = owner.to_string();
+    let request_started = Instant::now();
+    if !force_refresh {
+        if let Some(cached) = runtime.delivery_cache.owner_repositories(&key) {
+            return Ok(cached.value);
+        }
+    }
+
+    let read = runtime.delivery_cache.owner_repository_read(&key);
+    let _guard = read.lock().await;
+    if let Some(cached) = runtime.delivery_cache.owner_repositories(&key) {
+        if !force_refresh || cached.fetched_at >= request_started {
+            return Ok(cached.value);
+        }
+    }
+
+    loop {
+        let generation = runtime.delivery_cache.owner_cache_generation(&key);
+        let results = stream::iter(runtime.list_repos(owner).await?)
+            .map(|repo| async move {
+                match repository_target_from_local(&repo).await {
+                    Ok(target) => Ok(OwnerRepositoryEntry { repo, target }),
+                    Err(message) => Err(CodeDeliverySourceError {
+                        repository: None,
+                        kind: "not_github".into(),
+                        message: format!("{}: {message}", repo.display_name),
+                        retry_at: None,
+                    }),
+                }
+            })
+            .buffer_unordered(DELIVERY_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut catalog = OwnerRepositoryCatalog::default();
+        for result in results {
+            match result {
+                Ok(entry) => catalog.entries.push(entry),
+                Err(error) => catalog.errors.push(error),
+            }
+        }
+        if runtime.delivery_cache.put_owner_repositories_if_current(
+            &key,
+            generation,
+            catalog.clone(),
+        ) {
+            return Ok(catalog);
+        }
+    }
+}
+
+async fn ensure_delivery_targets(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    allow_unscoped_delivery: bool,
+    targets: &[CodeGitHubRepositoryTarget],
+) -> Result<(), ServerError> {
+    if allow_unscoped_delivery || targets.is_empty() {
+        return Ok(());
+    }
+    // The target mapping may use its short cache, but membership may not.
+    // A database read is enough to remove stale catalog entries without
+    // spawning one git process for every registered repository.
+    let catalog = owner_repository_catalog(runtime, owner, false).await?;
+    let live_repo_ids = runtime
+        .list_repos(owner)
+        .await?
+        .into_iter()
+        .map(|repo| repo.id)
+        .collect::<HashSet<_>>();
+    let allowed = live_catalog_target_keys(&catalog, &live_repo_ids);
+    if let Some(target) = targets
+        .iter()
+        .find(|target| !allowed.contains(&repository_key(target)))
+    {
+        return Err(ServerError::not_found(format!(
+            "GitHub repository {}/{} is not registered for this account",
+            target.owner, target.name
+        )));
+    }
+    Ok(())
+}
+
+fn live_catalog_target_keys(
+    catalog: &OwnerRepositoryCatalog,
+    live_repo_ids: &HashSet<RepoId>,
+) -> HashSet<String> {
+    catalog
+        .entries
+        .iter()
+        .filter(|entry| live_repo_ids.contains(&entry.repo.id))
+        .map(|entry| repository_key(&entry.target))
+        .collect()
 }
 
 fn parse_repository_input(input: &str) -> Result<CodeGitHubRepositoryTarget, String> {
@@ -945,6 +1625,45 @@ fn dedupe_targets(
     Ok(deduped)
 }
 
+fn dedupe_numbered_targets(
+    targets: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>,
+) -> Result<Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>, ServerError> {
+    let mut grouped: HashMap<String, (CodeGitHubRepositoryTarget, HashSet<u64>)> = HashMap::new();
+    for (mut target, numbers) in targets {
+        target.host = target.host.trim().to_ascii_lowercase();
+        target.owner = target.owner.trim().to_owned();
+        target.name = target.name.trim().trim_end_matches(".git").to_owned();
+        if target.host.is_empty()
+            || !valid_repo_segment(&target.owner)
+            || !valid_repo_segment(&target.name)
+        {
+            return Err(ServerError::bad_request("invalid GitHub repository target"));
+        }
+        grouped
+            .entry(repository_key(&target))
+            .and_modify(|(_, existing)| existing.extend(numbers.iter().copied()))
+            .or_insert_with(|| (target, numbers.into_iter().collect()));
+    }
+
+    let mut grouped = grouped.into_values().collect::<Vec<_>>();
+    for (_, numbers) in &mut grouped {
+        numbers.remove(&0);
+    }
+    let mut grouped = grouped
+        .into_iter()
+        .filter_map(|(target, numbers)| {
+            if numbers.is_empty() {
+                return None;
+            }
+            let mut numbers = numbers.into_iter().collect::<Vec<_>>();
+            numbers.sort_unstable();
+            Some((target, numbers))
+        })
+        .collect::<Vec<_>>();
+    grouped.sort_by_key(|(target, _)| repository_key(target));
+    Ok(grouped)
+}
+
 async fn resolve_repository(
     binary: &Path,
     target: &CodeGitHubRepositoryTarget,
@@ -973,6 +1692,44 @@ async fn resolve_repository(
     })
 }
 
+async fn resolve_repository_cached(
+    runtime: &CodeRuntime,
+    binary: &Path,
+    target: &CodeGitHubRepositoryTarget,
+    tidebreak_repo_id: Option<tidebreak_core::RepoId>,
+    force_refresh: bool,
+) -> Result<CodeGitHubRepositoryRef, String> {
+    let key = repository_key(target);
+    let request_started = Instant::now();
+    if !force_refresh {
+        if let Some(cached) = runtime.delivery_cache.repository(&key) {
+            return Ok(repository_with_id(cached.value, tidebreak_repo_id));
+        }
+    }
+
+    let read = runtime.delivery_cache.repository_read(&key);
+    let _guard = read.lock().await;
+    if let Some(cached) = runtime.delivery_cache.repository(&key) {
+        if !force_refresh || cached.fetched_at >= request_started {
+            return Ok(repository_with_id(cached.value, tidebreak_repo_id));
+        }
+    }
+
+    let repository = resolve_repository(binary, target, None).await?;
+    runtime
+        .delivery_cache
+        .put_repository(key, repository.clone());
+    Ok(repository_with_id(repository, tidebreak_repo_id))
+}
+
+fn repository_with_id(
+    mut repository: CodeGitHubRepositoryRef,
+    tidebreak_repo_id: Option<tidebreak_core::RepoId>,
+) -> CodeGitHubRepositoryRef {
+    repository.tidebreak_repo_id = tidebreak_repo_id;
+    repository
+}
+
 fn repository_ref_from_target(
     target: &CodeGitHubRepositoryTarget,
     tidebreak_repo_id: Option<tidebreak_core::RepoId>,
@@ -991,42 +1748,66 @@ fn repository_ref_from_target(
 async fn workspace_index(
     runtime: &CodeRuntime,
     owner: &OwnerId,
+    force_refresh: bool,
 ) -> Result<Vec<WorkspaceIndexEntry>, ServerError> {
-    let repos = runtime.list_repos(owner).await?;
-    let workspaces = runtime.list_workspaces(owner, None).await?;
-    let mut repository_targets = HashMap::new();
-    let mut roots = HashMap::new();
-    for repo in repos {
-        roots.insert(repo.id, PathBuf::from(&repo.root_path));
-        if let Ok(target) = repository_target_from_local(&repo).await {
-            repository_targets.insert(repo.id, target);
+    let key = owner.to_string();
+    let request_started = Instant::now();
+    if !force_refresh {
+        if let Some(cached) = runtime.delivery_cache.workspace_index(&key) {
+            return Ok(cached.value);
         }
     }
 
-    Ok(stream::iter(workspaces)
-        .map(|workspace| {
-            let target = repository_targets.get(&workspace.repo_id).cloned();
-            let root = roots.get(&workspace.repo_id).cloned();
-            async move {
-                let target = target?;
-                let head_sha = match root {
-                    Some(root) => git_read(&root, &["rev-parse", &workspace.branch_name])
-                        .await
-                        .ok()
-                        .filter(|value| !value.is_empty()),
-                    None => None,
-                };
-                Some(WorkspaceIndexEntry {
-                    repository_key: repository_key(&target),
-                    workspace,
-                    head_sha,
-                })
-            }
-        })
-        .buffer_unordered(DELIVERY_CONCURRENCY)
-        .filter_map(async move |entry| entry)
-        .collect()
-        .await)
+    let read = runtime.delivery_cache.workspace_index_read(&key);
+    let _guard = read.lock().await;
+    if let Some(cached) = runtime.delivery_cache.workspace_index(&key) {
+        if !force_refresh || cached.fetched_at >= request_started {
+            return Ok(cached.value);
+        }
+    }
+
+    loop {
+        let generation = runtime.delivery_cache.owner_cache_generation(&key);
+        let catalog = owner_repository_catalog(runtime, owner, force_refresh).await?;
+        let workspaces = runtime.list_workspaces(owner, None).await?;
+        let mut repository_targets = HashMap::new();
+        let mut roots = HashMap::new();
+        for entry in catalog.entries {
+            roots.insert(entry.repo.id, PathBuf::from(&entry.repo.root_path));
+            repository_targets.insert(entry.repo.id, entry.target);
+        }
+
+        let index: Vec<WorkspaceIndexEntry> = stream::iter(workspaces)
+            .map(|workspace| {
+                let target = repository_targets.get(&workspace.repo_id).cloned();
+                let root = roots.get(&workspace.repo_id).cloned();
+                async move {
+                    let target = target?;
+                    let head_sha = match root {
+                        Some(root) => git_read(&root, &["rev-parse", &workspace.branch_name])
+                            .await
+                            .ok()
+                            .filter(|value| !value.is_empty()),
+                        None => None,
+                    };
+                    Some(WorkspaceIndexEntry {
+                        repository_key: repository_key(&target),
+                        workspace,
+                        head_sha,
+                    })
+                }
+            })
+            .buffer_unordered(DELIVERY_CONCURRENCY)
+            .filter_map(async move |entry| entry)
+            .collect()
+            .await;
+        if runtime
+            .delivery_cache
+            .put_workspace_index_if_current(&key, generation, index.clone())
+        {
+            return Ok(index);
+        }
+    }
 }
 
 /// True for GitHub failures that are worth one more attempt.
@@ -1066,11 +1847,15 @@ where
 }
 
 async fn fetch_pull_requests(
+    runtime: &CodeRuntime,
     binary: &Path,
     target: &CodeGitHubRepositoryTarget,
     workspaces: &[WorkspaceIndexEntry],
+    plan: PullRequestRemotePlan,
+    force_refresh: bool,
 ) -> Result<Vec<CodeDeliveryPullRequestSummary>, String> {
-    let repository = resolve_repository(binary, target, None).await?;
+    let repository =
+        resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
     let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
     let limit = MAX_REMOTE_ITEMS_PER_REPO.to_string();
     let args = [
@@ -1079,11 +1864,11 @@ async fn fetch_pull_requests(
         "--repo",
         cli_repository.as_str(),
         "--state",
-        "all",
+        plan.state,
         "--limit",
         limit.as_str(),
         "--json",
-        PR_LIST_FIELDS,
+        plan.fields,
     ];
     let raw =
         with_transient_retry(|| gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)).await?;
@@ -1095,6 +1880,31 @@ async fn fetch_pull_requests(
         .flatten()
         .filter_map(|value| parse_pull_request(&repository, value, workspaces))
         .collect())
+}
+
+fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequestRemotePlan {
+    let state = if query.attention_only
+        || query.ready_only
+        || (query.states.len() == 1 && query.states[0].eq_ignore_ascii_case("open"))
+    {
+        "open"
+    } else if query.states.len() == 1 && query.states[0].eq_ignore_ascii_case("closed") {
+        "closed"
+    } else if query.states.len() == 1 && query.states[0].eq_ignore_ascii_case("merged") {
+        "merged"
+    } else {
+        "all"
+    };
+    let checks_loaded = state == "open" || !query.check_states.is_empty();
+    PullRequestRemotePlan {
+        state,
+        fields: if checks_loaded {
+            PR_LIST_FIELDS_WITH_CHECKS
+        } else {
+            PR_LIST_FIELDS
+        },
+        checks_loaded,
+    }
 }
 
 async fn fetch_pull_request(
@@ -1115,7 +1925,7 @@ async fn fetch_pull_request(
             "--repo",
             &cli_repository,
             "--json",
-            PR_LIST_FIELDS,
+            PR_LIST_FIELDS_WITH_CHECKS,
         ],
         GH_READ_TIMEOUT,
     )
@@ -1168,6 +1978,7 @@ fn parse_pull_request(
         .and_then(Value::as_array)
         .map(|checks| checks.iter().filter_map(parse_check).collect::<Vec<_>>())
         .unwrap_or_default();
+    let checks_loaded = value.get("statusCheckRollup").is_some();
     let attention_reasons = pull_request_attention(
         &state,
         draft,
@@ -1178,6 +1989,7 @@ fn parse_pull_request(
     );
     let ready_to_merge = state == "open"
         && !draft
+        && checks_loaded
         && attention_reasons.is_empty()
         && !checks
             .iter()
@@ -1287,61 +2099,98 @@ fn pull_request_attention(
 }
 
 async fn fetch_runs(
+    runtime: &CodeRuntime,
     binary: &Path,
     target: &CodeGitHubRepositoryTarget,
     workspaces: &[WorkspaceIndexEntry],
-) -> Result<Vec<CodeDeliveryRunSummary>, String> {
-    let repository = resolve_repository(binary, target, None).await?;
+    fetch_workflows: bool,
+    fetch_deployments: bool,
+    force_refresh: bool,
+) -> Result<FetchedRuns, String> {
+    let repository =
+        resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
     let workflow_endpoint = api_endpoint(target, "actions/runs?per_page=100");
     let deployments_endpoint = api_endpoint(target, "deployments?per_page=100");
-    let (workflow_runs, deployments) = tokio::join!(
-        run_api_json(binary, &target.host, &workflow_endpoint),
-        run_api_json(binary, &target.host, &deployments_endpoint),
-    );
-    let mut items = Vec::new();
-    if let Ok(ref value) = workflow_runs {
-        if let Some(runs) = value.get("workflow_runs").and_then(Value::as_array) {
-            items.extend(
-                runs.iter()
-                    .filter_map(|run| parse_workflow_run(&repository, run, workspaces)),
-            );
+    let workflow_read = async {
+        if fetch_workflows {
+            run_api_json(binary, &target.host, &workflow_endpoint)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
         }
+    };
+    let deployment_read = async {
+        if fetch_deployments {
+            run_api_json(binary, &target.host, &deployments_endpoint)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        }
+    };
+    let (workflow_runs, deployments) = tokio::join!(workflow_read, deployment_read,);
+    Ok(collect_run_sources(
+        target,
+        &repository,
+        workspaces,
+        workflow_runs,
+        deployments,
+    ))
+}
+
+fn collect_run_sources(
+    target: &CodeGitHubRepositoryTarget,
+    repository: &CodeGitHubRepositoryRef,
+    workspaces: &[WorkspaceIndexEntry],
+    workflow_runs: Result<Option<Value>, String>,
+    deployments: Result<Option<Value>, String>,
+) -> FetchedRuns {
+    let mut fetched = FetchedRuns::default();
+    match workflow_runs {
+        Ok(Some(value)) => {
+            if let Some(runs) = value.get("workflow_runs").and_then(Value::as_array) {
+                fetched.items.extend(
+                    runs.iter()
+                        .filter_map(|run| parse_workflow_run(repository, run, workspaces)),
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(message) => fetched
+            .errors
+            .push(detail_source_error(target, "workflow runs", message)),
     }
-    if let Ok(ref value) = deployments {
-        let deployments = value.as_array().cloned().unwrap_or_default();
-        let statuses = stream::iter(deployments.into_iter().take(MAX_REMOTE_ITEMS_PER_REPO))
-            .map(|deployment| {
-                let repository = repository.clone();
-                let target = target.clone();
-                async move {
-                    let id = u64_field(&deployment, "id")?;
-                    let endpoint =
-                        api_endpoint(&target, &format!("deployments/{id}/statuses?per_page=1"));
-                    let status = run_api_json(binary, &target.host, &endpoint)
-                        .await
-                        .ok()
-                        .and_then(|value| value.as_array().and_then(|items| items.first()).cloned())
-                        .and_then(|value| parse_deployment_status(&value));
-                    Some((repository, deployment, status))
-                }
-            })
-            .buffer_unordered(DELIVERY_CONCURRENCY)
-            .filter_map(async move |value| value)
-            .collect::<Vec<_>>()
-            .await;
-        items.extend(
-            statuses
-                .iter()
-                .filter_map(|(repository, deployment, status)| {
-                    parse_deployment(repository, deployment, status.as_ref(), workspaces)
+    match deployments {
+        Ok(Some(value)) => fetched.items.extend(
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(MAX_REMOTE_ITEMS_PER_REPO)
+                .filter_map(|deployment| {
+                    parse_deployment(repository, deployment, None, workspaces)
                 }),
-        );
+        ),
+        Ok(None) => {}
+        Err(message) => fetched
+            .errors
+            .push(detail_source_error(target, "deployments", message)),
     }
-    if items.is_empty() {
-        workflow_runs?;
-        deployments?;
-    }
-    Ok(items)
+    fetched
+}
+
+fn run_remote_scope(query: &CodeDeliveryRunQuery) -> (&'static str, bool, bool) {
+    let fetch_workflows =
+        query.kinds.is_empty() || query.kinds.contains(&CodeDeliveryRunKind::WorkflowRun);
+    let fetch_deployments =
+        query.kinds.is_empty() || query.kinds.contains(&CodeDeliveryRunKind::Deployment);
+    let scope = match (fetch_workflows, fetch_deployments) {
+        (true, false) => "workflows",
+        (false, true) => "deployments",
+        _ => "all",
+    };
+    (scope, fetch_workflows, fetch_deployments)
 }
 
 fn parse_workflow_run(
@@ -1360,6 +2209,7 @@ fn parse_workflow_run(
         repository: repository.clone(),
         kind: CodeDeliveryRunKind::WorkflowRun,
         github_id: id,
+        run_attempt: u64_field(value, "run_attempt"),
         name: text_field(value, "display_title")
             .or_else(|| text_field(value, "name"))
             .unwrap_or_else(|| format!("Workflow run {id}")),
@@ -1394,9 +2244,12 @@ fn parse_deployment(
     let sha = text_field(value, "sha");
     let status = latest_status
         .map(|status| status.state.clone())
-        .unwrap_or_else(|| "pending".into());
-    let conclusion = (!matches!(status.as_str(), "pending" | "queued" | "in_progress"))
-        .then_some(status.clone());
+        .unwrap_or_else(|| "unknown".into());
+    let conclusion = (!matches!(
+        status.as_str(),
+        "unknown" | "pending" | "queued" | "in_progress"
+    ))
+    .then_some(status.clone());
     let environment = text_field(value, "environment");
     let url = latest_status
         .and_then(|status| {
@@ -1411,6 +2264,7 @@ fn parse_deployment(
         repository: repository.clone(),
         kind: CodeDeliveryRunKind::Deployment,
         github_id: id,
+        run_attempt: None,
         name: environment
             .clone()
             .map(|environment| format!("Deploy to {environment}"))
@@ -1857,6 +2711,54 @@ fn source_error(
     }
 }
 
+fn detail_source_error(
+    repository: &CodeGitHubRepositoryTarget,
+    section: &str,
+    message: String,
+) -> CodeDeliverySourceError {
+    let mut error = source_error(Some(repository.clone()), message);
+    error.message = format!("Could not load {section}: {}", error.message);
+    error
+}
+
+fn record_full_detail_page(
+    errors: &mut Vec<CodeDeliverySourceError>,
+    repository: &CodeGitHubRepositoryTarget,
+    section: &str,
+    item_count: Option<usize>,
+) {
+    if item_count != Some(GITHUB_DETAIL_PAGE_SIZE) {
+        return;
+    }
+    errors.push(CodeDeliverySourceError {
+        repository: Some(repository.clone()),
+        kind: "truncated".into(),
+        message: format!(
+            "{section} may be incomplete because GitHub returned the one-page limit of {GITHUB_DETAIL_PAGE_SIZE} items"
+        ),
+        retry_at: None,
+    });
+}
+
+fn observation_error_kind(observation: &GhObservation) -> &'static str {
+    if !observation.found {
+        "gh_absent"
+    } else if observation.authenticated == Some(false) {
+        "gh_signed_out"
+    } else {
+        "gh_unavailable"
+    }
+}
+
+fn observation_source_error(observation: &GhObservation) -> CodeDeliverySourceError {
+    CodeDeliverySourceError {
+        repository: None,
+        kind: observation_error_kind(observation).into(),
+        message: observation.remediation.clone(),
+        retry_at: None,
+    }
+}
+
 fn map_gh_error(error: gh::GhError) -> ServerError {
     match error {
         gh::GhError::GhAbsent { instructions } => {
@@ -1871,7 +2773,15 @@ fn map_gh_error(error: gh::GhError) -> ServerError {
         gh::GhError::AuthFailed(message) => ServerError::conflict_kind("git_auth_failed", message),
         gh::GhError::PushFailed(message) => ServerError::conflict_kind("git_push_failed", message),
         gh::GhError::NothingToCommit => ServerError::conflict("nothing to commit"),
-        gh::GhError::User(message) => ServerError::bad_request_kind("github", message),
+        gh::GhError::User(message) => {
+            if let Some(message) = message.strip_prefix(gh::GH_UNAVAILABLE_PREFIX) {
+                ServerError::conflict_kind("gh_unavailable", message)
+            } else if let Some(message) = message.strip_prefix(gh::PR_HEAD_CHANGED_PREFIX) {
+                ServerError::conflict_kind("pr_head_changed", message)
+            } else {
+                ServerError::bad_request_kind("github", message)
+            }
+        }
         gh::GhError::Internal(message) => ServerError::internal(message),
     }
 }
@@ -1980,6 +2890,8 @@ fn datetime_field(value: &Value, key: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+
     use super::*;
 
     #[test]
@@ -2001,6 +2913,154 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exact_pull_request_targets_group_repositories_and_numbers() {
+        let grouped = dedupe_numbered_targets(vec![
+            (
+                CodeGitHubRepositoryTarget {
+                    host: "GitHub.COM".into(),
+                    owner: "brightwave-inc".into(),
+                    name: "tidebreak.git".into(),
+                },
+                vec![41, 40, 41],
+            ),
+            (
+                CodeGitHubRepositoryTarget {
+                    host: "github.com".into(),
+                    owner: "brightwave-inc".into(),
+                    name: "tidebreak".into(),
+                },
+                vec![42, 0],
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(
+            repository_key(&grouped[0].0),
+            "github.com/brightwave-inc/tidebreak"
+        );
+        assert_eq!(grouped[0].1, vec![40, 41, 42]);
+    }
+
+    #[test]
+    fn owner_repository_catalog_stays_cached_until_owner_invalidation() {
+        let cache = DeliveryCache::default();
+        let owner = OwnerId::local();
+        let key = owner.to_string();
+        cache.owner_repositories.lock().unwrap().insert(
+            key.clone(),
+            CachedValue {
+                fetched_at: Instant::now()
+                    .checked_sub(LIST_CACHE_TTL + Duration::from_secs(1))
+                    .unwrap(),
+                value: OwnerRepositoryCatalog::default(),
+            },
+        );
+
+        assert!(cache.owner_repositories(&key).is_some());
+        cache.invalidate_owner(&owner);
+        assert!(cache.owner_repositories(&key).is_none());
+    }
+
+    #[test]
+    fn owner_invalidation_rejects_in_flight_catalog_and_workspace_index_writes() {
+        let cache = Arc::new(DeliveryCache::default());
+        let owner = OwnerId::local();
+        let key = owner.to_string();
+        let stale_generation = cache.owner_cache_generation(&key);
+        let loader_ready = Arc::new(Barrier::new(2));
+        let resume_loader = Arc::new(Barrier::new(2));
+        let loader = {
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            let owner = owner.clone();
+            let loader_ready = Arc::clone(&loader_ready);
+            let resume_loader = Arc::clone(&resume_loader);
+            std::thread::spawn(move || {
+                loader_ready.wait();
+                resume_loader.wait();
+                (
+                    cache.put_owner_repositories_if_current(
+                        &key,
+                        stale_generation,
+                        owner_catalog_marker("stale"),
+                    ),
+                    cache.put_workspace_index_if_current(
+                        &key,
+                        stale_generation,
+                        workspace_index_marker(&owner, "stale"),
+                    ),
+                )
+            })
+        };
+
+        loader_ready.wait();
+        cache.invalidate_owner(&owner);
+        let fresh_generation = cache.owner_cache_generation(&key);
+        assert_ne!(fresh_generation, stale_generation);
+        assert!(cache.put_owner_repositories_if_current(
+            &key,
+            fresh_generation,
+            owner_catalog_marker("fresh"),
+        ));
+        assert!(cache.put_workspace_index_if_current(
+            &key,
+            fresh_generation,
+            workspace_index_marker(&owner, "fresh"),
+        ));
+
+        resume_loader.wait();
+        let (catalog_published, index_published) = loader.join().unwrap();
+        assert!(!catalog_published);
+        assert!(!index_published);
+        assert_eq!(
+            cache.owner_repositories(&key).unwrap().value.errors[0].message,
+            "fresh"
+        );
+        assert_eq!(
+            cache.workspace_index(&key).unwrap().value[0]
+                .head_sha
+                .as_deref(),
+            Some("fresh")
+        );
+    }
+
+    fn owner_catalog_marker(message: &str) -> OwnerRepositoryCatalog {
+        OwnerRepositoryCatalog {
+            entries: Vec::new(),
+            errors: vec![CodeDeliverySourceError {
+                repository: None,
+                kind: "test".into(),
+                message: message.into(),
+                retry_at: None,
+            }],
+        }
+    }
+
+    fn workspace_index_marker(owner: &OwnerId, marker: &str) -> Vec<WorkspaceIndexEntry> {
+        vec![WorkspaceIndexEntry {
+            workspace: CodeWorkspace {
+                id: tidebreak_core::WorkspaceId::new(),
+                owner: owner.clone(),
+                repo_id: RepoId::new(),
+                title: marker.into(),
+                worktree_path: format!("/tmp/{marker}"),
+                branch_name: format!("tidebreak/{marker}"),
+                base_ref: "main".into(),
+                status: CodeWorkspaceStatus::Active,
+                pr: None,
+                created_at: Utc::now(),
+                archived_at: None,
+                released_at: None,
+                released_tip: None,
+                bundle_bytes: None,
+            },
+            repository_key: format!("github.com/brightwave-inc/{marker}"),
+            head_sha: Some(marker.into()),
+        }]
+    }
+
     fn repository_ref() -> CodeGitHubRepositoryRef {
         CodeGitHubRepositoryRef {
             host: "github.com".into(),
@@ -2011,6 +3071,191 @@ mod tests {
             default_branch: Some("main".into()),
             tidebreak_repo_id: None,
         }
+    }
+
+    fn repository_target(name: &str) -> CodeGitHubRepositoryTarget {
+        CodeGitHubRepositoryTarget {
+            host: "github.com".into(),
+            owner: "brightwave-inc".into(),
+            name: name.into(),
+        }
+    }
+
+    fn code_repo(id: RepoId, name: &str) -> CodeRepo {
+        CodeRepo {
+            id,
+            owner: OwnerId::local(),
+            root_path: format!("/tmp/{name}"),
+            display_name: name.into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: Vec::new(),
+            created_at: Utc::now(),
+            removed_at: None,
+            cloned_from: None,
+        }
+    }
+
+    fn pull_request_query() -> CodeDeliveryPullRequestQuery {
+        CodeDeliveryPullRequestQuery {
+            repositories: Vec::new(),
+            search: None,
+            states: Vec::new(),
+            review_states: Vec::new(),
+            check_states: Vec::new(),
+            authors: Vec::new(),
+            attention_only: false,
+            ready_only: false,
+            tidebreak_linked: None,
+            updated_after: None,
+            cursor: None,
+            limit: None,
+            refresh: false,
+        }
+    }
+
+    fn run_query() -> CodeDeliveryRunQuery {
+        CodeDeliveryRunQuery {
+            repositories: Vec::new(),
+            search: None,
+            kinds: Vec::new(),
+            statuses: Vec::new(),
+            conclusions: Vec::new(),
+            workflows: Vec::new(),
+            environments: Vec::new(),
+            branches: Vec::new(),
+            events: Vec::new(),
+            actors: Vec::new(),
+            attention_only: false,
+            tidebreak_linked: None,
+            created_after: None,
+            cursor: None,
+            limit: None,
+            refresh: false,
+        }
+    }
+
+    #[test]
+    fn focused_queries_avoid_unrelated_remote_rows() {
+        let mut pull_requests = pull_request_query();
+        pull_requests.states = vec!["open".into()];
+        assert_eq!(pull_request_remote_plan(&pull_requests).state, "open");
+        assert!(pull_request_remote_plan(&pull_requests).checks_loaded);
+        pull_requests.states.clear();
+        pull_requests.attention_only = true;
+        assert_eq!(pull_request_remote_plan(&pull_requests).state, "open");
+        pull_requests.attention_only = false;
+        let settled = pull_request_remote_plan(&pull_requests);
+        assert_eq!(settled.state, "all");
+        assert!(!settled.checks_loaded);
+        assert!(!settled.fields.contains("statusCheckRollup"));
+
+        pull_requests.states = vec!["merged".into()];
+        assert_eq!(pull_request_remote_plan(&pull_requests).state, "merged");
+
+        let mut runs = run_query();
+        runs.kinds = vec![CodeDeliveryRunKind::WorkflowRun];
+        assert_eq!(run_remote_scope(&runs), ("workflows", true, false));
+        runs.kinds = vec![CodeDeliveryRunKind::Deployment];
+        assert_eq!(run_remote_scope(&runs), ("deployments", false, true));
+        runs.kinds.clear();
+        assert_eq!(run_remote_scope(&runs), ("all", true, true));
+    }
+
+    #[test]
+    fn run_sources_keep_rows_and_report_each_failed_source() {
+        let target = repository_target("tidebreak");
+        let workflows = serde_json::json!({
+            "workflow_runs": [{
+                "id": 41,
+                "run_attempt": 3,
+                "status": "completed",
+                "conclusion": "success",
+                "name": "Desktop CI"
+            }]
+        });
+        let fetched = collect_run_sources(
+            &target,
+            &repository_ref(),
+            &[],
+            Ok(Some(workflows)),
+            Err("HTTP 503: Service Unavailable".into()),
+        );
+
+        assert_eq!(fetched.items.len(), 1);
+        assert_eq!(fetched.items[0].kind, CodeDeliveryRunKind::WorkflowRun);
+        assert_eq!(fetched.items[0].run_attempt, Some(3));
+        assert_eq!(fetched.errors.len(), 1);
+        assert!(fetched.errors[0].message.contains("deployments"));
+
+        let deployments = serde_json::json!([{
+            "id": 91,
+            "environment": "production"
+        }]);
+        let fetched = collect_run_sources(
+            &target,
+            &repository_ref(),
+            &[],
+            Err("HTTP 503: Service Unavailable".into()),
+            Ok(Some(deployments)),
+        );
+
+        assert_eq!(fetched.items.len(), 1);
+        assert_eq!(fetched.items[0].kind, CodeDeliveryRunKind::Deployment);
+        assert_eq!(fetched.errors.len(), 1);
+        assert!(fetched.errors[0].message.contains("workflow runs"));
+    }
+
+    #[test]
+    fn member_authorization_drops_removed_repositories_without_rescanning_git() {
+        let live_id = RepoId::new();
+        let removed_id = RepoId::new();
+        let catalog = OwnerRepositoryCatalog {
+            entries: vec![
+                OwnerRepositoryEntry {
+                    repo: code_repo(live_id, "live"),
+                    target: repository_target("live"),
+                },
+                OwnerRepositoryEntry {
+                    repo: code_repo(removed_id, "removed"),
+                    target: repository_target("removed"),
+                },
+            ],
+            errors: Vec::new(),
+        };
+
+        let allowed = live_catalog_target_keys(&catalog, &HashSet::from([live_id]));
+        assert!(allowed.contains("github.com/brightwave-inc/live"));
+        assert!(!allowed.contains("github.com/brightwave-inc/removed"));
+    }
+
+    #[test]
+    fn partial_reruns_keep_every_outcome_in_stable_order() {
+        let result = rerun_action_result(vec![
+            CodeDeliveryRerunOutcome {
+                workflow_run_id: 11,
+                success: false,
+                error: Some("HTTP 503".into()),
+            },
+            CodeDeliveryRerunOutcome {
+                workflow_run_id: 10,
+                success: true,
+                error: None,
+            },
+        ]);
+
+        assert!(!result.success);
+        assert_eq!(
+            result
+                .rerun_outcomes
+                .iter()
+                .map(|outcome| outcome.workflow_run_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert!(result.message.contains("one workflow run failed"));
     }
 
     #[test]
@@ -2120,6 +3365,49 @@ mod tests {
         assert_eq!(files[0].patch.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
         assert!(files[1].patch.is_none(), "a binary file has no text diff");
         assert_eq!(files[2].previous_path.as_deref(), Some("old.rs"));
+        assert!(pull_request_files_truncated(0, 3));
+        assert!(!pull_request_files_truncated(3, 3));
+    }
+
+    #[test]
+    fn deployment_lists_do_not_claim_an_unknown_status_is_pending() {
+        let value: Value = serde_json::from_str(
+            r#"{
+                "id": 88,
+                "ref": "main",
+                "sha": "abcdef",
+                "environment": "staging",
+                "created_at": "2026-08-22T12:00:00Z",
+                "updated_at": "2026-08-22T12:01:00Z"
+            }"#,
+        )
+        .unwrap();
+        let deployment = parse_deployment(&repository_ref(), &value, None, &[]).unwrap();
+        assert_eq!(deployment.status, "unknown");
+        assert_eq!(deployment.conclusion, None);
+        assert!(deployment.attention_reasons.is_empty());
+    }
+
+    #[test]
+    fn detail_failures_name_the_missing_section() {
+        let target = CodeGitHubRepositoryTarget {
+            host: "github.com".into(),
+            owner: "brightwave-inc".into(),
+            name: "tidebreak".into(),
+        };
+        let error = detail_source_error(&target, "changed files", "gh api timed out".into());
+        assert_eq!(error.kind, "transient");
+        assert!(error.message.contains("Could not load changed files"));
+
+        let mut errors = Vec::new();
+        record_full_detail_page(
+            &mut errors,
+            &target,
+            "reviews",
+            Some(GITHUB_DETAIL_PAGE_SIZE),
+        );
+        assert_eq!(errors[0].kind, "truncated");
+        assert!(errors[0].message.contains("one-page limit"));
     }
 
     #[test]

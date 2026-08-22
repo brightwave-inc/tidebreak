@@ -319,7 +319,10 @@ async fn github_clone_uses_the_url_gh_reports_when_signed_in() {
         &shim_dir.path().join("gh"),
         &format!(
             r#"#!/bin/sh
-if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
 if [ "$1" = repo ] && [ "$2" = view ]; then
   printf '{{"url":"{url}"}}\n'
   exit 0

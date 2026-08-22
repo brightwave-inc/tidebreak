@@ -10,21 +10,27 @@
 //! resolution can check the bytes still match what was reserved rather than
 //! trusting a client to restate it.
 
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait, TryInsertResult,
+};
 
-use crate::code::CodeSessionId;
+use crate::code::{CodeSessionId, CodeSessionLifecycle};
 use crate::error::Result;
 use crate::image::{ImageMediaType, ImageRef};
 use crate::{AgentError, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
+use super::super::blob as blob_ops;
+use super::acquire_code_session_write_lock;
 
 /// Reserve one validated image for one session.
 ///
 /// Idempotent for an identical descriptor; a conflicting descriptor for the
 /// same `(session_id, blob_id)` is refused rather than silently replacing what
-/// an earlier turn may already reference. Returns whether a new row was
-/// written.
+/// an earlier turn may already reference. The session fence serializes this
+/// reservation with session ending. The reservation and retirement
+/// cancellation commit together, including on exact retries. Returns whether a
+/// new row was written.
 pub async fn publish_session_image(
     store: &DbStore,
     owner: &OwnerId,
@@ -35,31 +41,58 @@ pub async fn publish_session_image(
     image.validate().map_err(|reason| {
         AgentError::Store(format!("code session image is not publishable: {reason}"))
     })?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let session_is_live = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Ended.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if !session_is_live {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+
+    let inserted =
+        entities::code_session_image::Entity::insert(entities::code_session_image::ActiveModel {
+            session_id: Set(session_id.0),
+            blob_id: Set(image.blob_id),
+            owner: Set(owner.as_str().to_owned()),
+            media_type: Set(image.media_type.as_str().to_owned()),
+            width: Set(i32::try_from(image.width).unwrap_or(i32::MAX)),
+            height: Set(i32::try_from(image.height).unwrap_or(i32::MAX)),
+            byte_len: Set(i64::try_from(image.byte_len).unwrap_or(i64::MAX)),
+            created_at: Set(created_at),
+        })
+        .on_conflict_do_nothing()
+        .exec_without_returning(&transaction)
+        .await
+        .map_err(store_err)?;
     if let Some(existing) =
-        get_published_session_image(store, owner, session_id, image.blob_id).await?
+        get_published_session_image_on(&transaction, owner, session_id, image.blob_id).await?
     {
         if &existing != image {
+            transaction.rollback().await.map_err(store_err)?;
             return Err(AgentError::Store(format!(
                 "image {} is already published to session {session_id} with a different descriptor",
                 image.blob_id
             )));
         }
-        return Ok(false);
+    } else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "published image {} disappeared from code session {session_id}",
+            image.blob_id
+        )));
     }
-    entities::code_session_image::ActiveModel {
-        session_id: Set(session_id.0),
-        blob_id: Set(image.blob_id),
-        owner: Set(owner.as_str().to_owned()),
-        media_type: Set(image.media_type.as_str().to_owned()),
-        width: Set(i32::try_from(image.width).unwrap_or(i32::MAX)),
-        height: Set(i32::try_from(image.height).unwrap_or(i32::MAX)),
-        byte_len: Set(i64::try_from(image.byte_len).unwrap_or(i64::MAX)),
-        created_at: Set(created_at),
-    }
-    .insert(&store.conn)
-    .await
-    .map_err(store_err)?;
-    Ok(true)
+    blob_ops::cancel_on(&transaction, image.blob_id).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(matches!(inserted, TryInsertResult::Inserted(1)))
 }
 
 /// Resolve one image only when it was explicitly published to this session by
@@ -73,11 +106,23 @@ pub async fn get_published_session_image(
     session_id: CodeSessionId,
     blob_id: uuid::Uuid,
 ) -> Result<Option<ImageRef>> {
+    get_published_session_image_on(&store.conn, owner, session_id, blob_id).await
+}
+
+async fn get_published_session_image_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    blob_id: uuid::Uuid,
+) -> Result<Option<ImageRef>>
+where
+    C: ConnectionTrait,
+{
     let Some(row) = entities::code_session_image::Entity::find()
         .filter(entities::code_session_image::Column::SessionId.eq(session_id.0))
         .filter(entities::code_session_image::Column::BlobId.eq(blob_id))
         .filter(entities::code_session_image::Column::Owner.eq(owner.as_str()))
-        .one(&store.conn)
+        .one(conn)
         .await
         .map_err(store_err)?
     else {

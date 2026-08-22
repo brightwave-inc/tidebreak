@@ -4,9 +4,9 @@ import type { CodeForkTranscript } from "../api/types";
 /**
  * Forking one agent into another: what the child is handed, and how.
  *
- * The server writes the parent's transcript into the worktree, so the child
- * needs a path rather than bytes. That path travels as a composer chip and is
- * named on the way out, which keeps the framing line the reader's to edit.
+ * The server writes the parent's transcript into private storage, so the
+ * child needs an absolute path rather than bytes. That path travels as a
+ * composer chip and is named on the way out.
  */
 
 /** The opening line a fork seeds, editable before it is sent. */
@@ -27,7 +27,7 @@ export function forkTranscriptFile(
 }
 
 /**
- * Name the worktree files a message points at, after the message itself.
+ * Name the files a message points at, after the message itself.
  *
  * The engine reads them from disk, so the prompt carries paths and nothing
  * else. An empty list leaves the message exactly as the reader wrote it.
@@ -38,7 +38,7 @@ export function messageWithWorkspaceFiles(
 ): string {
   if (files.length === 0) return message;
   const list = files.map((file) => `- \`${file.path}\``).join("\n");
-  const body = `Files in this worktree:\n${list}`;
+  const body = `Files available to you:\n${list}`;
   const text = message.trim();
   return text.length === 0 ? body : `${text}\n\n${body}`;
 }

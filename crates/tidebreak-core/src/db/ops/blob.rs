@@ -5,6 +5,7 @@ use sea_orm::{
     TransactionTrait, TryInsertResult,
 };
 
+use crate::code::CodeSessionLifecycle;
 use crate::error::{AgentError, Result};
 use crate::model::{BlobRetirement, BlobRetirementStatus};
 
@@ -65,6 +66,26 @@ where
         .map_err(store_err)?
         .is_some();
     if by_chat_publication {
+        return Ok(true);
+    }
+    let live_code_sessions = sea_orm::sea_query::Query::select()
+        .column(entities::code_session::Column::Id)
+        .from(entities::code_session::Entity)
+        .and_where(
+            entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Ended.as_str()),
+        )
+        .to_owned();
+    let by_code_publication = entities::code_session_image::Entity::find()
+        .select_only()
+        .column(entities::code_session_image::Column::SessionId)
+        .filter(entities::code_session_image::Column::BlobId.eq(blob_id))
+        .filter(entities::code_session_image::Column::SessionId.in_subquery(live_code_sessions))
+        .into_tuple::<uuid::Uuid>()
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if by_code_publication {
         return Ok(true);
     }
     let by_attachment = entities::message_attachment::Entity::find()

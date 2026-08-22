@@ -187,6 +187,13 @@ import {
 
 const WS_HANDSHAKE = "tidebreak-v1";
 const WS_TOKEN_PREFIX = "tidebreak-token.";
+const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+
+export type DeliveryRequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  refreshAuth?: boolean;
+};
 
 /**
  * The size below which a transfer is not worth reporting on.
@@ -312,6 +319,39 @@ export class ApiClient {
     const text = await response.text();
     if (text.length === 0) return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  private async deliveryJson<T>(
+    path: string,
+    init: RequestInit,
+    options: DeliveryRequestOptions = {},
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeoutMs = options.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) abortFromCaller();
+    else
+      options.signal?.addEventListener("abort", abortFromCaller, {
+        once: true,
+      });
+    const timeout = globalThis.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
+      return await this.json<T>(path, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (timedOut) {
+        throw new Error(
+          `GitHub delivery request timed out after ${Math.ceil(timeoutMs / 1_000)} seconds.`,
+        );
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abortFromCaller);
+    }
   }
   listProviders(): Promise<{ providers: ProviderInfo[] }> {
     return this.json("/providers", { headers: this.headers() });
@@ -1780,12 +1820,21 @@ export class ApiClient {
     return socket;
   }
 
-  async getCodeDeliveryRepositories(): Promise<CodeDeliveryRepositoriesSnapshot> {
+  async getCodeDeliveryRepositories(
+    options?: DeliveryRequestOptions,
+  ): Promise<CodeDeliveryRepositoriesSnapshot> {
+    const path = options?.refreshAuth
+      ? "/code/delivery/repositories?refresh=true"
+      : "/code/delivery/repositories";
     return requireParsed(
       parseCodeDeliveryRepositories(
-        await this.json("/code/delivery/repositories", {
-          headers: this.headers(),
-        }),
+        await this.deliveryJson(
+          path,
+          {
+            headers: this.headers(),
+          },
+          options,
+        ),
       ),
       "code delivery repositories",
     );
@@ -1793,14 +1842,19 @@ export class ApiClient {
 
   async resolveCodeDeliveryRepositories(
     repositories: string[],
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryRepositoriesSnapshot> {
     return requireParsed(
       parseCodeDeliveryRepositories(
-        await this.json("/code/delivery/repositories/resolve", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify({ repositories }),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/repositories/resolve",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ repositories }),
+          },
+          options,
+        ),
       ),
       "code delivery repositories",
     );
@@ -1808,14 +1862,19 @@ export class ApiClient {
 
   async queryCodeDeliveryPullRequests(
     query: CodeDeliveryPullRequestQuery,
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryPullRequestsPage> {
     return requireParsed(
       parseCodeDeliveryPullRequestsPage(
-        await this.json("/code/delivery/pull-requests/query", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(query),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/pull-requests/query",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(query),
+          },
+          options,
+        ),
       ),
       "code delivery pull requests",
     );
@@ -1823,14 +1882,19 @@ export class ApiClient {
 
   async getCodeDeliveryPullRequestDetail(
     target: CodeDeliveryPullRequestTarget,
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryPullRequestDetail> {
     return requireParsed(
       parseCodeDeliveryPullRequestDetail(
-        await this.json("/code/delivery/pull-requests/detail", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(target),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/pull-requests/detail",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(target),
+          },
+          options,
+        ),
       ),
       "code delivery pull request detail",
     );
@@ -1838,14 +1902,19 @@ export class ApiClient {
 
   async runCodeDeliveryPullRequestAction(
     body: CodeDeliveryPullRequestActionBody,
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryActionResult> {
     return requireParsed(
       parseCodeDeliveryActionResult(
-        await this.json("/code/delivery/pull-requests/action", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(body),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/pull-requests/action",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(body),
+          },
+          options,
+        ),
       ),
       "code delivery pull request action",
     );
@@ -1853,14 +1922,19 @@ export class ApiClient {
 
   async queryCodeDeliveryRuns(
     query: CodeDeliveryRunQuery,
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryRunsPage> {
     return requireParsed(
       parseCodeDeliveryRunsPage(
-        await this.json("/code/delivery/runs/query", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(query),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/runs/query",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(query),
+          },
+          options,
+        ),
       ),
       "code delivery runs",
     );
@@ -1868,14 +1942,19 @@ export class ApiClient {
 
   async getCodeDeliveryRunDetail(
     target: CodeDeliveryRunTarget,
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryRunDetail> {
     return requireParsed(
       parseCodeDeliveryRunDetail(
-        await this.json("/code/delivery/runs/detail", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(target),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/runs/detail",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(target),
+          },
+          options,
+        ),
       ),
       "code delivery run detail",
     );
@@ -1883,14 +1962,19 @@ export class ApiClient {
 
   async runCodeDeliveryRunAction(
     body: CodeDeliveryRunActionBody,
+    options?: DeliveryRequestOptions,
   ): Promise<CodeDeliveryActionResult> {
     return requireParsed(
       parseCodeDeliveryActionResult(
-        await this.json("/code/delivery/runs/action", {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify(body),
-        }),
+        await this.deliveryJson(
+          "/code/delivery/runs/action",
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(body),
+          },
+          options,
+        ),
       ),
       "code delivery run action",
     );

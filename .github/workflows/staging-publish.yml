@@ -546,6 +546,18 @@ jobs:
           ditto -c -k --keepParent "$app_path" "$output_dir/${base_name}.app.zip"
           find "$output_dir" -type f -print
 
+      - name: Smoke-test packaged GitHub CLI discovery
+        env:
+          RELEASE_TARGET: universal-apple-darwin
+        run: |
+          target_dir="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
+          app_paths=("$target_dir/$RELEASE_TARGET/release/bundle/macos/"*.app)
+          (( ${#app_paths[@]} == 1 )) && [[ -d "${app_paths[0]}" ]] || {
+            echo "Expected exactly one packaged macOS app to smoke-test." >&2
+            exit 1
+          }
+          scripts/smoke-packaged-gh-discovery.sh "${app_paths[0]}"
+
       - name: Upload verified macOS artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   createEvent,
   fireEvent,
@@ -702,8 +703,8 @@ describe("CodeComposer", () => {
   });
 
   it("attaches an image on an engine with no protocol for one", () => {
-    // The bytes reach the engine as a file under the checkout, so the
-    // composer offers attachment whatever the engine's own input path is.
+    // The bytes reach the engine through a private file, so the composer
+    // offers attachment whatever the engine's own input path is.
     renderComposer(
       <CodeComposer
         running={false}
@@ -832,6 +833,104 @@ describe("CodeComposer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText("shot.png")).toBeInTheDocument();
     expect(box).toHaveValue("look at this");
+  });
+
+  it("keeps images added while a refused send is pending", async () => {
+    let rejectSend!: (error: Error) => void;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    useComposerDrafts.getState().setImages("sess-1", [
+      readyImageAttachment("img-a", {
+        attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+        fileName: "a.png",
+        mediaType: "image/png",
+        width: 390,
+        height: 202,
+        byteLen: 1024,
+      }),
+    ]);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "compare these" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+
+    act(() => {
+      useComposerDrafts.getState().setImages("sess-1", [
+        readyImageAttachment("img-b", {
+          attachmentId: "2c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a22",
+          fileName: "b.png",
+          mediaType: "image/png",
+          width: 390,
+          height: 202,
+          byteLen: 1024,
+        }),
+      ]);
+    });
+    expect(screen.getByText("b.png")).toBeInTheDocument();
+
+    await act(async () => {
+      rejectSend(new Error("send failed"));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("a.png")).toBeInTheDocument();
+    expect(screen.getByText("b.png")).toBeInTheDocument();
+  });
+
+  it("deduplicates attachment blob ids in the turn payload", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    const attachmentId = "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21";
+    useComposerDrafts.getState().setImages("sess-1", [
+      readyImageAttachment("img-a", {
+        attachmentId,
+        fileName: "a.png",
+        mediaType: "image/png",
+        width: 390,
+        height: 202,
+        byteLen: 1024,
+      }),
+      readyImageAttachment("img-b", {
+        attachmentId,
+        fileName: "a-copy.png",
+        mediaType: "image/png",
+        width: 390,
+        height: 202,
+        byteLen: 1024,
+      }),
+    ]);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "inspect this" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("inspect this", [
+        { blob_id: attachmentId, media_type: "image/png" },
+      ]),
+    );
   });
 });
 

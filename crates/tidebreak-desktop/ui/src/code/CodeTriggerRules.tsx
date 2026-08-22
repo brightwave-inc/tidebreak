@@ -1,3 +1,7 @@
+import { useState } from "react";
+import { Trash2 } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -104,6 +108,7 @@ export function CodeTriggerRules({
   onArm,
   onSetEnabled,
   onChangeAction,
+  onDelete,
 }: {
   triggers: CodeTriggerSnapshot[];
   /** Where a fire would land right now, or null when nothing can receive one. */
@@ -120,7 +125,11 @@ export function CodeTriggerRules({
     trigger: CodeTriggerSnapshot,
     action: CodeTriggerAction,
   ) => void;
+  onDelete: (trigger: CodeTriggerSnapshot) => void;
 }) {
+  const [draftActions, setDraftActions] = useState<
+    Partial<Record<CodeTriggerCondition, CodeTriggerAction>>
+  >({});
   const armed = new Map(
     triggers.map((trigger) => [trigger.condition, trigger] as const),
   );
@@ -140,6 +149,8 @@ export function CodeTriggerRules({
         {CONDITIONS.map((condition) => {
           const trigger = armed.get(condition);
           const copy = conditionCopy(condition);
+          const action =
+            trigger?.action ?? draftActions[condition] ?? "deliver";
           return (
             <div
               key={condition}
@@ -158,7 +169,7 @@ export function CodeTriggerRules({
                     return;
                   }
                   if (enabled) {
-                    onArm(condition, "deliver");
+                    onArm(condition, action);
                   }
                 }}
               />
@@ -169,15 +180,18 @@ export function CodeTriggerRules({
                 </p>
               </div>
               <Select
-                value={trigger?.action ?? "deliver"}
-                disabled={busy || !trigger?.enabled}
+                value={action}
+                disabled={busy || Boolean(trigger && !trigger.enabled)}
                 onValueChange={(value) => {
-                  const action = value as CodeTriggerAction;
+                  const nextAction = value as CodeTriggerAction;
                   if (trigger) {
-                    onChangeAction(trigger, action);
+                    onChangeAction(trigger, nextAction);
                     return;
                   }
-                  onArm(condition, action);
+                  setDraftActions((current) => ({
+                    ...current,
+                    [condition]: nextAction,
+                  }));
                 }}
               >
                 <SelectTrigger
@@ -191,6 +205,18 @@ export function CodeTriggerRules({
                   <SelectItem value="notify">Just notify me</SelectItem>
                 </SelectContent>
               </Select>
+              {trigger && (
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost-destructive"
+                  disabled={busy}
+                  aria-label={`Delete ${copy.title} trigger`}
+                  onClick={() => onDelete(trigger)}
+                >
+                  <Trash2 />
+                </Button>
+              )}
             </div>
           );
         })}

@@ -52,8 +52,8 @@ pub async fn update_repo_trigger(
 
 pub async fn delete_repo_trigger(
     code: ScopedCode,
-    Path((_repo_id, id)): Path<(RepoId, CodeTriggerId)>,
+    Path((repo_id, id)): Path<(RepoId, CodeTriggerId)>,
 ) -> Result<StatusCode, ServerError> {
-    code.delete_trigger(id).await?;
+    code.delete_trigger(repo_id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

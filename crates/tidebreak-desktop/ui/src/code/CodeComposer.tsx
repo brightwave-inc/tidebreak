@@ -18,7 +18,10 @@ import { useApp } from "@/AppContext";
 import { HttpError } from "../api/client";
 import { Composer, type ComposerWorkspaceFiles } from "../Composer";
 import { messageWithWorkspaceFiles } from "./fork";
-import { IMAGE_MEDIA_TYPES } from "../ImageAttachments";
+import {
+  IMAGE_MEDIA_TYPES,
+  readyImageAttachmentIds,
+} from "../ImageAttachments";
 import { useImageAttachments } from "../useImageAttachments";
 import { reasoningEffortOptions } from "../ModelMenu";
 import { familyForModelId } from "../modelFamilies";
@@ -707,7 +710,7 @@ export function CodeComposer({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const images = useImageAttachments(
     client,
-    sessionId ?? "code-composer",
+    sessionId ?? composerPromptScope,
     sessionId ? async () => sessionId : undefined,
     "code",
   );
@@ -825,15 +828,16 @@ export function CodeComposer({
       setNotice({ text: "Remove or retry the images that failed to attach." });
       return;
     }
-    const attachments = images.attachments.flatMap((item) =>
-      item.attachmentId
-        ? [
-            {
-              blob_id: item.attachmentId,
-              media_type: item.mediaType ?? "image/png",
-            },
-          ]
-        : [],
+    const attachments = readyImageAttachmentIds(images.attachments).map(
+      (blobId) => {
+        const item = images.attachments.find(
+          (attachment) => attachment.attachmentId === blobId,
+        );
+        return {
+          blob_id: blobId,
+          media_type: item?.mediaType ?? "image/png",
+        };
+      },
     );
     const held = images.attachments;
     setDraft("");
@@ -1006,20 +1010,28 @@ export function CodeComposer({
         contextUsage={contextUsage}
         pathMentions={pathMentions}
         slash={slash}
-        images={{
-          items: images.attachments,
-          error: images.error,
-          unsupportedModel: null,
-          onAttachFiles: images.attachFiles,
-          onRemove: images.remove,
-          onRetry: images.retry,
-        }}
-        files={{
-          items: [],
-          attaching: false,
-          onAttach: () => imageInputRef.current?.click(),
-          onRemove: () => undefined,
-        }}
+        images={
+          sessionId
+            ? {
+                items: images.attachments,
+                error: images.error,
+                unsupportedModel: null,
+                onAttachFiles: images.attachFiles,
+                onRemove: images.remove,
+                onRetry: images.retry,
+              }
+            : undefined
+        }
+        files={
+          sessionId
+            ? {
+                items: [],
+                attaching: false,
+                onAttach: () => imageInputRef.current?.click(),
+                onRemove: () => undefined,
+              }
+            : undefined
+        }
         workspaceFiles={workspaceFiles}
         onDraftChange={(value) => {
           draftRef.current = value;
@@ -1038,19 +1050,21 @@ export function CodeComposer({
         steerPending={steerPending}
         steerStatus={steerStatus}
       />
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept={IMAGE_MEDIA_TYPES.join(",")}
-        multiple
-        className="hidden"
-        aria-label="Attach images"
-        onChange={(event) => {
-          const files = [...(event.target.files ?? [])];
-          event.target.value = "";
-          images.attachFiles(files);
-        }}
-      />
+      {sessionId && (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept={IMAGE_MEDIA_TYPES.join(",")}
+          multiple
+          className="hidden"
+          aria-label="Attach images"
+          onChange={(event) => {
+            const files = [...(event.target.files ?? [])];
+            event.target.value = "";
+            images.attachFiles(files);
+          }}
+        />
+      )}
       {notice && (
         <p
           role="alert"

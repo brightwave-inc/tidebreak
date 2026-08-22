@@ -21,6 +21,7 @@ import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
 import type {
+  CodeDeliveryActionResult,
   CodeDeliveryCheck,
   CodeDeliveryPullRequestAction,
   CodeDeliveryPullRequestDetail,
@@ -92,6 +93,7 @@ const LIFECYCLE_BADGE_VARIANT: Record<
 export function PullRequestDetailPanel({
   client,
   summary,
+  initialDetail,
   onClose,
   onChanged,
   onOpenWorkspace,
@@ -101,22 +103,37 @@ export function PullRequestDetailPanel({
     "getCodeDeliveryPullRequestDetail" | "runCodeDeliveryPullRequestAction"
   >;
   summary: CodeDeliveryPullRequestSummary;
+  initialDetail?: CodeDeliveryPullRequestDetail;
   onClose: () => void;
   onChanged: () => void;
   onOpenWorkspace: (workspaceId: string) => void;
 }) {
   const [detail, setDetail] = useState<CodeDeliveryPullRequestDetail | null>(
-    null,
+    initialDetail ?? null,
   );
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialDetail);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("conversation");
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
   const [draftComment, setDraftComment] = useState("");
   const generation = useRef(0);
+  const activeTarget = useRef(summary.id);
+  const mounted = useRef(true);
+  activeTarget.current = summary.id;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const targetIsActive = (targetId: string) =>
+    mounted.current && activeTarget.current === targetId;
 
   const load = async () => {
+    const targetId = summary.id;
     const token = ++generation.current;
     setLoading(true);
     setError(null);
@@ -125,33 +142,44 @@ export function PullRequestDetailPanel({
         repository: codeDeliveryRepositoryTarget(summary.repository),
         number: summary.number,
       });
-      if (token === generation.current) setDetail(next);
+      if (token === generation.current && targetIsActive(targetId)) {
+        setDetail(next);
+      }
     } catch (caught) {
-      if (token === generation.current) {
+      if (token === generation.current && targetIsActive(targetId)) {
         setError(
           friendlyErrorMessage(caught, "Could not load this pull request."),
         );
       }
     } finally {
-      if (token === generation.current) setLoading(false);
+      if (token === generation.current && targetIsActive(targetId)) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     setTab("conversation");
     setDraftComment("");
-    void load();
+    if (initialDetail?.summary.id === summary.id) {
+      setDetail(initialDetail);
+      setLoading(false);
+    } else {
+      setDetail(null);
+      void load();
+    }
     return () => {
       generation.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, summary.id]);
+  }, [client, initialDetail, summary.id]);
 
   const runAction = async (
     name: string,
     action: CodeDeliveryPullRequestAction,
   ) => {
     if (busy) return;
+    const targetId = summary.id;
     setBusy(name);
     try {
       const result = await client.runCodeDeliveryPullRequestAction({
@@ -161,16 +189,26 @@ export function PullRequestDetailPanel({
         },
         action,
       });
-      toast.success(result.message);
+      if (!targetIsActive(targetId)) return;
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        const description = rerunOutcomeDescription(result, current.checks);
+        toast.warning(
+          result.message,
+          description ? { description } : undefined,
+        );
+      }
       if (action.type === "comment") setDraftComment("");
-      await load();
       onChanged();
+      await load();
     } catch (caught) {
+      if (!targetIsActive(targetId)) return;
       toast.error(
         friendlyErrorMessage(caught, "The pull request action failed."),
       );
     } finally {
-      setBusy(null);
+      if (targetIsActive(targetId)) setBusy(null);
     }
   };
 
@@ -241,84 +279,145 @@ export function PullRequestDetailPanel({
         ) : error ? (
           <InlineDetailError message={error} onRetry={() => void load()} />
         ) : detail ? (
-          <Tabs
-            value={tab}
-            onValueChange={(value) => setTab(value as DetailTab)}
-          >
-            <TabsList className="sticky top-0 z-10 w-full justify-start rounded-none border-b border-border-subtle bg-background/95 px-4 backdrop-blur">
-              <TabsTrigger value="conversation">
-                <MessageSquare />
-                Conversation
-                {detail.comments.length > 0 && (
-                  <span className="text-muted-foreground tabular-nums">
-                    {detail.comments.length}
-                  </span>
-                )}
-              </TabsTrigger>
-              <TabsTrigger value="files">
-                Files
-                <span className="text-muted-foreground tabular-nums">
-                  {detail.changed_files}
-                </span>
-              </TabsTrigger>
-              <TabsTrigger value="checks">
-                Checks
-                {counts.total > 0 && (
-                  <span
-                    className={cn(
-                      "tabular-nums",
-                      counts.failed > 0
-                        ? STATUS_TEXT.critical
-                        : counts.pending > 0
-                          ? STATUS_TEXT.pending
-                          : STATUS_TEXT.ready,
-                    )}
-                  >
-                    {counts.passed}/{counts.total}
-                  </span>
-                )}
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent
-              value="conversation"
-              className="mt-0 flex flex-col gap-5 p-4"
+          <>
+            <DetailErrors errors={detail.errors} />
+            <Tabs
+              value={tab}
+              onValueChange={(value) => setTab(value as DetailTab)}
             >
-              <PrActions
-                detail={detail}
-                summary={current}
-                busy={busy}
-                mergeMethod={mergeMethod}
-                onMergeMethodChange={setMergeMethod}
-                workflowRunIds={workflowRunIds}
-                onRun={(name, action) => void runAction(name, action)}
-              />
-              <PrDescription body={detail.body} />
-              <PrConversation
-                detail={detail}
-                busy={busy}
-                draft={draftComment}
-                onDraftChange={setDraftComment}
-                onComment={() =>
-                  void runAction("comment", {
-                    type: "comment",
-                    body: draftComment,
-                  })
-                }
-              />
-            </TabsContent>
+              <TabsList className="sticky top-0 z-10 w-full justify-start rounded-none border-b border-border-subtle bg-background/95 px-4 backdrop-blur">
+                <TabsTrigger value="conversation">
+                  <MessageSquare />
+                  Conversation
+                  {detail.comments.length > 0 && (
+                    <span className="text-muted-foreground tabular-nums">
+                      {detail.comments.length}
+                    </span>
+                  )}
+                </TabsTrigger>
+                <TabsTrigger value="files">
+                  Files
+                  <span className="text-muted-foreground tabular-nums">
+                    {detail.changed_files}
+                  </span>
+                </TabsTrigger>
+                <TabsTrigger value="checks">
+                  Checks
+                  {counts.total > 0 && (
+                    <span
+                      className={cn(
+                        "tabular-nums",
+                        counts.failed > 0
+                          ? STATUS_TEXT.critical
+                          : counts.pending > 0
+                            ? STATUS_TEXT.pending
+                            : STATUS_TEXT.ready,
+                      )}
+                    >
+                      {counts.passed}/{counts.total}
+                    </span>
+                  )}
+                </TabsTrigger>
+              </TabsList>
 
-            <TabsContent value="files" className="mt-0 p-4">
-              <PrFiles detail={detail} />
-            </TabsContent>
+              <TabsContent
+                value="conversation"
+                className="mt-0 flex flex-col gap-5 p-4"
+              >
+                <PrActions
+                  detail={detail}
+                  summary={current}
+                  busy={busy}
+                  mergeMethod={mergeMethod}
+                  onMergeMethodChange={setMergeMethod}
+                  workflowRunIds={workflowRunIds}
+                  onRun={(name, action) => void runAction(name, action)}
+                />
+                <PrDescription body={detail.body} />
+                <PrConversation
+                  detail={detail}
+                  busy={busy}
+                  draft={draftComment}
+                  onDraftChange={setDraftComment}
+                  onComment={() =>
+                    void runAction("comment", {
+                      type: "comment",
+                      body: draftComment,
+                    })
+                  }
+                />
+              </TabsContent>
 
-            <TabsContent value="checks" className="mt-0 p-4">
-              <PrChecks checks={current.checks} />
-            </TabsContent>
-          </Tabs>
+              <TabsContent value="files" className="mt-0 p-4">
+                <PrFiles detail={detail} />
+              </TabsContent>
+
+              <TabsContent value="checks" className="mt-0 p-4">
+                <PrChecks checks={current.checks} />
+              </TabsContent>
+            </Tabs>
+          </>
         ) : null}
       </div>
     </aside>
+  );
+}
+
+function rerunOutcomeDescription(
+  result: CodeDeliveryActionResult,
+  checks: CodeDeliveryCheck[],
+): string | undefined {
+  if (!result.rerun_outcomes?.length) return undefined;
+  const checkNames = new Map<number, Set<string>>();
+  for (const check of checks) {
+    if (!check.workflow_run_id || check.bucket !== "fail") continue;
+    const names = checkNames.get(check.workflow_run_id) ?? new Set<string>();
+    names.add(check.name);
+    checkNames.set(check.workflow_run_id, names);
+  }
+  const label = (workflowRunId: number) => {
+    const names = [...(checkNames.get(workflowRunId) ?? [])];
+    return names.length > 0
+      ? `${names.join(", ")} (run ${workflowRunId})`
+      : `Run ${workflowRunId}`;
+  };
+  const queued = result.rerun_outcomes
+    .filter((outcome) => outcome.success)
+    .map((outcome) => label(outcome.workflow_run_id));
+  const failed = result.rerun_outcomes
+    .filter((outcome) => !outcome.success)
+    .map(
+      (outcome) =>
+        `${label(outcome.workflow_run_id)}: ${outcome.error ?? "Unknown error"}`,
+    );
+  return [
+    queued.length > 0 ? `Queued: ${queued.join(", ")}.` : null,
+    failed.length > 0 ? `Failed: ${failed.join("; ")}.` : null,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+function DetailErrors({
+  errors,
+}: {
+  errors: CodeDeliveryPullRequestDetail["errors"];
+}) {
+  if (errors.length === 0) return null;
+  return (
+    <div
+      role="alert"
+      className="m-4 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2.5 text-xs"
+    >
+      <p className="font-medium text-warning">Some details could not load.</p>
+      <ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
+        {errors.map((error, index) => (
+          <li key={`${error.kind}:${error.message}:${index}`}>
+            {error.message}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

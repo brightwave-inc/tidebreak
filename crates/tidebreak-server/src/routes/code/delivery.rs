@@ -1,5 +1,8 @@
 //! Cross-repository GitHub delivery routes.
 
+use axum::extract::Query;
+use serde::Deserialize;
+
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::Json;
@@ -12,10 +15,20 @@ use super::types::{
     ResolveCodeDeliveryRepositoriesBody,
 };
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoverCodeDeliveryRepositoriesQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
 pub async fn discover_repositories(
     code: ScopedCode,
+    Query(query): Query<DiscoverCodeDeliveryRepositoriesQuery>,
 ) -> Result<Json<CodeDeliveryRepositoriesSnapshot>, ServerError> {
-    Ok(Json(code.discover_delivery_repositories().await?))
+    Ok(Json(
+        code.discover_delivery_repositories(query.refresh).await?,
+    ))
 }
 
 pub async fn resolve_repositories(

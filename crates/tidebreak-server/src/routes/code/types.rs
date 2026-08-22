@@ -929,6 +929,8 @@ pub struct CodeDeliveryPullRequestDetail {
     pub files: Vec<CodeDeliveryPullRequestFile>,
     pub files_truncated: bool,
     pub comments: Vec<tidebreak_core::PullRequestComment>,
+    /// Section reads that failed after the pull request itself loaded.
+    pub errors: Vec<CodeDeliverySourceError>,
     pub can_mark_ready: bool,
     pub can_merge: bool,
     pub can_rerun_failed: bool,
@@ -966,12 +968,23 @@ pub struct CodeDeliveryPullRequestActionBody {
     pub action: CodeDeliveryPullRequestAction,
 }
 
-/// Successful delivery mutation; callers refresh the affected detail after
-/// showing this bounded result.
+/// Result of rerunning one GitHub Actions workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryRerunOutcome {
+    pub workflow_run_id: u64,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// Delivery mutation result. A partial rerun returns every per-run outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeDeliveryActionResult {
     pub success: bool,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rerun_outcomes: Vec<CodeDeliveryRerunOutcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, TS)]
@@ -997,6 +1010,9 @@ pub struct CodeDeliveryRunSummary {
     pub repository: CodeGitHubRepositoryRef,
     pub kind: CodeDeliveryRunKind,
     pub github_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_attempt: Option<u64>,
     pub name: String,
     pub url: String,
     pub status: String,
@@ -1122,6 +1138,8 @@ pub struct CodeDeliveryRunDetail {
     pub jobs: Vec<CodeDeliveryWorkflowJob>,
     pub deployment_statuses: Vec<CodeDeliveryDeploymentStatus>,
     pub can_rerun_failed: bool,
+    /// Section reads that failed after the run or deployment itself loaded.
+    pub errors: Vec<CodeDeliverySourceError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]

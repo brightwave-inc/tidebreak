@@ -34,6 +34,7 @@ const fixturePaths = [
   "deploy/self-host/Dockerfile.dockerignore",
   "crates/tidebreak-sandbox-agent/Dockerfile.dockerignore",
   "scripts/stage-self-host-build-context.sh",
+  "scripts/smoke-packaged-gh-discovery.sh",
   "deny.toml",
   "README.md",
 ];

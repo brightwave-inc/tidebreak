@@ -4,14 +4,18 @@
 //! array, never a shell string. `gh` credentials are observed, never stored.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction, WorkspaceId};
+use tidebreak_harness::{filter_child_env, probe_shell, HostEnv};
 
 use super::setup_script::spawn_workspace_script;
 
@@ -22,6 +26,35 @@ const PR_DIGEST_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_CHARS: usize = 4_096;
 const PR_CACHE_TTL: Duration = Duration::from_secs(20);
+const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
+pub(crate) const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
+pub(crate) const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
+
+static GH_LAUNCH: OnceLock<GhLaunch> = OnceLock::new();
+static GH_OBSERVATION: OnceLock<AsyncMutex<Option<CachedGhObservation>>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct GhLaunch {
+    binary: PathBuf,
+    login_env: Option<Arc<Vec<(OsString, OsString)>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedGhObservation {
+    observed_at: Instant,
+    observation: GhObservation,
+}
+
+impl CachedGhObservation {
+    fn get(&self, force_refresh: bool, request_started: Instant) -> Option<GhObservation> {
+        let fresh = if force_refresh {
+            self.observed_at >= request_started
+        } else {
+            self.observed_at.elapsed() <= GH_OBSERVATION_TTL
+        };
+        fresh.then(|| self.observation.clone())
+    }
+}
 
 /// Brief in-memory cache of a workspace PR digest.
 #[derive(Debug, Default)]
@@ -84,6 +117,14 @@ pub(crate) enum GhError {
 impl GhError {
     fn user(message: impl Into<String>) -> Self {
         Self::User(message.into())
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self::User(format!("{GH_UNAVAILABLE_PREFIX}{}", message.into()))
+    }
+
+    fn pull_request_head_changed(message: impl Into<String>) -> Self {
+        Self::User(format!("{PR_HEAD_CHANGED_PREFIX}{}", message.into()))
     }
 }
 
@@ -182,6 +223,7 @@ fn github_clone_url(url: &str) -> String {
 pub(crate) struct GhObservation {
     pub found: bool,
     pub authenticated: Option<bool>,
+    pub viewer_login: Option<String>,
     pub binary: Option<PathBuf>,
     pub remediation: String,
 }
@@ -432,15 +474,20 @@ pub(crate) fn classify_merge_error(err: String) -> GhError {
     // Sign-out markers must be specific: a bare `auth` substring also matches
     // host messages that name the pull request author, which would send a
     // blocked merge to the sign-in remediation instead.
-    if lower.contains("not logged")
-        || lower.contains("not signed")
-        || lower.contains("authenticat")
-        || lower.contains("gh auth login")
-        || lower.contains("http 401")
-    {
+    if is_gh_signed_out_error(&bounded) {
         return GhError::GhSignedOut {
             instructions: "gh is installed but not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into(),
         };
+    }
+    if lower.contains("head branch was modified")
+        || lower.contains("head commit") && lower.contains("match")
+    {
+        return GhError::pull_request_head_changed(
+            "the pull request head changed; refresh it before merging",
+        );
+    }
+    if is_gh_unavailable_error(&bounded) {
+        return GhError::unavailable(format!("gh pr merge is unavailable: {bounded}"));
     }
     if lower.contains("not mergeable")
         || lower.contains("merge conflict")
@@ -505,10 +552,16 @@ fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
             instructions: gh.remediation.clone(),
         });
     }
-    if gh.authenticated != Some(true) {
-        return Err(GhError::GhSignedOut {
-            instructions: gh.remediation.clone(),
-        });
+    match gh.authenticated {
+        Some(true) => {}
+        Some(false) => {
+            return Err(GhError::GhSignedOut {
+                instructions: gh.remediation.clone(),
+            });
+        }
+        None => {
+            return Err(GhError::unavailable(gh.remediation.clone()));
+        }
     }
     gh.binary.clone().ok_or_else(|| GhError::GhAbsent {
         instructions: gh.remediation.clone(),
@@ -886,28 +939,197 @@ fn parse_count(text: &str) -> u64 {
 }
 
 pub(crate) async fn observe_gh(search_path: Option<&str>) -> GhObservation {
-    let Some(binary) = find_gh(search_path) else {
+    observe_gh_with_cache(search_path, false).await
+}
+
+pub(crate) async fn refresh_gh_observation(search_path: Option<&str>) -> GhObservation {
+    observe_gh_with_cache(search_path, true).await
+}
+
+async fn observe_gh_with_cache(search_path: Option<&str>, force_refresh: bool) -> GhObservation {
+    let request_started = Instant::now();
+    if search_path.is_some() {
+        return observe_gh_uncached(search_path).await;
+    }
+
+    let cache = GH_OBSERVATION.get_or_init(|| AsyncMutex::new(None));
+    let mut cached = cache.lock().await;
+    if let Some(observation) = cached
+        .as_ref()
+        .and_then(|entry| entry.get(force_refresh, request_started))
+    {
+        return observation;
+    }
+
+    let observation = observe_gh_uncached(None).await;
+    *cached = Some(CachedGhObservation {
+        observed_at: Instant::now(),
+        observation: observation.clone(),
+    });
+    observation
+}
+
+async fn observe_gh_uncached(search_path: Option<&str>) -> GhObservation {
+    let Some(binary) = resolve_gh_binary(search_path).await else {
         return GhObservation {
             found: false,
             authenticated: None,
+            viewer_login: None,
             binary: None,
             remediation: "gh is not installed. Install the GitHub CLI from https://cli.github.com/ and sign in with `gh auth login` in a terminal. Tidebreak does not store GitHub credentials.".into(),
         };
     };
-    match run_gh(Path::new("."), &binary, &["auth", "status"], GH_TIMEOUT).await {
-        Ok(_) => GhObservation {
-            found: true,
-            authenticated: Some(true),
-            binary: Some(binary),
-            remediation: String::new(),
+
+    let status = run_gh(
+        Path::new("."),
+        &binary,
+        &["auth", "status", "--json", "hosts"],
+        GH_TIMEOUT,
+    )
+    .await;
+    match status {
+        Ok(raw) => match parse_auth_status(&raw) {
+            Some(status) if status.authenticated => GhObservation {
+                found: true,
+                authenticated: Some(true),
+                viewer_login: status.viewer_login,
+                binary: Some(binary),
+                remediation: String::new(),
+            },
+            Some(_) => signed_out_observation(binary),
+            None => unavailable_observation(
+                binary,
+                "gh returned an unreadable authentication status. Retry the request or run `gh auth status` in a terminal.",
+            ),
         },
-        Err(_) => GhObservation {
-            found: true,
-            authenticated: Some(false),
-            binary: Some(binary),
-            remediation: "gh is installed but not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into(),
-        },
+        Err(message) if message.to_ascii_lowercase().contains("unknown flag") => {
+            match run_gh(Path::new("."), &binary, &["auth", "status"], GH_TIMEOUT).await {
+                Ok(_) => GhObservation {
+                    found: true,
+                    authenticated: Some(true),
+                    viewer_login: None,
+                    binary: Some(binary),
+                    remediation: String::new(),
+                },
+                Err(message) if is_gh_signed_out_error(&message) => signed_out_observation(binary),
+                Err(message) => unavailable_observation(binary, &message),
+            }
+        }
+        Err(message) if is_gh_signed_out_error(&message) => signed_out_observation(binary),
+        Err(message) => unavailable_observation(binary, &message),
     }
+}
+
+async fn resolve_gh_binary(search_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(search_path) = search_path {
+        return find_gh(Some(search_path));
+    }
+    if let Some(launch) = GH_LAUNCH.get() {
+        return Some(launch.binary.clone());
+    }
+    let launch = match find_gh(None) {
+        Some(binary) => GhLaunch {
+            binary,
+            login_env: None,
+        },
+        None => {
+            let capture = probe_shell(&HostEnv::from_process(), "gh").await.ok()?;
+            GhLaunch {
+                binary: capture.binary,
+                login_env: Some(Arc::new(capture.env)),
+            }
+        }
+    };
+    let _ = GH_LAUNCH.set(launch);
+    GH_LAUNCH.get().map(|launch| launch.binary.clone())
+}
+
+fn signed_out_observation(binary: PathBuf) -> GhObservation {
+    GhObservation {
+        found: true,
+        authenticated: Some(false),
+        viewer_login: None,
+        binary: Some(binary),
+        remediation: "gh is installed but not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into(),
+    }
+}
+
+fn unavailable_observation(binary: PathBuf, message: &str) -> GhObservation {
+    GhObservation {
+        found: true,
+        authenticated: None,
+        viewer_login: None,
+        binary: Some(binary),
+        remediation: format!(
+            "gh is installed, but Tidebreak could not check its authentication: {}",
+            bound_text(message)
+        ),
+    }
+}
+
+fn is_gh_signed_out_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("not logged")
+        || lower.contains("not signed")
+        || lower.contains("signed out")
+        || lower.contains("gh auth login")
+        || lower.contains("token is invalid")
+        || lower.contains("authentication token")
+        || lower.contains("http 401")
+}
+
+fn is_gh_unavailable_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timed out")
+        || lower.contains("failed to spawn gh")
+        || lower.contains("connection reset")
+        || lower.contains("could not resolve host")
+        || lower.contains("network is unreachable")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedGhAuthStatus {
+    authenticated: bool,
+    viewer_login: Option<String>,
+}
+
+fn parse_auth_status(raw: &str) -> Option<ParsedGhAuthStatus> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let accounts = parsed
+        .get("hosts")?
+        .as_object()?
+        .values()
+        .flat_map(|value| value.as_array().into_iter().flatten().collect::<Vec<_>>());
+    let mut authenticated = false;
+    let mut fallback = None;
+    for account in accounts {
+        if account.get("state").and_then(serde_json::Value::as_str) != Some("success") {
+            continue;
+        }
+        authenticated = true;
+        let login = account
+            .get("login")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|login| !login.is_empty())
+            .map(ToOwned::to_owned);
+        if account.get("active").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Some(ParsedGhAuthStatus {
+                authenticated,
+                viewer_login: login,
+            });
+        }
+        if fallback.is_none() {
+            fallback = login;
+        }
+    }
+    Some(ParsedGhAuthStatus {
+        authenticated,
+        viewer_login: fallback,
+    })
 }
 
 fn require_gh(
@@ -923,10 +1145,16 @@ fn require_gh(
             instructions: manual_pr_instructions(worktree, branch, title, body, stat, gh),
         });
     }
-    if gh.authenticated != Some(true) {
-        return Err(GhError::GhSignedOut {
-            instructions: manual_pr_instructions(worktree, branch, title, body, stat, gh),
-        });
+    match gh.authenticated {
+        Some(true) => {}
+        Some(false) => {
+            return Err(GhError::GhSignedOut {
+                instructions: manual_pr_instructions(worktree, branch, title, body, stat, gh),
+            });
+        }
+        None => {
+            return Err(GhError::unavailable(gh.remediation.clone()));
+        }
     }
     Ok(())
 }
@@ -1461,17 +1689,20 @@ fn classify_gh(
     body: Option<&str>,
     stat: &Diffstat,
 ) -> GhError {
-    let lower = err.to_ascii_lowercase();
-    if lower.contains("not logged") || lower.contains("not signed") || lower.contains("auth") {
+    if is_gh_signed_out_error(&err) {
         let gh = GhObservation {
             found: true,
             authenticated: Some(false),
+            viewer_login: None,
             binary: None,
             remediation: "gh is installed but not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into(),
         };
         return GhError::GhSignedOut {
             instructions: manual_pr_instructions(worktree, branch, title, body, stat, &gh),
         };
+    }
+    if is_gh_unavailable_error(&err) {
+        return GhError::unavailable(format!("gh is unavailable: {}", bound_text(&err)));
     }
     GhError::user(format!("gh failed: {err}"))
 }
@@ -1636,6 +1867,7 @@ pub(crate) async fn comment_on_pull_request_target(
 
 /// Repository-qualified merge for a PR that may not have a local Tidebreak
 /// workspace. The runner still admits only `gh pr merge` argv.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_pull_request_target(
     host: &str,
     owner: &str,
@@ -1643,6 +1875,7 @@ pub(crate) async fn merge_pull_request_target(
     number: u64,
     method: MergeMethod,
     auto: bool,
+    expected_head_sha: &str,
     search_path: Option<&str>,
 ) -> Result<(), GhError> {
     let observation = observe_gh(search_path).await;
@@ -1656,6 +1889,8 @@ pub(crate) async fn merge_pull_request_target(
         "--repo".to_owned(),
         repository,
         method.flag().to_owned(),
+        "--match-head-commit".to_owned(),
+        expected_head_sha.to_owned(),
     ];
     if auto {
         args.push("--auto".to_owned());
@@ -1667,56 +1902,14 @@ pub(crate) async fn merge_pull_request_target(
         .map_err(classify_merge_error)
 }
 
-/// Current host head SHA for an expected-head fence immediately before merge.
-pub(crate) async fn pull_request_head_sha(
-    host: &str,
-    owner: &str,
-    repo: &str,
-    number: u64,
-    search_path: Option<&str>,
-) -> Result<String, GhError> {
-    let observation = observe_gh(search_path).await;
-    let binary = require_gh_binary(&observation)?;
-    let repository = cli_repository(host, owner, repo);
-    let number = number.to_string();
-    let raw = run_gh(
-        Path::new("."),
-        &binary,
-        &[
-            "pr",
-            "view",
-            &number,
-            "--repo",
-            &repository,
-            "--json",
-            "headRefOid",
-        ],
-        GH_TIMEOUT,
-    )
-    .await
-    .map_err(|error| classify_observed_gh(error, &observation))?;
-    serde_json::from_str::<serde_json::Value>(&raw)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("headRefOid")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| GhError::user("GitHub did not report the pull request head SHA"))
-}
-
-/// Rerun only the failed jobs from one Actions workflow run.
-pub(crate) async fn rerun_failed_jobs(
+pub(crate) async fn rerun_failed_jobs_with_observation(
+    observation: &GhObservation,
     host: &str,
     owner: &str,
     repo: &str,
     run_id: u64,
-    search_path: Option<&str>,
 ) -> Result<(), GhError> {
-    let observation = observe_gh(search_path).await;
-    let binary = require_gh_binary(&observation)?;
+    let binary = require_gh_binary(observation)?;
     let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs");
     let mut args = vec![
         "api".to_owned(),
@@ -1731,7 +1924,7 @@ pub(crate) async fn rerun_failed_jobs(
     run_gh(Path::new("."), &binary, &borrowed, GH_TIMEOUT)
         .await
         .map(|_| ())
-        .map_err(|error| classify_observed_gh(error, &observation))
+        .map_err(|error| classify_observed_gh(error, observation))
 }
 
 pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
@@ -1743,13 +1936,7 @@ pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
 }
 
 fn classify_observed_gh(error: String, observation: &GhObservation) -> GhError {
-    let lower = error.to_ascii_lowercase();
-    if observation.authenticated != Some(true)
-        || lower.contains("not logged")
-        || lower.contains("not signed")
-        || lower.contains("authentication")
-        || lower.contains("http 401")
-    {
+    if observation.authenticated == Some(false) || is_gh_signed_out_error(&error) {
         return GhError::GhSignedOut {
             instructions: if observation.remediation.is_empty() {
                 "gh is not signed in. Run `gh auth login` in a terminal, then try again. Tidebreak does not store GitHub credentials.".into()
@@ -1757,6 +1944,15 @@ fn classify_observed_gh(error: String, observation: &GhObservation) -> GhError {
                 observation.remediation.clone()
             },
         };
+    }
+    if observation.authenticated.is_none() || is_gh_unavailable_error(&error) {
+        return GhError::unavailable(
+            if observation.authenticated.is_none() && !observation.remediation.is_empty() {
+                observation.remediation.clone()
+            } else {
+                format!("gh is unavailable: {}", bound_text(&error))
+            },
+        );
     }
     GhError::user(format!("gh failed: {error}"))
 }
@@ -1785,7 +1981,27 @@ async fn spawn_gh(
     args: &[&str],
     limit: Duration,
 ) -> Result<String, String> {
+    let login_env = GH_LAUNCH
+        .get()
+        .filter(|launch| launch.binary == binary)
+        .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
+    spawn_gh_with_login_env(cwd, binary, login_env, args, limit).await
+}
+
+async fn spawn_gh_with_login_env(
+    cwd: &Path,
+    binary: &Path,
+    login_env: Option<&[(OsString, OsString)]>,
+    args: &[&str],
+    limit: Duration,
+) -> Result<String, String> {
     let mut command = Command::new(binary);
+    if let Some(login_env) = login_env {
+        command.env_clear();
+        for (key, value) in filter_child_env(login_env.iter().cloned()) {
+            command.env(key, value);
+        }
+    }
     command
         .args(args)
         .current_dir(cwd)
@@ -2029,6 +2245,155 @@ fatal: Could not read from remote repository.\n";
         assert!(signed_out.remediation.contains("gh auth login"));
     }
 
+    #[test]
+    fn auth_status_prefers_the_active_successful_login() {
+        let raw = r#"{
+            "hosts": {
+                "github.example.com": [
+                    {"active": false, "login": "fallback", "state": "success"}
+                ],
+                "github.com": [
+                    {"active": false, "login": "stale", "state": "failure"},
+                    {"active": true, "login": "active-user", "state": "success"}
+                ]
+            }
+        }"#;
+        assert_eq!(
+            parse_auth_status(raw),
+            Some(ParsedGhAuthStatus {
+                authenticated: true,
+                viewer_login: Some("active-user".into()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_only_json_auth_status_is_signed_out() {
+        let shim_dir = TempDir::new().unwrap();
+        write_executable(
+            &shim_dir.path().join("gh"),
+            r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ] && [ "$3" = --json ]; then
+  printf '%s\n' '{"hosts":{"github.com":[{"active":true,"login":"stale-user","state":"failure"}]}}'
+  exit 0
+fi
+echo unexpected "$@" >&2
+exit 3
+"#,
+        );
+
+        let observed = observe_gh(Some(shim_dir.path().to_str().unwrap())).await;
+        assert!(observed.found);
+        assert_eq!(observed.authenticated, Some(false));
+        assert_eq!(observed.viewer_login, None);
+        assert!(observed.remediation.contains("gh auth login"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_auth_status_is_unavailable_not_signed_out() {
+        let shim_dir = TempDir::new().unwrap();
+        write_executable(
+            &shim_dir.path().join("gh"),
+            "#!/bin/sh\nif [ \"$1\" = auth ]; then echo not-json; exit 0; fi\nexit 3\n",
+        );
+
+        let observed = observe_gh(Some(shim_dir.path().to_str().unwrap())).await;
+        assert!(observed.found);
+        assert_eq!(observed.authenticated, None);
+        assert!(!observed.remediation.contains("gh auth login"));
+        assert!(observed.remediation.contains("unreadable"));
+    }
+
+    #[tokio::test]
+    async fn captured_login_environment_reaches_the_gh_child() {
+        let shim_dir = TempDir::new().unwrap();
+        let binary = shim_dir.path().join("gh");
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprintf '%s|%s' \"$GH_CONFIG_DIR\" \"${TIDEBREAK_PRIVATE-unset}\"\n",
+        );
+        let login_env = vec![
+            (
+                OsString::from("GH_CONFIG_DIR"),
+                OsString::from("/shell/config"),
+            ),
+            (
+                OsString::from("TIDEBREAK_PRIVATE"),
+                OsString::from("must-not-leak"),
+            ),
+        ];
+
+        let output = spawn_gh_with_login_env(
+            shim_dir.path(),
+            &binary,
+            Some(&login_env),
+            &["version"],
+            GH_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, "/shell/config|unset");
+    }
+
+    #[tokio::test]
+    async fn rerun_with_an_observation_does_not_repeat_authentication() {
+        let shim_dir = TempDir::new().unwrap();
+        let log = shim_dir.path().join("log");
+        let binary = shim_dir.path().join("gh");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> {}\n[ \"$1\" = api ] && exit 0\nexit 3\n",
+                log.display()
+            ),
+        );
+        let observation = GhObservation {
+            found: true,
+            authenticated: Some(true),
+            viewer_login: Some("tester".into()),
+            binary: Some(binary),
+            remediation: String::new(),
+        };
+
+        let (first, second) = tokio::join!(
+            rerun_failed_jobs_with_observation(&observation, "github.com", "acme", "app", 10,),
+            rerun_failed_jobs_with_observation(&observation, "github.com", "acme", "app", 11,),
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let logged = std::fs::read_to_string(log).unwrap();
+        assert_eq!(logged.matches("api --method POST").count(), 2, "{logged}");
+        assert!(!logged.contains("auth status"), "{logged}");
+    }
+
+    #[test]
+    fn observation_cache_keeps_negative_results_and_coalesces_forced_refreshes() {
+        let observed_at = Instant::now();
+        let cached = CachedGhObservation {
+            observed_at,
+            observation: signed_out_observation(PathBuf::from("/tmp/gh")),
+        };
+
+        assert_eq!(
+            cached.get(false, Instant::now()).unwrap().authenticated,
+            Some(false)
+        );
+        assert_eq!(
+            cached
+                .get(
+                    true,
+                    observed_at.checked_sub(Duration::from_millis(1)).unwrap(),
+                )
+                .unwrap()
+                .authenticated,
+            Some(false)
+        );
+        assert!(cached
+            .get(true, observed_at + Duration::from_millis(1))
+            .is_none());
+    }
+
     #[tokio::test]
     async fn create_pr_uses_view_and_checks_and_never_merges() {
         let (_dir, work, _bare) = init_paired_repos();
@@ -2048,7 +2413,7 @@ if [ "$1" = merge ] || [ "$2" = merge ]; then echo merge-forbidden >&2; exit 2; 
 for arg in "$@"; do
   if [ "$arg" = --auto ]; then echo auto-forbidden >&2; exit 2; fi
 done
-if [ "$1" = auth ]; then echo logged in; exit 0; fi
+if [ "$1" = auth ]; then echo '{{"hosts":{{"github.com":[{{"active":true,"login":"tester","state":"success"}}]}}}}'; exit 0; fi
 if [ "$1" = pr ] && [ "$2" = create ]; then
   echo https://github.com/example/demo/pull/12
   exit 0
@@ -2137,7 +2502,7 @@ exit 3
             &format!(
                 r#"#!/bin/sh
 echo "$@" >> {log}
-if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = auth ]; then echo '{{"hosts":{{"github.com":[{{"active":true,"login":"tester","state":"success"}}]}}}}'; exit 0; fi
 if [ "$1" = pr ] && [ "$2" = ready ]; then exit 0; fi
 echo unexpected "$@" >&2
 exit 3
@@ -2180,7 +2545,7 @@ exit 3
             &format!(
                 r#"#!/bin/sh
 echo "$@" >> {log}
-if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = auth ]; then echo '{{"hosts":{{"github.com":[{{"active":true,"login":"tester","state":"success"}}]}}}}'; exit 0; fi
 if [ "$1" = pr ] && [ "$2" = merge ]; then exit 0; fi
 echo unexpected "$@" >&2
 exit 3
@@ -2236,6 +2601,46 @@ exit 3
         assert!(logged.contains("pr merge --merge --auto"), "{logged}");
     }
 
+    #[tokio::test]
+    async fn repository_merge_matches_the_reviewed_head_atomically() {
+        let shim_dir = TempDir::new().unwrap();
+        let log = shim_dir.path().join("log");
+        write_executable(
+            &shim_dir.path().join("gh"),
+            &format!(
+                r#"#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = auth ]; then echo '{{"hosts":{{"github.com":[{{"active":true,"login":"tester","state":"success"}}]}}}}'; exit 0; fi
+if [ "$1" = pr ] && [ "$2" = merge ]; then exit 0; fi
+exit 3
+"#,
+                log = log.display()
+            ),
+        );
+
+        merge_pull_request_target(
+            "github.com",
+            "acme",
+            "app",
+            42,
+            MergeMethod::Squash,
+            false,
+            "abcdef123456",
+            Some(shim_dir.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let logged = std::fs::read_to_string(log).unwrap();
+        assert!(
+            logged
+                .contains("pr merge 42 --repo acme/app --squash --match-head-commit abcdef123456"),
+            "{logged}"
+        );
+        assert_eq!(logged.matches("pr merge").count(), 1, "{logged}");
+        assert!(!logged.contains("pr view"), "{logged}");
+    }
+
     #[test]
     fn merge_failures_map_to_blocked_signed_out_or_user() {
         for blocked in [
@@ -2257,6 +2662,14 @@ exit 3
         assert!(matches!(
             classify_merge_error("HTTP 401: authentication required".into()),
             GhError::GhSignedOut { .. }
+        ));
+        assert!(matches!(
+            classify_merge_error("Head branch was modified. Review and try again.".into()),
+            GhError::User(message) if message.starts_with(PR_HEAD_CHANGED_PREFIX)
+        ));
+        assert!(matches!(
+            classify_merge_error("gh pr merge timed out".into()),
+            GhError::User(message) if message.starts_with(GH_UNAVAILABLE_PREFIX)
         ));
         assert!(matches!(
             classify_merge_error("the author of this pull request cannot approve it".into(),),
@@ -2390,6 +2803,7 @@ exit 3
         let gh = GhObservation {
             found: true,
             authenticated: Some(true),
+            viewer_login: None,
             binary: Some(shim_dir.path().join("gh")),
             remediation: String::new(),
         };
@@ -2453,6 +2867,7 @@ exit 3
         let gh = GhObservation {
             found: true,
             authenticated: Some(true),
+            viewer_login: None,
             binary: Some(shim_dir.path().join("gh")),
             remediation: String::new(),
         };
@@ -2574,7 +2989,7 @@ exit 3
         write_executable(
             &shim_dir.path().join("gh"),
             r#"#!/bin/sh
-if [ "$1" = auth ]; then exit 0; fi
+if [ "$1" = auth ]; then echo '{"hosts":{"github.com":[{"active":true,"login":"tester","state":"success"}]}}'; exit 0; fi
 if [ "$1" = repo ] && [ "$2" = view ]; then
   echo '{"url":"https://github.com/acme/demo"}'
   exit 0
@@ -2668,6 +3083,7 @@ mod windows_tests {
         let gh = GhObservation {
             found: false,
             authenticated: None,
+            viewer_login: None,
             binary: None,
             remediation: "install gh".into(),
         };

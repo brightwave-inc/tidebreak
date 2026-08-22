@@ -6,36 +6,40 @@
 //! event bus is a lossy `broadcast`, and a fact this misses is a message an
 //! agent never gets.
 //!
-//! A fire is claimed only once its delivery is settled. The claim is
-//! fingerprinted against `head_sha`, so claiming on a tick that could not
-//! deliver would burn the edge and the message would never arrive: the
-//! condition staying true is not a second edge. Holding the claim back is
-//! what makes "retry on a later tick" work without a row to mark drained.
+//! A fire row leases delivery before the side effect. Explicit failures keep
+//! the row pending with bounded backoff. Each sink records the stable delivery
+//! id before acceptance, so an expired lease cannot repeat an accepted effect.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::Utc;
+use futures::{stream, StreamExt};
 use tidebreak_core::db::code::{
-    get_open_turn, get_repo, get_session, insert_trigger_fire, latest_turn,
-    list_active_watches_all_owners, list_enabled_triggers_all_owners, list_sessions_for_workspace,
+    acknowledge_trigger_fire_delivery, get_open_turn, get_session, insert_or_load_trigger_fire,
+    latest_turn, lease_trigger_fire_delivery, list_active_watches_all_owners,
+    list_due_trigger_fire_deliveries_all_owners, list_enabled_triggers_all_owners,
+    list_sessions_for_workspace, reschedule_trigger_fire_delivery_failure,
+    trigger_delivery_accepted,
 };
 use tidebreak_core::{
     classify_trigger_condition, Attention, AttentionSource, CapLevel, CodeEvent, CodeSession,
     CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction,
-    CodeTriggerCondition, CodeTriggerFire, CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel,
-    OwnerId, PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
+    CodeTriggerCondition, CodeTriggerDeliveryId, CodeTriggerFire, CodeTriggerFireIdentity,
+    CodeTriggerFirePayload, CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel, OwnerId,
+    PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
 };
 use tracing::{debug, warn};
 
-use super::attention::apply_attention;
-use super::delivery::{query_pull_requests, repository_target_from_local};
+use super::attention::apply_trigger_attention;
+use super::delivery::{query_pull_requests_by_number, repository_target_from_local};
 use super::runtime::CodeRuntime;
 use super::session_worker::journal_event;
 use crate::error::ServerError;
 use crate::routes::code::types::{
-    CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestSummary, CodeDeliveryWorkspaceLink,
+    CodeDeliveryPullRequestSummary, CodeDeliveryPullRequestsPage, CodeDeliveryWorkspaceLink,
+    CodeGitHubRepositoryRef, CodeGitHubRepositoryTarget,
 };
 
 /// How often the trigger sweep walks enabled triggers.
@@ -44,10 +48,53 @@ use crate::routes::code::types::{
 /// both sweeps read GitHub, and landing them on the same tick would double the
 /// burst a rate limit sees.
 pub(crate) const TRIGGER_SWEEP_INTERVAL: Duration = Duration::from_secs(53);
+const TRIGGER_REPOSITORY_READ_CONCURRENCY: usize = 4;
+const TRIGGER_DUE_BATCH_LIMIT: u64 = 128;
+const TRIGGER_DELIVERY_LEASE: chrono::Duration = chrono::Duration::seconds(53 * 3);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct RepositoryKey {
+    host: String,
+    owner: String,
+    name: String,
+}
+
+impl RepositoryKey {
+    fn from_target(target: &CodeGitHubRepositoryTarget) -> Self {
+        Self::new(&target.host, &target.owner, &target.name)
+    }
+
+    fn from_ref(repository: &CodeGitHubRepositoryRef) -> Self {
+        Self::new(&repository.host, &repository.owner, &repository.name)
+    }
+
+    fn new(host: &str, owner: &str, name: &str) -> Self {
+        Self {
+            host: host.trim().to_ascii_lowercase(),
+            owner: owner.trim().to_ascii_lowercase(),
+            name: name.trim().trim_end_matches(".git").to_ascii_lowercase(),
+        }
+    }
+}
+
+struct RepositoryWork {
+    repo_id: RepoId,
+    triggers: Vec<CodeTrigger>,
+    workspace_ids: HashSet<WorkspaceId>,
+    pr_numbers: HashSet<u64>,
+}
+
+#[derive(Default)]
+struct EligibleWorkspaces {
+    workspace_ids: HashSet<WorkspaceId>,
+    pr_numbers: HashSet<u64>,
+}
 
 /// One pass over every enabled trigger. A failure on one repository never
 /// stops the others.
 pub(crate) async fn sweep_triggers(runtime: &Arc<CodeRuntime>) {
+    retry_due_deliveries(runtime).await;
+
     let triggers = match list_enabled_triggers_all_owners(&runtime.db).await {
         Ok(triggers) => triggers,
         Err(err) => {
@@ -74,88 +121,228 @@ pub(crate) async fn sweep_triggers(runtime: &Arc<CodeRuntime>) {
         }
     };
 
-    // Group by repository so each one is queried once per tick no matter how
-    // many conditions the user armed on it.
-    let mut by_repo: HashMap<(OwnerId, RepoId), Vec<CodeTrigger>> = HashMap::new();
+    // Build one workset per owner. The delivery query builds an owner-wide
+    // workspace index, so calling it once per repository multiplies local git
+    // reads by the repository count.
+    let mut by_owner: HashMap<OwnerId, HashMap<RepoId, Vec<CodeTrigger>>> = HashMap::new();
     for trigger in triggers {
-        by_repo
-            .entry((trigger.owner.clone(), trigger.repo_id))
+        by_owner
+            .entry(trigger.owner.clone())
+            .or_default()
+            .entry(trigger.repo_id)
             .or_default()
             .push(trigger);
     }
 
-    for ((owner, repo_id), triggers) in by_repo {
-        if let Err(err) = sweep_repo(runtime, &owner, repo_id, &triggers, &watched).await {
+    for (owner, repositories) in by_owner {
+        if let Err(err) = sweep_owner(runtime, &owner, repositories, &watched).await {
             warn!(
-                repo = %repo_id,
+                owner = %owner,
                 error = %err.message(),
-                "code-mode trigger sweep failed for one repository"
+                "code-mode trigger sweep failed for one owner"
             );
         }
     }
 }
 
-/// One repository: read its pull requests in bulk, then claim what matches.
-async fn sweep_repo(
+/// Retry a bounded due page without consulting the pull request again.
+async fn retry_due_deliveries(runtime: &Arc<CodeRuntime>) {
+    let due = match list_due_trigger_fire_deliveries_all_owners(
+        &runtime.db,
+        Utc::now(),
+        TRIGGER_DUE_BATCH_LIMIT,
+    )
+    .await
+    {
+        Ok(due) => due,
+        Err(err) => {
+            warn!(error = %err, "code-mode trigger sweep could not list due deliveries");
+            return;
+        }
+    };
+    for fire in due {
+        if let Err(err) = lease_and_deliver(runtime, &fire.identity.owner, fire.delivery_id).await {
+            warn!(
+                delivery = %fire.delivery_id,
+                trigger = %fire.identity.trigger_id,
+                workspace = %fire.identity.workspace_id,
+                error = %err.message(),
+                "code-mode trigger sweep could not retry a due delivery"
+            );
+        }
+    }
+}
+
+/// Read one owner's local workset once, then fetch only the pull requests that
+/// its eligible workspaces identify.
+async fn sweep_owner(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
-    repo_id: RepoId,
-    triggers: &[CodeTrigger],
+    mut repositories: HashMap<RepoId, Vec<CodeTrigger>>,
     watched: &HashSet<WorkspaceId>,
 ) -> Result<(), ServerError> {
-    let Some(repo) = get_repo(&runtime.db, owner, repo_id).await? else {
-        return Ok(());
-    };
-    if repo.removed_at.is_some() {
+    let mut eligible: HashMap<RepoId, EligibleWorkspaces> = HashMap::new();
+    for workspace in runtime.list_workspaces(owner, None).await? {
+        if workspace.status == CodeWorkspaceStatus::Active
+            && !watched.contains(&workspace.id)
+            && repositories.contains_key(&workspace.repo_id)
+        {
+            let work = eligible.entry(workspace.repo_id).or_default();
+            work.workspace_ids.insert(workspace.id);
+            if let Some(pr) = workspace.pr.as_ref() {
+                work.pr_numbers.insert(pr.number);
+            }
+        }
+    }
+
+    // An exact remote read needs both an eligible workspace and its persisted
+    // pull-request number. Exclude every other repository before reading its
+    // origin or asking GitHub for anything.
+    repositories.retain(|repo_id, _| {
+        eligible
+            .get(repo_id)
+            .is_some_and(|work| !work.pr_numbers.is_empty())
+    });
+    if repositories.is_empty() {
         return Ok(());
     }
-    // A repository with no GitHub origin has no facts to sweep. That is a
-    // registration the user made, not a failure worth logging every tick.
-    let Ok(target) = repository_target_from_local(&repo).await else {
+
+    let local_repositories = runtime
+        .list_repos(owner)
+        .await?
+        .into_iter()
+        .filter_map(|repo| {
+            if repo.removed_at.is_some() {
+                return None;
+            }
+            let triggers = repositories.remove(&repo.id)?;
+            let eligible = eligible.remove(&repo.id)?;
+            Some((repo, triggers, eligible))
+        })
+        .collect::<Vec<_>>();
+
+    let resolved = stream::iter(local_repositories)
+        .map(|(repo, triggers, eligible)| async move {
+            match repository_target_from_local(&repo).await {
+                Ok(target) => Some((
+                    RepositoryKey::from_target(&target),
+                    target,
+                    RepositoryWork {
+                        repo_id: repo.id,
+                        triggers,
+                        workspace_ids: eligible.workspace_ids,
+                        pr_numbers: eligible.pr_numbers,
+                    },
+                )),
+                Err(message) => {
+                    debug!(
+                        repo = %repo.id,
+                        error = %message,
+                        "code-mode trigger skipped a repository without a GitHub origin"
+                    );
+                    None
+                }
+            }
+        })
+        .buffer_unordered(TRIGGER_REPOSITORY_READ_CONCURRENCY)
+        .filter_map(async move |work| work)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut work_by_repository: HashMap<RepositoryKey, Vec<RepositoryWork>> = HashMap::new();
+    let mut reads_by_repository: HashMap<
+        RepositoryKey,
+        (CodeGitHubRepositoryTarget, HashSet<u64>),
+    > = HashMap::new();
+    for (key, target, work) in resolved {
+        reads_by_repository
+            .entry(key.clone())
+            .and_modify(|(_, numbers)| numbers.extend(work.pr_numbers.iter().copied()))
+            .or_insert_with(|| (target, work.pr_numbers.clone()));
+        work_by_repository.entry(key).or_default().push(work);
+    }
+
+    let mut reads = reads_by_repository.into_iter().collect::<Vec<_>>();
+    reads.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let reads = reads
+        .into_iter()
+        .map(|(_, (target, numbers))| {
+            let mut numbers = numbers.into_iter().collect::<Vec<_>>();
+            numbers.sort_unstable();
+            (target, numbers)
+        })
+        .collect();
+    sweep_pull_requests(runtime, owner, reads, &work_by_repository).await?;
+    Ok(())
+}
+
+/// Fetch one exact-number aggregate and deliver its matching facts.
+async fn sweep_pull_requests(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    repositories: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>,
+    work_by_repository: &HashMap<RepositoryKey, Vec<RepositoryWork>>,
+) -> Result<(), ServerError> {
+    let page = query_pull_requests_by_number(runtime, owner, repositories).await?;
+    if !github_available(owner, &page) {
         return Ok(());
-    };
-
-    // Bulk, behind the delivery list cache. Reading per workspace instead
-    // would invalidate the digest cache and spawn one `gh` call per
-    // workspace per tick.
-    let page = query_pull_requests(
-        runtime,
-        owner,
-        CodeDeliveryPullRequestQuery {
-            repositories: vec![target],
-            search: None,
-            states: Vec::new(),
-            review_states: Vec::new(),
-            check_states: Vec::new(),
-            authors: Vec::new(),
-            attention_only: false,
-            ready_only: false,
-            // Triggers apply to workspaces that have a pull request, so an
-            // unlinked one is out of scope before any condition is read.
-            tidebreak_linked: Some(true),
-            updated_after: None,
-            cursor: None,
-            limit: None,
-            // Never set: a sweep is not a user refresh, and the whole point of
-            // reading here is to ride the cache the delivery surface fills.
-            refresh: false,
-        },
-    )
-    .await?;
-
+    }
+    warn_source_errors(owner, &page);
     for item in &page.items {
-        claim_fires(runtime, owner, triggers, item, watched).await;
+        let key = RepositoryKey::from_ref(&item.repository);
+        let Some(repository_work) = work_by_repository.get(&key) else {
+            continue;
+        };
+        for work in repository_work {
+            claim_fires(runtime, owner, work, item).await;
+        }
     }
     Ok(())
+}
+
+fn github_available(owner: &OwnerId, page: &CodeDeliveryPullRequestsPage) -> bool {
+    if !page.capability.found {
+        warn!(
+            owner = %owner,
+            remediation = %page.capability.remediation,
+            "code-mode trigger sweep cannot read GitHub because gh is unavailable"
+        );
+        return false;
+    }
+    if page.capability.authenticated != Some(true) {
+        warn!(
+            owner = %owner,
+            remediation = %page.capability.remediation,
+            "code-mode trigger sweep cannot read GitHub because gh is signed out"
+        );
+        return false;
+    }
+    true
+}
+
+fn warn_source_errors(owner: &OwnerId, page: &CodeDeliveryPullRequestsPage) {
+    for error in &page.errors {
+        let repository = error
+            .repository
+            .as_ref()
+            .map(|target| format!("{}/{}/{}", target.host, target.owner, target.name))
+            .unwrap_or_else(|| "unknown".to_owned());
+        warn!(
+            owner = %owner,
+            repository = %repository,
+            kind = %error.kind,
+            error = %error.message,
+            "code-mode trigger sweep could not read one GitHub repository"
+        );
+    }
 }
 
 /// Claim and deliver one fire per matching trigger per linked workspace.
 async fn claim_fires(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
-    triggers: &[CodeTrigger],
+    work: &RepositoryWork,
     item: &CodeDeliveryPullRequestSummary,
-    watched: &HashSet<WorkspaceId>,
 ) {
     // Without a head SHA the fire cannot be fingerprinted, and a fire that
     // cannot be bounded would repeat every tick.
@@ -166,11 +353,15 @@ async fn claim_fires(
     let Some(condition) = classify_trigger_condition(&digest) else {
         return;
     };
-    let workspaces = linked_workspaces(&item.workspace_links, watched);
+    let workspaces = linked_workspaces(&item.workspace_links, work.repo_id, &work.workspace_ids);
     if workspaces.is_empty() {
         return;
     }
-    for trigger in triggers.iter().filter(|t| t.condition == condition) {
+    for trigger in work
+        .triggers
+        .iter()
+        .filter(|trigger| trigger.condition == condition)
+    {
         for workspace_id in &workspaces {
             if let Err(err) =
                 fire_one(runtime, owner, trigger, *workspace_id, &digest, &head_sha).await
@@ -210,7 +401,7 @@ impl Delivery {
     }
 }
 
-/// Settle delivery, then claim, then act.
+/// Capture one immutable pull-request edge, then drive its outbox row.
 async fn fire_one(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
@@ -219,65 +410,219 @@ async fn fire_one(
     digest: &PullRequestDigest,
     head_sha: &str,
 ) -> Result<(), ServerError> {
-    // Settled first, deliberately. See the module note: the claim is the
-    // commitment to act, not the observation of an edge.
-    let Some(delivery) = plan_delivery(runtime, owner, workspace_id, trigger.action).await? else {
-        return Ok(());
-    };
-
-    let fire = CodeTriggerFire {
+    let identity = CodeTriggerFireIdentity {
         trigger_id: trigger.id,
         owner: owner.clone(),
         workspace_id,
         pr_number: digest.number,
         head_sha: head_sha.to_owned(),
-        fired_at: Utc::now(),
     };
-    // Already fired for this head. The condition still being true is not a
-    // second edge.
-    if !insert_trigger_fire(&runtime.db, &fire).await? {
+    let payload = CodeTriggerFirePayload {
+        action: trigger.action,
+        condition: trigger.condition,
+        message: trigger_message(trigger.condition, digest),
+    };
+    let now = Utc::now();
+    let Some(fire) = insert_or_load_trigger_fire(&runtime.db, &identity, &payload, now).await?
+    else {
+        return Ok(());
+    };
+    lease_and_deliver(runtime, owner, fire.delivery_id).await
+}
+
+/// Lease one pending row by id, then deliver from its stored payload.
+async fn lease_and_deliver(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    delivery_id: CodeTriggerDeliveryId,
+) -> Result<(), ServerError> {
+    let now = Utc::now();
+    let lease_token = uuid::Uuid::new_v4();
+    let Some(fire) = lease_trigger_fire_delivery(
+        &runtime.db,
+        owner,
+        delivery_id,
+        lease_token,
+        now,
+        now + TRIGGER_DELIVERY_LEASE,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    deliver_leased_fire(runtime, fire, lease_token).await
+}
+
+/// Acknowledge or reschedule one leased row without rebuilding its event from
+/// current GitHub state.
+async fn deliver_leased_fire(
+    runtime: &Arc<CodeRuntime>,
+    fire: CodeTriggerFire,
+    lease_token: uuid::Uuid,
+) -> Result<(), ServerError> {
+    let owner = &fire.identity.owner;
+    let payload = fire
+        .payload
+        .as_ref()
+        .ok_or_else(|| ServerError::internal("pending trigger delivery has no payload"))?;
+
+    // A sink may have accepted this id before the process could acknowledge
+    // the outbox. Settle that durable boundary before replanning: the session,
+    // turn, or selected sink may have changed while the lease was unavailable.
+    if trigger_delivery_accepted(&runtime.db, owner, fire.delivery_id).await? {
+        if !acknowledge_trigger_fire_delivery(
+            &runtime.db,
+            owner,
+            fire.delivery_id,
+            lease_token,
+            Utc::now(),
+        )
+        .await?
+        {
+            warn!(
+                delivery = %fire.delivery_id,
+                "code-mode trigger could not acknowledge a previously accepted delivery"
+            );
+        }
         return Ok(());
     }
+
+    let Some(delivery) =
+        plan_delivery(runtime, owner, fire.identity.workspace_id, payload.action).await?
+    else {
+        reschedule_delivery_failure(
+            runtime,
+            &fire,
+            lease_token,
+            "no eligible session can accept this trigger delivery",
+        )
+        .await;
+        return Ok(());
+    };
+
+    let session_id = delivery.session_id();
+    if let Err(delivery_error) = deliver_fire(runtime, &fire, payload, delivery, lease_token).await
+    {
+        reschedule_delivery_failure(runtime, &fire, lease_token, delivery_error.message()).await;
+        return Err(delivery_error);
+    }
+    if !acknowledge_trigger_fire_delivery(
+        &runtime.db,
+        owner,
+        fire.delivery_id,
+        lease_token,
+        Utc::now(),
+    )
+    .await?
+    {
+        warn!(
+            delivery = %fire.delivery_id,
+            "code-mode trigger sink accepted a delivery after its lease became stale"
+        );
+    }
     debug!(
-        trigger = %trigger.id,
-        workspace = %workspace_id,
-        pr = digest.number,
-        condition = ?trigger.condition,
+        trigger = %fire.identity.trigger_id,
+        workspace = %fire.identity.workspace_id,
+        pr = fire.identity.pr_number,
+        condition = ?payload.condition,
         delivery = ?delivery,
         "code-mode trigger fired"
     );
+    note_fire(
+        runtime,
+        owner,
+        session_id,
+        &fire.identity,
+        payload.condition,
+    )
+    .await;
+    Ok(())
+}
 
+async fn reschedule_delivery_failure(
+    runtime: &Arc<CodeRuntime>,
+    fire: &CodeTriggerFire,
+    lease_token: uuid::Uuid,
+    error: &str,
+) {
+    match reschedule_trigger_fire_delivery_failure(
+        &runtime.db,
+        &fire.identity.owner,
+        fire.delivery_id,
+        lease_token,
+        Utc::now(),
+        error,
+    )
+    .await
+    {
+        Ok(Some(retry_at)) => debug!(
+            delivery = %fire.delivery_id,
+            retry_at = %retry_at,
+            "code-mode trigger delivery scheduled for retry"
+        ),
+        Ok(None) => warn!(
+            delivery = %fire.delivery_id,
+            "code-mode trigger delivery lost its lease before failure reschedule"
+        ),
+        Err(reschedule_error) => warn!(
+            trigger = %fire.identity.trigger_id,
+            workspace = %fire.identity.workspace_id,
+            pr = fire.identity.pr_number,
+            error = %reschedule_error,
+            "code-mode trigger could not reschedule a failed delivery"
+        ),
+    }
+}
+
+async fn deliver_fire(
+    runtime: &Arc<CodeRuntime>,
+    fire: &CodeTriggerFire,
+    payload: &CodeTriggerFirePayload,
+    delivery: Delivery,
+    lease_token: uuid::Uuid,
+) -> Result<(), ServerError> {
+    let owner = &fire.identity.owner;
+    let delivery_id = fire.delivery_id;
+    let message = payload.message.clone();
     let session_id = delivery.session_id();
-    let message = trigger_message(trigger.condition, digest);
     match delivery {
         Delivery::Steer { turn_id, .. } => {
-            runtime.steer(owner, session_id, turn_id, message).await?;
+            runtime
+                .steer_trigger(
+                    owner,
+                    session_id,
+                    turn_id,
+                    message,
+                    delivery_id,
+                    lease_token,
+                )
+                .await?;
         }
         Delivery::Turn { .. } => {
             runtime
-                .submit_turn(owner, session_id, message, None, None, Vec::new())
+                .submit_trigger_turn(owner, session_id, message, delivery_id, lease_token)
                 .await?;
         }
         Delivery::Notify { .. } => {
-            let _ = apply_attention(
+            apply_trigger_attention(
                 &runtime.db,
                 &runtime.bus,
                 owner,
                 session_id,
+                delivery_id,
+                lease_token,
                 Attention::needs_you(
-                    describe_condition(trigger.condition, digest.number),
+                    describe_condition(payload.condition, fire.identity.pr_number),
                     AttentionSource::Structured,
                 ),
-                false,
             )
-            .await;
+            .await?;
         }
     }
-    note_fire(runtime, owner, session_id, trigger, digest).await;
     Ok(())
 }
 
-/// Which session a fire reaches and how, or `None` to try again next tick.
+/// Which session a fire reaches and how, or `None` to retry after backoff.
 async fn plan_delivery(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
@@ -297,7 +642,7 @@ async fn plan_delivery(
 
     // Another session's turn owns the checkout. The turn lock in the worker is
     // what actually serializes it (record 55); standing down here keeps the
-    // fire unclaimed so a later tick delivers it.
+    // outbox pending so a later lease delivers it.
     let busy = sessions
         .iter()
         .any(|session| session.lifecycle == CodeSessionLifecycle::Running);
@@ -432,8 +777,8 @@ async fn note_fire(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
     session_id: CodeSessionId,
-    trigger: &CodeTrigger,
-    digest: &PullRequestDigest,
+    identity: &CodeTriggerFireIdentity,
+    condition: CodeTriggerCondition,
 ) {
     let Ok(Some(session)) = get_session(&runtime.db, owner, session_id).await else {
         return;
@@ -448,8 +793,8 @@ async fn note_fire(
             level: HarnessNoticeLevel::Info,
             message: format!(
                 "trigger {} fired: {}",
-                trigger.id,
-                describe_condition(trigger.condition, digest.number)
+                identity.trigger_id,
+                describe_condition(condition, identity.pr_number)
             ),
         },
     )
@@ -459,7 +804,8 @@ async fn note_fire(
 /// Active workspaces this pull request is exactly on, minus watched ones.
 fn linked_workspaces(
     links: &[CodeDeliveryWorkspaceLink],
-    watched: &HashSet<WorkspaceId>,
+    repo_id: RepoId,
+    eligible: &HashSet<WorkspaceId>,
 ) -> Vec<WorkspaceId> {
     links
         .iter()
@@ -467,7 +813,8 @@ fn linked_workspaces(
         // agent about someone else's pull request.
         .filter(|link| link.exact)
         .filter(|link| link.status == CodeWorkspaceStatus::Active)
-        .filter(|link| !watched.contains(&link.workspace_id))
+        .filter(|link| link.repo_id == repo_id)
+        .filter(|link| eligible.contains(&link.workspace_id))
         .map(|link| link.workspace_id)
         .collect()
 }
@@ -651,14 +998,21 @@ mod tests {
     #[test]
     fn only_exact_active_unwatched_workspaces_are_targets() {
         let exact_active = link(true, CodeWorkspaceStatus::Active);
-        let fuzzy = link(false, CodeWorkspaceStatus::Active);
-        let archived = link(true, CodeWorkspaceStatus::Archived);
-        let watched_link = link(true, CodeWorkspaceStatus::Active);
+        let mut fuzzy = link(false, CodeWorkspaceStatus::Active);
+        fuzzy.repo_id = exact_active.repo_id;
+        let mut archived = link(true, CodeWorkspaceStatus::Archived);
+        archived.repo_id = exact_active.repo_id;
+        let other_repo = link(true, CodeWorkspaceStatus::Active);
 
-        let watched = HashSet::from([watched_link.workspace_id]);
-        let links = vec![exact_active.clone(), fuzzy, archived, watched_link.clone()];
+        let eligible = HashSet::from([
+            exact_active.workspace_id,
+            fuzzy.workspace_id,
+            archived.workspace_id,
+            other_repo.workspace_id,
+        ]);
+        let links = vec![exact_active.clone(), fuzzy, archived, other_repo];
 
-        let targets = linked_workspaces(&links, &watched);
+        let targets = linked_workspaces(&links, exact_active.repo_id, &eligible);
         assert_eq!(targets, vec![exact_active.workspace_id]);
     }
 
@@ -666,7 +1020,28 @@ mod tests {
     /// about somebody else's pull request.
     #[test]
     fn a_fuzzy_link_alone_produces_no_target() {
-        let links = vec![link(false, CodeWorkspaceStatus::Active)];
-        assert!(linked_workspaces(&links, &HashSet::new()).is_empty());
+        let fuzzy = link(false, CodeWorkspaceStatus::Active);
+        let eligible = HashSet::from([fuzzy.workspace_id]);
+        assert!(
+            linked_workspaces(std::slice::from_ref(&fuzzy), fuzzy.repo_id, &eligible).is_empty()
+        );
+    }
+
+    #[test]
+    fn repository_keys_match_case_insensitively() {
+        let target = CodeGitHubRepositoryTarget {
+            host: "GitHub.COM".to_owned(),
+            owner: "Example".to_owned(),
+            name: "Demo.git".to_owned(),
+        };
+        let mut repository = repository();
+        repository.host = "github.com".to_owned();
+        repository.owner = "example".to_owned();
+        repository.name = "demo".to_owned();
+
+        assert_eq!(
+            RepositoryKey::from_target(&target),
+            RepositoryKey::from_ref(&repository)
+        );
     }
 }

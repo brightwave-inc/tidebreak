@@ -56,6 +56,7 @@ use crate::state::AppState;
 pub(crate) struct ScopedCode {
     runtime: Arc<CodeRuntime>,
     owner: OwnerId,
+    allow_unscoped_delivery: bool,
 }
 
 impl ScopedCode {
@@ -68,6 +69,7 @@ impl ScopedCode {
         Ok(Self {
             runtime,
             owner: auth.principal.owner_id(),
+            allow_unscoped_delivery: auth.principal.is_admin(),
         })
     }
 
@@ -80,7 +82,11 @@ impl ScopedCode {
         runtime: std::sync::Arc<super::runtime::CodeRuntime>,
         owner: OwnerId,
     ) -> Self {
-        Self { runtime, owner }
+        Self {
+            runtime,
+            owner,
+            allow_unscoped_delivery: false,
+        }
     }
 
     /// The principal's durable owner key, for the seams that take it directly:
@@ -155,57 +161,100 @@ impl ScopedCode {
 
     pub(crate) async fn discover_delivery_repositories(
         &self,
+        refresh: bool,
     ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
-        delivery::discover_repositories(&self.runtime, &self.owner).await
+        delivery::discover_repositories(&self.runtime, &self.owner, refresh).await
     }
 
     pub(crate) async fn resolve_delivery_repositories(
         &self,
         body: ResolveCodeDeliveryRepositoriesBody,
     ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
-        delivery::resolve_repositories(&self.runtime, body).await
+        delivery::resolve_repositories(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            body,
+        )
+        .await
     }
 
     pub(crate) async fn query_delivery_pull_requests(
         &self,
         query: CodeDeliveryPullRequestQuery,
     ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
-        delivery::query_pull_requests(&self.runtime, &self.owner, query).await
+        delivery::query_pull_requests(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            query,
+        )
+        .await
     }
 
     pub(crate) async fn delivery_pull_request_detail(
         &self,
         target: CodeDeliveryPullRequestTarget,
     ) -> Result<CodeDeliveryPullRequestDetail, ServerError> {
-        delivery::pull_request_detail(&self.runtime, &self.owner, target).await
+        delivery::pull_request_detail(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            target,
+        )
+        .await
     }
 
     pub(crate) async fn act_on_delivery_pull_request(
         &self,
         body: CodeDeliveryPullRequestActionBody,
     ) -> Result<CodeDeliveryActionResult, ServerError> {
-        delivery::act_on_pull_request(&self.runtime, body).await
+        delivery::act_on_pull_request(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            body,
+        )
+        .await
     }
 
     pub(crate) async fn query_delivery_runs(
         &self,
         query: CodeDeliveryRunQuery,
     ) -> Result<CodeDeliveryRunsPage, ServerError> {
-        delivery::query_runs(&self.runtime, &self.owner, query).await
+        delivery::query_runs(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            query,
+        )
+        .await
     }
 
     pub(crate) async fn delivery_run_detail(
         &self,
         target: CodeDeliveryRunTarget,
     ) -> Result<CodeDeliveryRunDetail, ServerError> {
-        delivery::run_detail(&self.runtime, &self.owner, target).await
+        delivery::run_detail(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            target,
+        )
+        .await
     }
 
     pub(crate) async fn act_on_delivery_run(
         &self,
         body: CodeDeliveryRunActionBody,
     ) -> Result<CodeDeliveryActionResult, ServerError> {
-        delivery::act_on_run(&self.runtime, body).await
+        delivery::act_on_run(
+            &self.runtime,
+            &self.owner,
+            self.allow_unscoped_delivery,
+            body,
+        )
+        .await
     }
 
     pub(crate) async fn worktree_root(
@@ -378,8 +427,12 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn delete_trigger(&self, id: CodeTriggerId) -> Result<(), ServerError> {
-        self.runtime.delete_trigger(&self.owner, id).await
+    pub(crate) async fn delete_trigger(
+        &self,
+        repo_id: RepoId,
+        id: CodeTriggerId,
+    ) -> Result<(), ServerError> {
+        self.runtime.delete_trigger(&self.owner, repo_id, id).await
     }
 
     pub(crate) async fn workspace_pr(

@@ -34,6 +34,7 @@ const meta = {
     onArm: fn(),
     onSetEnabled: fn(),
     onChangeAction: fn(),
+    onDelete: fn(),
   },
   decorators: [
     (Story) => (
@@ -47,7 +48,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Nothing armed yet: every condition off, every action control inert. */
+/** Nothing armed yet: every condition can choose its action before arming. */
 export const NothingArmed: Story = {};
 
 export const Armed: Story = {

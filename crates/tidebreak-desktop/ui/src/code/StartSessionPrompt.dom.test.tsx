@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { act, cleanup, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  screen,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -96,6 +102,36 @@ function deferred<T>() {
 }
 
 describe("StartSessionPrompt", () => {
+  it("does not offer attachments before a real session exists", async () => {
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={vi.fn()}
+        />,
+      ),
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const paste = createEvent.paste(box, {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1, 2, 3])], "shot.png", {
+            type: "image/png",
+          }),
+        ],
+      },
+    });
+    fireEvent(box, paste);
+    expect(paste.defaultPrevented).toBe(false);
+    expect(screen.queryByLabelText("Attached images")).toBeNull();
+    expect(document.querySelector('input[type="file"][accept]')).toBeNull();
+  });
+
   it("defaults to the widest mode the engine honors, says so, and starts on Cmd+Enter", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
