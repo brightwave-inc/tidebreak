@@ -76,7 +76,7 @@ pub struct ConfiguredResolver {
     chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
     provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    on_behalf_of: Option<Arc<crate::obo_inference::OboInference>>,
+    on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
     cached: Mutex<CachedProviders>,
 }
 
@@ -108,15 +108,15 @@ impl ConfiguredResolver {
         }
     }
 
-    /// Resolve model credentials per caller through `on_behalf_of` wherever the
-    /// deployment states no other inference path (decision 51).
+    /// Resolve model credentials and entitlements per caller through
+    /// `on_behalf_of` (decisions 51 and 62).
     ///
     /// Only a gateway-authenticated hosted machine supplies one. Every other
     /// deployment leaves this unset and keeps its configured providers.
     #[must_use]
-    pub(crate) fn with_on_behalf_of_inference(
+    pub(crate) fn with_on_behalf_of_gateway(
         mut self,
-        on_behalf_of: Option<Arc<crate::obo_inference::OboInference>>,
+        on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
         self.on_behalf_of = on_behalf_of;
         self
@@ -144,15 +144,30 @@ impl ProviderResolver for ConfiguredResolver {
         let chatgpt = self.chatgpt.route_auth().await;
         // Per-caller credentials need a caller. An unnamed turn is offered
         // none, which fails it closed instead of running it as somebody else.
-        let on_behalf_of = self
-            .on_behalf_of
-            .as_ref()
-            .zip(owner)
-            .and_then(|(inference, owner)| {
-                inference
+        // The caller's routes are built from their own entitlement snapshot
+        // (decision 62); a snapshot that cannot be resolved right now — the
+        // gateway unreachable past the stale grace, or the caller's session
+        // dead — yields no gateway route, which also fails closed.
+        let on_behalf_of = match (self.on_behalf_of.as_ref(), owner) {
+            (Some(gateway), Some(owner)) => {
+                let snapshot = match gateway.snapshot_for(owner).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::warn!("per-caller gateway entitlements are unavailable: {error}");
+                        None
+                    }
+                };
+                gateway
                     .token_source_for(owner)
-                    .map(|source| (source, inference.inference_base_url().to_owned()))
-            });
+                    .zip(snapshot)
+                    .map(|(source, snapshot)| crate::providers::OnBehalfOfGateway {
+                        source,
+                        gateway_base_url: gateway.gateway_base_url().to_owned(),
+                        snapshot,
+                    })
+            }
+            _ => None,
+        };
         let routes = providers::collect_routes(
             &*self.store,
             &*self.secrets,

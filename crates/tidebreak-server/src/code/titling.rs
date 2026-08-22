@@ -125,17 +125,21 @@ async fn derive_workspace_title(
     }
     // Resolved per call, like every consumer of the utility role: `None` means
     // this install has no model for background work, and the placeholder stays.
+    // On a hosted machine both the role and the provider resolve as the
+    // workspace's owner (decision 62).
+    let caller_gateway = state.caller_gateway_snapshot(owner).await.ok().flatten();
     let Some(utility) = crate::model_roles::resolve_utility_model(
         &*state.store,
         &*state.secrets,
         &*state.provisioned_policy,
         &*state.os_policy,
+        caller_gateway.as_ref(),
     )
     .await?
     else {
         return Ok(Outcome::NotApplicable);
     };
-    let provider = state.resolver.resolve().await;
+    let provider = state.resolver.resolve_for(Some(owner)).await;
     let title = derive_title_with_retries(
         provider.as_ref(),
         &utility,

@@ -216,11 +216,25 @@ async fn resolve_file_attachments(
 /// answer's author behind the user's back. Refusing is the only option that
 /// leaves the user in control, so the error is machine-readable and the client
 /// can offer to change the model or drop the attachments.
-async fn require_image_capable_model(state: &AppState, model: &str) -> Result<(), ServerError> {
+async fn require_image_capable_model(
+    state: &AppState,
+    chat: &tidebreak_core::Chat,
+    model: &str,
+) -> Result<(), ServerError> {
     if !state.resolver.enforces_model_registry() {
         return Ok(());
     }
-    let Some(policy) = providers::resolve_model_policy(&*state.store, model, true).await? else {
+    // A hosted caller's frozen gateway selection resolves only through their
+    // own entitlement snapshot (decision 62).
+    let owner = state.store.chat_owner(chat.id).await.unwrap_or_default();
+    let caller_gateway = match owner.as_ref() {
+        Some(owner) => state.caller_gateway_snapshot(owner).await?,
+        None => None,
+    };
+    let Some(policy) =
+        providers::resolve_model_policy(&*state.store, model, true, caller_gateway.as_ref())
+            .await?
+    else {
         return Err(ServerError::bad_request_kind(
             "unknown_model",
             format!("model `{model}` is not registered for that provider"),
@@ -387,7 +401,7 @@ pub async fn post_message(
             let images = resolve_message_attachments(&state, id, &body.attachments).await?;
             let documents = resolve_file_attachments(&store, id, &body.file_attachments).await?;
             if !images.is_empty() {
-                require_image_capable_model(&state, &model).await?;
+                require_image_capable_model(&state, &chat, &model).await?;
             }
             Ok::<_, ServerError>((model, images, documents))
         }

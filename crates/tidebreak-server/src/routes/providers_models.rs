@@ -72,20 +72,29 @@ pub(crate) async fn resolve_executable_chat_model(
         return Ok(selected);
     }
     let managed = state.managed_policy()?;
-    let executable = if managed.managed {
+    // A hosted caller's turn freezes its model against their own entitlement
+    // snapshot, exactly as a managed profile freezes against the
+    // deployment-wide one (decision 62).
+    let owner = state.store.chat_owner(chat.id).await.unwrap_or_default();
+    let caller_gateway = match owner.as_ref() {
+        Some(owner) => state.caller_gateway_snapshot(owner).await?,
+        None => None,
+    };
+    let executable = if managed.managed || caller_gateway.is_some() {
         let policy = model_roles::effective_chat_policy(
             &*state.store,
             &*state.secrets,
             &managed,
             &selected,
             explicit,
+            caller_gateway.as_ref(),
         )
         .await?
         .ok_or_else(|| {
             ServerError::conflict_kind(
                 "model_provider_unavailable",
                 format!(
-                    "the managed model gateway cannot serve selected model `{selected}` with its current catalog or credential"
+                    "the model gateway cannot serve selected model `{selected}` with its current catalog or credential"
                 ),
             )
         })?;
@@ -93,16 +102,18 @@ pub(crate) async fn resolve_executable_chat_model(
     } else {
         selected
     };
-    validate_execution_selection(state, &executable, true).await
+    validate_execution_selection(state, &executable, true, caller_gateway.as_ref()).await
 }
 
 async fn validate_execution_selection(
     state: &AppState,
     value: &str,
     allow_legacy_custom: bool,
+    caller_gateway: Option<&providers::GatewayModelSnapshot>,
 ) -> Result<String, ServerError> {
     let Some(policy) =
-        providers::resolve_model_policy(&*state.store, value, allow_legacy_custom).await?
+        providers::resolve_model_policy(&*state.store, value, allow_legacy_custom, caller_gateway)
+            .await?
     else {
         return Err(ServerError::bad_request_kind(
             "unknown_model",
@@ -116,7 +127,15 @@ async fn validate_execution_selection(
         ));
     }
     let managed = state.managed_policy()?;
-    if !providers::model_is_usable(&*state.store, &*state.secrets, &policy, &managed).await? {
+    if !providers::model_is_usable(
+        &*state.store,
+        &*state.secrets,
+        &policy,
+        &managed,
+        caller_gateway,
+    )
+    .await?
+    {
         return Err(ServerError::conflict_kind(
             "model_provider_unavailable",
             format!(
@@ -136,6 +155,7 @@ pub(super) async fn validate_model_selection(
     state: &AppState,
     value: &str,
     allow_legacy_custom: bool,
+    owner: Option<&tidebreak_core::OwnerId>,
 ) -> Result<String, ServerError> {
     if value.is_empty() {
         return Err(ServerError::bad_request("model must not be empty"));
@@ -143,8 +163,20 @@ pub(super) async fn validate_model_selection(
     if !state.resolver.enforces_model_registry() {
         return Ok(value.to_owned());
     }
-    let Some(policy) =
-        providers::resolve_model_policy(&*state.store, value, allow_legacy_custom).await?
+    // On a hosted machine a selection is validated against the requesting
+    // caller's own entitlements (decision 62); everywhere else the snapshot
+    // is `None` and nothing changes.
+    let caller_gateway = match owner {
+        Some(owner) => state.caller_gateway_snapshot(owner).await?,
+        None => None,
+    };
+    let Some(policy) = providers::resolve_model_policy(
+        &*state.store,
+        value,
+        allow_legacy_custom,
+        caller_gateway.as_ref(),
+    )
+    .await?
     else {
         return Err(ServerError::bad_request_kind(
             "unknown_model",
@@ -152,7 +184,15 @@ pub(super) async fn validate_model_selection(
         ));
     };
     let managed = state.managed_policy()?;
-    if !providers::model_is_usable(&*state.store, &*state.secrets, &policy, &managed).await? {
+    if !providers::model_is_usable(
+        &*state.store,
+        &*state.secrets,
+        &policy,
+        &managed,
+        caller_gateway.as_ref(),
+    )
+    .await?
+    {
         return Err(ServerError::conflict_kind(
             "model_provider_unavailable",
             format!(
@@ -309,10 +349,20 @@ pub struct ProvidersList {
 /// model gateway appears only on a managed profile, projected from policy.
 pub async fn list_providers(
     State(state): State<AppState>,
+    auth: crate::principal::AuthContext,
 ) -> Result<Json<ProvidersList>, ServerError> {
     let policy = state.managed_policy()?;
+    let caller_gateway = state
+        .caller_gateway_snapshot(&auth.principal.owner_id())
+        .await?;
     Ok(Json(ProvidersList {
-        providers: providers::list_providers(&*state.store, &*state.secrets, &policy).await?,
+        providers: providers::list_providers(
+            &*state.store,
+            &*state.secrets,
+            &policy,
+            caller_gateway.as_ref(),
+        )
+        .await?,
     }))
 }
 
@@ -532,11 +582,18 @@ pub struct ModelCatalog {
 ///
 /// All typed registry rows plus current availability. Clients may explain
 /// unavailable rows, but must never offer them as usable selections.
-pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCatalog>, ServerError> {
+pub async fn list_models(
+    State(state): State<AppState>,
+    auth: crate::principal::AuthContext,
+) -> Result<Json<ModelCatalog>, ServerError> {
+    let caller_gateway = state
+        .caller_gateway_snapshot(&auth.principal.owner_id())
+        .await?;
     let mut roles = Vec::with_capacity(ModelRole::ALL.len());
     for &role in ModelRole::ALL {
         let selection = model_roles::read_selection(&*state.store, role).await?;
-        let resolved_key = resolved_role_key(&state, role, selection.as_deref()).await?;
+        let resolved_key =
+            resolved_role_key(&state, role, selection.as_deref(), caller_gateway.as_ref()).await?;
         roles.push(ModelRoleInfo {
             role,
             selection,
@@ -544,31 +601,36 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ModelCata
         });
     }
     let policy = state.managed_policy()?;
-    let models = providers::catalog_models(&*state.store, &*state.secrets, &policy)
-        .await?
-        .into_iter()
-        .map(|entry| ModelInfo {
-            key: entry.policy.key,
-            id: entry.policy.id,
-            display_name: entry.policy.display_name,
-            provider: entry.policy.provider,
-            vendor: entry.policy.vendor,
-            verification: entry.policy.verification,
-            recommended: entry.policy.recommended,
-            available: entry.available,
-            context_window: entry.policy.context_window,
-            max_output_tokens: entry.policy.max_output_tokens,
-            input_modalities: entry.policy.input_modalities.clone(),
-            supports_reasoning: entry.policy.supports_reasoning,
-            supports_tools: entry.policy.supports_tools,
-            supports_structured_output: entry.policy.supports_structured_output,
-            reasoning_efforts: entry.policy.reasoning_efforts.clone(),
-            multimodal: entry
-                .policy
-                .input_modalities
-                .contains(&crate::model_registry::InputModality::Image),
-        })
-        .collect();
+    let models = providers::catalog_models(
+        &*state.store,
+        &*state.secrets,
+        &policy,
+        caller_gateway.as_ref(),
+    )
+    .await?
+    .into_iter()
+    .map(|entry| ModelInfo {
+        key: entry.policy.key,
+        id: entry.policy.id,
+        display_name: entry.policy.display_name,
+        provider: entry.policy.provider,
+        vendor: entry.policy.vendor,
+        verification: entry.policy.verification,
+        recommended: entry.policy.recommended,
+        available: entry.available,
+        context_window: entry.policy.context_window,
+        max_output_tokens: entry.policy.max_output_tokens,
+        input_modalities: entry.policy.input_modalities.clone(),
+        supports_reasoning: entry.policy.supports_reasoning,
+        supports_tools: entry.policy.supports_tools,
+        supports_structured_output: entry.policy.supports_structured_output,
+        reasoning_efforts: entry.policy.reasoning_efforts.clone(),
+        multimodal: entry
+            .policy
+            .input_modalities
+            .contains(&crate::model_registry::InputModality::Image),
+    })
+    .collect();
     Ok(Json(ModelCatalog { models, roles }))
 }
 
@@ -590,23 +652,32 @@ pub struct ModelRoleUpdate {
 /// writes the same setting as `PUT /settings`.
 pub async fn put_model_role(
     State(state): State<AppState>,
+    auth: crate::principal::AuthContext,
     Path(role): Path<String>,
     Json(body): Json<ModelRoleUpdate>,
 ) -> Result<Json<ModelRoleInfo>, ServerError> {
     let role = ModelRole::parse(&role)
         .ok_or_else(|| ServerError::not_found(format!("unknown model role: {role}")))?;
+    let owner = auth.principal.owner_id();
+    let caller_gateway = state.caller_gateway_snapshot(&owner).await?;
     let selection = match body.selection {
         Some(selection) => {
-            let selection = validate_model_selection(&state, &selection, false).await?;
+            let selection =
+                validate_model_selection(&state, &selection, false, Some(&owner)).await?;
             if role == ModelRole::Utility && state.resolver.enforces_model_registry() {
-                let policy = providers::resolve_model_policy(&*state.store, &selection, false)
-                    .await?
-                    .ok_or_else(|| {
-                        ServerError::bad_request_kind(
-                            "unknown_model",
-                            unknown_model_message(&selection),
-                        )
-                    })?;
+                let policy = providers::resolve_model_policy(
+                    &*state.store,
+                    &selection,
+                    false,
+                    caller_gateway.as_ref(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    ServerError::bad_request_kind(
+                        "unknown_model",
+                        unknown_model_message(&selection),
+                    )
+                })?;
                 if !role.supports_model(&policy) {
                     return Err(ServerError::conflict_kind(
                         "model_structured_output_unsupported",
@@ -622,7 +693,8 @@ pub async fn put_model_role(
         None => None,
     };
     model_roles::write_selection(&*state.store, role, selection.as_deref()).await?;
-    let resolved_key = resolved_role_key(&state, role, selection.as_deref()).await?;
+    let resolved_key =
+        resolved_role_key(&state, role, selection.as_deref(), caller_gateway.as_ref()).await?;
     Ok(Json(ModelRoleInfo {
         role,
         selection,
@@ -640,6 +712,7 @@ async fn resolved_role_key(
     state: &AppState,
     role: ModelRole,
     selection: Option<&str>,
+    caller_gateway: Option<&providers::GatewayModelSnapshot>,
 ) -> Result<Option<String>, ServerError> {
     match role {
         // The chat role goes through the same seam a new execution does, minus
@@ -660,6 +733,7 @@ async fn resolved_role_key(
                 &managed,
                 &fallback,
                 selection.is_some(),
+                caller_gateway,
             )
             .await?
             .map(|policy| policy.key))
@@ -670,6 +744,7 @@ async fn resolved_role_key(
             &*state.provisioned_policy,
             &*state.os_policy,
             role,
+            caller_gateway,
         )
         .await?
         .map(|policy| policy.key)),

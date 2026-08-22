@@ -777,7 +777,7 @@ async fn an_exact_image_turn_retry_survives_a_managed_gateway_route_retarget() {
     .await
     .unwrap();
     assert!(
-        providers::resolve_model_policy(&*store, &original_model, false)
+        providers::resolve_model_policy(&*store, &original_model, false, None)
             .await
             .unwrap()
             .is_none(),
@@ -1060,10 +1060,11 @@ async fn a_turn_carrying_images_against_a_text_only_model_is_refused() {
     let router = app(state);
     let chat = make_chat(&router, &bearer).await;
 
-    let policy = providers::resolve_model_policy(&*store, "openai_compatible::vendor/model", false)
-        .await
-        .unwrap()
-        .expect("a registered custom model resolves");
+    let policy =
+        providers::resolve_model_policy(&*store, "openai_compatible::vendor/model", false, None)
+            .await
+            .unwrap()
+            .expect("a registered custom model resolves");
     assert!(!policy
         .input_modalities
         .contains(&crate::model_registry::InputModality::Image));

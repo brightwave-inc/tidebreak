@@ -815,7 +815,7 @@ mod tests {
 
         // The stale snapshot carries the old deployment's stamp, so the new
         // policy reads no models until sign-in resyncs the entitled set.
-        assert!(providers::gateway_models(&*store, &policy)
+        assert!(providers::gateway_models(&*store, &policy, None)
             .await
             .unwrap()
             .is_empty());

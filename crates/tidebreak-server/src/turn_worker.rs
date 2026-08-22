@@ -90,6 +90,10 @@ pub(crate) enum TurnWorkerOutcome {
 
 #[derive(Clone)]
 pub(crate) struct TurnWorker {
+    /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
+    /// 62): the turn's model resolution and utility role read the owner's
+    /// own entitlement snapshot through this. `None` everywhere else.
+    on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     secrets: Arc<dyn SecretProvider>,
@@ -402,6 +406,7 @@ impl TurnWorker {
             events.clone(),
         ));
         Self {
+            on_behalf_of: None,
             store,
             resolver,
             secrets,
@@ -431,6 +436,14 @@ impl TurnWorker {
     ///
     /// Without it an agent evicts every image block to a text stand-in, so a
     /// turn still runs but the model is told the image is unavailable.
+    pub(crate) fn with_on_behalf_of_gateway(
+        mut self,
+        gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
+    ) -> Self {
+        self.on_behalf_of = gateway;
+        self
+    }
+
     pub(crate) fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
         self.blobs = Some(blobs);
         self
@@ -790,8 +803,24 @@ impl TurnWorker {
             Some(provider) => provider.current_timeout_ms().await,
             None => crate::code_execution::DEFAULT_TIMEOUT_MS,
         };
+        // The turn's owner and, on a hosted machine, their own entitlement
+        // snapshot — resolved once here so the model re-resolution, the
+        // utility role, and the per-caller router all read the same answer
+        // (decision 62). A snapshot that cannot be resolved reads as `None`
+        // and fails the gateway-bound paths closed.
+        let owner = self.store.chat_owner(chat.id).await.unwrap_or_default();
+        let caller_gateway = match (self.on_behalf_of.as_ref(), owner.as_ref()) {
+            (Some(gateway), Some(owner)) => gateway.snapshot_for(owner).await.ok().flatten(),
+            _ => None,
+        };
         let model_policy = if self.resolver.enforces_model_registry() {
-            crate::providers::resolve_model_policy(&*self.store, &turn.model, true).await?
+            crate::providers::resolve_model_policy(
+                &*self.store,
+                &turn.model,
+                true,
+                caller_gateway.as_ref(),
+            )
+            .await?
         } else {
             None
         };
@@ -892,6 +921,7 @@ impl TurnWorker {
                 &*self.secrets,
                 &*self.provisioned_policy,
                 &*self.os_policy,
+                caller_gateway.as_ref(),
             )
             .await?
         } else {
@@ -995,7 +1025,6 @@ impl TurnWorker {
             // ignored; on one that resolves them per caller, an owner that
             // cannot be named yields no route and fails the turn closed
             // rather than running it on somebody else's authority.
-            let owner = self.store.chat_owner(chat.id).await.unwrap_or_default();
             let provider = self.resolver.resolve_for(owner.as_ref()).await;
             let steer = active.steer_inbox();
             let mut agent = Agent::new(provider, surface.tools.clone(), self.store.clone(), config)

@@ -1442,8 +1442,11 @@ impl SandboxContainerRunner {
             .ok_or_else(|| AgentError::msg("container agent run has no chat"))?;
         let mut config = AgentConfig::default();
         if self.resolver.enforces_model_registry() {
+            // Container sandboxes resolve without a caller snapshot: on a
+            // hosted machine their model proxy has no per-caller route yet
+            // either. Decision 62 names this gap and leaves it open.
             let Some(policy) =
-                crate::providers::resolve_model_policy(&*self.store, &model, true).await?
+                crate::providers::resolve_model_policy(&*self.store, &model, true, None).await?
             else {
                 return Err(AgentError::config(
                     "container sandbox model is not registered for its provider",

@@ -166,6 +166,13 @@ pub async fn write_selection(
 /// for every managed install. The walk is the same shape either way: first
 /// usable wins, and nothing usable degrades to `None`.
 ///
+/// On a gateway-authenticated hosted machine, `caller_gateway` is the
+/// triggering caller's own entitlement snapshot (decision 62): background
+/// work runs as the caller whose turn asked for it, walking their entitled
+/// models the same way the managed walk covers a deployment's. Work with no
+/// caller to bill resolves to `None` and is skipped, never run as somebody
+/// else.
+///
 /// `None` means this install has no model for the role. Callers skip the work.
 pub async fn resolve(
     store: &dyn Store,
@@ -173,12 +180,45 @@ pub async fn resolve(
     provisioned_policy: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
     role: ModelRole,
+    caller_gateway: Option<&crate::providers::GatewayModelSnapshot>,
 ) -> Result<Option<ResolvedModelPolicy>> {
     let managed = crate::managed_policy::resolve(provisioned_policy, os_policy)?;
+    if let Some(snapshot) = caller_gateway.filter(|_| !managed.managed) {
+        // The hosted caller's walk: their explicit selection when their own
+        // catalog can serve it, else their entitled models cheapest-first —
+        // the same shape as the managed walk below, over their snapshot.
+        if let Some(selection) = read_selection(store, role).await? {
+            if let Some(policy) =
+                effective_chat_policy(store, secrets, &managed, &selection, true, caller_gateway)
+                    .await?
+            {
+                if role.supports_model(&policy) {
+                    return Ok(Some(policy));
+                }
+            }
+        }
+        if role.defaults().is_empty() {
+            return Ok(None);
+        }
+        let mut models: Vec<_> = snapshot.models.iter().collect();
+        models.sort_by_key(|model| model.context_window);
+        for model in models {
+            let key = crate::model_registry::selection_key(
+                providers::ProviderKind::ModelGateway,
+                &model.id,
+            );
+            if let Some(policy) = providers::gateway_execution_policy(snapshot, &key) {
+                if role.supports_model(&policy) {
+                    return Ok(Some(policy));
+                }
+            }
+        }
+        return Ok(None);
+    }
     if managed.managed {
         if let Some(selection) = read_selection(store, role).await? {
             if let Some(policy) =
-                effective_chat_policy(store, secrets, &managed, &selection, true).await?
+                effective_chat_policy(store, secrets, &managed, &selection, true, None).await?
             {
                 if role.supports_model(&policy) {
                     return Ok(Some(policy));
@@ -191,6 +231,7 @@ pub async fn resolve(
                 secrets,
                 providers::ProviderKind::ModelGateway,
                 &managed,
+                None,
             )
             .await?
         {
@@ -219,7 +260,7 @@ pub async fn resolve(
         // credential, or whose capabilities no longer satisfy the role, falls
         // through to the defaults rather than issuing a request that would
         // fail or silently skip the work.
-        if let Some(policy) = usable_policy(store, secrets, &managed, &selection).await? {
+        if let Some(policy) = usable_policy(store, secrets, &managed, &selection, None).await? {
             if role.supports_model(&policy) {
                 return Ok(Some(policy));
             }
@@ -234,7 +275,7 @@ pub async fn resolve(
         .map(|key| (*key).to_owned())
         .collect();
     for key in defaults {
-        if let Some(policy) = usable_policy(store, secrets, &managed, &key).await? {
+        if let Some(policy) = usable_policy(store, secrets, &managed, &key, None).await? {
             if role.supports_model(&policy) {
                 return Ok(Some(policy));
             }
@@ -264,12 +305,16 @@ pub async fn effective_chat_policy(
     managed: &crate::managed_policy::ManagedPolicy,
     selection: &str,
     explicit: bool,
+    caller_gateway: Option<&crate::providers::GatewayModelSnapshot>,
 ) -> Result<Option<ResolvedModelPolicy>> {
-    let resolved = providers::resolve_model_policy(store, selection, true).await?;
-    if !managed.managed {
+    let resolved = providers::resolve_model_policy(store, selection, true, caller_gateway).await?;
+    if !managed.managed && caller_gateway.is_none() {
         return Ok(resolved);
     }
-    let snapshot = providers::gateway_snapshot_for_policy(store, managed).await?;
+    // One shape for both gateway-bound profiles (decision 62): a managed
+    // profile freezes against the deployment-wide snapshot, a hosted caller
+    // against their own.
+    let snapshot = providers::gateway_snapshot_for(store, managed, caller_gateway).await?;
     let Some(snapshot) = snapshot.as_ref() else {
         return Ok(None);
     };
@@ -281,6 +326,7 @@ pub async fn effective_chat_policy(
             secrets,
             providers::ProviderKind::ModelGateway,
             managed,
+            caller_gateway,
         )
         .await?
         .then_some(equivalent));
@@ -294,6 +340,7 @@ pub async fn effective_chat_policy(
                     secrets,
                     providers::ProviderKind::ModelGateway,
                     managed,
+                    caller_gateway,
                 )
                 .await?
             {
@@ -309,6 +356,7 @@ pub async fn effective_chat_policy(
         secrets,
         providers::ProviderKind::ModelGateway,
         managed,
+        caller_gateway,
     )
     .await?
     {
@@ -328,13 +376,18 @@ async fn usable_policy(
     secrets: &dyn SecretProvider,
     managed: &crate::managed_policy::ManagedPolicy,
     selection: &str,
+    caller_gateway: Option<&crate::providers::GatewayModelSnapshot>,
 ) -> Result<Option<ResolvedModelPolicy>> {
-    let Some(policy) = providers::resolve_model_policy(store, selection, false).await? else {
+    let Some(policy) =
+        providers::resolve_model_policy(store, selection, false, caller_gateway).await?
+    else {
         return Ok(None);
     };
-    Ok(providers::model_is_usable(store, secrets, &policy, managed)
-        .await?
-        .then_some(policy))
+    Ok(
+        providers::model_is_usable(store, secrets, &policy, managed, caller_gateway)
+            .await?
+            .then_some(policy),
+    )
 }
 
 /// Resolve the `utility` role into the shape its callers carry.
@@ -349,9 +402,19 @@ pub async fn resolve_utility_model(
     secrets: &dyn SecretProvider,
     provisioned_policy: &dyn crate::managed_policy::ProvisionedPolicySource,
     os_policy: &dyn crate::managed_policy::OsPolicySource,
+    caller_gateway: Option<&crate::providers::GatewayModelSnapshot>,
 ) -> Result<Option<UtilityModel>> {
     let role = ModelRole::Utility;
-    let Some(policy) = resolve(store, secrets, provisioned_policy, os_policy, role).await? else {
+    let Some(policy) = resolve(
+        store,
+        secrets,
+        provisioned_policy,
+        os_policy,
+        role,
+        caller_gateway,
+    )
+    .await?
+    else {
         return Ok(None);
     };
     Ok(Some(UtilityModel {
@@ -435,7 +498,7 @@ mod tests {
         .await
         .unwrap();
 
-        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
+        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy, None)
             .await
             .unwrap()
             .expect("the capable Together default keeps utility work enabled");
@@ -452,7 +515,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
+        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy, None)
             .await
             .unwrap()
             .expect("Kimi K3 supports the strict utility response contract");
@@ -498,7 +561,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
+            resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy, None)
                 .await
                 .unwrap()
                 .map(|model| model.model),
@@ -509,7 +572,7 @@ mod tests {
         // there is nothing to fall back to, so consumers skip their work.
         crate::managed_policy::provision(&*provisioned, "https://corp.gateway").unwrap();
         assert!(
-            resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
+            resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy, None)
                 .await
                 .unwrap()
                 .is_none()
@@ -561,7 +624,7 @@ mod tests {
         providers::write_gateway_snapshot(&*store, &snapshot)
             .await
             .unwrap();
-        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy)
+        let utility = resolve_utility_model(&*store, &*secrets, &*provisioned, &os_policy, None)
             .await
             .unwrap()
             .expect("a managed profile resolves the utility role to a gateway model");

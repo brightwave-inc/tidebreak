@@ -191,7 +191,7 @@ async fn managed_compaction_and_message_admission_share_the_frozen_gateway_ident
         compaction_model.starts_with("model_gateway::__tidebreak_gateway_v1."),
         "managed execution should freeze the gateway route: {compaction_model}"
     );
-    let compaction_policy = providers::resolve_model_policy(&*store, &compaction_model, true)
+    let compaction_policy = providers::resolve_model_policy(&*store, &compaction_model, true, None)
         .await
         .unwrap()
         .expect("the frozen gateway selector should resolve against its snapshot");

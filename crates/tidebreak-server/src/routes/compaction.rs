@@ -84,7 +84,21 @@ pub async fn post_compact(
 
     let mut config = state.agent_config.clone();
     let model = resolve_executable_chat_model(&state, &chat).await?;
-    match crate::providers::resolve_model_policy(&*state.store, &model, true).await? {
+    // A hosted caller's frozen gateway selection resolves only through their
+    // own entitlement snapshot (decision 62).
+    let owner = state.store.chat_owner(chat.id).await.unwrap_or_default();
+    let caller_gateway = match owner.as_ref() {
+        Some(owner) => state.caller_gateway_snapshot(owner).await?,
+        None => None,
+    };
+    match crate::providers::resolve_model_policy(
+        &*state.store,
+        &model,
+        true,
+        caller_gateway.as_ref(),
+    )
+    .await?
+    {
         Some(policy) => {
             crate::providers::apply_model_policy(&mut config, &policy, chat.reasoning_effort)?;
         }

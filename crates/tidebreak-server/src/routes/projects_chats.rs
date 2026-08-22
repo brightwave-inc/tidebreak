@@ -205,7 +205,8 @@ pub async fn create_chat(
         store.require_project(project_id).await?;
     }
     if let Some(model) = body.model.as_mut() {
-        *model = validate_model_selection(&state, model, false).await?;
+        *model = validate_model_selection(&state, model, false, Some(&auth.principal.owner_id()))
+            .await?;
     }
     refuse_permission_mode_over_ceiling(&state, body.permission_mode).await?;
     if let Some(policy) = body.network_policy.as_mut() {
@@ -222,7 +223,14 @@ pub async fn create_chat(
         // ambiguous/unmatched selection honestly.
         None => match read_sticky_default::<String>(&*state.store, &owner, STICKY_MODEL_KEY).await?
         {
-            Some(sticky) => match validate_model_selection(&state, &sticky, false).await {
+            Some(sticky) => match validate_model_selection(
+                &state,
+                &sticky,
+                false,
+                Some(&auth.principal.owner_id()),
+            )
+            .await
+            {
                 Ok(model) => Some(model),
                 Err(_) if managed.managed => Some(sticky),
                 Err(_) => None,
@@ -350,7 +358,8 @@ pub async fn patch_chat(
     // Validate every supplied field before touching durable state. This keeps a
     // mixed request all-or-nothing from the user's point of view.
     if let Some(Some(model)) = body.model.as_mut() {
-        *model = validate_model_selection(&state, model, false).await?;
+        *model = validate_model_selection(&state, model, false, Some(&auth.principal.owner_id()))
+            .await?;
     }
     if let Some(policy) = body.network_policy.as_mut() {
         crate::code_execution::normalize_network_policy(policy)?;

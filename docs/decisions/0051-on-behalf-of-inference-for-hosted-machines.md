@@ -8,6 +8,9 @@
   [`../gateway-boundary.md`](../gateway-boundary.md)
 - Supersedes: the deployment-scoped inference credential as the default for
   gateway-authenticated hosted machines
+- Amended by: [`0062-per-caller-gateway-entitlements.md`](0062-per-caller-gateway-entitlements.md)
+  — the route presentation and rule 3; the exchange, attribution, and
+  fail-closed rules stand
 
 ## Context
 

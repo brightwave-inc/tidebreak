@@ -159,17 +159,92 @@ pub(crate) async fn write_gateway_snapshot(
         .await
 }
 
-/// The entitled models of the gateway the resolved policy names: empty for
-/// an unmanaged profile, for a misconfigured policy, and for a snapshot
-/// stamped by a different deployment.
+/// Convert a member catalog (`/api/v1/me/catalog`) into snapshot rows.
+///
+/// One conversion for both consumers — the deployment-wide managed sync and
+/// the per-caller hosted fetch (decision 62) — so a model a hosted caller is
+/// offered is shaped exactly like a model the sync would have stored.
+pub(crate) fn member_catalog_models(
+    catalog: crate::connectors::GatewayCatalog,
+) -> (
+    Vec<CustomModelConfig>,
+    BTreeMap<String, GatewayModelProtocol>,
+) {
+    let mut model_protocols = BTreeMap::new();
+    let models = catalog
+        .models
+        .into_iter()
+        .filter_map(|model| {
+            let protocols: Vec<_> = model
+                .protocols
+                .iter()
+                .filter_map(|protocol| GatewayModelProtocol::parse(protocol))
+                .collect();
+            // A dual-protocol model routes through Anthropic Messages, the
+            // richer adapter; a model with no protocol this client speaks is
+            // skipped, exactly as on the older surface.
+            let protocol = if protocols.contains(&GatewayModelProtocol::AnthropicMessages) {
+                GatewayModelProtocol::AnthropicMessages
+            } else {
+                *protocols.first()?
+            };
+            let id = model.id;
+            model_protocols.insert(id.clone(), protocol);
+            Some(CustomModelConfig {
+                id,
+                display_name: Some(model.name),
+                // The catalog reports gateway-id aliases instead of the
+                // provider-side id; both exist to match a curated row.
+                upstream_id: None,
+                aliases: model.aliases,
+                context_window: clamp_u32(model.context_window, 32_768),
+                max_output_tokens: clamp_u32(model.max_output_tokens, 4_096),
+                input_modalities: vec![crate::model_registry::InputModality::Text],
+                supports_reasoning: false,
+                reasoning_efforts: Vec::new(),
+            })
+        })
+        .collect();
+    (models, model_protocols)
+}
+
+/// Clamp a gateway-reported limit into the u32 the config carries; zero and
+/// out-of-range values fall back to the default.
+pub(crate) fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
+    value
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+/// The entitled models of the gateway serving the current caller: the managed
+/// deployment-wide snapshot, or the caller's own snapshot on a hosted machine
+/// (decision 62). Empty for an unmanaged profile with no caller snapshot, a
+/// misconfigured policy, and a snapshot stamped by a different deployment.
 pub(crate) async fn gateway_models(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
+    caller_gateway: Option<&GatewayModelSnapshot>,
 ) -> Result<Vec<CustomModelConfig>> {
-    Ok(gateway_snapshot_for_policy(store, policy)
+    Ok(gateway_snapshot_for(store, policy, caller_gateway)
         .await?
         .map(|snapshot| snapshot.models)
         .unwrap_or_default())
+}
+
+/// The gateway snapshot the current caller's surfaces read: the managed
+/// deployment-wide snapshot, or — on a gateway-authenticated hosted machine —
+/// the caller's own entitlements, resolved per request and held only in
+/// process memory (decision 62).
+pub(crate) async fn gateway_snapshot_for(
+    store: &dyn Store,
+    policy: &crate::managed_policy::ManagedPolicy,
+    caller_gateway: Option<&GatewayModelSnapshot>,
+) -> Result<Option<GatewayModelSnapshot>> {
+    if policy.managed {
+        return gateway_snapshot_for_policy(store, policy).await;
+    }
+    Ok(caller_gateway.cloned())
 }
 
 pub(crate) async fn gateway_snapshot_for_policy(
@@ -1495,11 +1570,30 @@ pub async fn list_providers(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     policy: &crate::managed_policy::ManagedPolicy,
+    caller_gateway: Option<&GatewayModelSnapshot>,
 ) -> Result<Vec<ProviderInfo>> {
     let mut out = Vec::with_capacity(ProviderKind::ALL.len());
     for &kind in ProviderKind::ALL {
         if kind == ProviderKind::ModelGateway {
             if !policy.managed {
+                // A hosted machine reports the caller's own gateway: present
+                // exactly when their entitlement snapshot resolved, with
+                // their models (decision 62). Absent on every other
+                // unmanaged profile.
+                let Some(snapshot) = caller_gateway else {
+                    continue;
+                };
+                out.push(ProviderInfo {
+                    kind,
+                    enabled: true,
+                    base_url: policy
+                        .hosted_gateway_url
+                        .clone()
+                        .or_else(|| Some(snapshot.gateway_url.clone())),
+                    has_credential: true,
+                    auth_mode: None,
+                    models: snapshot.models.clone(),
+                });
                 continue;
             }
             out.push(ProviderInfo {
@@ -1515,7 +1609,7 @@ pub async fn list_providers(
                     None => false,
                 },
                 auth_mode: None,
-                models: gateway_models(store, policy).await?,
+                models: gateway_models(store, policy, caller_gateway).await?,
             });
             continue;
         }
@@ -1873,13 +1967,17 @@ pub fn route_kind(kind: ProviderKind) -> tidebreak_router::RouteKind {
     }
 }
 
-/// A per-caller inference path offered where the deployment states no other
-/// one: the caller's rotating credential and the base URL it authenticates
-/// against.
-pub type OnBehalfOfInference = (
-    std::sync::Arc<dyn tidebreak_router::BearerTokenSource>,
-    String,
-);
+/// A hosted caller's gateway path: their rotating inference credential, the
+/// gateway base it authenticates against, and their own entitlement snapshot
+/// (decision 62). Resolved per caller and held only in process memory.
+pub struct OnBehalfOfGateway {
+    /// The caller's exchanged inference credential (decision 51).
+    pub source: std::sync::Arc<dyn tidebreak_router::BearerTokenSource>,
+    /// The gateway base URL the compat routes are joined below.
+    pub gateway_base_url: String,
+    /// The caller's own entitled models, from their member catalog.
+    pub snapshot: GatewayModelSnapshot,
+}
 
 /// Collect enabled, credentialed routes for the composite router.
 ///
@@ -1895,10 +1993,12 @@ pub type OnBehalfOfInference = (
 /// all: policy is the only gateway source, and a legacy stored row is never
 /// read.
 ///
-/// `on_behalf_of` is the hosted machine's per-caller credential (decision 51).
-/// It becomes an Anthropic route only where the deployment states no other
-/// inference path for that provider — see
-/// [`on_behalf_of_states_the_only_path`].
+/// `on_behalf_of` is a hosted machine's per-caller gateway path (decisions 51
+/// and 62): the caller's exchanged credential and their own entitlement
+/// snapshot become the same per-protocol gateway routes a managed profile
+/// gets from its deployment-wide snapshot. No caller means no gateway route,
+/// which fails an unnamed turn closed rather than running it as somebody
+/// else.
 pub async fn collect_routes(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
@@ -1907,13 +2007,29 @@ pub async fn collect_routes(
         std::sync::Arc<dyn tidebreak_router::BearerTokenSource>,
         String,
     )>,
-    on_behalf_of: Option<OnBehalfOfInference>,
+    on_behalf_of: Option<OnBehalfOfGateway>,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Vec<tidebreak_router::Route> {
     let mut routes = Vec::new();
     for &kind in ProviderKind::ALL {
         if kind == ProviderKind::ModelGateway {
             if !policy.managed {
+                // A gateway-authenticated hosted machine routes each caller
+                // through their own entitlements and credential (decision
+                // 62). The routes are the same shape a managed profile gets —
+                // both compat protocols, frozen identities included — built
+                // from the caller's snapshot instead of the deployment-wide
+                // one. No caller path means no gateway route, which fails an
+                // unnamed turn closed rather than running it as somebody
+                // else.
+                let Some(obo) = on_behalf_of.as_ref() else {
+                    continue;
+                };
+                routes.extend(gateway_snapshot_routes(
+                    Some(&obo.snapshot),
+                    obo.gateway_base_url.trim_end_matches('/'),
+                    obo.source.clone(),
+                ));
                 continue;
             }
             // The gateway route rides its live token source; without a signed-in
@@ -1931,96 +2047,15 @@ pub async fn collect_routes(
                 .await
                 .unwrap_or_default()
                 .filter(|snapshot| snapshot.installation_id.as_deref() == source.binding_id());
-            let mut anthropic_models = Vec::new();
-            let mut openai_models = Vec::new();
-            let mut anthropic_rewrites = HashMap::new();
-            let mut openai_rewrites = HashMap::new();
-            if let Some(snapshot) = snapshot.as_ref() {
-                for model in &snapshot.models {
-                    let protocol = snapshot
-                        .model_protocols
-                        .get(&model.id)
-                        .copied()
-                        .unwrap_or_default();
-                    let frozen = frozen_gateway_route_model(snapshot, model, protocol);
-                    match protocol {
-                        GatewayModelProtocol::AnthropicMessages => {
-                            anthropic_models.push(model.id.clone());
-                            anthropic_models.push(frozen.clone());
-                            anthropic_rewrites.insert(frozen, model.id.clone());
-                        }
-                        GatewayModelProtocol::OpenaiResponses => {
-                            openai_models.push(model.id.clone());
-                            openai_models.push(frozen.clone());
-                            openai_rewrites.insert(frozen, model.id.clone());
-                        }
-                    }
-                }
-            }
-            let base = base.trim_end_matches('/');
-            // Preserve the pre-protocol route shape before the first sync (or
-            // for an empty entitlement set): it still selects no model, but a
-            // signed-in managed profile has one inert gateway adapter rather
-            // than looking indistinguishable from missing credentials.
-            if anthropic_models.is_empty() && openai_models.is_empty() {
-                routes.push(tidebreak_router::Route {
-                    kind: route_kind(kind),
-                    api_key: String::new(),
-                    base_url: Some(format!("{base}/compat/anthropic")),
-                    curated_models: Vec::new(),
-                    model_rewrites: HashMap::new(),
-                    token_source: Some(source),
-                    chatgpt_account_id: None,
-                });
-            } else {
-                if !anthropic_models.is_empty() {
-                    routes.push(tidebreak_router::Route {
-                        kind: route_kind(kind),
-                        api_key: String::new(),
-                        base_url: Some(format!("{base}/compat/anthropic")),
-                        curated_models: anthropic_models,
-                        model_rewrites: anthropic_rewrites,
-                        token_source: Some(source.clone()),
-                        chatgpt_account_id: None,
-                    });
-                }
-                if !openai_models.is_empty() {
-                    routes.push(tidebreak_router::Route {
-                        kind: tidebreak_router::RouteKind::ModelGatewayOpenai,
-                        api_key: String::new(),
-                        base_url: Some(format!("{base}/compat/openai/v1")),
-                        curated_models: openai_models,
-                        model_rewrites: openai_rewrites,
-                        token_source: Some(source),
-                        chatgpt_account_id: None,
-                    });
-                }
-            }
+            routes.extend(gateway_snapshot_routes(
+                snapshot.as_ref(),
+                base.trim_end_matches('/'),
+                source,
+            ));
             continue;
         }
         if policy.managed {
             continue;
-        }
-        // A hosted machine resolves this provider per caller only where the
-        // deployment states no other path to it (decision 51, rule 3).
-        if kind == ON_BEHALF_OF_PROVIDER {
-            if let Some((source, base_url)) = on_behalf_of.clone() {
-                if on_behalf_of_states_the_only_path(store, secrets, kind).await {
-                    routes.push(tidebreak_router::Route {
-                        kind: route_kind(kind),
-                        // The credential rotates; there is no key to snapshot.
-                        api_key: String::new(),
-                        base_url: Some(base_url),
-                        curated_models: model_registry::models_for(kind)
-                            .map(|spec| spec.id.to_string())
-                            .collect(),
-                        model_rewrites: HashMap::new(),
-                        token_source: Some(source),
-                        chatgpt_account_id: None,
-                    });
-                    continue;
-                }
-            }
         }
         let config = match read_config(store, kind).await {
             Ok(c) => c,
@@ -2100,68 +2135,79 @@ pub async fn collect_routes(
     routes
 }
 
-/// The provider a hosted machine's on-behalf-of route serves.
-///
-/// One statement of it, read by both halves that must agree: the route
-/// [`collect_routes`] builds, and the availability
-/// [`provider_is_usable`] reports for it. The gateway's Anthropic-compatible
-/// surface is what an exchanged inference token authenticates against
-/// ([`crate::obo_inference::OboInference::inference_base_url`]).
-const ON_BEHALF_OF_PROVIDER: ProviderKind = ProviderKind::Anthropic;
-
-/// Whether this deployment serves `kind` with the caller's own gateway
-/// credential.
-///
-/// True only on a gateway-authenticated hosted machine, only for the provider
-/// the on-behalf-of route serves, and only where the deployment states no
-/// other path to it (decision 51, rule 3).
-///
-/// This reads the policy projection where [`collect_routes`] reads the
-/// runtime handle, and the two agree by construction: `OboInference` is
-/// assembled for exactly the configuration `Config::hosted_gateway_url`
-/// answers for. Disagreement would show a caller a model no route serves.
-async fn on_behalf_of_is_the_path(
-    store: &dyn Store,
-    secrets: &dyn SecretProvider,
-    kind: ProviderKind,
-    policy: &crate::managed_policy::ManagedPolicy,
-) -> bool {
-    if policy.managed || policy.hosted_gateway_url.is_none() {
-        return false;
+/// Routes for one gateway snapshot: a per-protocol compat route carrying both
+/// the raw and frozen model ids, or one inert Anthropic-compat route for an
+/// empty snapshot — it still selects no model, but a signed-in profile then
+/// has one gateway adapter rather than looking indistinguishable from
+/// missing credentials. One builder for both snapshot sources, so a hosted
+/// caller's routes and a managed profile's cannot drift apart (decision 62).
+fn gateway_snapshot_routes(
+    snapshot: Option<&GatewayModelSnapshot>,
+    base: &str,
+    source: std::sync::Arc<dyn tidebreak_router::BearerTokenSource>,
+) -> Vec<tidebreak_router::Route> {
+    let mut routes = Vec::new();
+    let mut anthropic_models = Vec::new();
+    let mut openai_models = Vec::new();
+    let mut anthropic_rewrites = HashMap::new();
+    let mut openai_rewrites = HashMap::new();
+    if let Some(snapshot) = snapshot {
+        for model in &snapshot.models {
+            let protocol = snapshot
+                .model_protocols
+                .get(&model.id)
+                .copied()
+                .unwrap_or_default();
+            let frozen = frozen_gateway_route_model(snapshot, model, protocol);
+            match protocol {
+                GatewayModelProtocol::AnthropicMessages => {
+                    anthropic_models.push(model.id.clone());
+                    anthropic_models.push(frozen.clone());
+                    anthropic_rewrites.insert(frozen, model.id.clone());
+                }
+                GatewayModelProtocol::OpenaiResponses => {
+                    openai_models.push(model.id.clone());
+                    openai_models.push(frozen.clone());
+                    openai_rewrites.insert(frozen, model.id.clone());
+                }
+            }
+        }
     }
-    if kind != ON_BEHALF_OF_PROVIDER {
-        return false;
+    if anthropic_models.is_empty() && openai_models.is_empty() {
+        routes.push(tidebreak_router::Route {
+            kind: tidebreak_router::RouteKind::ModelGateway,
+            api_key: String::new(),
+            base_url: Some(format!("{base}/compat/anthropic")),
+            curated_models: Vec::new(),
+            model_rewrites: HashMap::new(),
+            token_source: Some(source),
+            chatgpt_account_id: None,
+        });
+        return routes;
     }
-    on_behalf_of_states_the_only_path(store, secrets, kind).await
-}
-
-/// Whether per-caller inference is the only path this deployment states to
-/// `kind`.
-///
-/// Three statements outrank it, in the order a deployment makes them: a stored
-/// provider configuration row, a stored credential, and the environment
-/// fallbacks for the credential and the base URL. Any one of them means the
-/// operator has named an inference path, and decision 51 leaves it in force —
-/// including a row that disables the provider outright.
-///
-/// Every read failure answers `false`, so an unreadable store or secret skips
-/// the provider rather than routing a caller's turn on a guess.
-async fn on_behalf_of_states_the_only_path(
-    store: &dyn Store,
-    secrets: &dyn SecretProvider,
-    kind: ProviderKind,
-) -> bool {
-    if !matches!(store.get_setting(&kind.setting_key()).await, Ok(None)) {
-        return false;
+    if !anthropic_models.is_empty() {
+        routes.push(tidebreak_router::Route {
+            kind: tidebreak_router::RouteKind::ModelGateway,
+            api_key: String::new(),
+            base_url: Some(format!("{base}/compat/anthropic")),
+            curated_models: anthropic_models,
+            model_rewrites: anthropic_rewrites,
+            token_source: Some(source.clone()),
+            chatgpt_account_id: None,
+        });
     }
-    if !matches!(read_credential(secrets, kind).await, Ok(None)) {
-        return false;
+    if !openai_models.is_empty() {
+        routes.push(tidebreak_router::Route {
+            kind: tidebreak_router::RouteKind::ModelGatewayOpenai,
+            api_key: String::new(),
+            base_url: Some(format!("{base}/compat/openai/v1")),
+            curated_models: openai_models,
+            model_rewrites: openai_rewrites,
+            token_source: Some(source),
+            chatgpt_account_id: None,
+        });
     }
-    if env_api_key(kind).is_some() {
-        return false;
-    }
-    kind.env_base_url_from(|name| std::env::var(name).ok())
-        .is_none()
+    routes
 }
 
 /// One-shot boot migration for authentication that can outlive provider config.
@@ -2206,12 +2252,18 @@ pub async fn resolve_model_policy(
     store: &dyn Store,
     value: &str,
     allow_legacy_custom: bool,
+    caller_gateway: Option<&GatewayModelSnapshot>,
 ) -> Result<Option<ResolvedModelPolicy>> {
     if let Some((provider, id)) = model_registry::parse_selection_key(value) {
         if let Some(spec) = model_registry::find_for(provider, id) {
             return Ok(Some(ResolvedModelPolicy::curated(spec)));
         }
         if provider == ProviderKind::ModelGateway && id.starts_with(FROZEN_GATEWAY_MODEL_PREFIX) {
+            // A hosted caller's frozen selections resolve against their own
+            // snapshot (decision 62); nothing writes the stored one there.
+            if let Some(snapshot) = caller_gateway {
+                return Ok(resolve_frozen_gateway_policy(snapshot, id));
+            }
             return Ok(read_gateway_snapshot(store)
                 .await?
                 .as_ref()
@@ -2222,10 +2274,13 @@ pub async fn resolve_model_policy(
             // Resolution is not an offer: usability and routing gate the
             // gateway on policy separately, so the raw snapshot read here
             // only keeps stored selections legible.
-            ProviderKind::ModelGateway => read_gateway_snapshot(store)
-                .await?
-                .map(|snapshot| snapshot.models)
-                .unwrap_or_default(),
+            ProviderKind::ModelGateway => match caller_gateway {
+                Some(snapshot) => snapshot.models.clone(),
+                None => read_gateway_snapshot(store)
+                    .await?
+                    .map(|snapshot| snapshot.models)
+                    .unwrap_or_default(),
+            },
             _ => return Ok(None),
         };
         return Ok(models
@@ -2257,14 +2312,16 @@ pub async fn resolve_model_policy(
 /// usable would advertise models no route can serve.
 ///
 /// A gateway-authenticated hosted machine is the one profile that is usable
-/// with nothing stored at all: it resolves the credential per caller
-/// (`on_behalf_of_is_the_path`), so the stored-row walk below would call
-/// every provider unusable and leave every caller's picker empty.
+/// with nothing stored at all: `caller_gateway` is the requesting caller's
+/// own entitlement snapshot (decision 62), resolved per request from their
+/// live credential, and its presence is what makes the gateway usable for
+/// them. Every other deployment passes `None` and keeps the stored-row walk.
 pub async fn provider_is_usable(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     kind: ProviderKind,
     policy: &crate::managed_policy::ManagedPolicy,
+    caller_gateway: Option<&GatewayModelSnapshot>,
 ) -> Result<bool> {
     if policy.managed {
         if kind != ProviderKind::ModelGateway {
@@ -2285,10 +2342,10 @@ pub async fn provider_is_usable(
             }));
     }
     if kind == ProviderKind::ModelGateway {
-        return Ok(false);
-    }
-    if on_behalf_of_is_the_path(store, secrets, kind, policy).await {
-        return Ok(true);
+        // A hosted machine's gateway is usable exactly when this caller's own
+        // entitlement snapshot resolved (decision 62): the snapshot exists
+        // only because the caller's live token just exchanged and fetched it.
+        return Ok(caller_gateway.is_some());
     }
     let config = read_config(store, kind).await?;
     if !config.enabled {
@@ -2318,12 +2375,13 @@ pub async fn model_is_usable(
     secrets: &dyn SecretProvider,
     model: &ResolvedModelPolicy,
     policy: &crate::managed_policy::ManagedPolicy,
+    caller_gateway: Option<&GatewayModelSnapshot>,
 ) -> Result<bool> {
-    if !provider_is_usable(store, secrets, model.provider, policy).await? {
+    if !provider_is_usable(store, secrets, model.provider, policy, caller_gateway).await? {
         return Ok(false);
     }
     if model.provider == ProviderKind::ModelGateway {
-        let Some(snapshot) = gateway_snapshot_for_policy(store, policy).await? else {
+        let Some(snapshot) = gateway_snapshot_for(store, policy, caller_gateway).await? else {
             return Ok(false);
         };
         let matches_snapshot = if model.route_model.starts_with(FROZEN_GATEWAY_MODEL_PREFIX) {
@@ -2360,10 +2418,12 @@ pub async fn catalog_models(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
     policy: &crate::managed_policy::ManagedPolicy,
+    caller_gateway: Option<&GatewayModelSnapshot>,
 ) -> Result<Vec<CatalogModel>> {
     let mut models = Vec::new();
     for &kind in ProviderKind::ALL {
-        let provider_usable = provider_is_usable(store, secrets, kind, policy).await?;
+        let provider_usable =
+            provider_is_usable(store, secrets, kind, policy, caller_gateway).await?;
         let chatgpt = matches!(
             auth_mode_for(secrets, kind).await,
             Some(ProviderAuthMode::Chatgpt)
@@ -2380,7 +2440,7 @@ pub async fn catalog_models(
         // unmanaged profile, so no gateway row ever reaches the catalog there.
         let configured = match kind {
             kind if kind.accepts_configured_models() => read_config(store, kind).await?.models,
-            ProviderKind::ModelGateway => gateway_models(store, policy).await?,
+            ProviderKind::ModelGateway => gateway_models(store, policy, caller_gateway).await?,
             _ => Vec::new(),
         };
         models.extend(configured.iter().map(|model| CatalogModel {
@@ -2531,11 +2591,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            provider_is_usable(&store, &secrets, ProviderKind::Openai, &policy)
+            provider_is_usable(&store, &secrets, ProviderKind::Openai, &policy, None)
                 .await
                 .unwrap()
         );
-        assert!(catalog_models(&store, &secrets, &policy)
+        assert!(catalog_models(&store, &secrets, &policy, None)
             .await
             .unwrap()
             .iter()
@@ -2686,7 +2746,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let resolved = resolve_model_policy(&store, "claude-opus-5", false)
+        let resolved = resolve_model_policy(&store, "claude-opus-5", false, None)
             .await
             .unwrap()
             .expect("the unique bare id resolves to Anthropic");
@@ -2708,7 +2768,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let mutable = resolve_model_policy(&store, "model_gateway::sample-claude", false)
+        let mutable = resolve_model_policy(&store, "model_gateway::sample-claude", false, None)
             .await
             .unwrap()
             .expect("the current catalog still contains the local id");
@@ -2721,7 +2781,7 @@ mod tests {
             .expect("the canonical model has one gateway equivalent");
         assert!(is_valid_execution_policy(&frozen));
 
-        let direct = resolve_model_policy(&store, "anthropic::claude-opus-5", false)
+        let direct = resolve_model_policy(&store, "anthropic::claude-opus-5", false, None)
             .await
             .unwrap()
             .expect("the direct curated route is registered");
@@ -2752,7 +2812,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(resolve_model_policy(&store, "claude-opus-5", false)
+        assert!(resolve_model_policy(&store, "claude-opus-5", false, None)
             .await
             .unwrap()
             .is_none());

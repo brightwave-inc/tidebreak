@@ -1573,7 +1573,7 @@ async fn chatgpt_auth_marks_api_only_openai_models_unavailable() {
         &crate::managed_policy::NoOsPolicy,
     )
     .unwrap();
-    let catalog = providers::catalog_models(&*store, &*secrets, &policy)
+    let catalog = providers::catalog_models(&*store, &*secrets, &policy, None)
         .await
         .unwrap();
     let nano = catalog
@@ -1595,7 +1595,7 @@ async fn chatgpt_auth_marks_api_only_openai_models_unavailable() {
         crate::model_registry::find_for(providers::ProviderKind::Openai, "gpt-5.4-nano").unwrap(),
     );
     assert!(
-        !providers::model_is_usable(&*store, &*secrets, &nano_policy, &policy)
+        !providers::model_is_usable(&*store, &*secrets, &nano_policy, &policy, None)
             .await
             .unwrap()
     );
@@ -1769,12 +1769,12 @@ async fn xai_config_builds_a_provider_qualified_native_route() {
     assert_eq!(routes[0].base_url, None);
     assert_eq!(routes[0].curated_models, ["grok-4.6", "grok-4.5"]);
 
-    let grok = providers::resolve_model_policy(&*store, "grok-4.5", false)
+    let grok = providers::resolve_model_policy(&*store, "grok-4.5", false, None)
         .await
         .unwrap()
         .expect("a bare curated xAI id resolves to its direct provider");
     assert_eq!(grok.provider, providers::ProviderKind::Xai);
-    let curated = providers::resolve_model_policy(&*store, "gpt-5.6-sol", false)
+    let curated = providers::resolve_model_policy(&*store, "gpt-5.6-sol", false, None)
         .await
         .unwrap()
         .expect("a bare curated id keeps the registry's direct owner");
@@ -2389,7 +2389,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .model;
     assert!(gateway_override_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        providers::resolve_model_policy(&*store, &gateway_override_model, false)
+        providers::resolve_model_policy(&*store, &gateway_override_model, false, None)
             .await
             .unwrap()
             .unwrap()
@@ -2443,7 +2443,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .model;
     assert!(sticky_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        providers::resolve_model_policy(&*store, &sticky_model, false)
+        providers::resolve_model_policy(&*store, &sticky_model, false, None)
             .await
             .unwrap()
             .unwrap()
@@ -2523,7 +2523,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         .model;
     assert!(fallback_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
-        providers::resolve_model_policy(&*store, &fallback_model, false)
+        providers::resolve_model_policy(&*store, &fallback_model, false, None)
             .await
             .unwrap()
             .unwrap()
@@ -2907,7 +2907,8 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
             &*store,
             &*secrets,
             providers::ProviderKind::Ollama,
-            &policy
+            &policy,
+            None
         )
         .await
         .unwrap(),
@@ -2934,7 +2935,8 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
         &*store,
         &*secrets,
         providers::ProviderKind::Ollama,
-        &policy
+        &policy,
+        None
     )
     .await
     .unwrap());
@@ -2943,7 +2945,7 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
         "usability must not invent a stored credential"
     );
 
-    let listed = providers::list_providers(&*store, &*secrets, &policy)
+    let listed = providers::list_providers(&*store, &*secrets, &policy, None)
         .await
         .unwrap();
     let ollama = listed
@@ -2957,7 +2959,7 @@ async fn ollama_is_usable_without_a_credential_and_serves_only_configured_models
         Some("http://127.0.0.1:11434/v1")
     );
 
-    let catalog = providers::catalog_models(&*store, &*secrets, &policy)
+    let catalog = providers::catalog_models(&*store, &*secrets, &policy, None)
         .await
         .unwrap();
     let model = catalog
@@ -3040,12 +3042,13 @@ async fn openrouter_uses_its_fixed_endpoint_and_serves_only_configured_models() 
         &*store,
         &*secrets,
         providers::ProviderKind::Openrouter,
-        &policy
+        &policy,
+        None
     )
     .await
     .unwrap());
 
-    let listed = providers::list_providers(&*store, &*secrets, &policy)
+    let listed = providers::list_providers(&*store, &*secrets, &policy, None)
         .await
         .unwrap();
     let openrouter = listed
@@ -3059,7 +3062,7 @@ async fn openrouter_uses_its_fixed_endpoint_and_serves_only_configured_models() 
         Some("https://openrouter.ai/api/v1")
     );
 
-    let catalog = providers::catalog_models(&*store, &*secrets, &policy)
+    let catalog = providers::catalog_models(&*store, &*secrets, &policy, None)
         .await
         .unwrap();
     let model = catalog
@@ -3242,7 +3245,8 @@ async fn a_managed_profile_offers_only_the_gateway_route() {
         &*store,
         &*secrets,
         providers::ProviderKind::Anthropic,
-        &policy
+        &policy,
+        None
     )
     .await
     .unwrap());
@@ -3747,11 +3751,12 @@ async fn a_superseded_gateway_session_never_reads_usable() {
         &*store,
         &*secrets,
         providers::ProviderKind::ModelGateway,
-        &policy
+        &policy,
+        None
     )
     .await
     .unwrap());
-    let gateway = providers::list_providers(&*store, &*secrets, &policy)
+    let gateway = providers::list_providers(&*store, &*secrets, &policy, None)
         .await
         .unwrap()
         .into_iter()
@@ -3787,7 +3792,8 @@ async fn a_superseded_gateway_session_never_reads_usable() {
         &*store,
         &*secrets,
         providers::ProviderKind::ModelGateway,
-        &policy
+        &policy,
+        None
     )
     .await
     .unwrap());
@@ -5650,13 +5656,54 @@ impl tidebreak_router::BearerTokenSource for FakeCallerCredential {
     }
 }
 
-/// The per-caller inference path a gateway-authenticated hosted machine
-/// offers, as `collect_routes` receives it.
-fn on_behalf_of() -> Option<providers::OnBehalfOfInference> {
-    Some((
-        Arc::new(FakeCallerCredential) as Arc<dyn tidebreak_router::BearerTokenSource>,
-        "https://gateway.example/compat/anthropic".to_string(),
-    ))
+/// One hosted caller's entitlement snapshot: an Anthropic-protocol model that
+/// maps to a curated row, and an OpenAI-protocol one that does not.
+fn caller_snapshot() -> providers::GatewayModelSnapshot {
+    providers::GatewayModelSnapshot {
+        gateway_url: "https://gateway.example".to_owned(),
+        installation_id: None,
+        models: vec![
+            providers::CustomModelConfig {
+                id: "acme-opus".into(),
+                display_name: Some("Acme Opus".into()),
+                aliases: vec!["claude-opus-5".into()],
+                context_window: 200_000,
+                max_output_tokens: 32_000,
+                ..Default::default()
+            },
+            providers::CustomModelConfig {
+                id: "acme-gpt".into(),
+                display_name: Some("Acme GPT".into()),
+                context_window: 128_000,
+                max_output_tokens: 16_000,
+                ..Default::default()
+            },
+        ],
+        model_protocols: [
+            (
+                "acme-opus".to_owned(),
+                providers::GatewayModelProtocol::AnthropicMessages,
+            ),
+            (
+                "acme-gpt".to_owned(),
+                providers::GatewayModelProtocol::OpenaiResponses,
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        member_catalog: Some("v1".into()),
+        catalog_etag: None,
+    }
+}
+
+/// The per-caller gateway path a hosted machine offers, as `collect_routes`
+/// receives it (decision 62).
+fn on_behalf_of() -> Option<providers::OnBehalfOfGateway> {
+    Some(providers::OnBehalfOfGateway {
+        source: Arc::new(FakeCallerCredential) as Arc<dyn tidebreak_router::BearerTokenSource>,
+        gateway_base_url: "https://gateway.example".to_owned(),
+        snapshot: caller_snapshot(),
+    })
 }
 
 /// A store and secrets pair with nothing configured in either.
@@ -5672,11 +5719,11 @@ async fn empty_deployment(dir: &tempfile::TempDir) -> (Arc<dyn Store>, Arc<dyn S
     (store, Arc::new(MemSecrets::default()))
 }
 
-/// Decision 51, rule 1: with gateway authentication and nothing else stated,
-/// the caller's own credential drives their turns against the gateway's
-/// Anthropic-compatible surface.
+/// Decision 62: a hosted caller's routes are their own entitlements, in the
+/// same per-protocol gateway shape a managed profile gets — frozen identities
+/// included — and nothing impersonates the curated Anthropic route.
 #[tokio::test]
-async fn on_behalf_of_inference_serves_a_deployment_that_states_no_other_path() {
+async fn on_behalf_of_routes_serve_the_callers_own_entitlements() {
     let dir = tempfile::tempdir().unwrap();
     let (store, secrets) = empty_deployment(&dir).await;
 
@@ -5687,38 +5734,271 @@ async fn on_behalf_of_inference_serves_a_deployment_that_states_no_other_path() 
     let policy =
         crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
 
-    let route = providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy)
-        .await
-        .into_iter()
-        .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
-        .expect("per-caller inference must offer an Anthropic route");
-
+    let routes =
+        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
+    let anthropic = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::ModelGateway)
+        .expect("the caller's Anthropic-protocol models must route");
     assert_eq!(
-        route.base_url.as_deref(),
+        anthropic.base_url.as_deref(),
         Some("https://gateway.example/compat/anthropic")
     );
     assert!(
-        route.api_key.is_empty(),
+        anthropic.api_key.is_empty(),
         "the credential rotates; no key may be snapshotted into the route"
     );
-    let source = route
+    let source = anthropic
         .token_source
         .as_ref()
         .expect("the route must carry the caller's rotating credential");
     assert_eq!(source.binding_id(), Some("user:alice"));
     assert!(
-        route
+        anthropic
             .curated_models
             .iter()
-            .any(|model| model.starts_with("claude-")),
-        "the route must serve the curated Anthropic catalog"
+            .any(|model| model == "acme-opus"),
+        "the route must serve the caller's own entitled models"
+    );
+    assert!(
+        anthropic
+            .curated_models
+            .iter()
+            .any(|model| model.starts_with("__tidebreak_gateway_v1.")),
+        "frozen identities must ride the route"
+    );
+    let openai = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::ModelGatewayOpenai)
+        .expect("the caller's OpenAI-protocol models must route too");
+    assert_eq!(
+        openai.base_url.as_deref(),
+        Some("https://gateway.example/compat/openai/v1")
+    );
+    assert!(openai
+        .curated_models
+        .iter()
+        .any(|model| model == "acme-gpt"));
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.kind == tidebreak_router::RouteKind::Anthropic),
+        "nothing impersonates the curated Anthropic route"
     );
 }
 
-/// Rule 3: a stored provider configuration always wins, so the deployment's
-/// own credential drives every caller's turns exactly as before.
+/// A caller entitled to nothing is offered nothing: one inert gateway
+/// adapter, no models, and no selectable catalog row (decision 62).
 #[tokio::test]
-async fn a_stored_provider_configuration_outranks_on_behalf_of_inference() {
+async fn a_caller_entitled_to_nothing_is_offered_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let policy =
+        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
+
+    let mut nothing = on_behalf_of().unwrap();
+    nothing.snapshot.models.clear();
+    nothing.snapshot.model_protocols.clear();
+    let empty_snapshot = nothing.snapshot.clone();
+    let routes =
+        providers::collect_routes(&*store, &*secrets, None, None, Some(nothing), &policy).await;
+    let gateway = routes
+        .iter()
+        .find(|route| route.kind == tidebreak_router::RouteKind::ModelGateway)
+        .expect("a signed-in caller keeps one inert gateway adapter");
+    assert!(gateway.curated_models.is_empty());
+
+    let catalog = providers::catalog_models(
+        &*store,
+        &*secrets,
+        &hosted_machine_policy(),
+        Some(&empty_snapshot),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !catalog.iter().any(|entry| entry.available),
+        "a caller entitled to nothing must be offered nothing"
+    );
+}
+
+/// Two callers on one machine see two catalogs (decision 62), and neither is
+/// written to deployment-wide state.
+#[tokio::test]
+async fn two_callers_see_their_own_catalogs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let hosted = hosted_machine_policy();
+
+    let alice = caller_snapshot();
+    let mut bob = caller_snapshot();
+    bob.models.retain(|model| model.id == "acme-gpt");
+    bob.model_protocols.remove("acme-opus");
+
+    let alice_models: Vec<_> = providers::catalog_models(&*store, &*secrets, &hosted, Some(&alice))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.policy.provider == providers::ProviderKind::ModelGateway)
+        .map(|entry| entry.policy.id)
+        .collect();
+    let bob_models: Vec<_> = providers::catalog_models(&*store, &*secrets, &hosted, Some(&bob))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.policy.provider == providers::ProviderKind::ModelGateway)
+        .map(|entry| entry.policy.id)
+        .collect();
+    assert_eq!(alice_models, ["acme-opus", "acme-gpt"]);
+    assert_eq!(bob_models, ["acme-gpt"]);
+    assert!(
+        providers::read_gateway_snapshot(&*store)
+            .await
+            .unwrap()
+            .is_none(),
+        "no per-caller catalog may reach deployment-wide state"
+    );
+}
+
+/// A hosted caller's explicit selection freezes against their own snapshot
+/// and resolves back through it — and through nobody else's (decision 62).
+#[tokio::test]
+async fn a_hosted_selection_freezes_through_the_caller_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let hosted = hosted_machine_policy();
+    let snapshot = caller_snapshot();
+
+    let policy = model_roles::effective_chat_policy(
+        &*store,
+        &*secrets,
+        &hosted,
+        "model_gateway::acme-opus",
+        true,
+        Some(&snapshot),
+    )
+    .await
+    .unwrap()
+    .expect("an entitled selection must freeze");
+    assert!(policy.route_model.starts_with("__tidebreak_gateway_v1."));
+
+    let resolved =
+        providers::resolve_model_policy(&*store, &policy.execution_key(), false, Some(&snapshot))
+            .await
+            .unwrap()
+            .expect("the frozen key must resolve through the caller's snapshot");
+    assert_eq!(resolved.id, "acme-opus");
+
+    let mut foreign = caller_snapshot();
+    foreign.models.retain(|model| model.id != "acme-opus");
+    foreign.model_protocols.remove("acme-opus");
+    assert!(
+        providers::resolve_model_policy(&*store, &policy.execution_key(), false, Some(&foreign),)
+            .await
+            .unwrap()
+            .is_none(),
+        "another caller's snapshot must refuse a model it does not entitle"
+    );
+}
+
+/// Background roles run as the caller who triggered them (decision 62): the
+/// utility role walks the caller's own entitlements, and with no caller it
+/// resolves to nothing, so the work is skipped rather than run as somebody
+/// else.
+#[tokio::test]
+async fn background_roles_walk_the_callers_entitlements() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+    let snapshot = caller_snapshot();
+
+    let utility = model_roles::resolve(
+        &*store,
+        &*secrets,
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+        model_roles::ModelRole::Utility,
+        Some(&snapshot),
+    )
+    .await
+    .unwrap()
+    .expect("the caller's entitlements must serve the utility role");
+    assert_eq!(utility.provider, providers::ProviderKind::ModelGateway);
+    assert_eq!(utility.id, "acme-opus");
+
+    assert!(
+        model_roles::resolve(
+            &*store,
+            &*secrets,
+            &*provisioned,
+            &crate::managed_policy::NoOsPolicy,
+            model_roles::ModelRole::Utility,
+            None,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "background work with no caller must be skipped, never run as somebody else"
+    );
+}
+
+/// The providers surface names the caller's gateway (decision 62): present
+/// with their models exactly when their snapshot resolved, absent otherwise.
+#[tokio::test]
+async fn the_providers_list_names_the_callers_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, secrets) = empty_deployment(&dir).await;
+
+    let _env = ENV_LOCK.lock().await;
+    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
+    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
+    let hosted = hosted_machine_policy();
+    let snapshot = caller_snapshot();
+
+    let listed = providers::list_providers(&*store, &*secrets, &hosted, Some(&snapshot))
+        .await
+        .unwrap();
+    let gateway = listed
+        .iter()
+        .find(|provider| provider.kind == providers::ProviderKind::ModelGateway)
+        .expect("the caller's gateway must be listed");
+    assert!(gateway.enabled);
+    assert!(gateway.has_credential);
+    assert_eq!(gateway.models.len(), 2);
+
+    let without_caller = providers::list_providers(&*store, &*secrets, &hosted, None)
+        .await
+        .unwrap();
+    assert!(
+        !without_caller
+            .iter()
+            .any(|provider| provider.kind == providers::ProviderKind::ModelGateway),
+        "no caller snapshot means no gateway to offer"
+    );
+}
+
+/// A stored provider configuration keeps its own route beside the caller's
+/// gateway path (decision 62): the caller path no longer impersonates a
+/// direct provider, so neither displaces the other.
+#[tokio::test]
+async fn a_stored_provider_and_the_caller_path_coexist() {
     let dir = tempfile::tempdir().unwrap();
     let (store, secrets) = empty_deployment(&dir).await;
     providers::write_credential(
@@ -5747,100 +6027,22 @@ async fn a_stored_provider_configuration_outranks_on_behalf_of_inference() {
     let policy =
         crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
 
-    let route = providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy)
-        .await
-        .into_iter()
+    let routes =
+        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
+    let stored = routes
+        .iter()
         .find(|route| route.kind == tidebreak_router::RouteKind::Anthropic)
-        .expect("the stored key must still offer an Anthropic route");
-
-    assert_eq!(route.api_key, "sk-stored");
+        .expect("the stored key must keep its Anthropic route");
+    assert_eq!(stored.api_key, "sk-stored");
     assert!(
-        route.token_source.is_none(),
-        "a stored configuration must not be displaced by per-caller inference"
+        stored.token_source.is_none(),
+        "the stored route keeps the deployment's own credential"
     );
-}
-
-/// Rule 3: a provider row that disables the provider is a statement too. The
-/// deployment said no, and per-caller inference does not overrule it.
-#[tokio::test]
-async fn a_disabled_provider_row_outranks_on_behalf_of_inference() {
-    let dir = tempfile::tempdir().unwrap();
-    let (store, secrets) = empty_deployment(&dir).await;
-    providers::write_config(
-        &*store,
-        providers::ProviderKind::Anthropic,
-        &providers::ProviderConfig {
-            enabled: false,
-            base_url: None,
-            models: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let _env = ENV_LOCK.lock().await;
-    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
-    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
-    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
-    let policy =
-        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-
-    let routes =
-        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
     assert!(
-        !routes
+        routes
             .iter()
-            .any(|route| route.kind == tidebreak_router::RouteKind::Anthropic),
-        "a disabled provider row must leave the provider unrouted"
-    );
-}
-
-/// Rule 3: the environment fallbacks keep their semantics. An environment
-/// credential names an inference path, so per-caller inference stays out of
-/// the way — including where the environment key alone routes nothing,
-/// because that is the behavior this record leaves in force.
-#[tokio::test]
-async fn an_environment_credential_outranks_on_behalf_of_inference() {
-    let dir = tempfile::tempdir().unwrap();
-    let (store, secrets) = empty_deployment(&dir).await;
-
-    let _env = ENV_LOCK.lock().await;
-    let _key = ScopedEnv::set("ANTHROPIC_API_KEY", "sk-from-the-environment");
-    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
-    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
-    let policy =
-        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-
-    let routes =
-        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
-    assert!(
-        !routes.iter().any(|route| route.token_source.is_some()),
-        "an environment credential must not be displaced by per-caller inference"
-    );
-}
-
-/// Rule 3: an environment base URL names an inference path of its own, even
-/// with no credential beside it, so per-caller inference stays out of the way.
-#[tokio::test]
-async fn an_environment_base_url_outranks_on_behalf_of_inference() {
-    let dir = tempfile::tempdir().unwrap();
-    let (store, secrets) = empty_deployment(&dir).await;
-
-    let _env = ENV_LOCK.lock().await;
-    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
-    let _base = ScopedEnv::set("ANTHROPIC_BASE_URL", "https://relay.example/v1");
-    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
-    let policy =
-        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-
-    let routes =
-        providers::collect_routes(&*store, &*secrets, None, None, on_behalf_of(), &policy).await;
-    assert!(
-        !routes
-            .iter()
-            .any(|route| route.kind == tidebreak_router::RouteKind::Anthropic
-                && route.token_source.is_some()),
-        "an environment endpoint must not be displaced by per-caller inference"
+            .any(|route| route.kind == tidebreak_router::RouteKind::ModelGateway),
+        "the caller's gateway path rides beside the stored provider"
     );
 }
 
@@ -5874,12 +6076,18 @@ async fn a_cached_provider_is_never_shared_between_callers() {
 
     let dir = tempfile::tempdir().unwrap();
     let (store, secrets) = empty_deployment(&dir).await;
-    let inference =
-        Arc::new(crate::obo_inference::OboInference::new("https://gateway.example").unwrap());
+    let gateway_obo =
+        Arc::new(crate::obo_gateway::OboGateway::new("https://gateway.example").unwrap());
     let alice = tidebreak_core::OwnerId::new("user:alice").unwrap();
     let bob = tidebreak_core::OwnerId::new("user:bob").unwrap();
-    inference.record_caller(&alice, "mg_at_alice".into());
-    inference.record_caller(&bob, "mg_at_bob".into());
+    gateway_obo.record_caller(&alice, "mg_at_alice".into());
+    gateway_obo.record_caller(&bob, "mg_at_bob".into());
+    gateway_obo
+        .seed_snapshot_for_test(&alice, caller_snapshot())
+        .await;
+    gateway_obo
+        .seed_snapshot_for_test(&bob, caller_snapshot())
+        .await;
 
     let resolver = resolver::ConfiguredResolver::new(
         store.clone(),
@@ -5896,7 +6104,7 @@ async fn a_cached_provider_is_never_shared_between_callers() {
         crate::managed_policy::MemoryProvisionedPolicy::new(),
         Arc::new(crate::managed_policy::NoOsPolicy),
     )
-    .with_on_behalf_of_inference(Some(inference.clone()));
+    .with_on_behalf_of_gateway(Some(gateway_obo.clone()));
 
     let _env = ENV_LOCK.lock().await;
     let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
@@ -6051,13 +6259,11 @@ async fn app_state_projects_the_deployments_own_gateway() {
     assert!(!policy.managed);
 }
 
-/// The picker a caller starts a conversation from.
-///
-/// A hosted machine stores no provider configuration of its own — it resolves
-/// the credential per caller — so the stored-row walk would call every
-/// provider unusable and offer nobody a model to select.
+/// The picker a caller starts a conversation from (decision 62): their own
+/// snapshot makes the gateway usable and fills the catalog; without one, the
+/// machine offers nothing rather than guessing.
 #[tokio::test]
-async fn a_hosted_machine_offers_the_caller_a_model_to_start_with() {
+async fn a_hosted_machine_offers_the_caller_their_own_models() {
     let dir = tempfile::tempdir().unwrap();
     let (store, secrets) = empty_deployment(&dir).await;
 
@@ -6065,77 +6271,55 @@ async fn a_hosted_machine_offers_the_caller_a_model_to_start_with() {
     let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
     let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
     let hosted = hosted_machine_policy();
+    let snapshot = caller_snapshot();
 
     assert!(
         providers::provider_is_usable(
             &*store,
             &*secrets,
-            providers::ProviderKind::Anthropic,
+            providers::ProviderKind::ModelGateway,
             &hosted,
+            Some(&snapshot),
         )
         .await
         .unwrap(),
-        "the provider the caller's own credential serves must be usable"
+        "a resolved caller snapshot makes the gateway usable"
     );
 
-    let catalog = providers::catalog_models(&*store, &*secrets, &hosted)
+    let catalog = providers::catalog_models(&*store, &*secrets, &hosted, Some(&snapshot))
         .await
         .unwrap();
     assert!(
-        catalog
-            .iter()
-            .any(|entry| entry.available
-                && entry.policy.provider == providers::ProviderKind::Anthropic),
-        "the catalog must offer at least one selectable model"
+        catalog.iter().any(|entry| entry.available
+            && entry.policy.provider == providers::ProviderKind::ModelGateway
+            && entry.policy.id == "acme-opus"),
+        "the catalog must offer the caller's own entitled models"
+    );
+    assert!(
+        !catalog.iter().any(|entry| entry.available
+            && entry.policy.provider != providers::ProviderKind::ModelGateway),
+        "no other provider is selectable with nothing configured"
     );
 
-    // The same deployment without gateway authentication is unchanged: a
-    // self-host server on static tokens states no path to this provider.
-    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
-    let unmanaged =
-        crate::managed_policy::resolve(&*provisioned, &crate::managed_policy::NoOsPolicy).unwrap();
-    assert!(!providers::provider_is_usable(
-        &*store,
-        &*secrets,
-        providers::ProviderKind::Anthropic,
-        &unmanaged,
-    )
-    .await
-    .unwrap());
-}
-
-/// Decision 51, rule 3, in the catalog as well as in route collection: a
-/// stored provider configuration states the deployment's inference path, and
-/// per-caller availability does not overrule it.
-#[tokio::test]
-async fn a_stored_provider_configuration_still_decides_availability() {
-    let dir = tempfile::tempdir().unwrap();
-    let (store, secrets) = empty_deployment(&dir).await;
-    providers::write_config(
-        &*store,
-        providers::ProviderKind::Anthropic,
-        &providers::ProviderConfig {
-            enabled: false,
-            base_url: None,
-            models: Vec::new(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let _env = ENV_LOCK.lock().await;
-    let _key = ScopedEnv::unset("ANTHROPIC_API_KEY");
-    let _base = ScopedEnv::unset("ANTHROPIC_BASE_URL");
-
+    // Without a caller snapshot — an unnamed request, or a caller whose
+    // exchange failed — the same machine offers nothing.
     assert!(
         !providers::provider_is_usable(
             &*store,
             &*secrets,
-            providers::ProviderKind::Anthropic,
-            &hosted_machine_policy(),
+            providers::ProviderKind::ModelGateway,
+            &hosted,
+            None,
         )
         .await
         .unwrap(),
-        "a disabled provider row must leave the provider unusable"
+        "no caller snapshot means no usable gateway"
+    );
+    let catalog = providers::catalog_models(&*store, &*secrets, &hosted, None)
+        .await
+        .unwrap();
+    assert!(
+        !catalog.iter().any(|entry| entry.available),
+        "no caller snapshot means nothing selectable"
     );
 }
