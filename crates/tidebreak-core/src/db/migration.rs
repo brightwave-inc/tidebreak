@@ -1226,8 +1226,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_ne!(
-            fire.try_get::<String>("", "delivery_id").unwrap(),
-            "00000000-0000-0000-0000-000000000000"
+            fire.try_get::<uuid::Uuid>("", "delivery_id").unwrap(),
+            uuid::Uuid::nil()
         );
         assert_eq!(fire.try_get::<String>("", "state").unwrap(), "delivered");
         assert_eq!(fire.try_get::<i64>("", "attempt_count").unwrap(), 1);
