@@ -970,10 +970,19 @@ mod tests {
         worktree: &Path,
         sink: Arc<dyn HarnessEventSink>,
     ) -> ClaudeSession {
+        session_with_mode(binary, worktree, sink, PermissionMode::Plan)
+    }
+
+    fn session_with_mode(
+        binary: PathBuf,
+        worktree: &Path,
+        sink: Arc<dyn HarnessEventSink>,
+        permission_mode: PermissionMode,
+    ) -> ClaudeSession {
         ClaudeSession::new(SessionSpec {
             worktree: worktree.to_path_buf(),
             allowed_read_roots: Vec::new(),
-            permission_mode: PermissionMode::Plan,
+            permission_mode,
             model: None,
             reasoning_effort: None,
             fast_mode: false,
@@ -1108,12 +1117,12 @@ mod tests {
             PermissionMode::Auto,
             PermissionMode::Allow,
         ] {
-            let mut session = session_with(
+            let mut session = session_with_mode(
                 PathBuf::from("/usr/bin/claude"),
                 dir.path(),
                 Arc::new(Discard),
+                mode,
             );
-            session.spec.permission_mode = mode;
             session.spec.allowed_read_roots = roots.to_vec();
             session.spec.extra_argv = vec!["--append-system-prompt".into(), "extra".into()];
 
@@ -1164,12 +1173,12 @@ mod tests {
             PermissionMode::Ask,
             PermissionMode::Auto,
         ] {
-            let mut session = session_with(
+            let mut session = session_with_mode(
                 PathBuf::from("/usr/bin/claude"),
                 dir.path(),
                 Arc::new(Discard),
+                mode,
             );
-            session.spec.permission_mode = mode;
             session.spec.extra_argv = vec!["--dangerously-skip-permissions".into()];
 
             assert!(matches!(
@@ -1178,12 +1187,12 @@ mod tests {
             ));
         }
 
-        let mut allow = session_with(
+        let mut allow = session_with_mode(
             PathBuf::from("/usr/bin/claude"),
             dir.path(),
             Arc::new(Discard),
+            PermissionMode::Allow,
         );
-        allow.spec.permission_mode = PermissionMode::Allow;
         allow.spec.extra_argv = vec!["--dangerously-skip-permissions".into()];
         allow.compose_plan_for(None, None).unwrap();
     }
