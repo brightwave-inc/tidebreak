@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { Folder, GitBranch, Link2 } from "lucide-react";
 
-import type { CodeCloneDefaults, CodeCloneJobSnapshot } from "../api/types";
+import type {
+  CodeCloneDefaults,
+  CodeCloneJobSnapshot,
+  CodeRepoSources,
+} from "../api/types";
 import { useApp } from "@/AppContext";
 import type { OptionRow } from "@/components/OptionListbox";
 import { Button } from "@/components/ui/button";
@@ -22,7 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { hasNativeHost, pickCodeDirectory } from "@/host";
+import { hasLocalHostAuthority, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -77,20 +81,61 @@ export function AddRepoPalette({
   const [parentDir, setParentDir] = useState("");
   const [cloneName, setCloneName] = useState("");
   const [defaults, setDefaults] = useState<CodeCloneDefaults | null>(null);
+  const [sources, setSources] = useState<CodeRepoSources | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const job = jobId ? cloneJobs[jobId] : undefined;
+  // Whether this window can name a path the machine would resolve. Browsing
+  // is the host's, resolving is the machine's, and they are the same computer
+  // only when the window is not attached elsewhere.
+  const canBrowse = hasLocalHostAuthority();
+  // The machine places clones itself when its operator configured a
+  // destination, which is what lets someone who cannot see its filesystem
+  // clone at all. Until the probe answers, assume it does not, so a desktop
+  // working on its own machine never loses the field it has always had.
+  const machineChoosesDestination = sources?.chooses_destination === true;
+  const offered = useMemo(() => {
+    // Before the probe answers, offer everything: the machine is the
+    // authority, and a dialog that showed nothing while asking would read as
+    // a broken dialog rather than a pending one.
+    if (!sources) return SOURCES;
+    const available = new Map(
+      sources.sources.map((source) => [source.kind, source] as const),
+    );
+    return SOURCES.filter((row) => available.get(row.key)?.available !== false);
+  }, [sources]);
   const rows = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return SOURCES;
-    return SOURCES.filter(
+    if (!needle) return offered;
+    return offered.filter(
       (row) =>
         row.label.toLowerCase().includes(needle) ||
         (row.description ?? "").toLowerCase().includes(needle),
     );
-  }, [query]);
+  }, [query, offered]);
+  // What the machine says would make a hidden source usable. Shown rather
+  // than swallowed: "GitHub is missing" with no reason is worse than absent.
+  const unavailable = useMemo(
+    () =>
+      (sources?.sources ?? []).filter(
+        (source) =>
+          !source.available &&
+          source.remediation &&
+          SOURCES.some((row) => row.key === source.kind),
+      ),
+    [sources],
+  );
+  // What the machine says about GitHub while still offering it: no `gh`
+  // credential means public repositories only. Read from the probe rather
+  // than from `getCodeCloneDefaults`, which is administrator-only — a member
+  // on a shared machine would otherwise be told nothing at all.
+  const githubHint = useMemo(() => {
+    const github = sources?.sources.find((source) => source.kind === "github");
+    if (github?.available && github.remediation) return github.remediation;
+    return null;
+  }, [sources]);
 
   useEffect(() => {
     if (!open) return;
@@ -104,10 +149,21 @@ export function AddRepoPalette({
     setJobId(null);
     setBusy(false);
     setError(null);
-    void client.getCodeCloneDefaults().then((next) => {
-      setDefaults(next);
-      setParentDir(next.parent_dir ?? "");
-    });
+    setSources(null);
+    void client
+      .getCodeRepoSources()
+      .then(setSources)
+      .catch(() => setSources(null));
+    // Administrator-only, and the person adding a repo on a shared machine
+    // usually is not one. A refusal leaves the remembered destination unknown,
+    // which the machine fills in for itself.
+    void client
+      .getCodeCloneDefaults()
+      .then((next) => {
+        setDefaults(next);
+        setParentDir(next.parent_dir ?? "");
+      })
+      .catch(() => setDefaults(null));
   }, [open, client]);
 
   useEffect(() => {
@@ -174,16 +230,22 @@ export function AddRepoPalette({
   async function startClone(body: {
     url?: string;
     github?: string;
-    parent_dir: string;
+    parent_dir?: string;
     name?: string;
   }) {
-    if (!body.parent_dir.trim()) return;
+    // A field nobody was shown must not be sent. `parentDir` may still hold
+    // whatever the defaults read seeded it with, and sending that would put
+    // the checkout somewhere the reader never chose.
+    const parent = machineChoosesDestination
+      ? undefined
+      : body.parent_dir?.trim();
+    if (!parent && !machineChoosesDestination) return;
     setBusy(true);
     setError(null);
     try {
       const started = await client.startCodeClone({
         ...body,
-        parent_dir: body.parent_dir.trim(),
+        parent_dir: parent || undefined,
         name: body.name?.trim() || undefined,
       });
       useCodeUpdatesStore.getState().apply({
@@ -206,7 +268,7 @@ export function AddRepoPalette({
     if (!row) return;
     if (row.key === "local") {
       setStage("local");
-      if (hasNativeHost()) void pickDirectory("path");
+      if (canBrowse) void pickDirectory("path");
       return;
     }
     if (row.key === "git_url") setStage("git_url");
@@ -305,6 +367,18 @@ export function AddRepoPalette({
                   );
                 })}
               </CommandGroup>
+              {unavailable.length > 0 && (
+                <div className="border-t px-3 py-2">
+                  {unavailable.map((source) => (
+                    <p
+                      key={source.kind}
+                      className="text-xs text-muted-foreground"
+                    >
+                      {source.remediation}
+                    </p>
+                  ))}
+                </div>
+              )}
             </CommandList>
           </Command>
         )}
@@ -317,6 +391,7 @@ export function AddRepoPalette({
             error={error}
             onPath={setPath}
             onDisplayName={setDisplayName}
+            canBrowse={canBrowse}
             onBrowse={() => void pickDirectory("path")}
             onSubmit={() => void registerLocal()}
           />
@@ -332,6 +407,8 @@ export function AddRepoPalette({
             onUrl={setUrl}
             onParentDir={setParentDir}
             onName={setCloneName}
+            canBrowse={canBrowse}
+            machineChoosesDestination={machineChoosesDestination}
             onBrowse={() => void pickDirectory("parent")}
             onSubmit={() =>
               void startClone({
@@ -349,11 +426,14 @@ export function AddRepoPalette({
             parentDir={parentDir}
             name={cloneName}
             defaults={defaults}
+            hint={githubHint}
             busy={busy}
             error={error}
             onGithub={setGithub}
             onParentDir={setParentDir}
             onName={setCloneName}
+            canBrowse={canBrowse}
+            machineChoosesDestination={machineChoosesDestination}
             onBrowse={() => void pickDirectory("parent")}
             onSubmit={() =>
               void startClone({
@@ -395,6 +475,7 @@ function LocalStage({
   error,
   onPath,
   onDisplayName,
+  canBrowse,
   onBrowse,
   onSubmit,
 }: {
@@ -404,6 +485,8 @@ function LocalStage({
   error: string | null;
   onPath: (value: string) => void;
   onDisplayName: (value: string) => void;
+  /** Whether this window can open a picker the machine would resolve. */
+  canBrowse: boolean;
   onBrowse: () => void;
   onSubmit: () => void;
 }) {
@@ -421,11 +504,13 @@ function LocalStage({
           <Input
             value={path}
             onChange={(event) => onPath(event.target.value)}
-            placeholder="/Users/you/src/app"
+            placeholder={
+              canBrowse ? "/Users/you/src/app" : "a path on the machine"
+            }
             disabled={busy}
             autoFocus
           />
-          {hasNativeHost() && (
+          {canBrowse && (
             <Button
               type="button"
               variant="outline"
@@ -466,6 +551,8 @@ function GitUrlStage({
   onUrl,
   onParentDir,
   onName,
+  canBrowse,
+  machineChoosesDestination,
   onBrowse,
   onSubmit,
 }: {
@@ -477,6 +564,8 @@ function GitUrlStage({
   onUrl: (value: string) => void;
   onParentDir: (value: string) => void;
   onName: (value: string) => void;
+  canBrowse: boolean;
+  machineChoosesDestination: boolean;
   onBrowse: () => void;
   onSubmit: () => void;
 }) {
@@ -498,12 +587,15 @@ function GitUrlStage({
           autoFocus
         />
       </label>
-      <ParentDirField
-        value={parentDir}
-        busy={busy}
-        onChange={onParentDir}
-        onBrowse={onBrowse}
-      />
+      {!machineChoosesDestination && (
+        <ParentDirField
+          value={parentDir}
+          busy={busy}
+          canBrowse={canBrowse}
+          onChange={onParentDir}
+          onBrowse={onBrowse}
+        />
+      )}
       <label className="flex flex-col gap-1 text-sm">
         <span className="font-medium">Name</span>
         <Input
@@ -516,7 +608,11 @@ function GitUrlStage({
       {error && <p className="text-sm text-critical">{error}</p>}
       <Button
         type="submit"
-        disabled={busy || !url.trim() || !parentDir.trim()}
+        disabled={
+          busy ||
+          !url.trim() ||
+          (!machineChoosesDestination && !parentDir.trim())
+        }
         className="self-start"
       >
         {busy ? "Starting…" : "Clone"}
@@ -530,11 +626,14 @@ function GithubStage({
   parentDir,
   name,
   defaults,
+  hint,
   busy,
   error,
   onGithub,
   onParentDir,
   onName,
+  canBrowse,
+  machineChoosesDestination,
   onBrowse,
   onSubmit,
 }: {
@@ -542,18 +641,25 @@ function GithubStage({
   parentDir: string;
   name: string;
   defaults: CodeCloneDefaults | null;
+  /** The machine's note about GitHub, when it still offers it. */
+  hint: string | null;
   busy: boolean;
   error: string | null;
   onGithub: (value: string) => void;
   onParentDir: (value: string) => void;
   onName: (value: string) => void;
+  canBrowse: boolean;
+  machineChoosesDestination: boolean;
   onBrowse: () => void;
   onSubmit: () => void;
 }) {
+  // The machine's own note first; the administrator-only defaults read is
+  // the fallback for a profile whose probe predates this field.
   const ghHint =
-    defaults && (!defaults.gh_found || defaults.gh_authenticated === false)
+    hint ??
+    (defaults && (!defaults.gh_found || defaults.gh_authenticated === false)
       ? defaults.gh_remediation
-      : null;
+      : null);
   return (
     <form
       className="flex flex-col gap-3"
@@ -580,12 +686,15 @@ function GithubStage({
           {ghHint} You can still clone over HTTPS.
         </p>
       )}
-      <ParentDirField
-        value={parentDir}
-        busy={busy}
-        onChange={onParentDir}
-        onBrowse={onBrowse}
-      />
+      {!machineChoosesDestination && (
+        <ParentDirField
+          value={parentDir}
+          busy={busy}
+          canBrowse={canBrowse}
+          onChange={onParentDir}
+          onBrowse={onBrowse}
+        />
+      )}
       <label className="flex flex-col gap-1 text-sm">
         <span className="font-medium">Name</span>
         <Input
@@ -598,7 +707,11 @@ function GithubStage({
       {error && <p className="text-sm text-critical">{error}</p>}
       <Button
         type="submit"
-        disabled={busy || !github.trim() || !parentDir.trim()}
+        disabled={
+          busy ||
+          !github.trim() ||
+          (!machineChoosesDestination && !parentDir.trim())
+        }
         className="self-start"
       >
         {busy ? "Starting…" : "Clone"}
@@ -610,11 +723,13 @@ function GithubStage({
 function ParentDirField({
   value,
   busy,
+  canBrowse,
   onChange,
   onBrowse,
 }: {
   value: string;
   busy: boolean;
+  canBrowse: boolean;
   onChange: (value: string) => void;
   onBrowse: () => void;
 }) {
@@ -625,10 +740,10 @@ function ParentDirField({
         <Input
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          placeholder="/Users/you/src"
+          placeholder={canBrowse ? "/Users/you/src" : "a path on the machine"}
           disabled={busy}
         />
-        {hasNativeHost() && (
+        {canBrowse && (
           <Button
             type="button"
             variant="outline"

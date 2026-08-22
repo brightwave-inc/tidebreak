@@ -52,6 +52,8 @@ import type {
   CodeSubagentSummary,
   CodeUpdateNotice,
   CodeCloneDefaults,
+  CodeRepoSource,
+  CodeRepoSources,
   CodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot,
   CodeWorktreeRoot,
@@ -119,6 +121,8 @@ import type {
   CodeSessionDigest as WireCodeSessionDigest,
   CodeUpdateNotice as WireCodeUpdateNotice,
   CodeCloneDefaults as WireCodeCloneDefaults,
+  CodeRepoSource as WireCodeRepoSource,
+  CodeRepoSources as WireCodeRepoSources,
   CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   CodeWorktreeRoot as WireCodeWorktreeRoot,
@@ -1177,6 +1181,55 @@ export function parseCodeCloneDefaults(
       ? { gh_authenticated: value.gh_authenticated }
       : {}),
   };
+}
+
+/**
+ * One source the machine reports.
+ *
+ * An unfamiliar `kind` parses fine and is dropped by the caller rather than
+ * rejected here: the set of sources is the machine's to grow, and a client
+ * that refused the whole envelope over one unknown member could never be
+ * older than its machine.
+ */
+function parseCodeRepoSource(value: unknown): CodeRepoSource | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeRepoSource>(value, [
+      "kind",
+      "available",
+      "remediation",
+    ]) ||
+    typeof value.kind !== "string" ||
+    typeof value.available !== "boolean" ||
+    !optionalString(value.remediation)
+  ) {
+    return null;
+  }
+  return {
+    kind: value.kind,
+    available: value.available,
+    ...(value.remediation !== undefined
+      ? { remediation: value.remediation }
+      : {}),
+  };
+}
+
+export function parseCodeRepoSources(value: unknown): CodeRepoSources | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeRepoSources>(value, ["sources", "chooses_destination"]) ||
+    !Array.isArray(value.sources) ||
+    typeof value.chooses_destination !== "boolean"
+  ) {
+    return null;
+  }
+  const sources: CodeRepoSource[] = [];
+  for (const entry of value.sources) {
+    const source = parseCodeRepoSource(entry);
+    if (!source) return null;
+    sources.push(source);
+  }
+  return { sources, chooses_destination: value.chooses_destination };
 }
 
 export function parseCodeForkTranscript(

@@ -301,7 +301,10 @@ pub struct CloneRepoBody {
     pub url: Option<String>,
     #[serde(default)]
     pub github: Option<String>,
-    pub parent_dir: String,
+    /// Absent when the machine places clones itself; see
+    /// [`CodeRepoSources::chooses_destination`].
+    #[serde(default)]
+    pub parent_dir: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -354,6 +357,42 @@ pub struct CodeCloneDefaults {
     #[ts(optional)]
     pub gh_authenticated: Option<bool>,
     pub gh_remediation: String,
+}
+
+/// What this machine can add a repository from: `GET /code/repos/sources`.
+///
+/// The machine answers for itself — whether it can spawn `git`, whether it has
+/// a GitHub credential — and the client decides separately whether it can
+/// offer a picker for any of it. Those are different questions: a desktop on
+/// the same computer as its machine can browse for a path, and a window
+/// attached to a machine elsewhere cannot, while the machine's own answer is
+/// identical either way.
+///
+/// `chooses_destination` says the machine places clones under the destination
+/// its operator configured, so a caller names no path — which is what lets a
+/// shared machine keep its filesystem layout to itself.
+///
+/// Unknown source kinds are ignored by clients rather than rendered, so this
+/// set may grow without a client release (decision 17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeRepoSources {
+    pub sources: Vec<CodeRepoSource>,
+    pub chooses_destination: bool,
+}
+
+/// One way of adding a repository, and whether this machine can serve it.
+///
+/// `kind` is `local`, `git_url`, or `github`. `remediation` says what stands in
+/// the way, and rides on an available source too: `github` clones anything
+/// public without a `gh` credential, so its absence is a note about private
+/// repositories rather than a reason to withhold the form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeRepoSource {
+    pub kind: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remediation: Option<String>,
 }
 
 /// A written fork transcript: `POST /code/sessions/{id}/fork`.

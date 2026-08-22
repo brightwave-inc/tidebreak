@@ -9,8 +9,8 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 
 use super::types::{
-    CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSnapshot, CreateRepoBody,
-    PatchRepoBody, RemoveRepoQuery,
+    CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSnapshot, CodeRepoSources,
+    CreateRepoBody, PatchRepoBody, RemoveRepoQuery,
 };
 use tidebreak_core::RepoId;
 
@@ -109,6 +109,10 @@ pub async fn delete_repo(
 
 pub async fn clone_defaults(code: ScopedCode) -> Result<Json<CodeCloneDefaults>, ServerError> {
     Ok(Json(code.clone_defaults().await?))
+}
+
+pub async fn repo_sources(code: ScopedCode) -> Result<Json<CodeRepoSources>, ServerError> {
+    Ok(Json(code.repo_sources().await?))
 }
 
 pub async fn start_clone(

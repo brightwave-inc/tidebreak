@@ -167,6 +167,8 @@ import {
   type CodeSessionDigest as WireCodeSessionDigest,
   type CodeUpdateNotice as WireCodeUpdateNotice,
   type CodeCloneDefaults as WireCodeCloneDefaults,
+  type CodeRepoSource as WireCodeRepoSource,
+  type CodeRepoSources as WireCodeRepoSources,
   type CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   type CodeWorktreeRoot as WireCodeWorktreeRoot,
@@ -1198,6 +1200,8 @@ export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;
 export type CodeSessionDigest = WireCodeSessionDigest;
 export type CodeUpdateNotice = WireCodeUpdateNotice;
 export type CodeCloneDefaults = WireCodeCloneDefaults;
+export type CodeRepoSource = WireCodeRepoSource;
+export type CodeRepoSources = WireCodeRepoSources;
 export type CodeCloneJobSnapshot = WireCodeCloneJobSnapshot;
 /** Where the warm install of one pinned engine stands. */
 export type CodeHarnessInstallSnapshot = WireCodeHarnessInstallSnapshot;
