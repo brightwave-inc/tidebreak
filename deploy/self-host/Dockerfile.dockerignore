@@ -30,6 +30,12 @@
 !plugins/*/
 !plugins/*/PLUGIN.md
 
+# The container entrypoint, copied into the runtime stage. Named exactly, so
+# nothing else in deploy/ reaches the daemon.
+!deploy/
+!deploy/self-host/
+!deploy/self-host/entrypoint.sh
+
 # Never admit hidden files or common credential files, even below an allowed
 # source directory. Keep these after the allow rules so they win. The explicit
 # credential names are defense in depth for future changes to the hidden-file
