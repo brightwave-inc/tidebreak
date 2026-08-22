@@ -100,24 +100,27 @@ The main local data is easy to recognize:
 | Location | Meaning |
 | --- | --- |
 | `tidebreak.db` | SQLite operational source of truth |
-| `tidebreak-schema.json` | pre-v1 local SQLite schema epoch |
-| `orphaned-code-worktrees.json` | code worktrees an epoch reset left on disk |
+| `tidebreak-schema.json` | which schema pin this profile holds |
+| `orphaned-code-worktrees.json` | code worktrees a reset left on disk |
 | `blobs/` | retained immutable document bytes |
 | `tidebreak.lock` | proof that one process owns this data directory |
 | OS keychain | provider credentials, kept outside the database — one item per profile |
 
-While the app remains at version `0.0.0`, baseline migrations may be rewritten
-instead of accumulated. The local SQLite schema epoch makes that explicit for
-both the desktop app and a headless `tidebreak serve` using the desktop profile.
-Opening an older pre-v1 database rebuilds `tidebreak.db` and its SQLite journals
-so stale state cannot survive the reset. A current epoch preserves both stores.
-Startup also removes the retired `vectors/` directory when it is safe to open
-the current schema. Code worktrees are the exception to "rebuilt": they live
-outside the data directory because they hold uncommitted user work, so a reset
-records them in `orphaned-code-worktrees.json` and leaves the trees, their
-`.git/worktrees` entries, and their branches alone. Unknown, newer, or post-v1 lifecycle markers fail closed so
-a prerelease binary cannot silently erase a future stable database, and the
-destructive path is disabled at runtime for package major version 1 and later.
+A schema change is an appended migration, so local data survives it
+([decision 61](decisions/0061-schema-changes-are-migrations.md)). The marker
+records which pin the profile holds. A profile at the pin is kept and its
+marker re-stamped. A profile below the pin predates the migration chain and
+holds a schema nothing recorded, so opening it rebuilds `tidebreak.db` and its
+SQLite journals once, and never again. Startup also removes the retired
+`vectors/` directory when it is safe to open the current schema.
+
+Code worktrees are the exception to "rebuilt": they live outside the data
+directory because they hold uncommitted user work, so a reset records them in
+`orphaned-code-worktrees.json` and leaves the trees, their `.git/worktrees`
+entries, and their branches alone. Unknown or newer lifecycle markers fail
+closed so a prerelease binary cannot silently erase a future stable database,
+and the destructive path is disabled at runtime for package major version 1
+and later.
 
 Source bytes under `blobs/` are physically retained during the reset, but their
 database records are gone. They are therefore unreachable through the product
@@ -128,11 +131,12 @@ executor identity, broker grants, and the broker audit log are preserved;
 native recovery still has to validate them against the new canonical database
 and fails closed when their old conversation no longer exists.
 
-When the baseline changes incompatibly during pre-v1 development, bump
-`DESKTOP_SCHEMA_EPOCH` in `crates/tidebreak-server/src/desktop_schema.rs` in the
-same change. `the_schema_baseline_is_pinned` fails until you do, and names the
-bump in its message. The epoch is a deliberate reset boundary, not a
-replacement for migrations after the schema stabilizes for v1.
+To change the schema, append a migration to `Migrator::migrations` in
+`crates/tidebreak-core/src/db/migration.rs`. Do not edit the baseline —
+`the_schema_baseline_is_pinned` fails on that, and says so, because an edit
+there reaches a fresh database and no existing one. `LAST_RESET_EPOCH` in
+`crates/tidebreak-server/src/desktop_schema.rs` names the baseline the chain
+starts from and does not move for a schema change.
 
 Non-secret provider settings and the default model live in the operational
 store and can change while the process runs. Model routing observes those
@@ -948,13 +952,10 @@ SQLite coverage, and PostgreSQL coverage when database locking or transactional
 semantics are involved. Keep public routes thin: orchestration belongs in the
 server, while reusable state transitions belong in `tidebreak-core`.
 
-Before v1, there are no deployed desktop users to migrate. Schema work edits
-the baseline in place and bumps the epoch above, which makes the already-written
-local database disposable. A durable database has no such reset, so anything
-that must reach one is an appended migration in
-`crates/tidebreak-core/src/db/migration.rs` instead — the baseline already ran
-there under a recorded name, and SeaORM cannot see that the statements behind
-that name changed. `a_stepwise_upgrade_lands_on_the_fresh_schema` fails when an
+Schema work appends a migration rather than editing the baseline, because a
+baseline edit reaches a fresh database and no existing one: SeaORM records one
+name per migration and cannot see that the statements behind an already-recorded
+name changed. `a_stepwise_upgrade_lands_on_the_fresh_schema` fails when an
 appended migration and the baseline disagree. Squash the chain back into one
 baseline when the schema stabilizes for v1.
 

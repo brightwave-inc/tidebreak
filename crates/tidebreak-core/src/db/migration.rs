@@ -7,9 +7,10 @@
 //! The ordering is the point. SeaORM records one name per migration and cannot
 //! tell that the statements behind an already-recorded name changed, so an
 //! in-place baseline edit reaches a fresh database and no existing one. The
-//! desktop profile survives that because `DESKTOP_SCHEMA_EPOCH` deletes and
-//! rebuilds it. The self-host PostgreSQL store is durable and has no reset, so
-//! an appended migration is the only thing that reaches it.
+//! desktop profile used to survive that by being deleted and rebuilt. It is
+//! not deleted any more, and the self-host PostgreSQL store never was, so an
+//! appended migration is the only thing that reaches either of them.
+//! [`Baseline`] is frozen; `the_schema_baseline_is_pinned` fails on an edit.
 //!
 //! The two owner migrations below used to be branches inside `Baseline::up`,
 //! each guarded by whether its column existed yet. One such branch works.
@@ -408,35 +409,26 @@ mod tests {
             .unwrap();
         assert_eq!(row.try_get::<String>("", "owner").unwrap(), "local");
     }
-    /// The baseline *is* the desktop schema, and nothing notices when it moves.
-    /// `Migrator::up` records one migration name, so SeaORM cannot tell that
-    /// the statements behind that name changed; the reset that repairs an
-    /// existing database is keyed on `DESKTOP_SCHEMA_EPOCH`, an integer a
-    /// contributor has to remember to bump in a different crate.
+    /// The baseline is frozen, and this is what holds it still.
     ///
-    /// Decision record 2 names this gap in its own validation section: "no
-    /// test fails if a baseline edit ships without an epoch bump. Reviewers
-    /// of a change touching `db/migration/baseline/` should confirm
-    /// `DESKTOP_SCHEMA_EPOCH` moved in the same diff." This is that test, and
-    /// it retires that review instruction.
+    /// `Migrator::up` records one name per migration and cannot tell that the
+    /// statements behind an already-recorded name changed. So an edit here
+    /// reaches a fresh database and no existing one — the two then run
+    /// different schemas against the same queries, each internally consistent,
+    /// with nothing to notice. That used to be survivable because an epoch
+    /// bump deleted the local database. Nothing deletes it now.
     ///
-    /// Like the journal shape fixtures it is a change *detector*, not a
-    /// compatibility contract. It does not know what the epoch is. It knows
-    /// the schema moved, and that a human owes it a decision.
+    /// The fix for a diff here is therefore not a regenerated fixture. It is
+    /// an appended migration in [`Migrator::migrations`], which reaches both.
     ///
-    /// Both backends are rendered. The epoch guards the desktop profile, so
-    /// SQLite is what a bump repairs — but the self-host store is PostgreSQL
-    /// and durable, and the two builders do not agree on everything: a type
-    /// that collapses in SQLite, or a constraint it parses and ignores, is a
-    /// real schema difference that a SQLite-only fixture cannot see. The
-    /// second render costs one file and closes that gap ahead of the
-    /// migration chain, which will be written against PostgreSQL first.
+    /// Both backends are rendered, because the two builders do not agree on
+    /// everything: a type that collapses in SQLite, or a constraint it parses
+    /// and ignores, is a real difference on PostgreSQL that a SQLite-only
+    /// fixture cannot see.
     ///
-    /// Regenerate with `UPDATE_SCHEMA_FIXTURE=1 cargo test -p tidebreak-core`.
-    ///
-    /// At v1 this inverts with the rest of decision record 2: the baseline
-    /// becomes the first entry in a real chain, and the fix for a diff here
-    /// becomes an ordered migration rather than a bump.
+    /// Regenerate with `UPDATE_SCHEMA_FIXTURE=1 cargo test -p tidebreak-core`
+    /// only when squashing the chain for a release, which is the one time the
+    /// baseline is supposed to move.
     #[test]
     fn the_schema_baseline_is_pinned() {
         // sea-query renders one statement per line. Break each column and
@@ -498,10 +490,11 @@ mod tests {
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
             assert_eq!(
                 existing, rendered,
-                "the schema baseline changed; if this is deliberate, bump \
-             DESKTOP_SCHEMA_EPOCH in tidebreak-server so existing databases are \
-             discarded, then regenerate with UPDATE_SCHEMA_FIXTURE=1 cargo \
-             test -p tidebreak-core"
+                "the schema baseline changed, and it is frozen; an edit here \
+             reaches a fresh database and no existing one. Append a migration \
+             in db/migration.rs instead. Regenerate with \
+             UPDATE_SCHEMA_FIXTURE=1 cargo test -p tidebreak-core only when \
+             squashing the chain for a release."
             );
         }
     }

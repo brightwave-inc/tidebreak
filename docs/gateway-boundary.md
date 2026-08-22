@@ -48,12 +48,12 @@ Policy resolution has three tiers, strongest first:
 2. **Provisioned.** The sticky policy file `gateway-policy.json` in the
    profile's data directory, written only by a completed pairing (below).
    User-consented, and replaceable by the same consent that created it. It
-   is deliberately a sidecar file rather than a database row: a pre-v1
-   schema-epoch reset deletes the SQLite profile, and the policy must
-   survive that — losing it would resolve the profile unmanaged and orphan
-   the session below. Profiles paired before the move are imported once at
-   boot from the legacy `managed_policy_v1` settings row, which the next
-   epoch reset then removes naturally.
+   is deliberately a sidecar file rather than a database row: a profile
+   below the migration pin is deleted and rebuilt on first boot, and the
+   policy must survive that — losing it would resolve the profile unmanaged
+   and orphan the session below. Profiles paired before the move are imported
+   once at boot from the legacy `managed_policy_v1` settings row, which stays
+   put and inert once the sidecar exists.
 3. **Open.** Neither present; the unmanaged product, which has no gateway
    surface at all.
 

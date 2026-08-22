@@ -1616,8 +1616,8 @@ async fn bind_inner(
     let os_policy: Arc<dyn managed_policy::OsPolicySource> =
         managed_policy::platform_source(&config);
     // The provisioned policy's durable home is the sidecar file in the data
-    // directory, not the SQLite profile: a pre-v1 schema-epoch reset deletes
-    // the database, and the policy (and with it the gateway session's
+    // directory, not the SQLite profile: a profile below the migration pin is
+    // deleted and rebuilt, and the policy (and with it the gateway session's
     // authorization) must survive that. One instance, shared the same way.
     let provisioned_policy: Arc<dyn managed_policy::ProvisionedPolicySource> = Arc::new(
         managed_policy::ProvisionedPolicyFile::in_data_dir(&config.data_dir),

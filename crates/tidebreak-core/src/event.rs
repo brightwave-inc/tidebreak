@@ -467,21 +467,19 @@ mod tests {
     /// names are a storage format, not only a wire format — and nothing else
     /// pins them.
     ///
-    /// Pre-v1 this test is a change *detector*, not a compatibility contract:
-    /// bumping `DESKTOP_SCHEMA_EPOCH` deletes the whole database, journal rows
-    /// included, so no row written under an older shape can reach this code.
-    /// What still bites is a payload change that ships *without* the bump —
+    /// Rows written by an older binary now survive, so this is a compatibility
+    /// contract again, not only a change detector. Nothing deletes the local
+    /// database for a format change any more, and the failure is not graceful:
     /// `list_events` collects into `Result<Vec<_>>`, so one unreadable row
     /// fails a whole chat's history rather than one message, silently until
     /// someone opens an old chat.
     ///
-    /// Regenerate with `UPDATE_JOURNAL_FIXTURE=1 cargo test -p tidebreak-core`.
-    /// A diff here means the journal format changed, which needs an epoch bump
-    /// — not a refreshed fixture on its own.
-    ///
-    /// At v1 this inverts: databases stop being disposable, and the fix for a
-    /// diff becomes a `#[serde(alias)]` or a migration. See
-    /// `docs/decisions/0002-pre-v1-schema-and-persisted-format-mutability.md`.
+    /// So a diff here is a question, not a chore. Either the change is
+    /// backward-compatible — a `#[serde(alias)]`, an added optional field —
+    /// or the rows already written need a migration. Regenerate with
+    /// `UPDATE_JOURNAL_FIXTURE=1 cargo test -p tidebreak-core` once one of
+    /// those is true. See
+    /// `docs/decisions/0061-schema-changes-are-migrations.md`.
     #[test]
     fn the_journal_event_shape_is_pinned() {
         let rendered = format!(
@@ -498,10 +496,11 @@ mod tests {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         assert_eq!(
             existing, rendered,
-            "the journal event shape changed; if this is deliberate, bump \
-             DESKTOP_SCHEMA_EPOCH in tidebreak-server so existing databases are \
-             discarded, then regenerate with UPDATE_JOURNAL_FIXTURE=1 cargo \
-             test -p tidebreak-core"
+            "the journal event shape changed; rows written in the old shape \
+             now survive a schema change, so make the new shape readable from \
+             the old one with #[serde(alias)], or migrate the rows. Then \
+             regenerate with UPDATE_JOURNAL_FIXTURE=1 cargo test -p \
+             tidebreak-core"
         );
     }
 }

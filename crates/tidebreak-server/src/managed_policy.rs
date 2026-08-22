@@ -41,9 +41,11 @@ const PROVISIONED_POLICY_FILE: &str = "gateway-policy.json";
 
 /// The settings key the provisioned policy lived under before it moved to
 /// [`PROVISIONED_POLICY_FILE`]. Read once per boot by
-/// [`import_legacy_setting`]; never written or deleted — pre-v1 epoch
-/// squashes remove the row naturally, and the [`Store`] API grows no delete
-/// for this.
+/// [`import_legacy_setting`]; never written or deleted. It used to be swept by
+/// the next epoch reset, which no longer happens for a profile at or above the
+/// migration pin (decision 61), so on those the row simply stays. It is inert
+/// while the sidecar exists, which is the case for every profile that has
+/// booted since the move.
 const LEGACY_SETTING_KEY: &str = "managed_policy_v1";
 
 /// The key every OS artifact stores the asserted URL under: the Windows
@@ -1107,7 +1109,8 @@ pub(crate) async fn import_legacy_setting(
         Err(_) => {
             tracing::warn!(
                 "legacy provisioned policy setting does not decode; \
-                 leaving it for the next schema-epoch reset to remove"
+                 leaving it, since the sidecar file is what this profile \
+                 reads and the row is inert"
             );
             Ok(())
         }

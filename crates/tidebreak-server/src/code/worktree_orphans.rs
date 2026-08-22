@@ -1,12 +1,15 @@
-//! What a pre-v1 epoch reset is about to lose track of.
+//! What a reset is about to lose track of.
 //!
 //! Code worktrees do not live in the data directory. Decision 53 moved them to
 //! a user-visible root on purpose, because a worktree is user work —
 //! uncommitted code on a real branch. The reset in [`crate::desktop_schema`]
-//! deletes the database and nothing outside the data directory, so every
-//! epoch bump drops the `code_workspace` rows and leaves the trees behind:
-//! directories full of possibly-uncommitted work, entries in each source
-//! repository's `.git/worktrees`, and branches on the user's real repository.
+//! deletes the database and nothing outside the data directory, so it drops
+//! the `code_workspace` rows and leaves the trees behind: directories full of
+//! possibly-uncommitted work, entries in each source repository's
+//! `.git/worktrees`, and branches on the user's real repository.
+//!
+//! Only a profile below the migration pin still takes a reset (decision 61),
+//! so this runs once per such profile and then never again.
 //!
 //! Deleting them is not the answer, and neither is silence. So the reset
 //! writes them down. Right before the database goes, read the rows that name
