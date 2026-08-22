@@ -496,9 +496,9 @@ mod tests {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         assert_eq!(
             existing, rendered,
-            "the journal event shape changed, and rows in this shape already \
-             exist in databases nothing deletes; make the change readable from \
-             the old shape with #[serde(alias)], or migrate the rows, then \
+            "the journal event shape changed; rows written in the old shape \
+             now survive a schema change, so make the new shape readable from \
+             the old one with #[serde(alias)], or migrate the rows. Then \
              regenerate with UPDATE_JOURNAL_FIXTURE=1 cargo test -p \
              tidebreak-core"
         );
