@@ -948,11 +948,15 @@ SQLite coverage, and PostgreSQL coverage when database locking or transactional
 semantics are involved. Keep public routes thin: orchestration belongs in the
 server, while reusable state transitions belong in `tidebreak-core`.
 
-Before v1, there are no deployed users to migrate. The schema is therefore a
-single baseline migration that schema work edits in place, rather than a chain
-of upgrade steps; the epoch below is what makes an already-written database
-disposable. The baseline becomes the first entry of an ordinary migration chain
-when the schema stabilizes for v1.
+Before v1, there are no deployed desktop users to migrate. Schema work edits
+the baseline in place and bumps the epoch above, which makes the already-written
+local database disposable. A durable database has no such reset, so anything
+that must reach one is an appended migration in
+`crates/tidebreak-core/src/db/migration.rs` instead — the baseline already ran
+there under a recorded name, and SeaORM cannot see that the statements behind
+that name changed. `a_stepwise_upgrade_lands_on_the_fresh_schema` fails when an
+appended migration and the baseline disagree. Squash the chain back into one
+baseline when the schema stabilizes for v1.
 
 ## Glossary
 
