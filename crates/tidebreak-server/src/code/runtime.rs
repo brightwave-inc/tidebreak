@@ -1643,8 +1643,18 @@ impl CodeRuntime {
         // opinion" — the inner `None` is a real choice.
         let mut changed = false;
         if let Some(model) = normalize_model(model) {
+            let switched = session.model.as_deref() != Some(model.as_str());
             session.model = Some(model);
             changed = true;
+            // A session armed for fast mode on one model must not carry that
+            // arming onto a model that cannot serve the tier: the engines
+            // reject the request rather than quietly running standard, and a
+            // toggle the picker has already hidden must not keep spending.
+            // Checked only on a real switch, which is rare — the model list
+            // costs a process on some engines.
+            if switched && session.fast_mode && !self.model_serves_fast_mode(&session).await? {
+                session.fast_mode = false;
+            }
         }
         if let Some(effort) = reasoning_effort {
             if session.reasoning_effort != effort {
@@ -2063,11 +2073,14 @@ impl CodeRuntime {
     /// Arm or disarm the engine's fast mode for a session.
     ///
     /// Refused mid-turn and after the session ends, on the rule the effort
-    /// route already applies. Refused too when the session's model cannot
-    /// serve fast mode: unlike effort, which every listed rung is valid for,
-    /// fast mode is offered on part of a provider's line only, and silently
-    /// accepting it would report a session running at a speed it never got —
-    /// and, on a metered key, at a price it was never charged.
+    /// route already applies. Not refused for a model that cannot serve the
+    /// tier, deliberately: the composer's model choice is local until a turn
+    /// carries it, so gating here would reject the arming the picker just
+    /// offered for the model the user can see selected. This stores intent;
+    /// whether a given turn actually runs fast is decided by the adapter
+    /// against the model that turn really sends — see the launch-time check
+    /// in the Claude adapter. That keeps a stale bit inert rather than
+    /// letting it claim a premium the model would not run.
     pub(crate) async fn set_fast_mode(
         &self,
         owner: &OwnerId,
@@ -2093,30 +2106,21 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        // Only arming needs the check. Disarming returns the session to the
-        // engines' own default, which every model serves.
-        if fast_mode && !self.model_serves_fast_mode(&session).await? {
-            return Err(ServerError::unprocessable_kind(
-                "fast_mode_unsupported",
-                match session.model.as_deref() {
-                    Some(model) => format!("{model} does not serve fast mode"),
-                    None => format!(
-                        "{harness} has no model selected that serves fast mode",
-                        harness = session.harness_kind
-                    ),
-                },
-            ));
-        }
         session.fast_mode = fast_mode;
         save_session(&self.db, &session).await?;
         Ok(session)
     }
 
-    /// Whether the session's selected model advertises fast mode.
+    /// Whether the session's persisted model advertises fast mode.
     ///
     /// Read off the engine's own listing rather than a table here, so a model
     /// that gains or loses the tier upstream needs no change in this repo. A
-    /// session whose model the engine does not list reads as no fast mode.
+    /// model the engine does not list reads as no fast mode.
+    ///
+    /// Only called when a turn actually switches model, never on the arming
+    /// route: listing costs a process on Codex, and gating the route on the
+    /// persisted id would reject arming for the model the composer is already
+    /// showing as selected.
     async fn model_serves_fast_mode(&self, session: &CodeSession) -> Result<bool, ServerError> {
         let adapter = self.adapter(session.harness_kind)?;
         let probe = self.probe(adapter.as_ref()).await;

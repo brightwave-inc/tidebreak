@@ -793,6 +793,14 @@ export function CodeComposer({
     setSelectedEffort(reasoningEffort);
   }, [reasoningEffort, sessionId]);
 
+  // The toggle moves optimistically on click, so it has to follow the session
+  // back down when the route refuses or answers with something else. Without
+  // this the control keeps the value the click assumed and the spend switch
+  // reads wrong until remount.
+  useEffect(() => {
+    setSelectedFastMode(fastMode);
+  }, [fastMode, sessionId]);
+
   useEffect(() => {
     setFollowUpQueued(false);
   }, [lastTurnBeganId]);

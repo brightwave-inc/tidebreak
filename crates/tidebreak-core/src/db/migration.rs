@@ -303,6 +303,14 @@ impl MigrationTrait for CodeSessionFastMode {
             .await?;
         Ok(())
     }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: the column belongs to `code_session`, and
+        // `Baseline::down` drops that table outright. Unlike `AppOwner`, the
+        // frozen baseline does not declare this column, so a rolled-back
+        // database gets it again from this migration's `up` on the way back.
+        Ok(())
+    }
 }
 
 #[cfg(test)]

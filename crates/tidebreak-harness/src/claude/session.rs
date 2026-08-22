@@ -84,16 +84,25 @@ pub(crate) fn effort_flags(effort: Option<ReasoningEffort>) -> Vec<String> {
     vec!["--effort".into(), token.to_owned()]
 }
 
-/// The `--settings` flag that arms fast mode, or nothing when it is off.
+/// The `--settings` flag that arms fast mode, or nothing when it is off or the
+/// model cannot serve it.
 ///
 /// `fastMode` is a settings key rather than a flag of its own, and `--settings`
 /// takes inline JSON as well as a path. Off is the engine's own default, so an
 /// off session composes no flag at all rather than an explicit `false` — that
 /// keeps argv identical to what a session without the feature would produce,
 /// and leaves a user's own settings file to speak for itself.
+///
+/// The model check is here rather than at the route that stores the bit,
+/// because this is the first point that knows which model the turn actually
+/// runs on: a session armed on Opus and then switched to Sonnet still carries
+/// `fast_mode`, and Anthropic rejects `speed` outside the ids it serves.
+/// Dropping the flag degrades that turn to standard speed, which is the same
+/// degrade-don't-refuse rule effort follows — and it is the honest direction,
+/// since the alternative claims a premium the model would never run.
 #[must_use]
-pub(crate) fn fast_mode_flags(fast_mode: bool) -> Vec<String> {
-    if !fast_mode {
+pub(crate) fn fast_mode_flags(fast_mode: bool, model: Option<&str>) -> Vec<String> {
+    if !fast_mode || !model.is_some_and(crate::claude::model_serves_fast_mode) {
         return Vec::new();
     }
     vec!["--settings".into(), r#"{"fastMode":true}"#.to_owned()]
@@ -311,6 +320,20 @@ impl ClaudeSession {
         resolve_effort(turn_effort.or(self.spec.reasoning_effort))
     }
 
+    /// Whether a turn actually runs fast: armed, and on a model that serves it.
+    ///
+    /// The session can stay armed across a model switch, so this is what the
+    /// child is really launched with and what [`Self::ensure_channel`] must
+    /// compare against — otherwise switching between a serving and a
+    /// non-serving model would reuse a child composed for the other one.
+    fn resolved_fast_mode(&self, turn_model: Option<&str>) -> bool {
+        self.spec.fast_mode
+            && self
+                .resolved_model(turn_model)
+                .as_deref()
+                .is_some_and(crate::claude::model_serves_fast_mode)
+    }
+
     /// The mode in force right now.
     fn permission_mode(&self) -> PermissionMode {
         *self.permission_mode.lock().expect("claude permission mode")
@@ -342,7 +365,10 @@ impl ClaudeSession {
             argv.push(model);
         }
         argv.extend(effort_flags(self.resolved_effort(turn_effort)));
-        argv.extend(fast_mode_flags(self.spec.fast_mode));
+        argv.extend(fast_mode_flags(
+            self.spec.fast_mode,
+            self.resolved_model(turn_model).as_deref(),
+        ));
         if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
@@ -421,7 +447,7 @@ impl ClaudeSession {
             stderr_task: Mutex::new(Some(stderr_task)),
             model: self.resolved_model(turn_model),
             effort: self.resolved_effort(turn_effort),
-            fast_mode: self.spec.fast_mode,
+            fast_mode: self.resolved_fast_mode(turn_model),
             mode: Mutex::new(self.permission_mode()),
         }))
     }
@@ -445,7 +471,7 @@ impl ClaudeSession {
         if let Some(channel) = slot.as_ref() {
             let same_flags = channel.model == self.resolved_model(turn_model)
                 && channel.effort == self.resolved_effort(turn_effort)
-                && channel.fast_mode == self.spec.fast_mode
+                && channel.fast_mode == self.resolved_fast_mode(turn_model)
                 && *channel.mode.lock().expect("claude child mode") == self.permission_mode();
             // Probing reaps a child that has already exited, so never wait on
             // it again afterwards.
