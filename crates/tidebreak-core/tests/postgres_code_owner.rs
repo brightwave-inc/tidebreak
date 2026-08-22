@@ -49,6 +49,9 @@ async fn seed_owner(
             created_at: Utc::now(),
             removed_at: None,
             cloned_from: None,
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
         },
     )
     .await
@@ -277,6 +280,9 @@ async fn postgres_repository_paths_are_unique_per_owner() {
         created_at: Utc::now(),
         removed_at: None,
         cloned_from: None,
+        origin_host: None,
+        origin_owner: None,
+        origin_name: None,
     };
     let removed = repo(&alice);
     insert_repo(&store, &removed).await.unwrap();

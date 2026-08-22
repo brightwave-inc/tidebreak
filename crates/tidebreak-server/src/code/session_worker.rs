@@ -192,6 +192,10 @@ pub(crate) struct LiveSink {
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
+    /// Where tests point `gh`; `None` outside tests. Snapshotted at attach so
+    /// the post-turn fact detector confirms against the same binary every
+    /// other gh call in the process resolves (decision 62).
+    gh_search_path: Option<String>,
     /// Engine-lifetime unrecognized count already folded onto the session row.
     ///
     /// The engine's own count is cumulative for as long as it is attached, and
@@ -1231,6 +1235,13 @@ async fn drive_turn_inner(
             // the turn's edits can still be checkpointed. The engine may have
             // rewritten files before the stream broke.
             super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
+            super::pr_facts::sweep_turn_for_pull_request_acts(
+                db,
+                session,
+                turn.id,
+                sink.gh_search_path.as_deref(),
+            )
+            .await;
             if let Some(detail) = attachment_cleanup_error.as_ref() {
                 let _ = super::recovery::fence_session(
                     db,
@@ -1276,6 +1287,13 @@ async fn drive_turn_inner(
         turn = current;
     }
     super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
+    super::pr_facts::sweep_turn_for_pull_request_acts(
+        db,
+        session,
+        turn.id,
+        sink.gh_search_path.as_deref(),
+    )
+    .await;
     if let Some(detail) = attachment_cleanup_error {
         let _ = super::recovery::fence_session(
             db,
@@ -1597,6 +1615,7 @@ pub(crate) async fn attach_engine(
     Ok(session)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sink_for(
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
@@ -1605,6 +1624,7 @@ pub(crate) fn sink_for(
     spawn_epoch: i64,
     turn_id: Option<CodeTurnId>,
     subagents: Vec<CodeSubagentSummary>,
+    gh_search_path: Option<String>,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
         db,
@@ -1613,6 +1633,7 @@ pub(crate) fn sink_for(
         session_id,
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
+        gh_search_path,
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
     })
@@ -2056,6 +2077,9 @@ mod tests {
                 created_at: Utc::now(),
                 removed_at: None,
                 cloned_from: None,
+                origin_host: None,
+                origin_owner: None,
+                origin_name: None,
             },
         )
         .await
@@ -2117,6 +2141,7 @@ mod tests {
             1,
             None,
             Vec::new(),
+            None,
         );
         (directory, store, sink, session_id)
     }

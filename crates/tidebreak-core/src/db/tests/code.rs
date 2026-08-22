@@ -66,6 +66,9 @@ async fn seed_owner(
             created_at: now(),
             removed_at: None,
             cloned_from: None,
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
         },
     )
     .await
@@ -1124,6 +1127,9 @@ async fn the_same_repository_path_can_belong_to_two_owners() {
                 created_at: now(),
                 removed_at: None,
                 cloned_from: None,
+                origin_host: None,
+                origin_owner: None,
+                origin_name: None,
             },
         )
         .await
@@ -1415,6 +1421,9 @@ async fn a_removed_repo_path_can_be_registered_again() {
         created_at: now(),
         removed_at: None,
         cloned_from: None,
+        origin_host: None,
+        origin_owner: None,
+        origin_name: None,
     };
     insert_repo(&store, &replacement).await.unwrap();
 
@@ -1486,6 +1495,9 @@ async fn a_cloned_repo_records_where_it_came_from() {
             created_at: now(),
             removed_at: None,
             cloned_from: Some("https://example.invalid/team/repo.git".into()),
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
         },
     )
     .await
@@ -2453,4 +2465,148 @@ async fn trigger_attention_acceptance_is_atomic_and_global() {
             .attention,
         Attention::working(AttentionSource::Lifecycle)
     );
+}
+
+/// Facts and attribution (decision 62): identity upsert, claim-once, and the
+/// contributed-to-authored promotion.
+#[tokio::test]
+async fn pull_request_facts_upsert_claim_and_promote() {
+    use crate::code::{
+        CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,
+        CodePullRequestId, CodePullRequestRelation, CodePullRequestState,
+    };
+    use crate::db::code::{
+        count_attributed_prs_for_workspace, get_pull_request_fact, insert_pull_request_attribution,
+        list_attributed_facts_for_workspace, list_fact_repo_identities,
+        promote_attribution_to_authored, save_pull_request_fact,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session_id, _turn_id) = seed_owner(&store, &owner, "facts").await;
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+
+    let first_seen = now();
+    let fact = CodePullRequestFact {
+        id: CodePullRequestId::new(),
+        owner: owner.clone(),
+        host: "github.com".into(),
+        repo_owner: "acme".into(),
+        repo_name: "tools".into(),
+        number: 412,
+        url: "https://github.com/acme/tools/pull/412".into(),
+        title: "First".into(),
+        state: CodePullRequestState::Open,
+        draft: true,
+        author: Some("octocat".into()),
+        head_branch: "feat/x".into(),
+        base_branch: "main".into(),
+        head_sha: Some("aaa111".into()),
+        created_at: first_seen,
+        updated_at: first_seen,
+        merged_at: None,
+        closed_at: None,
+        first_seen_at: first_seen,
+        last_seen_at: first_seen,
+    };
+    let id = save_pull_request_fact(&store, &fact).await.unwrap();
+
+    // Same identity, fresh snapshot: the id and first_seen_at hold, the
+    // snapshot and last_seen_at move.
+    let later = now();
+    let refreshed = CodePullRequestFact {
+        id: CodePullRequestId::new(),
+        title: "First, retitled".into(),
+        state: CodePullRequestState::Merged,
+        draft: false,
+        head_sha: Some("bbb222".into()),
+        merged_at: Some(later),
+        first_seen_at: later,
+        last_seen_at: later,
+        ..fact.clone()
+    };
+    let same_id = save_pull_request_fact(&store, &refreshed).await.unwrap();
+    assert_eq!(id, same_id);
+    let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.id, id);
+    assert_eq!(stored.title, "First, retitled");
+    assert_eq!(stored.state, CodePullRequestState::Merged);
+    assert_eq!(stored.head_sha.as_deref(), Some("bbb222"));
+    assert_eq!(stored.first_seen_at, first_seen);
+    assert_eq!(stored.last_seen_at, later);
+
+    // Claim once: the second claim reports the row already exists and the
+    // stored relation is untouched.
+    let attribution = CodePullRequestAttribution {
+        owner: owner.clone(),
+        pull_request_id: id,
+        workspace_id,
+        relation: CodePullRequestRelation::Contributed,
+        discovered_via: CodePullRequestDiscovery::Command,
+        session_id: Some(session_id),
+        parent_call_id: Some("task-1".into()),
+        created_at: now(),
+    };
+    assert!(insert_pull_request_attribution(&store, &attribution)
+        .await
+        .unwrap());
+    assert!(!insert_pull_request_attribution(
+        &store,
+        &CodePullRequestAttribution {
+            relation: CodePullRequestRelation::Authored,
+            ..attribution.clone()
+        }
+    )
+    .await
+    .unwrap());
+    let listed = list_attributed_facts_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].1, CodePullRequestRelation::Contributed);
+
+    // The promotion is the only way the losing claim's stronger relation
+    // lands.
+    promote_attribution_to_authored(&store, &owner, id, workspace_id)
+        .await
+        .unwrap();
+    let listed = list_attributed_facts_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(listed[0].1, CodePullRequestRelation::Authored);
+
+    assert_eq!(
+        count_attributed_prs_for_workspace(&store, &owner, workspace_id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        list_fact_repo_identities(&store, &owner).await.unwrap(),
+        vec![(
+            "github.com".to_owned(),
+            "acme".to_owned(),
+            "tools".to_owned()
+        )]
+    );
+
+    // Another owner sees none of it.
+    let stranger = OwnerId::new("stranger").unwrap();
+    assert!(
+        get_pull_request_fact(&store, &stranger, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(list_fact_repo_identities(&store, &stranger)
+        .await
+        .unwrap()
+        .is_empty());
 }

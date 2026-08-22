@@ -1935,6 +1935,83 @@ pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
     }
 }
 
+/// Fields a pull-request fact snapshot needs (decision 62). Narrower than the
+/// delivery list fields: no checks, review, or mergeability — those stay
+/// live-only.
+pub(crate) const PR_FACT_FIELDS: &str = "number,url,title,state,isDraft,author,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergedAt,closedAt";
+
+/// Read one repository-qualified pull request's fact fields, as raw JSON.
+pub(crate) async fn view_pull_request_raw(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    search_path: Option<&str>,
+) -> Result<serde_json::Value, GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let number = number.to_string();
+    let raw = run_gh(
+        Path::new("."),
+        &binary,
+        &[
+            "pr",
+            "view",
+            &number,
+            "--repo",
+            &repository,
+            "--json",
+            PR_FACT_FIELDS,
+        ],
+        GH_TIMEOUT,
+    )
+    .await
+    .map_err(|error| classify_observed_gh(error, &observation))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| GhError::Internal(format!("could not parse pull request: {error}")))
+}
+
+/// List a repository's pull requests whose head is one branch, as raw JSON.
+///
+/// `--state all` so a push confirmed just after a merge still resolves; the
+/// caller picks among the handful of results.
+pub(crate) async fn list_pull_requests_for_head_raw(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    head_branch: &str,
+    search_path: Option<&str>,
+) -> Result<Vec<serde_json::Value>, GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let repository = cli_repository(host, owner, repo);
+    let raw = run_gh(
+        Path::new("."),
+        &binary,
+        &[
+            "pr",
+            "list",
+            "--repo",
+            &repository,
+            "--head",
+            head_branch,
+            "--state",
+            "all",
+            "--limit",
+            "5",
+            "--json",
+            PR_FACT_FIELDS,
+        ],
+        GH_TIMEOUT,
+    )
+    .await
+    .map_err(|error| classify_observed_gh(error, &observation))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| GhError::Internal(format!("could not parse pull requests: {error}")))?;
+    Ok(value.as_array().cloned().unwrap_or_default())
+}
+
 fn classify_observed_gh(error: String, observation: &GhObservation) -> GhError {
     if observation.authenticated == Some(false) || is_gh_signed_out_error(&error) {
         return GhError::GhSignedOut {

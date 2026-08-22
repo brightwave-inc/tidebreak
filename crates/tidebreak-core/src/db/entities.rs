@@ -1670,6 +1670,68 @@ pub mod code_repo {
         pub created_at: DateTimeUtc,
         pub removed_at: Option<DateTimeUtc>,
         pub cloned_from: Option<String>,
+        pub origin_host: Option<String>,
+        pub origin_owner: Option<String>,
+        pub origin_name: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_pull_request {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_pull_request")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub host: String,
+        pub repo_owner: String,
+        pub repo_name: String,
+        pub number: i64,
+        pub url: String,
+        pub title: String,
+        pub state: String,
+        pub draft: bool,
+        pub author: Option<String>,
+        pub head_branch: String,
+        pub base_branch: String,
+        pub head_sha: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub merged_at: Option<DateTimeUtc>,
+        pub closed_at: Option<DateTimeUtc>,
+        pub first_seen_at: DateTimeUtc,
+        pub last_seen_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_pull_request_attribution {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_pull_request_attribution")]
+    pub struct Model {
+        pub owner: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub pull_request_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub workspace_id: Uuid,
+        pub relation: String,
+        pub discovered_via: String,
+        pub session_id: Option<Uuid>,
+        pub parent_call_id: Option<String>,
+        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

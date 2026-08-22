@@ -626,6 +626,9 @@ mod tests {
                 created_at: Utc::now(),
                 removed_at: None,
                 cloned_from: None,
+                origin_host: None,
+                origin_owner: None,
+                origin_name: None,
             },
         )
         .await
