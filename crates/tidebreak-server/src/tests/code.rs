@@ -6967,3 +6967,76 @@ async fn a_session_cannot_attach_an_image_published_to_another_session() {
         "the refusal must name authority, not blob absence: {body}"
     );
 }
+
+/// Arming one condition twice must answer with the row that exists.
+///
+/// `save_trigger` upserts on `(owner, repo, condition)` and updates action and
+/// enabled without touching the stored id. Returning the freshly minted id
+/// instead would answer 201 with a trigger that `GET`, `PATCH` and `DELETE`
+/// cannot find.
+#[tokio::test]
+async fn re_arming_a_condition_keeps_the_stored_trigger_id() {
+    let adapter = ScriptedAdapter::new(plain_text_script());
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo_path = init_git_repo(dir.path());
+    let (repo, _workspace) = register_and_workspace(&client, addr, &token, &repo_path).await;
+    let repo_id = json_id(&repo).to_owned();
+
+    let armed = client
+        .post(format!("http://{addr}/code/repos/{repo_id}/triggers"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "condition": "checks_failed", "action": "deliver" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(armed.status(), reqwest::StatusCode::CREATED);
+    let first: serde_json::Value = armed.json().await.unwrap();
+
+    // Same condition, different action: the store's unique key collides.
+    let rearmed = client
+        .post(format!("http://{addr}/code/repos/{repo_id}/triggers"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "condition": "checks_failed", "action": "notify" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rearmed.status(), reqwest::StatusCode::CREATED);
+    let second: serde_json::Value = rearmed.json().await.unwrap();
+
+    assert_eq!(
+        json_id(&second),
+        json_id(&first),
+        "re-arming a condition must keep the stored id"
+    );
+    assert_eq!(
+        second["action"], "notify",
+        "the action is the one just armed"
+    );
+
+    let listed = client
+        .get(format!("http://{addr}/code/repos/{repo_id}/triggers"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let rows: Vec<serde_json::Value> = listed.json().await.unwrap();
+    assert_eq!(rows.len(), 1, "one row per condition, not one per action");
+    assert_eq!(json_id(&rows[0]), json_id(&first));
+
+    // The id it answered with has to be one the other routes can reach.
+    let patched = client
+        .patch(format!(
+            "http://{addr}/code/repos/{repo_id}/triggers/{}",
+            json_id(&second)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), reqwest::StatusCode::OK);
+    let patched_body: serde_json::Value = patched.json().await.unwrap();
+    assert_eq!(patched_body["enabled"], false);
+}
