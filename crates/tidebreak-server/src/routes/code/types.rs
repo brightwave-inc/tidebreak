@@ -862,6 +862,14 @@ pub struct CodeDeliveryPullRequestSummary {
     pub attention_reasons: Vec<CodeDeliveryPrAttentionReason>,
     pub ready_to_merge: bool,
     pub workspace_links: Vec<CodeDeliveryWorkspaceLink>,
+    /// The open pull request this one is stacked on: its base branch is that
+    /// pull request's head branch in the same repository (decision 62).
+    /// Derived from the durable fact set, so a parent outside the current
+    /// page or filter still resolves. Absent when the base is the default
+    /// branch or nothing tracked owns it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stack_parent_number: Option<u64>,
     pub labels: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,

@@ -36,6 +36,7 @@ import {
   deliveryNotifications,
   deliveryPullRequestDetails,
   deliveryPullRequests,
+  stackedDeliveryPullRequests,
   deliveryRepositoriesSnapshot,
   deliveryRunDetails,
   deliveryRuns,
@@ -47,6 +48,7 @@ type DeliveryScenario =
   | "pull-requests"
   | "pull-requests-loading"
   | "pull-requests-empty"
+  | "pull-requests-stacked"
   | "pull-requests-partial"
   | "github-unavailable"
   | "runs"
@@ -141,7 +143,12 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
       }
       return {
         capability: deliveryRepositoriesSnapshot.capability,
-        items: scenario === "pull-requests-empty" ? [] : deliveryPullRequests,
+        items:
+          scenario === "pull-requests-empty"
+            ? []
+            : scenario === "pull-requests-stacked"
+              ? stackedDeliveryPullRequests
+              : deliveryPullRequests,
         errors:
           scenario === "pull-requests-partial"
             ? [
@@ -395,6 +402,25 @@ export const PullRequestLifecycles: Story = {
     await expect(await canvas.findAllByText("Changes requested")).toHaveLength(
       1,
     );
+  },
+};
+
+/**
+ * Stack lanes (decision 62): children indent under their parent in fact
+ * order, and a child whose parent is not loaded stays flat with a
+ * "stacked on" chip instead of a hidden edge.
+ */
+export const PullRequestStacks: Story = {
+  args: { scenario: "pull-requests-stacked" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByText("Stack base: extract the fact store"),
+    ).toBeVisible();
+    const rows = canvasElement.querySelectorAll("[data-depth]");
+    const depths = [...rows].map((row) => row.getAttribute("data-depth"));
+    await expect(depths).toEqual(["0", "1", "2", "0"]);
+    await expect(await canvas.findByText("Stacked on #2288")).toBeVisible();
   },
 };
 

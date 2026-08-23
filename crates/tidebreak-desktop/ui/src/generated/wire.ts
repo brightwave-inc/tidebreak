@@ -945,7 +945,15 @@ refresh: boolean, };
 /**
  * Pull request row shared by the overview and notification monitor.
  */
-export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, labels: Array<string>, created_at: string, updated_at: string, 
+export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, 
+/**
+ * The open pull request this one is stacked on: its base branch is that
+ * pull request's head branch in the same repository (decision 62).
+ * Derived from the durable fact set, so a parent outside the current
+ * page or filter still resolves. Absent when the base is the default
+ * branch or nothing tracked owns it.
+ */
+stack_parent_number?: number, labels: Array<string>, created_at: string, updated_at: string, 
 /**
  * Set only once the pull request merged. `state` alone cannot separate a
  * merged pull request from a closed one on every host response, and the

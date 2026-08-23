@@ -583,6 +583,7 @@ function parseCodeDeliveryPullRequestSummary(
       "attention_reasons",
       "ready_to_merge",
       "workspace_links",
+      "stack_parent_number",
       "labels",
       "created_at",
       "updated_at",
@@ -610,6 +611,8 @@ function parseCodeDeliveryPullRequestSummary(
       isMember(reason, DELIVERY_PR_ATTENTION_REASONS),
     ) ||
     typeof value.ready_to_merge !== "boolean" ||
+    (value.stack_parent_number !== undefined &&
+      !isFiniteNumber(value.stack_parent_number)) ||
     !Array.isArray(value.workspace_links) ||
     !isStringList(value.labels) ||
     !nonEmpty(value.created_at) ||
@@ -648,6 +651,9 @@ function parseCodeDeliveryPullRequestSummary(
     attention_reasons: [...value.attention_reasons],
     ready_to_merge: value.ready_to_merge,
     workspace_links,
+    ...(value.stack_parent_number !== undefined
+      ? { stack_parent_number: value.stack_parent_number }
+      : {}),
     labels: [...value.labels],
     created_at: value.created_at,
     updated_at: value.updated_at,

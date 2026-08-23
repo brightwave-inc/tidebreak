@@ -79,10 +79,12 @@ export function WorkspaceCard({
   visibleMeta,
   commands,
   childSessions = [],
+  stackParent,
   onOpen,
   onCommand,
   onOpenChildSession,
   onOpenSubagent,
+  onOpenStackParent,
   onWorkflowAction,
 }: {
   workspace: CodeWorkspaceSnapshot;
@@ -95,10 +97,13 @@ export function WorkspaceCard({
   visibleMeta: { repoChip: boolean; branch: boolean };
   commands: WorkspaceCommand[];
   childSessions?: CodeSessionDigest[];
+  /** The sibling workspace this branch is stacked on (decision 62). */
+  stackParent?: { id: string; title: string } | null;
   onOpen: () => void;
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onOpenChildSession?: (sessionId: string) => void;
   onOpenSubagent?: (callId: string) => void;
+  onOpenStackParent?: (workspaceId: string) => void;
   onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
   const title = digest?.title ?? workspace.title;
@@ -214,8 +219,18 @@ export function WorkspaceCard({
       )}
 
       {density === "detailed" &&
-        (childSessions.length > 0 || (digest?.subagents?.length ?? 0) > 0) && (
+        (childSessions.length > 0 ||
+          (digest?.subagents?.length ?? 0) > 0 ||
+          stackParent) && (
           <div className="relative mr-2 mb-2 ml-5 flex flex-col gap-0.5 border-l border-border-subtle pl-2">
+            {stackParent && (
+              <WorkspaceChildRow
+                label={`Stacked on ${stackParent.title}`}
+                ariaLabel={`${title} is stacked on ${stackParent.title}; open that workspace`}
+                icon={<CornerDownRight />}
+                onClick={() => onOpenStackParent?.(stackParent.id)}
+              />
+            )}
             {childSessions.map((child) => (
               <WorkspaceChildRow
                 key={child.session}

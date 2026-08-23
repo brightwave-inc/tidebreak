@@ -17,6 +17,7 @@ import type { ApiClient } from "../api/client";
 import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
+  stackedDeliveryPullRequests,
   deliveryRepositoriesSnapshot,
   deliveryRunDetails,
   deliveryRuns,
@@ -649,5 +650,27 @@ describe("delivery run list", () => {
     expect(
       screen.getByRole("heading", { name: "Production" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("stack lanes", () => {
+  it("indents children under their parent and badges an unloaded parent", async () => {
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: async () => ({
+        capability: deliveryRepositoriesSnapshot.capability,
+        items: stackedDeliveryPullRequests,
+        errors: [],
+        fetched_at: "2026-08-21T15:00:00.000Z",
+      }),
+    } as unknown as ApiClient);
+
+    await screen.findByText("Stack base: extract the fact store");
+    const list = screen.getByRole("list", { name: "Pull requests" });
+    const depths = [...list.querySelectorAll("[data-depth]")].map((row) =>
+      row.getAttribute("data-depth"),
+    );
+    expect(depths).toEqual(["0", "1", "2", "0"]);
+    expect(screen.getByText("Stacked on #2288")).toBeTruthy();
   });
 });

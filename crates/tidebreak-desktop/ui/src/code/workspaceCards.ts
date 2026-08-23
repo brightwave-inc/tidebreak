@@ -528,3 +528,30 @@ export function workspacePrChipSummary(
   if (prCount === undefined || prCount <= 1) return null;
   return `${prCount} PRs`;
 }
+
+/**
+ * The sibling workspace this one's branch is stacked on (decision 62): its
+ * base ref names that sibling's branch in the same repository. An `origin/`
+ * prefix strips, the way pull-request creation resolves the base. Stacks
+ * are creatable today by basing a workspace on another's branch; this is
+ * the read side.
+ */
+export function workspaceStackParent(
+  workspace: { id: string; repo_id: string; base_ref: string },
+  siblings: readonly {
+    id: string;
+    repo_id: string;
+    branch_name: string;
+    title: string;
+  }[],
+): { id: string; title: string } | null {
+  const base = workspace.base_ref.replace(/^origin\//, "");
+  if (!base) return null;
+  const parent = siblings.find(
+    (sibling) =>
+      sibling.id !== workspace.id &&
+      sibling.repo_id === workspace.repo_id &&
+      sibling.branch_name === base,
+  );
+  return parent ? { id: parent.id, title: parent.title } : null;
+}

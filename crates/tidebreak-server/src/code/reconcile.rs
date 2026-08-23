@@ -220,3 +220,58 @@ pub(crate) fn fact_from_summary(
         last_seen_at: now,
     })
 }
+
+/// Open head branches → pull request numbers, for stack derivation
+/// (decision 62). A pull request is stacked on another when its base branch
+/// is that pull request's head branch in the same repository; only open
+/// parents count, since a merged parent's branch is history, not a base.
+pub(crate) fn stack_parents_by_head(facts: &[CodePullRequestFact]) -> HashMap<String, u64> {
+    facts
+        .iter()
+        .filter(|fact| fact.state == CodePullRequestState::Open && !fact.head_branch.is_empty())
+        .map(|fact| (fact.head_branch.clone(), fact.number))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidebreak_core::CodePullRequestId;
+
+    fn fact(number: u64, head: &str, state: CodePullRequestState) -> CodePullRequestFact {
+        CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: OwnerId::local(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number,
+            url: format!("https://github.com/acme/tools/pull/{number}"),
+            title: format!("PR {number}"),
+            state,
+            draft: false,
+            author: None,
+            head_branch: head.into(),
+            base_branch: "main".into(),
+            head_sha: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: chrono::Utc::now(),
+            last_seen_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn only_open_heads_parent_a_stack() {
+        let parents = stack_parents_by_head(&[
+            fact(1, "feat/base", CodePullRequestState::Open),
+            fact(2, "feat/merged-away", CodePullRequestState::Merged),
+            fact(3, "", CodePullRequestState::Open),
+        ]);
+        assert_eq!(parents.get("feat/base"), Some(&1));
+        assert!(!parents.contains_key("feat/merged-away"));
+        assert!(!parents.contains_key(""));
+    }
+}

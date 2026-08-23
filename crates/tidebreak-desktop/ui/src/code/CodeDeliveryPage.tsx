@@ -5,6 +5,7 @@ import {
   ArchiveRestore,
   Check,
   CircleAlert,
+  CornerDownRight,
   ExternalLink,
   Filter,
   GitBranch,
@@ -98,6 +99,7 @@ import {
   PULL_REQUEST_LIFECYCLE_LABEL,
   PULL_REQUEST_LIFECYCLE_TONE,
 } from "./pullRequestPresentation";
+import { arrangeStackLanes } from "./pullRequestStacks";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 
 const PR_BUILT_IN_VIEWS: readonly {
@@ -1468,6 +1470,9 @@ function PullRequestList({
   onSelect: (id: string) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  // Stack lanes: children follow their parent, indented; a parent outside
+  // the loaded rows leaves the child at depth 0 with a "stacked on" chip.
+  const rows = useMemo(() => arrangeStackLanes(items), [items]);
   return (
     <div role="list" aria-label="Pull requests" className="min-w-[760px]">
       <div
@@ -1482,15 +1487,17 @@ function PullRequestList({
         <span className="text-right">Updated</span>
       </div>
       <VirtualRows
-        items={items}
+        items={rows}
         scrollRef={scrollRef}
         estimateSize={PR_ROW_HEIGHT}
       >
-        {(item) => (
+        {(row) => (
           <PullRequestRow
-            item={item}
-            active={selectedId === item.id}
-            onSelect={() => onSelect(item.id)}
+            item={row.item}
+            depth={row.depth}
+            stackedOn={row.stackedOn}
+            active={selectedId === row.item.id}
+            onSelect={() => onSelect(row.item.id)}
           />
         )}
       </VirtualRows>
@@ -1500,10 +1507,14 @@ function PullRequestList({
 
 function PullRequestRow({
   item,
+  depth,
+  stackedOn,
   active,
   onSelect,
 }: {
   item: CodeDeliveryPullRequestSummary;
+  depth: number;
+  stackedOn?: number;
   active: boolean;
   onSelect: () => void;
 }) {
@@ -1516,14 +1527,24 @@ function PullRequestRow({
       type="button"
       role="listitem"
       data-active={active || undefined}
+      data-depth={depth}
       className={cn(
         "grid w-full cursor-pointer gap-4 border-b border-border-subtle px-5 py-3 text-left transition-colors hover:bg-muted/35 data-[active]:bg-muted/55",
         PR_GRID,
       )}
       onClick={onSelect}
     >
-      <span className="min-w-0">
+      <span
+        className="min-w-0"
+        style={depth > 0 ? { paddingLeft: depth * 16 } : undefined}
+      >
         <span className="flex min-w-0 items-center gap-2">
+          {depth > 0 && (
+            <CornerDownRight
+              className="size-3.5 shrink-0 text-muted-foreground/70"
+              aria-label={`Stacked on the pull request above, level ${depth}`}
+            />
+          )}
           <PrLifecycleIcon
             lifecycle={lifecycle}
             className={cn(
@@ -1554,6 +1575,11 @@ function PullRequestRow({
           <span className="truncate">{item.repository.name_with_owner}</span>
           <span className="tabular-nums">#{item.number}</span>
           <span className="truncate font-mono">{item.head_branch}</span>
+          {stackedOn !== undefined && (
+            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">
+              Stacked on #{stackedOn}
+            </span>
+          )}
           {item.workspace_links.length > 0 && (
             <span className="shrink-0 rounded bg-info-background px-1.5 py-0.5 text-[10px] text-info-foreground-muted">
               Tidebreak

@@ -16,6 +16,7 @@ import {
   sessionActivityLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
+  workspaceStackParent,
   workspaceStatusRank,
 } from "./workspaceCards";
 
@@ -390,5 +391,52 @@ describe("workspacePrChipSummary", () => {
   it("counts once the workspace worked on several", () => {
     expect(workspacePrChipSummary(2)).toBe("2 PRs");
     expect(workspacePrChipSummary(7)).toBe("7 PRs");
+  });
+});
+
+describe("workspaceStackParent", () => {
+  const parent = {
+    id: "ws-parent",
+    repo_id: "repo-1",
+    branch_name: "tidebreak/base-work",
+    title: "Base work",
+  };
+
+  it("finds the sibling whose branch this base ref names", () => {
+    const child = {
+      id: "ws-child",
+      repo_id: "repo-1",
+      base_ref: "origin/tidebreak/base-work",
+    };
+    expect(workspaceStackParent(child, [parent])).toEqual({
+      id: "ws-parent",
+      title: "Base work",
+    });
+    expect(
+      workspaceStackParent({ ...child, base_ref: "tidebreak/base-work" }, [
+        parent,
+      ]),
+    ).toEqual({ id: "ws-parent", title: "Base work" });
+  });
+
+  it("never matches itself, another repo, or a plain default base", () => {
+    expect(
+      workspaceStackParent(
+        { id: "ws-parent", repo_id: "repo-1", base_ref: "tidebreak/base-work" },
+        [parent],
+      ),
+    ).toBeNull();
+    expect(
+      workspaceStackParent(
+        { id: "ws-child", repo_id: "repo-2", base_ref: "tidebreak/base-work" },
+        [parent],
+      ),
+    ).toBeNull();
+    expect(
+      workspaceStackParent(
+        { id: "ws-child", repo_id: "repo-1", base_ref: "origin/main" },
+        [parent],
+      ),
+    ).toBeNull();
   });
 });

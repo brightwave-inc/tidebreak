@@ -74,6 +74,20 @@ export const PullRequestInRail: Story = {
 };
 
 /**
+ * A branch based on a sibling workspace's branch (decision 62): the stack
+ * relationship nests as a child row that opens the parent workspace.
+ */
+export const StackedOnSibling: Story = {
+  args: {
+    workspace: { ...codeWorkspace, base_ref: "origin/tidebreak/base-work" },
+    digest: runningDigest,
+    session: codeSession,
+    stackParent: { id: "ws-parent", title: "Extract the fact store" },
+    onOpenStackParent: fn(),
+  },
+};
+
+/**
  * A workspace that worked on several pull requests (decision 62): the chip
  * keeps its primary pull request and gains the attributed count.
  */
