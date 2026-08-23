@@ -47,6 +47,7 @@ impl MigratorTrait for Migrator {
             Box::new(TriggerFireOutbox),
             Box::new(TriggerDeliveryReceipts),
             Box::new(CodePullRequestFacts),
+            Box::new(TriggerFactConditions),
         ]
     }
 }
@@ -840,6 +841,235 @@ impl MigrationTrait for TriggerFireOutbox {
 
 const TRIGGER_FIRE_OUTBOX_TEMP_TABLE: &str = "code_trigger_fire_outbox_upgrade";
 
+/// The condition tokens the pre-fact-edge schema accepted (decision 60).
+const BASELINE_TRIGGER_CONDITIONS: &[&str] = &[
+    "checks_failed",
+    "conflicts",
+    "changes_requested",
+    "review_required",
+    "behind",
+    "ready_to_merge",
+    "merged",
+    "closed",
+];
+
+/// The condition tokens including the fact edges (decision 62).
+const FACT_TRIGGER_CONDITIONS: &[&str] = &[
+    "checks_failed",
+    "conflicts",
+    "changes_requested",
+    "review_required",
+    "behind",
+    "ready_to_merge",
+    "merged",
+    "closed",
+    "pr_opened",
+    "pr_updated",
+];
+
+/// Accept the fact-edge conditions `pr_opened` and `pr_updated` (decision 62).
+///
+/// Both condition CHECKs are table-level — `code_trigger.condition` from the
+/// frozen baseline and `code_trigger_fire.delivery_condition` from the outbox
+/// rebuild — and SQLite cannot alter a table-level CHECK in place, so both
+/// tables rebuild. The order matters on PostgreSQL, which enforces the
+/// fire→trigger cascade: the new fire table references the new trigger table
+/// before either old table drops, and nothing is ever dropped while a
+/// foreign key still points at it. SQLite rewrites the new fire table's
+/// reference when the new trigger table takes its final name.
+struct TriggerFactConditions;
+
+impl MigrationName for TriggerFactConditions {
+    fn name(&self) -> &str {
+        "m20260823_000010_trigger_fact_conditions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for TriggerFactConditions {
+    fn use_transaction(&self) -> Option<bool> {
+        // Either both rebuilt tables land with every row, or neither does.
+        Some(true)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        widen_trigger_condition_checks(manager).await
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Narrowing the vocabulary would refuse rows that already exist.
+        Ok(())
+    }
+}
+
+const TRIGGER_WIDEN_TEMP_TABLE: &str = "code_trigger_widen_upgrade";
+const TRIGGER_FIRE_WIDEN_TEMP_TABLE: &str = "code_trigger_fire_widen_upgrade";
+
+fn code_trigger_widened_table(name: &str, conditions: &[&str]) -> TableCreateStatement {
+    Table::create()
+        .table(Alias::new(name))
+        .col(
+            ColumnDef::new(idens::CodeTrigger::Id)
+                .uuid()
+                .not_null()
+                .primary_key(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTrigger::Owner)
+                .text()
+                .not_null()
+                .default("local"),
+        )
+        .col(ColumnDef::new(idens::CodeTrigger::RepoId).uuid().not_null())
+        .col(
+            ColumnDef::new(idens::CodeTrigger::Condition)
+                .text()
+                .not_null(),
+        )
+        .col(ColumnDef::new(idens::CodeTrigger::Action).text().not_null())
+        .col(
+            ColumnDef::new(idens::CodeTrigger::Enabled)
+                .boolean()
+                .not_null()
+                .default(true),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTrigger::CreatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(idens::CodeTrigger::UpdatedAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_code_trigger_repo")
+                .from(Alias::new(name), idens::CodeTrigger::RepoId)
+                .to(idens::CodeRepo::Table, idens::CodeRepo::Id),
+        )
+        .check(Expr::col(idens::CodeTrigger::Condition).is_in(conditions.iter().copied()))
+        .check(Expr::col(idens::CodeTrigger::Action).is_in(["deliver", "notify"]))
+        .to_owned()
+}
+
+async fn widen_trigger_condition_checks(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    for (table, temp) in [
+        ("code_trigger", TRIGGER_WIDEN_TEMP_TABLE),
+        ("code_trigger_fire", TRIGGER_FIRE_WIDEN_TEMP_TABLE),
+    ] {
+        if !manager.has_table(table).await? {
+            return Err(DbErr::Custom(format!(
+                "the migration chain did not create {table}"
+            )));
+        }
+        if manager.has_table(temp).await? {
+            manager
+                .drop_table(Table::drop().table(Alias::new(temp)).to_owned())
+                .await?;
+        }
+    }
+
+    manager
+        .create_table(code_trigger_widened_table(
+            TRIGGER_WIDEN_TEMP_TABLE,
+            FACT_TRIGGER_CONDITIONS,
+        ))
+        .await?;
+    let copy_triggers = "INSERT INTO {temp} \
+         (id, owner, repo_id, condition, action, enabled, created_at, updated_at) \
+         SELECT id, owner, repo_id, condition, action, enabled, created_at, updated_at \
+         FROM code_trigger"
+        .replace("{temp}", TRIGGER_WIDEN_TEMP_TABLE);
+    manager
+        .get_connection()
+        .execute_unprepared(&copy_triggers)
+        .await?;
+
+    manager
+        .create_table(code_trigger_fire_outbox_table(
+            TRIGGER_FIRE_WIDEN_TEMP_TABLE,
+            TRIGGER_WIDEN_TEMP_TABLE,
+            FACT_TRIGGER_CONDITIONS,
+        ))
+        .await?;
+    let copy_fires = "INSERT INTO {temp} \
+         (owner, trigger_id, workspace_id, pr_number, head_sha, fired_at, delivery_id, \
+          delivery_condition, delivery_action, delivery_message, state, attempt_count, \
+          lease_token, lease_expires_at, next_attempt_at, last_error, delivered_at, \
+          cancelled_at) \
+         SELECT owner, trigger_id, workspace_id, pr_number, head_sha, fired_at, delivery_id, \
+          delivery_condition, delivery_action, delivery_message, state, attempt_count, \
+          lease_token, lease_expires_at, next_attempt_at, last_error, delivered_at, \
+          cancelled_at \
+         FROM code_trigger_fire"
+        .replace("{temp}", TRIGGER_FIRE_WIDEN_TEMP_TABLE);
+    manager
+        .get_connection()
+        .execute_unprepared(&copy_fires)
+        .await?;
+
+    // Old fire first (nothing references it), then the old trigger table,
+    // which by now has zero inbound foreign keys on either backend.
+    manager
+        .drop_table(
+            Table::drop()
+                .table(Alias::new("code_trigger_fire"))
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .drop_table(Table::drop().table(Alias::new("code_trigger")).to_owned())
+        .await?;
+    manager
+        .rename_table(
+            Table::rename()
+                .table(
+                    Alias::new(TRIGGER_WIDEN_TEMP_TABLE),
+                    Alias::new("code_trigger"),
+                )
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .rename_table(
+            Table::rename()
+                .table(
+                    Alias::new(TRIGGER_FIRE_WIDEN_TEMP_TABLE),
+                    Alias::new("code_trigger_fire"),
+                )
+                .to_owned(),
+        )
+        .await?;
+
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_code_trigger_repo")
+                .table(idens::CodeTrigger::Table)
+                .col(idens::CodeTrigger::RepoId)
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .unique()
+                .name("uq_code_trigger_rule")
+                .table(idens::CodeTrigger::Table)
+                .col(idens::CodeTrigger::Owner)
+                .col(idens::CodeTrigger::RepoId)
+                .col(idens::CodeTrigger::Condition)
+                .to_owned(),
+        )
+        .await?;
+    for index in code_trigger_fire_outbox_indexes() {
+        manager.create_index(index).await?;
+    }
+    Ok(())
+}
+
 fn trigger_fire_uuid_expr(
     row: &QueryResult,
     backend: DbBackend,
@@ -868,6 +1098,8 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
     manager
         .create_table(code_trigger_fire_outbox_table(
             TRIGGER_FIRE_OUTBOX_TEMP_TABLE,
+            "code_trigger",
+            BASELINE_TRIGGER_CONDITIONS,
         ))
         .await?;
 
@@ -954,7 +1186,11 @@ async fn rebuild_code_trigger_fire_outbox(manager: &SchemaManager<'_>) -> Result
     Ok(())
 }
 
-fn code_trigger_fire_outbox_table(name: &str) -> TableCreateStatement {
+fn code_trigger_fire_outbox_table(
+    name: &str,
+    trigger_table: &str,
+    conditions: &[&str],
+) -> TableCreateStatement {
     let pending = Expr::col(idens::CodeTriggerFire::State)
         .eq("pending")
         .and(Expr::col(idens::CodeTriggerFire::DeliveredAt).is_null())
@@ -1060,7 +1296,7 @@ fn code_trigger_fire_outbox_table(name: &str) -> TableCreateStatement {
             ForeignKey::create()
                 .name("fk_code_trigger_fire_trigger")
                 .from(Alias::new(name), idens::CodeTriggerFire::TriggerId)
-                .to(idens::CodeTrigger::Table, idens::CodeTrigger::Id)
+                .to(Alias::new(trigger_table), idens::CodeTrigger::Id)
                 .on_delete(ForeignKeyAction::Cascade),
         )
         .foreign_key(
@@ -1087,16 +1323,8 @@ fn code_trigger_fire_outbox_table(name: &str) -> TableCreateStatement {
         .check(
             Expr::col(idens::CodeTriggerFire::DeliveryCondition)
                 .is_null()
-                .or(Expr::col(idens::CodeTriggerFire::DeliveryCondition).is_in([
-                    "checks_failed",
-                    "conflicts",
-                    "changes_requested",
-                    "review_required",
-                    "behind",
-                    "ready_to_merge",
-                    "merged",
-                    "closed",
-                ])),
+                .or(Expr::col(idens::CodeTriggerFire::DeliveryCondition)
+                    .is_in(conditions.iter().copied())),
         )
         .check(
             Expr::col(idens::CodeTriggerFire::DeliveryAction)
@@ -1187,6 +1415,7 @@ mod tests {
                 "m20260822_000007_trigger_fire_outbox",
                 "m20260822_000008_trigger_delivery_receipts",
                 "m20260822_000009_code_pull_request_facts",
+                "m20260823_000010_trigger_fact_conditions",
             ]
         );
         assert!(db
@@ -1687,5 +1916,78 @@ mod tests {
              squashing the chain for a release."
             );
         }
+    }
+
+    /// The condition-widening rebuild keeps every trigger and fire row, keeps
+    /// the outbox identity, accepts the fact-edge tokens, and still refuses a
+    /// garbage token. A wrong rebuild passes a fresh-database test easily —
+    /// only seeded data shows a dropped row or a lost constraint.
+    #[tokio::test]
+    async fn the_condition_widening_keeps_trigger_and_fire_rows() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        // Everything up to, but not including, the widening.
+        Migrator::up(&db, Some(9)).await.unwrap();
+
+        for statement in [
+            "INSERT INTO code_repo (id, owner, root_path, display_name, default_base_ref, \
+             branch_prefix, quick_actions, created_at) VALUES ('repo-1', 'local', '/tmp/r', \
+             'r', 'main', 'tidebreak/', '[]', '2026-08-20T00:00:00Z')",
+            "INSERT INTO code_workspace (id, owner, repo_id, title, worktree_path, branch_name, \
+             base_ref, status, created_at) VALUES ('ws-1', 'local', 'repo-1', 'w', '/tmp/w', \
+             'tidebreak/w', 'main', 'active', '2026-08-20T00:00:00Z')",
+            "INSERT INTO code_trigger (id, owner, repo_id, condition, action, enabled, \
+             created_at, updated_at) VALUES ('trig-1', 'local', 'repo-1', 'checks_failed', \
+             'deliver', TRUE, '2026-08-20T00:00:00Z', '2026-08-20T00:00:00Z')",
+            "INSERT INTO code_trigger_fire (owner, trigger_id, workspace_id, pr_number, \
+             head_sha, fired_at, delivery_id, delivery_condition, delivery_action, \
+             delivery_message, state, attempt_count, next_attempt_at) VALUES ('local', \
+             'trig-1', 'ws-1', 41, 'aaa', '2026-08-21T00:00:00Z', 'deliv-1', 'checks_failed', \
+             'deliver', 'm', 'pending', 0, '2026-08-21T00:00:00Z')",
+        ] {
+            db.execute_unprepared(statement).await.unwrap();
+        }
+
+        Migrator::up(&db, None).await.unwrap();
+
+        let fire = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT head_sha, state, delivery_condition FROM code_trigger_fire \
+                 WHERE trigger_id = 'trig-1'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("the seeded fire survives the rebuild");
+        assert_eq!(fire.try_get::<String>("", "head_sha").unwrap(), "aaa");
+        assert_eq!(fire.try_get::<String>("", "state").unwrap(), "pending");
+
+        // The widened vocabulary is accepted on both rebuilt CHECKs...
+        db.execute_unprepared(
+            "INSERT INTO code_trigger (id, owner, repo_id, condition, action, enabled, \
+             created_at, updated_at) VALUES ('trig-2', 'local', 'repo-1', 'pr_opened', \
+             'notify', TRUE, '2026-08-22T00:00:00Z', '2026-08-22T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared(
+            "INSERT INTO code_trigger_fire (owner, trigger_id, workspace_id, pr_number, \
+             head_sha, fired_at, delivery_id, delivery_condition, delivery_action, \
+             delivery_message, state, attempt_count, next_attempt_at) VALUES ('local', \
+             'trig-2', 'ws-1', 42, 'opened', '2026-08-22T00:00:00Z', 'deliv-2', 'pr_opened', \
+             'notify', 'm', 'pending', 0, '2026-08-22T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+
+        // ...and a token outside it still fails.
+        assert!(db
+            .execute_unprepared(
+                "INSERT INTO code_trigger (id, owner, repo_id, condition, action, enabled, \
+                 created_at, updated_at) VALUES ('trig-3', 'local', 'repo-1', 'pr_sparkled', \
+                 'notify', TRUE, '2026-08-22T00:00:00Z', '2026-08-22T00:00:00Z')",
+            )
+            .await
+            .is_err());
     }
 }

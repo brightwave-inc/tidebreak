@@ -52,6 +52,8 @@ mod code_pr_facts;
 mod code_reconcile;
 mod code_terminals;
 mod code_titling;
+#[cfg(unix)]
+mod code_trigger_facts;
 mod compaction;
 mod configuration;
 mod conformance;

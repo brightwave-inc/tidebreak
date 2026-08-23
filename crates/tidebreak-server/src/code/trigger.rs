@@ -18,17 +18,19 @@ use chrono::Utc;
 use futures::{stream, StreamExt};
 use tidebreak_core::db::code::{
     acknowledge_trigger_fire_delivery, get_open_turn, get_session, insert_or_load_trigger_fire,
-    latest_turn, lease_trigger_fire_delivery, list_active_watches_all_owners,
+    insert_settled_trigger_fire, latest_turn, lease_trigger_fire_delivery,
+    list_active_watches_all_owners, list_attributions_for_pull_requests,
     list_due_trigger_fire_deliveries_all_owners, list_enabled_triggers_all_owners,
-    list_sessions_for_workspace, reschedule_trigger_fire_delivery_failure,
-    trigger_delivery_accepted,
+    list_pull_request_facts_for_repo, list_sessions_for_workspace,
+    reschedule_trigger_fire_delivery_failure, trigger_delivery_accepted, trigger_fire_heads_for_pr,
 };
 use tidebreak_core::{
-    classify_trigger_condition, Attention, AttentionSource, CapLevel, CodeEvent, CodeSession,
-    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction,
-    CodeTriggerCondition, CodeTriggerDeliveryId, CodeTriggerFire, CodeTriggerFireIdentity,
-    CodeTriggerFirePayload, CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel, OwnerId,
-    PullRequestCheck, PullRequestDigest, RepoId, WorkspaceId,
+    classify_trigger_condition, Attention, AttentionSource, CapLevel, CodeEvent,
+    CodePullRequestFact, CodePullRequestId, CodeSession, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
+    CodeTriggerDeliveryId, CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload,
+    CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel, OwnerId, PullRequestCheck,
+    PullRequestDigest, RepoId, WorkspaceId,
 };
 use tracing::{debug, warn};
 
@@ -195,6 +197,12 @@ async fn sweep_owner(
         }
     }
 
+    // Fact-edge conditions read only the local store — the reconcile sweep
+    // keeps facts fresh — so they run before the remote-read gate below,
+    // which would drop a repository whose workspaces carry facts but no
+    // persisted digest (decision 62).
+    sweep_fact_edges(runtime, owner, &repositories, &eligible).await;
+
     // An exact remote read needs both an eligible workspace and its persisted
     // pull-request number. Exclude every other repository before reading its
     // origin or asking GitHub for anything.
@@ -276,6 +284,228 @@ async fn sweep_owner(
     Ok(())
 }
 
+/// The fingerprint a `pr_opened` fire carries instead of a head SHA: the edge
+/// is the pull request coming into existence, once, regardless of where its
+/// head moves afterwards. The token cannot collide with a real SHA.
+const PR_OPENED_FINGERPRINT: &str = "opened";
+
+/// Fire the fact-edge conditions from the durable store (decision 62).
+///
+/// `pr_opened` fires once per pull request whose host `created_at` and local
+/// `first_seen_at` both postdate the trigger's arming — arming a trigger over
+/// existing history stays silent. `pr_updated` fires once per distinct head;
+/// the first observed head lands as a settled baseline row so nothing
+/// notifies until the head actually moves. Both deliver to the eligible
+/// workspaces holding a durable attribution to the pull request. Best-effort
+/// throughout: a store failure skips the repository and the next tick
+/// retries.
+async fn sweep_fact_edges(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    repositories: &HashMap<RepoId, Vec<CodeTrigger>>,
+    eligible: &HashMap<RepoId, EligibleWorkspaces>,
+) {
+    let interested: Vec<(RepoId, Vec<&CodeTrigger>)> = repositories
+        .iter()
+        .filter_map(|(repo_id, triggers)| {
+            let fact_triggers: Vec<&CodeTrigger> = triggers
+                .iter()
+                .filter(|trigger| {
+                    matches!(
+                        trigger.condition,
+                        CodeTriggerCondition::PrOpened | CodeTriggerCondition::PrUpdated
+                    )
+                })
+                .collect();
+            (!fact_triggers.is_empty()).then_some((*repo_id, fact_triggers))
+        })
+        .collect();
+    if interested.is_empty() {
+        return;
+    }
+    let repos: HashMap<RepoId, tidebreak_core::CodeRepo> = match runtime.list_repos(owner).await {
+        Ok(repos) => repos.into_iter().map(|repo| (repo.id, repo)).collect(),
+        Err(err) => {
+            debug!(error = %err.message(), "fact-edge sweep could not list repositories");
+            return;
+        }
+    };
+
+    for (repo_id, triggers) in interested {
+        let Some(work) = eligible.get(&repo_id) else {
+            continue;
+        };
+        if work.workspace_ids.is_empty() {
+            continue;
+        }
+        let Some(repo) = repos.get(&repo_id) else {
+            continue;
+        };
+        // The reconcile sweep records the origin identity; a cold start falls
+        // back to one local git read.
+        let (host, repo_owner, repo_name) =
+            match (&repo.origin_host, &repo.origin_owner, &repo.origin_name) {
+                (Some(host), Some(repo_owner), Some(repo_name)) => {
+                    (host.clone(), repo_owner.clone(), repo_name.clone())
+                }
+                _ => match repository_target_from_local(repo).await {
+                    Ok(target) => (target.host, target.owner, target.name),
+                    Err(message) => {
+                        debug!(
+                            repo = %repo.id,
+                            error = %message,
+                            "fact-edge sweep skipped a repository without a GitHub origin"
+                        );
+                        continue;
+                    }
+                },
+            };
+        let facts = match list_pull_request_facts_for_repo(
+            &runtime.db,
+            owner,
+            &host,
+            &repo_owner,
+            &repo_name,
+        )
+        .await
+        {
+            Ok(facts) => facts,
+            Err(err) => {
+                debug!("fact-edge sweep could not read facts: {err}");
+                continue;
+            }
+        };
+        if facts.is_empty() {
+            continue;
+        }
+        let ids: Vec<CodePullRequestId> = facts.iter().map(|fact| fact.id).collect();
+        let attributions = match list_attributions_for_pull_requests(&runtime.db, owner, &ids).await
+        {
+            Ok(attributions) => attributions,
+            Err(err) => {
+                debug!("fact-edge sweep could not read attributions: {err}");
+                continue;
+            }
+        };
+        let mut workspaces_by_fact: HashMap<CodePullRequestId, Vec<WorkspaceId>> = HashMap::new();
+        for attribution in attributions {
+            if work.workspace_ids.contains(&attribution.workspace_id) {
+                workspaces_by_fact
+                    .entry(attribution.pull_request_id)
+                    .or_default()
+                    .push(attribution.workspace_id);
+            }
+        }
+
+        for fact in &facts {
+            let Some(targets) = workspaces_by_fact.get(&fact.id) else {
+                continue;
+            };
+            for trigger in &triggers {
+                for workspace_id in targets {
+                    if let Err(err) =
+                        fire_fact_edge(runtime, owner, trigger, *workspace_id, fact).await
+                    {
+                        warn!(
+                            trigger = %trigger.id,
+                            workspace = %workspace_id,
+                            error = %err.message(),
+                            "code-mode fact-edge fire failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Fire one fact edge for one trigger on one workspace, or record its
+/// baseline.
+async fn fire_fact_edge(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    trigger: &CodeTrigger,
+    workspace_id: WorkspaceId,
+    fact: &CodePullRequestFact,
+) -> Result<(), ServerError> {
+    match trigger.condition {
+        CodeTriggerCondition::PrOpened => {
+            if fact.created_at < trigger.created_at || fact.first_seen_at < trigger.created_at {
+                return Ok(());
+            }
+            let digest = digest_from_fact(fact);
+            fire_one(
+                runtime,
+                owner,
+                trigger,
+                workspace_id,
+                &digest,
+                PR_OPENED_FINGERPRINT,
+            )
+            .await
+        }
+        CodeTriggerCondition::PrUpdated => {
+            // A settled pull request's head is history; merged and closed have
+            // their own conditions.
+            if fact.state != tidebreak_core::CodePullRequestState::Open {
+                return Ok(());
+            }
+            let Some(head) = fact.head_sha.as_deref() else {
+                return Ok(());
+            };
+            let heads = trigger_fire_heads_for_pr(
+                &runtime.db,
+                owner,
+                trigger.id,
+                workspace_id,
+                fact.number,
+            )
+            .await?;
+            if heads.iter().any(|known| known == head) {
+                return Ok(());
+            }
+            if heads.is_empty() {
+                // First sight is the baseline, never a notification.
+                let identity = CodeTriggerFireIdentity {
+                    trigger_id: trigger.id,
+                    owner: owner.clone(),
+                    workspace_id,
+                    pr_number: fact.number,
+                    head_sha: head.to_owned(),
+                };
+                insert_settled_trigger_fire(&runtime.db, &identity, Utc::now()).await?;
+                return Ok(());
+            }
+            let digest = digest_from_fact(fact);
+            fire_one(runtime, owner, trigger, workspace_id, &digest, head).await
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The minimal digest a fact-edge message composes from: identity and title,
+/// no checks — the fact store deliberately never carries check state.
+fn digest_from_fact(fact: &CodePullRequestFact) -> PullRequestDigest {
+    PullRequestDigest {
+        number: fact.number,
+        url: Some(fact.url.clone()),
+        state: fact.state.as_str().to_owned(),
+        title: Some(fact.title.clone()),
+        checks_summary: None,
+        checks: None,
+        draft: Some(fact.draft),
+        merged: Some(fact.state == tidebreak_core::CodePullRequestState::Merged),
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: Some(fact.head_branch.clone()),
+        base_branch: Some(fact.base_branch.clone()),
+        head_sha: fact.head_sha.clone(),
+        auto_merge_enabled: None,
+        in_merge_queue: None,
+    }
+}
+
 /// Fetch one exact-number aggregate and deliver its matching facts.
 async fn sweep_pull_requests(
     runtime: &Arc<CodeRuntime>,
@@ -353,6 +583,23 @@ async fn claim_fires(
     let Some(condition) = classify_trigger_condition(&digest) else {
         return;
     };
+    // A stacked child is behind or blocked *because of its parent* — the
+    // summary carries the parent from the durable fact set (decision 62).
+    // Firing Behind or ReviewRequired at it would send an agent to rebase
+    // onto a branch that moves with every parent push.
+    if item.stack_parent_number.is_some()
+        && matches!(
+            condition,
+            CodeTriggerCondition::Behind | CodeTriggerCondition::ReviewRequired
+        )
+    {
+        debug!(
+            number = item.number,
+            parent = item.stack_parent_number,
+            "code-mode trigger held a stacked child's fire"
+        );
+        return;
+    }
     let workspaces = linked_workspaces(&item.workspace_links, work.repo_id, &work.workspace_ids);
     if workspaces.is_empty() {
         return;
@@ -765,6 +1012,8 @@ fn describe_condition(condition: CodeTriggerCondition, number: u64) -> String {
         CodeTriggerCondition::ReadyToMerge => format!("#{number} is ready to merge"),
         CodeTriggerCondition::Merged => format!("#{number} merged"),
         CodeTriggerCondition::Closed => format!("#{number} closed without merging"),
+        CodeTriggerCondition::PrOpened => format!("pull request #{number} opened"),
+        CodeTriggerCondition::PrUpdated => format!("#{number} has a new head"),
     }
 }
 

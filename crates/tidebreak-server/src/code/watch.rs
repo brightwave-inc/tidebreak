@@ -22,7 +22,7 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     get_session, insert_watch, latest_watch_for_workspace, list_active_watches_all_owners,
-    list_sessions_for_workspace, save_watch,
+    list_pull_request_facts_for_repo, list_sessions_for_workspace, save_watch,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeSessionKind, CodeSessionLifecycle, CodeWatch, CodeWatchId,
@@ -503,6 +503,21 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             Ok(())
         }
         WatchAssessment::Actionable(reason) => {
+            if reason == WatchReason::Behind {
+                // A stacked child is behind *because of its parent*: rebasing
+                // onto a branch that moves with every parent push never
+                // settles (decision 62). Park until the parent lands.
+                if let Some(parent) =
+                    stacked_parent_number(runtime.as_ref(), &owner, watch.workspace_id, &pr).await
+                {
+                    return park_watch(
+                        runtime.as_ref(),
+                        watch,
+                        &format!("waiting on its parent pull request #{parent}"),
+                    )
+                    .await;
+                }
+            }
             let same_head = watch.last_fix_head.is_some()
                 && watch.last_fix_head.as_deref() == pr.head_sha.as_deref();
             if same_head {
@@ -542,6 +557,42 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             Ok(())
         }
     }
+}
+
+/// The open pull request this workspace's pull request is stacked on, when
+/// the durable fact set knows one (decision 62). `None` on any missing link
+/// — no base branch, unresolved origin, or a store failure — so the watch
+/// behaves exactly as before when the answer is unknown.
+pub(crate) async fn stacked_parent_number(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    workspace_id: WorkspaceId,
+    pr: &PullRequestDigest,
+) -> Option<u64> {
+    let base_branch = pr.base_branch.as_deref()?;
+    let workspace = runtime.get_workspace(owner, workspace_id).await.ok()?;
+    let repo = runtime.get_repo(owner, workspace.repo_id).await.ok()?;
+    let (host, repo_owner, repo_name) =
+        match (&repo.origin_host, &repo.origin_owner, &repo.origin_name) {
+            (Some(host), Some(repo_owner), Some(repo_name)) => {
+                (host.clone(), repo_owner.clone(), repo_name.clone())
+            }
+            _ => {
+                let target = super::delivery::repository_target_from_local(&repo)
+                    .await
+                    .ok()?;
+                (target.host, target.owner, target.name)
+            }
+        };
+    let facts =
+        list_pull_request_facts_for_repo(&runtime.db, owner, &host, &repo_owner, &repo_name)
+            .await
+            .ok()?;
+    let parents = super::reconcile::stack_parents_by_head(&facts);
+    parents
+        .get(base_branch)
+        .copied()
+        .filter(|parent| *parent != pr.number)
 }
 
 /// Park a watch as blocked with a reason, surfacing `NeedsYou` once.
