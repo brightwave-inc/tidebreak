@@ -41,8 +41,8 @@ pub(crate) use delivery::{
 };
 pub(crate) use git::{
     commit_workspace, create_pull_request, get_workspace_pr, get_workspace_pr_comments,
-    mark_workspace_pr_ready, merge_workspace_pr, push_workspace, refresh_workspace_pr,
-    run_workspace_action, start_workspace_watch, stop_workspace_watch,
+    list_workspace_pull_requests, mark_workspace_pr_ready, merge_workspace_pr, push_workspace,
+    refresh_workspace_pr, run_workspace_action, start_workspace_watch, stop_workspace_watch,
 };
 pub(crate) use harnesses::{
     install_harness, list_harness_models, list_harnesses, refresh_harnesses,
@@ -77,9 +77,9 @@ pub(crate) use types::{
     CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest,
     CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
     CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateCodeTriggerBody,
-    HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
+    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
+    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
+    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
     UpdateCodeTriggerBody,
 };

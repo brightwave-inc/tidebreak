@@ -10,10 +10,10 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    count_turns, get_session, get_workspace, latest_event_created_at, latest_turn,
-    latest_watch_for_session, list_approvals, list_recent_events, list_sessions,
-    list_sessions_by_lifecycle_all_owners, list_sessions_for_workspace, replace_session_attention,
-    save_session,
+    count_attributed_prs_for_workspace, count_turns, get_session, get_workspace,
+    latest_event_created_at, latest_turn, latest_watch_for_session, list_approvals,
+    list_recent_events, list_sessions, list_sessions_by_lifecycle_all_owners,
+    list_sessions_for_workspace, replace_session_attention, save_session,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeEvent, CodeSession,
@@ -418,6 +418,10 @@ async fn build_digest(
     } else {
         None
     };
+    // One indexed count (decision 62). Zero stays absent so clients that
+    // predate the field and workspaces that never shipped read the same.
+    let pr_count =
+        count_attributed_prs_for_workspace(db, &session.owner, session.workspace_id).await?;
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -428,6 +432,7 @@ async fn build_digest(
         turn_count,
         activity,
         pr_state: workspace.pr,
+        pr_count: (pr_count > 0).then_some(pr_count),
         watch_state: watch.as_ref().map(|watch| watch.state),
         watch_detail: watch.as_ref().and_then(|watch| watch.detail.clone()),
         watch_cycles: watch.as_ref().map(|watch| watch.cycles),

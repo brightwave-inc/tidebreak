@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import { HttpError, type ApiClient } from "../api/client";
 import type {
   CodePrMergeMethod,
+  CodeWorkspacePullRequestFact,
   CodeWorkspaceSnapshot,
   PullRequestCheck,
   PullRequestComment,
@@ -58,6 +59,8 @@ import { PrCommentCard } from "./PrCommentCard";
 import { prMergeControls, prWorkflowStatus } from "./prActions";
 import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
+import { useWorkspacePullRequests } from "./useWorkspacePullRequests";
+import { digestFromFact, factKey, WorkspacePrList } from "./WorkspacePrList";
 import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
 
 export type InspectorTab = "files" | "source" | "pr";
@@ -256,12 +259,13 @@ export function CodeInspector({
           value="pr"
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <PrTab
+          <WorkspacePrTab
             client={client}
             workspaceId={workspaceId}
             pr={pr}
             branch={workspace?.branch_name}
             prResource={prResource}
+            prCount={digest?.pr_count}
           />
         </TabsContent>
       </Tabs>
@@ -309,6 +313,74 @@ export function inspectorTurnLabel(
     if (item.turnId === turnId) return `Turn ${ordinal}`;
   }
   return "This turn";
+}
+
+/**
+ * The inspector's Pull request tab: the workspace's attributed set above the
+ * single-PR panel (decision 62). With one or no attributed pull requests the
+ * list stays hidden and this is exactly the live panel it always was.
+ * Selecting a non-primary row shows its stored snapshot; the primary row
+ * returns to the live resource.
+ *
+ * Numbers repeat across repositories and the live digest carries no
+ * repository identity, so the primary is resolved only when exactly one
+ * attributed fact carries the live number. A colliding row is never treated
+ * as the primary: selecting it shows its own stored snapshot.
+ */
+function WorkspacePrTab({
+  client,
+  workspaceId,
+  pr,
+  branch,
+  prResource,
+  prCount,
+}: {
+  client: ApiClient;
+  workspaceId: string;
+  pr?: PullRequestDigest;
+  branch?: string;
+  prResource?: CodeWorkspacePrResource;
+  prCount?: number;
+}) {
+  const attributed = useWorkspacePullRequests(client, workspaceId, prCount);
+  const [selected, setSelected] = useState<CodeWorkspacePullRequestFact | null>(
+    null,
+  );
+  useEffect(() => {
+    setSelected(null);
+  }, [workspaceId]);
+  const items = attributed.data?.items ?? [];
+  const primaryMatches =
+    pr === undefined ? [] : items.filter((item) => item.number === pr.number);
+  const primary = primaryMatches.length === 1 ? primaryMatches[0] : undefined;
+  const selectedKey = selected
+    ? factKey(selected)
+    : primary
+      ? factKey(primary)
+      : undefined;
+  const shownPr = selected ? digestFromFact(selected) : pr;
+  return (
+    <>
+      {items.length > 1 && (
+        <WorkspacePrList
+          items={items}
+          selectedKey={selectedKey}
+          onSelect={(item) =>
+            setSelected(
+              primary && factKey(item) === factKey(primary) ? null : item,
+            )
+          }
+        />
+      )}
+      <PrTab
+        client={client}
+        workspaceId={workspaceId}
+        pr={shownPr}
+        branch={branch}
+        prResource={selected ? undefined : prResource}
+      />
+    </>
+  );
 }
 
 /**

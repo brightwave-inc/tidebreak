@@ -73,6 +73,24 @@ export const PullRequestInRail: Story = {
   },
 };
 
+/**
+ * A workspace that worked on several pull requests (decision 62): the chip
+ * keeps its primary pull request and gains the attributed count.
+ */
+export const SeveralPullRequests: Story = {
+  args: {
+    workspace: { ...codeWorkspace, pr: openPrDigest },
+    digest: { ...runningDigest, pr_state: openPrDigest, pr_count: 3 },
+    session: codeSession,
+    commands: workspaceCommands({
+      hasPr: true,
+      archived: false,
+      hasSession: true,
+    }),
+    onWorkflowAction: fn(),
+  },
+};
+
 /** One click from the rail: an approved, green PR offers Merge. */
 export const ReadyToMerge: Story = {
   args: {

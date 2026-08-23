@@ -905,6 +905,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_pr),
         )
         .route(
+            "/code/workspaces/{id}/pull-requests",
+            get(routes::code::list_workspace_pull_requests),
+        )
+        .route(
             "/code/workspaces/{id}/pr/refresh",
             post(routes::code::refresh_workspace_pr),
         )

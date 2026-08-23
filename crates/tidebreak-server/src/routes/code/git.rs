@@ -9,8 +9,8 @@ use crate::extract::{Json, Path};
 
 use super::types::{
     CodeActionSnapshot, CodeCommitSnapshot, CodePrCommentsSnapshot, CodePrMergeMethod,
-    CodePushSnapshot, CodeWatchSnapshot, CodeWorkspacePrSnapshot, CommitWorkspaceBody,
-    CreatePullRequestBody, MergeCodePrBody,
+    CodePushSnapshot, CodeWatchSnapshot, CodeWorkspacePrSnapshot, CodeWorkspacePullRequestFact,
+    CodeWorkspacePullRequests, CommitWorkspaceBody, CreatePullRequestBody, MergeCodePrBody,
 };
 use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, WorkspaceGitStatus};
 use tidebreak_core::WorkspaceId;
@@ -48,6 +48,42 @@ pub async fn get_workspace_pr(
     let status = code.workspace_pr(id).await?;
     let watch = code.latest_watch(id).await?;
     Ok(Json(pr_snapshot(status, watch)))
+}
+
+/// Every pull request attributed to the workspace (decision 62), from the
+/// durable fact store — no live host read.
+pub async fn list_workspace_pull_requests(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodeWorkspacePullRequests>, ServerError> {
+    let facts = code.workspace_pull_requests(id).await?;
+    let items = facts
+        .into_iter()
+        .map(|(fact, relation)| CodeWorkspacePullRequestFact {
+            host: fact.host,
+            repo_owner: fact.repo_owner,
+            repo_name: fact.repo_name,
+            number: fact.number,
+            url: fact.url,
+            title: fact.title,
+            state: fact.state.as_str().to_owned(),
+            draft: fact.draft,
+            author: fact.author,
+            head_branch: fact.head_branch,
+            base_branch: fact.base_branch,
+            head_sha: fact.head_sha,
+            relation,
+            created_at: fact.created_at,
+            updated_at: fact.updated_at,
+            merged_at: fact.merged_at,
+            closed_at: fact.closed_at,
+            last_seen_at: fact.last_seen_at,
+        })
+        .collect();
+    Ok(Json(CodeWorkspacePullRequests {
+        items,
+        fetched_at: chrono::Utc::now(),
+    }))
 }
 
 pub async fn refresh_workspace_pr(

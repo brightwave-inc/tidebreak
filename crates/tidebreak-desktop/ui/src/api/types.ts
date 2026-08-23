@@ -57,6 +57,9 @@ import {
   type CodeGitHubCapability as WireCodeGitHubCapability,
   type CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
   type CodeGitHubRepositoryTarget as WireCodeGitHubRepositoryTarget,
+  type CodePullRequestRelation as WireCodePullRequestRelation,
+  type CodeWorkspacePullRequestFact as WireCodeWorkspacePullRequestFact,
+  type CodeWorkspacePullRequests as WireCodeWorkspacePullRequests,
   type EgressConfig as WireEgressConfig,
   type CustomModelConfig as WireCustomModelConfig,
   type McpHealth as WireMcpHealth,
@@ -1111,6 +1114,9 @@ export type RepoId = WireRepoId;
 export type CodeGitHubCapability = WireCodeGitHubCapability;
 export type CodeGitHubRepositoryRef = WireCodeGitHubRepositoryRef;
 export type CodeGitHubRepositoryTarget = WireCodeGitHubRepositoryTarget;
+export type CodePullRequestRelation = WireCodePullRequestRelation;
+export type CodeWorkspacePullRequestFact = WireCodeWorkspacePullRequestFact;
+export type CodeWorkspacePullRequests = WireCodeWorkspacePullRequests;
 export type CodeDeliverySourceError = WireCodeDeliverySourceError;
 export type CodeDeliveryWorkspaceLink = WireCodeDeliveryWorkspaceLink;
 export type CodeDeliveryCheck = WireCodeDeliveryCheck;

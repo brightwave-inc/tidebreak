@@ -444,6 +444,7 @@ mod tests {
         );
         generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestQuery>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestsPage>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeWorkspacePullRequests>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeDeliveryPullRequestTarget>(
             &cfg, &mut out,
         );

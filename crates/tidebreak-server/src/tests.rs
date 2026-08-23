@@ -48,6 +48,8 @@ mod code_clone;
 mod code_git;
 #[cfg(unix)]
 mod code_pr_facts;
+#[cfg(unix)]
+mod code_reconcile;
 mod code_terminals;
 mod code_titling;
 mod compaction;

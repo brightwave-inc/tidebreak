@@ -51,6 +51,10 @@ pub(crate) struct SessionDigest {
     /// running; older clients safely fall back to a generic running label.
     pub activity: Option<CodeSessionActivity>,
     pub pr_state: Option<PullRequestDigest>,
+    /// How many pull requests hold a durable attribution to this workspace
+    /// (decision 62). Absent when none do; a change is the client's cheap
+    /// signal to re-read the workspace's pull-request list.
+    pub pr_count: Option<u64>,
     /// Watch progress, set only when `kind` is `Watch`. Lifecycle words
     /// undersell a watch ("running" for hours); these say what it is doing.
     pub watch_state: Option<CodeWatchState>,
