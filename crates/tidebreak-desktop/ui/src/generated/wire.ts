@@ -1578,7 +1578,7 @@ export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: bool
 /**
  * PR + checks digest plus the local git facts the PR card needs.
  */
-export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, watch?: CodeWatchSnapshot, };
+export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, pushes_as?: string, watch?: CodeWatchSnapshot, };
 
 /**
  * One pull request attributed to a workspace, from the durable fact store

@@ -293,6 +293,15 @@ export function PrCardView({
           {error}
         </p>
       )}
+      {snapshot?.pushes_as && (
+        <p className="text-muted-foreground text-xs leading-relaxed">
+          Pushes from this machine land as{" "}
+          <span className="text-foreground font-medium">
+            {snapshot.pushes_as}
+          </span>
+          , the deployment&apos;s GitHub App — not as your GitHub account.
+        </p>
+      )}
       {snapshot?.dirty ? (
         <div className="flex flex-col gap-2">
           <label className="flex flex-col gap-1">

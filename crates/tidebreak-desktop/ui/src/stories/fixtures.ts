@@ -125,6 +125,14 @@ export const unpushedGit: CodeWorkspacePrSnapshot = {
   ahead: 1,
 };
 
+/** A hosted machine whose pushes land as the deployment's GitHub App. */
+export const hostedAppGit: CodeWorkspacePrSnapshot = {
+  ...unpushedGit,
+  gh_found: false,
+  gh_authenticated: undefined,
+  pushes_as: "tidebreak-ship[bot]",
+};
+
 export const readyForPrGit: CodeWorkspacePrSnapshot = {
   ...cleanGit,
   ahead: 1,

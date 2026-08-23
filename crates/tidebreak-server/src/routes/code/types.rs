@@ -553,6 +553,12 @@ pub struct CodeWorkspacePrSnapshot {
     #[ts(optional)]
     pub gh_authenticated: Option<bool>,
     pub remediation: String,
+    /// The identity a push from this machine acts as, when it is not the
+    /// caller: the deployment's GitHub App bot account (decision 63). The UI
+    /// states this plainly beside the push control.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pushes_as: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub watch: Option<CodeWatchSnapshot>,

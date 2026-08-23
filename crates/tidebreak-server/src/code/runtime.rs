@@ -152,6 +152,10 @@ pub(crate) struct CodeRuntime {
     browser_bridge_command: Option<PathBuf>,
     host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
+    /// Per-caller git-forge lending on a gateway-authenticated hosted
+    /// machine (decision 63). `None` everywhere else: a machine with its own
+    /// `git`/`gh` configuration authenticates however the operator says.
+    git_credentials: Option<Arc<dyn crate::obo_gateway::GitCredentialLender>>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -212,6 +216,7 @@ impl CodeRuntime {
         host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
         browser_bridge_command: Option<PathBuf>,
+        git_credentials: Option<Arc<dyn crate::obo_gateway::GitCredentialLender>>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -237,6 +242,7 @@ impl CodeRuntime {
                 ..HostEnv::from_process()
             },
             host_tool_broker,
+            git_credentials,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -265,6 +271,13 @@ impl CodeRuntime {
         self.browser_tokens.set_loopback_base(&base);
         *self.loopback_base.lock().expect("loopback base") =
             Some(base.trim_end_matches('/').into());
+    }
+
+    /// The per-caller git-forge lender, on a machine that has one.
+    pub(crate) fn git_credentials(
+        &self,
+    ) -> Option<&Arc<dyn crate::obo_gateway::GitCredentialLender>> {
+        self.git_credentials.as_ref()
     }
 
     /// Boot: publish the bound loopback base now, and hand back the recovery
@@ -341,6 +354,7 @@ impl CodeRuntime {
             browser_bridge_command,
             host: HostEnv::from_process(),
             host_tool_broker: None,
+            git_credentials: None,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -362,6 +376,17 @@ impl CodeRuntime {
             reconcile_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Lend gateway git credentials from tests, in place of the on-behalf-of
+    /// handle a hosted deployment wires in.
+    #[cfg(any(test, feature = "scripted-harness"))]
+    pub(crate) fn with_git_credentials(
+        mut self,
+        lender: Arc<dyn crate::obo_gateway::GitCredentialLender>,
+    ) -> Self {
+        self.git_credentials = Some(lender);
+        self
     }
 
     #[cfg(test)]
@@ -1226,7 +1251,8 @@ impl CodeRuntime {
     ) -> Result<PushOutcome, ServerError> {
         let workspace = self.require_live_workspace(owner, id).await?;
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
-        let outcome = gh::push_branch(&worktree, &workspace.branch_name)
+        let credential = self.borrow_git_credential(owner, &worktree).await?;
+        let outcome = gh::push_branch(&worktree, &workspace.branch_name, credential.as_ref())
             .await
             .map_err(map_gh)?;
         // Best-effort contributed fact (decision 62): a user push to a branch
@@ -1262,6 +1288,37 @@ impl CodeRuntime {
         Ok(outcome)
     }
 
+    /// Borrow a repository-scoped forge credential for one git operation in
+    /// `worktree`, on a machine that lends them (decision 63). `Ok(None)` is
+    /// every machine that does not — and every checkout whose origin is not
+    /// a forge repository at all (a local path, a bare test origin): those
+    /// pushes carry no credential today and keep working exactly as they do.
+    ///
+    /// A refusal from the gateway fails the operation with its reason rather
+    /// than falling back to an uncredentialed attempt — the attempt would
+    /// fail with a worse message, and a fallback would blur which identity
+    /// acted.
+    async fn borrow_git_credential(
+        &self,
+        owner: &OwnerId,
+        worktree: &std::path::Path,
+    ) -> Result<Option<crate::obo_gateway::GitCredential>, ServerError> {
+        let Some(lender) = self.git_credentials() else {
+            return Ok(None);
+        };
+        let Ok(target) = super::delivery::repository_target_from_path(worktree).await else {
+            return Ok(None);
+        };
+        let repository = format!("{}/{}", target.owner, target.name);
+        match lender.git_credential(owner, &repository).await {
+            Ok(credential) => Ok(Some(credential)),
+            Err(refusal) => Err(ServerError::unprocessable_kind(
+                "git_forge_refused",
+                super::clone::git_forge_refusal_message(&refusal),
+            )),
+        }
+    }
+
     pub(crate) async fn workspace_pr(
         &self,
         owner: &OwnerId,
@@ -1269,7 +1326,7 @@ impl CodeRuntime {
     ) -> Result<WorkspaceGitStatus, ServerError> {
         let mut workspace = self.get_workspace(owner, id).await?;
         let gh_path = self.gh_search_path_owned();
-        let status = gh::workspace_git_status(
+        let mut status = gh::workspace_git_status(
             std::path::Path::new(&workspace.worktree_path),
             workspace.id,
             &workspace.title,
@@ -1281,6 +1338,23 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
+        // On a hosted machine, say whose identity a push would act as
+        // (decision 63) — only for a checkout whose origin is a forge
+        // repository, because only those pushes borrow the App's identity.
+        // Probed per caller and held fresh by the lender; a refusal simply
+        // leaves the field empty — the push itself reports refusals with
+        // their reasons.
+        if let Some(lender) = self.git_credentials() {
+            let worktree = std::path::Path::new(&workspace.worktree_path);
+            if super::delivery::repository_target_from_path(worktree)
+                .await
+                .is_ok()
+            {
+                if let Ok(identity) = lender.git_forge_identity(owner).await {
+                    status.pushes_as = Some(identity.bot_login.unwrap_or(identity.app_name));
+                }
+            }
+        }
         if status.pr != workspace.pr {
             workspace.pr = status.pr.clone();
             self.save_workspace(&workspace).await?;
@@ -3613,6 +3687,7 @@ mod managed_node_wait_tests {
         let runtime = CodeRuntime::new(
             Arc::new(db),
             data_dir.path().to_path_buf(),
+            None,
             None,
             None,
             None,

@@ -392,7 +392,10 @@ impl GatewayAuthenticator {
     }
 }
 
-fn canonical_public_url(raw: &str) -> Result<String> {
+/// Normalize the public URL whose digest names this machine's `tidebreak:`
+/// resource. Shared with the on-behalf-of gateway, which names the same
+/// resource in git-credential requests (decision 63).
+pub(crate) fn canonical_public_url(raw: &str) -> Result<String> {
     let url = reqwest::Url::parse(raw.trim())
         .map_err(|error| AgentError::config(format!("invalid Tidebreak public URL: {error}")))?;
     if !matches!(url.scheme(), "http" | "https")

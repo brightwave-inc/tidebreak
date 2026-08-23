@@ -89,6 +89,26 @@ describe("PrCard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("states plainly when pushes land as the deployment's GitHub App", () => {
+    renderState({
+      ...BASE,
+      unpushed: true,
+      ahead: 1,
+      gh_found: false,
+      gh_authenticated: undefined,
+      pushes_as: "tidebreak-ship[bot]",
+    });
+    expect(screen.getByText("tidebreak-ship[bot]")).toBeInTheDocument();
+    expect(screen.getByText(/not as your GitHub account/)).toBeInTheDocument();
+  });
+
+  it("names no acting identity on a machine with its own credentials", () => {
+    renderState({ ...BASE, unpushed: true, ahead: 1 });
+    expect(
+      screen.queryByText(/GitHub App — not as your GitHub account/),
+    ).not.toBeInTheDocument();
+  });
+
   it("enables create PR after a push with no pull request", async () => {
     const { onCreatePr } = renderState({
       ...BASE,

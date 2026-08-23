@@ -1,7 +1,9 @@
 //! Git commit/push and `gh` pull-request operations for a workspace.
 //!
 //! Every subprocess is bounded and non-interactive. Arguments are an argv
-//! array, never a shell string. `gh` credentials are observed, never stored.
+//! array, never a shell string. `gh` credentials are observed, never stored;
+//! a hosted machine instead lends each git operation a dying, gateway-minted
+//! credential through the environment (decision 63).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -18,6 +20,7 @@ use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction, WorkspaceId};
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv};
 
 use super::setup_script::spawn_workspace_script;
+use crate::obo_gateway::GitCredential;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -29,6 +32,28 @@ const PR_CACHE_TTL: Duration = Duration::from_secs(20);
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
 pub(crate) const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
 pub(crate) const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
+
+/// Environment variables the one-shot credential helper reads a borrowed
+/// credential from. The environment, not argv: another user's `ps` can read
+/// a process's arguments, not its environment.
+pub(crate) const GIT_CREDENTIAL_USERNAME_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_USERNAME";
+pub(crate) const GIT_CREDENTIAL_SECRET_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_SECRET";
+
+/// Configuration that lends one borrowed credential to one git subprocess
+/// (decision 63).
+///
+/// The empty helper first resets any inherited helper list. That is
+/// load-bearing twice over: no configured helper can answer ahead of the
+/// borrowed credential, and — because git offers a successful credential to
+/// every helper's `store` — no helper like `git-credential-store` can write
+/// the dying token to disk. The one-shot helper then answers `get` from the
+/// environment and ignores every other action.
+pub(crate) const GIT_CREDENTIAL_CONFIG_ARGS: [&str; 4] = [
+    "-c",
+    "credential.helper=",
+    "-c",
+    "credential.helper=!f() { if [ \"$1\" = get ]; then printf 'username=%s\\npassword=%s\\n' \"$TIDEBREAK_GIT_CREDENTIAL_USERNAME\" \"$TIDEBREAK_GIT_CREDENTIAL_SECRET\"; fi; }; f",
+];
 
 static GH_LAUNCH: OnceLock<GhLaunch> = OnceLock::new();
 static GH_OBSERVATION: OnceLock<AsyncMutex<Option<CachedGhObservation>>> = OnceLock::new();
@@ -161,6 +186,10 @@ pub(crate) struct WorkspaceGitStatus {
     pub gh_found: bool,
     pub gh_authenticated: Option<bool>,
     pub remediation: String,
+    /// The identity a push from this machine acts as, when it is not the
+    /// caller: the deployment's GitHub App bot account (decision 63). `None`
+    /// on every machine where git speaks for whoever configured it.
+    pub pushes_as: Option<String>,
 }
 
 /// Outcome of one named quick action.
@@ -254,14 +283,24 @@ pub(crate) async fn commit_all(
 }
 
 /// Push the workspace branch to `origin` and set upstream.
-pub(crate) async fn push_branch(worktree: &Path, branch: &str) -> Result<PushOutcome, GhError> {
-    git(
-        worktree,
-        &["push", "-u", "origin", branch],
-        GIT_PUSH_TIMEOUT,
-    )
-    .await
-    .map_err(|err| classify_git(err, "push"))?;
+///
+/// `credential` is a borrowed, repository-scoped forge credential for a
+/// hosted machine (decision 63), lent to this one subprocess and dropped.
+/// `None` is every other machine: git authenticates however the operator's
+/// own configuration says.
+pub(crate) async fn push_branch(
+    worktree: &Path,
+    branch: &str,
+    credential: Option<&GitCredential>,
+) -> Result<PushOutcome, GhError> {
+    let mut args: Vec<&str> = Vec::new();
+    if credential.is_some() {
+        args.extend(GIT_CREDENTIAL_CONFIG_ARGS);
+    }
+    args.extend(["push", "-u", "origin", branch]);
+    git_with_credential(worktree, &args, GIT_PUSH_TIMEOUT, credential)
+        .await
+        .map_err(|err| classify_git(err, "push"))?;
     Ok(PushOutcome {
         branch: branch.to_owned(),
         remote: "origin".into(),
@@ -305,6 +344,9 @@ pub(crate) async fn workspace_git_status(
         } else {
             manual_pr_instructions(worktree, branch, title, None, &inspect.diffstat, &gh)
         },
+        // Decorated by the runtime, which knows whether this machine lends
+        // gateway credentials; this module only observes local state.
+        pushes_as: None,
     })
 }
 
@@ -1708,6 +1750,17 @@ fn classify_gh(
 }
 
 async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
+    git_with_credential(cwd, args, limit, None).await
+}
+
+/// [`git`], optionally lending a borrowed credential through the environment
+/// the one-shot helper in [`GIT_CREDENTIAL_CONFIG_ARGS`] reads.
+async fn git_with_credential(
+    cwd: &Path,
+    args: &[&str],
+    limit: Duration,
+    credential: Option<&GitCredential>,
+) -> Result<String, String> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -1717,6 +1770,11 @@ async fn git(cwd: &Path, args: &[&str], limit: Duration) -> Result<String, Strin
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(credential) = credential {
+        command
+            .env(GIT_CREDENTIAL_USERNAME_ENV, &credential.username)
+            .env(GIT_CREDENTIAL_SECRET_ENV, &credential.secret);
+    }
     let child = command
         .spawn()
         .map_err(|err| format!("failed to spawn git: {err}"))?;
@@ -2115,6 +2173,44 @@ mod tests {
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
+    /// The one-shot helper is real shell handed to real git: prove it
+    /// answers `get` with the environment pair, so a clone or push carrying
+    /// [`GIT_CREDENTIAL_CONFIG_ARGS`] authenticates without the secret ever
+    /// touching argv, a URL, or a file (decision 63).
+    #[test]
+    fn the_one_shot_helper_answers_get_from_the_environment() {
+        use std::io::Write as _;
+
+        let dir = TempDir::new().unwrap();
+        let mut command = StdCommand::new("git");
+        command.args(GIT_CREDENTIAL_CONFIG_ARGS);
+        command
+            .args(["credential", "fill"])
+            .current_dir(dir.path())
+            .env(GIT_CREDENTIAL_USERNAME_ENV, "x-access-token")
+            .env(GIT_CREDENTIAL_SECRET_ENV, "ghs_dying_token")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"protocol=https\nhost=github.com\npath=acme/demo.git\n\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git credential fill failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let answered = String::from_utf8_lossy(&output.stdout);
+        assert!(answered.contains("username=x-access-token"), "{answered}");
+        assert!(answered.contains("password=ghs_dying_token"), "{answered}");
+    }
+
     fn init_paired_repos() -> (TempDir, PathBuf, PathBuf) {
         let dir = TempDir::new().unwrap();
         let bare = dir.path().join("origin.git");
@@ -2267,7 +2363,9 @@ fatal: Could not read from remote repository.\n";
             &work,
             &["git", "remote", "set-url", "origin", "../no-such-remote"],
         );
-        let err = push_branch(&work, "tidebreak/push-fail").await.unwrap_err();
+        let err = push_branch(&work, "tidebreak/push-fail", None)
+            .await
+            .unwrap_err();
         assert!(
             !matches!(err, GhError::AuthFailed(_)),
             "non-auth push classified as auth: {err}"
@@ -2292,7 +2390,9 @@ fatal: Could not read from remote repository.\n";
         commit_all(&work, "first change", Some("custom message"))
             .await
             .unwrap();
-        let pushed = push_branch(&work, "tidebreak/first-change").await.unwrap();
+        let pushed = push_branch(&work, "tidebreak/first-change", None)
+            .await
+            .unwrap();
         assert_eq!(pushed.remote, "origin");
         let listed = git(
             &bare,
@@ -2477,7 +2577,9 @@ exit 3
         run(&work, &["git", "checkout", "-b", "tidebreak/first-change"]);
         std::fs::write(work.join("extra.txt"), "line\n").unwrap();
         commit_all(&work, "first change", None).await.unwrap();
-        push_branch(&work, "tidebreak/first-change").await.unwrap();
+        push_branch(&work, "tidebreak/first-change", None)
+            .await
+            .unwrap();
 
         let shim_dir = TempDir::new().unwrap();
         let log = shim_dir.path().join("log");

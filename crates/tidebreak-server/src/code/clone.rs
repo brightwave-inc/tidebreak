@@ -20,6 +20,7 @@ use super::bus::{CloneProgress, CodeLiveUpdate};
 use super::gh::{self, resolve_github_clone_url};
 use super::runtime::CodeRuntime;
 use crate::error::ServerError;
+use crate::obo_gateway::{GitCredential, GitForgeError, GitForgeIdentity};
 use crate::routes::code::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSource, CodeRepoSources,
 };
@@ -144,26 +145,47 @@ impl CodeRuntime {
 
     /// What this machine can add a repository from.
     ///
-    /// Every answer here is about the machine, never about who is asking or
-    /// from where. A client pairs it with what it knows about itself — whether
-    /// it can open a directory picker the machine would resolve — and renders
-    /// the intersection.
-    pub(crate) async fn repo_sources(&self) -> Result<CodeRepoSources, ServerError> {
+    /// On a machine with its own credentials, every answer is about the
+    /// machine — a client pairs it with what it knows about itself and
+    /// renders the intersection. On a gateway-authenticated hosted machine
+    /// the `github` answer is about the caller too: it reflects whether the
+    /// deployment's gateway would lend *this* caller the forge's App
+    /// identity (decision 63), probed live rather than assumed.
+    pub(crate) async fn repo_sources(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<CodeRepoSources, ServerError> {
         let git = git_available().await;
-        let gh = gh::observe_gh(self.gh_search_path().as_deref()).await;
         let no_git = || {
             Some(
                 "This machine has no git. Install it there, or use a machine that has it."
                     .to_owned(),
             )
         };
-        // GitHub needs exactly what a git URL needs. Without a `gh`
-        // credential `resolve_github_clone_url` falls back to the public
-        // HTTPS URL, so `owner/repo` still clones anything public — hiding
-        // the form would take away a path that works. What `gh` buys is
-        // private repositories, so its absence rides along as a hint on an
-        // available source rather than as unavailability.
-        let github_credential = gh.found && gh.authenticated == Some(true);
+        let github = if let Some(lender) = self.git_credentials() {
+            let outcome = lender.git_forge_identity(owner).await;
+            hosted_github_source(git, no_git(), outcome)
+        } else {
+            // GitHub needs exactly what a git URL needs. Without a `gh`
+            // credential `resolve_github_clone_url` falls back to the public
+            // HTTPS URL, so `owner/repo` still clones anything public —
+            // hiding the form would take away a path that works. What `gh`
+            // buys is private repositories, so its absence rides along as a
+            // hint on an available source rather than as unavailability.
+            let gh = gh::observe_gh(self.gh_search_path().as_deref()).await;
+            let github_credential = gh.found && gh.authenticated == Some(true);
+            CodeRepoSource {
+                kind: "github".to_owned(),
+                available: git,
+                remediation: if !git {
+                    no_git()
+                } else if github_credential {
+                    None
+                } else {
+                    Some(gh.remediation.clone())
+                },
+            }
+        };
         let sources = vec![
             // Always offered: a machine can always register a checkout that
             // is already on its own disk. Whether the caller can name one is
@@ -178,17 +200,7 @@ impl CodeRuntime {
                 available: git,
                 remediation: if git { None } else { no_git() },
             },
-            CodeRepoSource {
-                kind: "github".to_owned(),
-                available: git,
-                remediation: if !git {
-                    no_git()
-                } else if github_credential {
-                    None
-                } else {
-                    Some(gh.remediation.clone())
-                },
-            },
+            github,
         ];
         Ok(CodeRepoSources {
             sources,
@@ -229,14 +241,19 @@ impl CodeRuntime {
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
         let parent = self.clone_parent(request.parent_dir.as_deref()).await?;
         validate_parent_dir(&parent).await?;
-        let source = resolve_clone_source(&request, self.gh_search_path()).await?;
+        let source = resolve_clone_source(
+            &request,
+            self.gh_search_path(),
+            self.git_credentials().is_some(),
+        )
+        .await?;
         let name = request
             .name
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
-            .unwrap_or_else(|| infer_clone_name(&source));
+            .unwrap_or_else(|| infer_clone_name(&source.url));
         if name.is_empty()
             || name.contains('/')
             || name.contains('\\')
@@ -281,15 +298,33 @@ impl CodeRuntime {
         self: std::sync::Arc<Self>,
         owner: &OwnerId,
         id: Uuid,
-        url: String,
+        source: CloneSource,
         target: PathBuf,
     ) {
-        match clone_into(&url, &target, |phase, percent| {
-            self.touch_clone(owner, id, |job| {
-                job.phase = phase.to_owned();
-                job.percent = Some(percent);
-            });
-        })
+        // Borrowed at the moment of use and dropped with this job: a hosted
+        // machine clones a GitHub repository with a dying, repository-scoped
+        // credential the gateway mints for this caller (decision 63).
+        let credential = match (source.github_slug.as_deref(), self.git_credentials()) {
+            (Some(slug), Some(lender)) => match lender.git_credential(owner, slug).await {
+                Ok(credential) => Some(credential),
+                Err(refusal) => {
+                    self.fail_clone(owner, id, git_forge_refusal_message(&refusal));
+                    return;
+                }
+            },
+            _ => None,
+        };
+        match clone_into(
+            &source.url,
+            &target,
+            credential.as_ref(),
+            |phase, percent| {
+                self.touch_clone(owner, id, |job| {
+                    job.phase = phase.to_owned();
+                    job.percent = Some(percent);
+                });
+            },
+        )
         .await
         {
             Ok(()) => match self
@@ -297,7 +332,7 @@ impl CodeRuntime {
                     owner,
                     target,
                     super::runtime::RepoRegistration {
-                        cloned_from: Some(redact_clone_url(&url)),
+                        cloned_from: Some(redact_clone_url(&source.url)),
                         ..Default::default()
                     },
                 )
@@ -358,10 +393,20 @@ impl CodeRuntime {
     }
 }
 
+/// Where a clone reads from, plus the GitHub slug when the caller named one.
+///
+/// The slug survives resolution so a hosted machine can borrow a credential
+/// scoped to exactly that repository at clone time (decision 63).
+struct CloneSource {
+    url: String,
+    github_slug: Option<String>,
+}
+
 async fn resolve_clone_source(
     request: &CloneRequest,
     gh_search_path: Option<String>,
-) -> Result<String, ServerError> {
+    gateway_credentials: bool,
+) -> Result<CloneSource, ServerError> {
     let url = request
         .url
         .as_deref()
@@ -381,7 +426,10 @@ async fn resolve_clone_source(
             "clone_invalid_source",
             "provide url or github",
         )),
-        (Some(url), None) => Ok(url.to_owned()),
+        (Some(url), None) => Ok(CloneSource {
+            url: url.to_owned(),
+            github_slug: None,
+        }),
         (None, Some(github)) => {
             if !valid_github_slug(github) {
                 return Err(ServerError::bad_request_kind(
@@ -389,12 +437,108 @@ async fn resolve_clone_source(
                     "github must be owner/repo",
                 ));
             }
+            if gateway_credentials {
+                // A hosted machine never consults `gh` — there is none, and
+                // nothing to observe if there were. The URL shape is fixed,
+                // and the credential arrives per operation at clone time.
+                return Ok(CloneSource {
+                    url: format!("https://github.com/{github}.git"),
+                    github_slug: Some(github.to_owned()),
+                });
+            }
             resolve_github_clone_url(github, gh_search_path.as_deref())
                 .await
+                .map(|url| CloneSource {
+                    url,
+                    github_slug: None,
+                })
                 .map_err(|err| {
                     ServerError::bad_request_kind("clone_github_unresolved", err.to_string())
                 })
         }
+    }
+}
+
+/// The `github` repo source as a gateway-authenticated hosted machine offers
+/// it to one caller (decision 63).
+///
+/// An identity means the source works and the remediation slot carries the
+/// attribution sentence — the one place the add-repository dialog states out
+/// loud that work lands as the App. Every named refusal keeps the source
+/// hidden and says why, so a deployment with no forge reads as "not
+/// offered", never as an error.
+fn hosted_github_source(
+    git: bool,
+    no_git: Option<String>,
+    outcome: Result<GitForgeIdentity, GitForgeError>,
+) -> CodeRepoSource {
+    if !git {
+        return CodeRepoSource {
+            kind: "github".to_owned(),
+            available: false,
+            remediation: no_git,
+        };
+    }
+    match outcome {
+        Ok(identity) => CodeRepoSource {
+            kind: "github".to_owned(),
+            available: true,
+            remediation: Some(hosted_attribution_sentence(&identity)),
+        },
+        Err(refusal) => CodeRepoSource {
+            kind: "github".to_owned(),
+            available: false,
+            remediation: Some(git_forge_refusal_message(&refusal)),
+        },
+    }
+}
+
+/// The sentence a hosted machine states its git identity with (decision 63).
+///
+/// Issue #2510's contract: an `installation_only` deployment cannot
+/// attribute work to the person, so the UI must say plainly that it lands as
+/// the App.
+pub(crate) fn hosted_attribution_sentence(identity: &GitForgeIdentity) -> String {
+    match identity.bot_login.as_deref() {
+        Some(bot_login) => format!(
+            "Clones and pushes use this deployment's GitHub App: work lands as {bot_login}, not as your GitHub account."
+        ),
+        None => format!(
+            "Clones and pushes use this deployment's GitHub App ({}): work lands as the App's bot account, not as your GitHub account.",
+            identity.app_name
+        ),
+    }
+}
+
+/// One user-facing sentence for a git-forge refusal, phrased for the
+/// operation or offer it stopped.
+pub(crate) fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
+    match refusal {
+        GitForgeError::SignInRequired(detail) | GitForgeError::Unavailable(detail) => {
+            detail.clone()
+        }
+        GitForgeError::NoGitForge => "This deployment has no git forge configured, so GitHub \
+                                      repositories are not offered. An administrator can register \
+                                      an installation-mode git forge app on the Model Gateway."
+            .to_owned(),
+        GitForgeError::AmbiguousGitForge => "This deployment's gateway has more than one git \
+                                             forge, and this machine serves exactly one. An \
+                                             administrator can disable the extras."
+            .to_owned(),
+        GitForgeError::ConnectModeForge => "This deployment's git forge identifies each person \
+                                            individually, and a personal identity is never lent \
+                                            to a shared machine. An administrator can register a \
+                                            second, installation-mode forge app on the Model \
+                                            Gateway."
+            .to_owned(),
+        GitForgeError::ForgeAppNotInstalled => "This deployment's git forge app has no approved \
+                                                GitHub App installation yet. An administrator can \
+                                                finish installing it on GitHub."
+            .to_owned(),
+        GitForgeError::RepositoryNotInstalled => "The deployment's GitHub App installation does \
+                                                  not cover this repository. An administrator can \
+                                                  add it to the installation on GitHub."
+            .to_owned(),
     }
 }
 
@@ -472,9 +616,19 @@ pub(crate) fn redact_clone_url(url: &str) -> String {
 async fn clone_into(
     url: &str,
     target: &Path,
+    credential: Option<&GitCredential>,
     mut on_progress: impl FnMut(&str, u8),
 ) -> Result<(), String> {
     let mut command = Command::new("git");
+    // The credential rides the environment into a one-shot helper, never the
+    // URL: the URL is persisted and shown back, and the helper reset keeps
+    // any configured helper from storing the dying token (decision 63).
+    if let Some(credential) = credential {
+        command.args(gh::GIT_CREDENTIAL_CONFIG_ARGS);
+        command
+            .env(gh::GIT_CREDENTIAL_USERNAME_ENV, &credential.username)
+            .env(gh::GIT_CREDENTIAL_SECRET_ENV, &credential.secret);
+    }
     command
         .args(["clone", "--progress", "--", url])
         .arg(target)
