@@ -86,6 +86,9 @@ import type {
   PullRequestCommentKind,
   CodePrCommentsSnapshot,
   QueuedCodeTurn,
+  CodeCheckLog,
+  CodeCheckLogError,
+  CodeCheckLogsSnapshot,
   CodeForkTranscript,
 } from "../api/types";
 import type {
@@ -145,6 +148,9 @@ import type {
   CodeDeliveryWorkspaceLink as WireCodeDeliveryWorkspaceLink,
   CodeWorkspacePullRequestFact as WireCodeWorkspacePullRequestFact,
   CodeWorkspacePullRequests as WireCodeWorkspacePullRequests,
+  CodeCheckLog as WireCodeCheckLog,
+  CodeCheckLogError as WireCodeCheckLogError,
+  CodeCheckLogsSnapshot as WireCodeCheckLogsSnapshot,
   CodeForkTranscript as WireCodeForkTranscript,
   CodeGitHubCapability as WireCodeGitHubCapability,
   CodeGitHubRepositoryRef as WireCodeGitHubRepositoryRef,
@@ -1413,6 +1419,80 @@ export function parseCodeForkTranscript(
     byte_len: value.byte_len,
     turns: value.turns,
     truncated: value.truncated,
+  };
+}
+
+function parseCodeCheckLog(value: unknown): CodeCheckLog | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCheckLog>(value, [
+      "check",
+      "path",
+      "byte_len",
+      "truncated",
+      "url",
+    ]) ||
+    !nonEmpty(value.check) ||
+    !nonEmpty(value.path) ||
+    typeof value.byte_len !== "number" ||
+    typeof value.truncated !== "boolean" ||
+    typeof value.url !== "string"
+  ) {
+    return null;
+  }
+  return {
+    check: value.check,
+    path: value.path,
+    byte_len: value.byte_len,
+    truncated: value.truncated,
+    url: value.url,
+  };
+}
+
+function parseCodeCheckLogError(value: unknown): CodeCheckLogError | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCheckLogError>(value, ["check", "message"]) ||
+    !nonEmpty(value.check) ||
+    typeof value.message !== "string"
+  ) {
+    return null;
+  }
+  return { check: value.check, message: value.message };
+}
+
+export function parseCodeCheckLogsSnapshot(
+  value: unknown,
+): CodeCheckLogsSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCheckLogsSnapshot>(value, [
+      "head_sha",
+      "logs",
+      "errors",
+    ]) ||
+    !optionalString(value.head_sha) ||
+    !Array.isArray(value.logs) ||
+    !Array.isArray(value.errors)
+  ) {
+    return null;
+  }
+  const logs: CodeCheckLog[] = [];
+  for (const entry of value.logs) {
+    const log = parseCodeCheckLog(entry);
+    if (!log) return null;
+    logs.push(log);
+  }
+  const errors: CodeCheckLogError[] = [];
+  for (const entry of value.errors) {
+    const error = parseCodeCheckLogError(entry);
+    if (!error) return null;
+    errors.push(error);
+  }
+  return {
+    ...(value.head_sha === undefined ? {} : { head_sha: value.head_sha }),
+    logs,
+    errors,
   };
 }
 

@@ -175,6 +175,47 @@ describe("prWorkflowPrompt", () => {
     );
   });
 
+  it("names the downloaded logs and tells the agent to read them first", () => {
+    const digest = pr({
+      checks: [{ name: "clippy", bucket: "fail", detail: "exit 101" }],
+    });
+    const prompt = prWorkflowPrompt("fix_errors", digest, [
+      {
+        check: "clippy",
+        path: "/data/code/private/ws-1/ci-logs/clippy-97255126659.log",
+        byte_len: 524_288,
+        truncated: true,
+        url: "https://github.com/example/app/actions/runs/7/job/9",
+      },
+      {
+        check: "desktop UI",
+        path: "/data/code/private/ws-1/ci-logs/desktop-ui-97255126660.log",
+        byte_len: 2_048,
+        truncated: false,
+        url: "https://github.com/example/app/actions/runs/7/job/9",
+      },
+    ]);
+    expect(prompt).toMatch(/already downloaded/);
+    expect(prompt).toMatch(
+      /clippy-97255126659\.log`? — clippy \(tail, 512 KB\)/,
+    );
+    expect(prompt).toMatch(
+      /desktop-ui-97255126660\.log`? — desktop UI \(2 KB\)/,
+    );
+    // The check itself is still named above, logs or no logs.
+    expect(prompt).toMatch(/Relevant checks:/);
+  });
+
+  /**
+   * A GitHub outage, a signed-out `gh`, or a provider with no downloadable log
+   * all land here. The action still has to work.
+   */
+  it("falls back to the find-them-yourself wording with no logs", () => {
+    const prompt = prWorkflowPrompt("fix_errors", pr({}), []);
+    expect(prompt).toMatch(/Inspect the latest failing CI logs/);
+    expect(prompt).not.toMatch(/already downloaded/);
+  });
+
   it("has no prompt for the pull-request state changes", () => {
     // Decision 42 keeps merging and readying a draft on user-initiated
     // endpoints. Excluding them from the prompt type is what stops either from

@@ -546,7 +546,7 @@ pub(crate) async fn load_pr_comments(
     Ok(PrComments { number, comments })
 }
 
-fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
+pub(crate) fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
     if !gh.found {
         return Err(GhError::GhAbsent {
             instructions: gh.remediation.clone(),

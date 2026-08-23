@@ -35,6 +35,7 @@ import {
   parseCodeWorkspaceTree,
   parseCodeWorktreeRoot,
   parseFenceReason,
+  parseCodeCheckLogsSnapshot,
 } from "./parsers";
 
 const DELIVERY_CAPABILITY = {
@@ -1268,6 +1269,39 @@ describe("pull request facts (decision 62)", () => {
           },
         ],
       }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodeCheckLogsSnapshot", () => {
+  it("accepts a snapshot with and without the optional fields", () => {
+    const full = {
+      head_sha: "abc123",
+      logs: [
+        {
+          check: "clippy",
+          path: "/data/code/private/ws-1/ci-logs/clippy-1.log",
+          byte_len: 2048,
+          truncated: true,
+          url: "https://github.com/acme/app/actions/runs/7/job/9",
+        },
+      ],
+      errors: [{ check: "desktop UI", message: "HTTP 404" }],
+    };
+    expect(parseCodeCheckLogsSnapshot(full)).toEqual(full);
+    const bare = { logs: [], errors: [] };
+    expect(parseCodeCheckLogsSnapshot(bare)).toEqual(bare);
+  });
+
+  it("rejects a malformed log entry rather than dropping it", () => {
+    expect(
+      parseCodeCheckLogsSnapshot({
+        logs: [{ check: "clippy", path: "", byte_len: 1, truncated: false }],
+        errors: [],
+      }),
+    ).toBeNull();
+    expect(
+      parseCodeCheckLogsSnapshot({ logs: [], errors: [], extra: true }),
     ).toBeNull();
   });
 });

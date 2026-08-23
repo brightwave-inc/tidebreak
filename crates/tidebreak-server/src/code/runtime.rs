@@ -36,6 +36,7 @@ use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, record_session_baseline,
     resolve_diff_range, sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
 };
+use super::ci_logs;
 use super::clone::CloneJobs;
 use super::delivery::DeliveryCache;
 use super::fork;
@@ -2668,6 +2669,42 @@ impl CodeRuntime {
         )
         .await
         .map_err(|err| ServerError::internal(format!("could not write the fork transcript: {err}")))
+    }
+
+    /// Download the workspace pull request's failing job logs into private
+    /// storage, and report where they landed.
+    ///
+    /// The fix-errors action calls this before it sends its prompt, so the
+    /// agent opens a file instead of working out which job failed and asking
+    /// GitHub for it. The digest is read fresh: fixing against the logs of a
+    /// head that has already been superseded is worse than not attaching any.
+    pub(crate) async fn workspace_check_logs(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+    ) -> Result<(Option<String>, ci_logs::WrittenCheckLogs), ServerError> {
+        let workspace = self.require_live_workspace(owner, workspace_id).await?;
+        let status = self.refresh_workspace_pr(owner, workspace_id).await?;
+        let Some(pr) = status.pr else {
+            return Err(ServerError::not_found(
+                "no pull request found for this workspace",
+            ));
+        };
+        let gh = gh::observe_gh(self.gh_search_path_owned().as_deref()).await;
+        let binary = gh::require_gh_binary(&gh).map_err(map_gh)?;
+        let private_root =
+            super::scratch::workspace_root(&self.data_dir, workspace.id).map_err(|err| {
+                ServerError::internal(format!("could not open private storage: {err}"))
+            })?;
+        let written = ci_logs::write_failing_check_logs(
+            &private_root,
+            &binary,
+            pr.checks.as_deref().unwrap_or(&[]),
+            pr.head_sha.as_deref(),
+        )
+        .await
+        .map_err(|err| ServerError::internal(format!("could not write the check logs: {err}")))?;
+        Ok((pr.head_sha, written))
     }
 
     pub(crate) async fn workspace_tree(

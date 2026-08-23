@@ -663,6 +663,47 @@ pub struct CodePrCommentsSnapshot {
     pub comments: Vec<tidebreak_core::PullRequestComment>,
 }
 
+/// One failing check's downloaded job log:
+/// `POST /code/workspaces/{id}/pr/check-logs`.
+///
+/// `path` is absolute and sits outside the Git worktree, in the same private
+/// storage a fork transcript uses. The prompt names it and the engine opens
+/// it; nothing is uploaded and nothing is indexable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCheckLog {
+    /// Check name as the host reports it.
+    pub check: String,
+    pub path: String,
+    pub byte_len: u64,
+    /// True when the file holds only the tail of the job log.
+    pub truncated: bool,
+    /// The job's host URL. A check without one has no log to download, so
+    /// every entry here has one.
+    pub url: String,
+}
+
+/// One failing check whose log could not be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCheckLogError {
+    pub check: String,
+    pub message: String,
+}
+
+/// Failing job logs written for one workspace's pull request.
+///
+/// A check with no downloadable log — an external CI provider, or a check-run
+/// URL that names no Actions job — is simply absent from both lists. The
+/// caller still names it in the prompt from the digest it already holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCheckLogsSnapshot {
+    /// Head the logs were read against, when the host reported one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+    pub logs: Vec<CodeCheckLog>,
+    pub errors: Vec<CodeCheckLogError>,
+}
+
 /// GitHub repository identity used by the install-wide delivery surfaces.
 ///
 /// `host` keeps GitHub Enterprise repositories distinct without introducing a

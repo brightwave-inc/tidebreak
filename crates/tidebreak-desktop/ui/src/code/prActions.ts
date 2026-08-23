@@ -1,4 +1,4 @@
-import type { PullRequestDigest } from "../api/types";
+import type { CodeCheckLog, PullRequestDigest } from "../api/types";
 import { prTone } from "./workspaceCards";
 
 export type PrWorkflowAction =
@@ -211,6 +211,7 @@ export type PrPromptAction = Exclude<
 export function prWorkflowPrompt(
   action: PrPromptAction,
   pr: PullRequestDigest,
+  logs: readonly CodeCheckLog[] = [],
 ): string {
   const number = `#${pr.number}`;
   const base = pr.base_branch?.trim() || "the base branch";
@@ -218,7 +219,10 @@ export function prWorkflowPrompt(
   let instruction: string;
   switch (action) {
     case "fix_errors":
-      instruction = `Pull request ${number} has failing checks. Inspect the latest failing CI logs for the current head SHA, reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`;
+      instruction =
+        logs.length > 0
+          ? `Pull request ${number} has failing checks, and their job logs are already downloaded — read them first. Reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`
+          : `Pull request ${number} has failing checks. Inspect the latest failing CI logs for the current head SHA, reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`;
       break;
     case "address_feedback":
       instruction = `Pull request ${number} has requested changes. Inspect the latest unresolved review feedback, implement each actionable request in this workspace, run focused validation, commit, push, and reply where context is useful. Do not merge.`;
@@ -230,7 +234,33 @@ export function prWorkflowPrompt(
       instruction = `Pull request ${number} has merge conflicts with ${base}. Fetch and rebase onto ${base}, resolve every conflict in this workspace, run focused validation, commit if needed, and push the updated head. Do not merge the pull request.`;
       break;
   }
-  return `${instruction}\n\n${context}`;
+  const attached = checkLogSection(logs);
+  return `${instruction}\n\n${context}${attached}`;
+}
+
+/**
+ * Name the downloaded logs after the context block.
+ *
+ * The paths sit outside the Git worktree, in the private storage the session
+ * is already allowed to read, so the prompt carries paths rather than bytes —
+ * the same bargain a fork transcript makes. A log the fetch could not reach is
+ * simply absent; the check itself is still named above.
+ */
+function checkLogSection(logs: readonly CodeCheckLog[]): string {
+  if (logs.length === 0) return "";
+  const lines = logs.map((log) => {
+    const size = `${Math.max(1, Math.round(log.byte_len / 1024))} KB`;
+    const note = log.truncated ? `tail, ${size}` : size;
+    return `- \`${log.path}\` — ${log.check} (${note})`;
+  });
+  return [
+    "",
+    "",
+    "Failure logs already downloaded for you:",
+    ...lines,
+    "",
+    "Read these before running anything — they are the job logs for this head. A failing check not listed here has no downloaded log; fetch that one yourself if you need it.",
+  ].join("\n");
 }
 
 function prWorkflowPromptContext(pr: PullRequestDigest): string {

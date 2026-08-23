@@ -43,6 +43,7 @@ pub(crate) use git::{
     commit_workspace, create_pull_request, get_workspace_pr, get_workspace_pr_comments,
     list_workspace_pull_requests, mark_workspace_pr_ready, merge_workspace_pr, push_workspace,
     refresh_workspace_pr, run_workspace_action, start_workspace_watch, stop_workspace_watch,
+    write_workspace_check_logs,
 };
 pub(crate) use harnesses::{
     install_harness, list_harness_models, list_harnesses, refresh_harnesses,
@@ -67,17 +68,18 @@ pub(crate) use triggers::{
 };
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCloneDefaults,
-    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeDeliveryActionResult,
-    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
-    CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
-    CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
-    CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
-    CodeForkTranscript, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
-    CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest,
-    CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
-    CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
+    CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCheckLog,
+    CodeCheckLogError, CodeCheckLogsSnapshot, CodeCloneDefaults, CodeCloneJobSnapshot,
+    CodeCommitSnapshot, CodeDeliveryActionResult, CodeDeliveryPullRequestActionBody,
+    CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile, CodeDeliveryPullRequestQuery,
+    CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
+    CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
+    CodeDeliveryRunsPage, CodeFileChange, CodeForkTranscript, CodeHarnessInstallSnapshot,
+    CodePrCommentsSnapshot, CodePushSnapshot, CodeRepoSnapshot, CodeRepoSource, CodeRepoSources,
+    CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice,
+    CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot, CodeTurnSnapshot,
+    CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
     CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
     CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,

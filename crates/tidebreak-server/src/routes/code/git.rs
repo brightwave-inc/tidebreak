@@ -8,9 +8,10 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path};
 
 use super::types::{
-    CodeActionSnapshot, CodeCommitSnapshot, CodePrCommentsSnapshot, CodePrMergeMethod,
-    CodePushSnapshot, CodeWatchSnapshot, CodeWorkspacePrSnapshot, CodeWorkspacePullRequestFact,
-    CodeWorkspacePullRequests, CommitWorkspaceBody, CreatePullRequestBody, MergeCodePrBody,
+    CodeActionSnapshot, CodeCheckLog, CodeCheckLogError, CodeCheckLogsSnapshot, CodeCommitSnapshot,
+    CodePrCommentsSnapshot, CodePrMergeMethod, CodePushSnapshot, CodeWatchSnapshot,
+    CodeWorkspacePrSnapshot, CodeWorkspacePullRequestFact, CodeWorkspacePullRequests,
+    CommitWorkspaceBody, CreatePullRequestBody, MergeCodePrBody,
 };
 use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, WorkspaceGitStatus};
 use tidebreak_core::WorkspaceId;
@@ -120,6 +121,44 @@ pub async fn get_workspace_pr_comments(
         number: comments.number,
         comments: comments.comments,
     }))
+}
+
+/// `POST /code/workspaces/{id}/pr/check-logs` — download the failing checks'
+/// job logs and report where they landed.
+///
+/// A write, so a POST. The fix-errors action calls this before it sends its
+/// prompt: the agent then opens a bounded file instead of spending its first
+/// turns working out which job failed and asking GitHub for the whole log.
+pub async fn write_workspace_check_logs(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<(StatusCode, Json<CodeCheckLogsSnapshot>), ServerError> {
+    let (head_sha, written) = code.workspace_check_logs(id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CodeCheckLogsSnapshot {
+            head_sha,
+            logs: written
+                .logs
+                .into_iter()
+                .map(|log| CodeCheckLog {
+                    check: log.check,
+                    path: log.path,
+                    byte_len: log.byte_len,
+                    truncated: log.truncated,
+                    url: log.url,
+                })
+                .collect(),
+            errors: written
+                .failures
+                .into_iter()
+                .map(|failure| CodeCheckLogError {
+                    check: failure.check,
+                    message: failure.message,
+                })
+                .collect(),
+        }),
+    ))
 }
 
 pub async fn merge_workspace_pr(

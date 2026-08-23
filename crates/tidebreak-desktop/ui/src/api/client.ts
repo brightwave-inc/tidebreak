@@ -106,6 +106,7 @@ import {
   type CodeCloneDefaults,
   type CodeRepoSources,
   type CodeWorktreeRoot,
+  type CodeCheckLogsSnapshot,
   type CodeForkTranscript,
   type CodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot,
@@ -146,6 +147,7 @@ import {
   parseCodeCloneDefaults,
   parseCodeRepoSources,
   parseCodeWorktreeRoot,
+  parseCodeCheckLogsSnapshot,
   parseCodeForkTranscript,
   parseCodeCloneJob,
   parseCodeHarnessInstall,
@@ -2660,6 +2662,29 @@ export class ApiClient {
         ),
       ),
       "code pull request",
+    );
+  }
+
+  /**
+   * Download the failing checks' job logs into private storage.
+   *
+   * The fix-errors action calls this before it prompts, so the agent opens a
+   * file instead of working out which job failed and asking GitHub itself.
+   * Each call replaces the previous set: only the head being fixed matters.
+   */
+  async writeCodeCheckLogs(
+    workspaceId: string,
+  ): Promise<CodeCheckLogsSnapshot> {
+    return requireParsed(
+      parseCodeCheckLogsSnapshot(
+        // A GitHub read, so it takes the delivery timeout rather than hanging
+        // the button on a `gh` that never answers.
+        await this.deliveryJson(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/check-logs`,
+          { method: "POST", headers: this.headers() },
+        ),
+      ),
+      "code check logs",
     );
   }
 
