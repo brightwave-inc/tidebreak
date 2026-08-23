@@ -830,6 +830,81 @@ pub async fn list_fires_for_workspace(
         .collect()
 }
 
+/// The head SHAs a trigger has already fired (or baselined) against for one
+/// pull request on one workspace. The fact-edge sweep reads this to tell a
+/// new head from one it has already handled (decision 62).
+pub async fn trigger_fire_heads_for_pr(
+    store: &DbStore,
+    owner: &OwnerId,
+    trigger_id: CodeTriggerId,
+    workspace_id: WorkspaceId,
+    pr_number: u64,
+) -> Result<Vec<String>> {
+    let pr_number = i64::try_from(pr_number)
+        .map_err(|_| AgentError::Store(format!("pull request number {pr_number} overflows")))?;
+    let rows: Vec<String> = entities::code_trigger_fire::Entity::find()
+        .select_only()
+        .column(entities::code_trigger_fire::Column::HeadSha)
+        .filter(entities::code_trigger_fire::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_trigger_fire::Column::TriggerId.eq(trigger_id.0))
+        .filter(entities::code_trigger_fire::Column::WorkspaceId.eq(workspace_id.0))
+        .filter(entities::code_trigger_fire::Column::PrNumber.eq(pr_number))
+        .into_tuple()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(rows)
+}
+
+/// Record a fire that must never notify: the `pr_updated` baseline
+/// (decision 62). The first observed head of a pull request is not an
+/// update, but a later head can only be recognized against a stored one, so
+/// the baseline lands as an already-delivered row with no payload — the
+/// outbox sweep never picks it up, and the conflict identity still
+/// suppresses a duplicate. Returns `true` when this call created the row.
+pub async fn insert_settled_trigger_fire(
+    store: &DbStore,
+    identity: &CodeTriggerFireIdentity,
+    fired_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let pr_number = trigger_fire_pr_number(identity)?;
+    let result =
+        entities::code_trigger_fire::Entity::insert(entities::code_trigger_fire::ActiveModel {
+            trigger_id: Set(identity.trigger_id.0),
+            owner: Set(identity.owner.as_str().to_owned()),
+            workspace_id: Set(identity.workspace_id.0),
+            pr_number: Set(pr_number),
+            head_sha: Set(identity.head_sha.clone()),
+            fired_at: Set(fired_at),
+            delivery_id: Set(CodeTriggerDeliveryId::new().0),
+            delivery_condition: Set(None),
+            delivery_action: Set(None),
+            delivery_message: Set(None),
+            state: Set(CodeTriggerFireState::Delivered.as_str().to_owned()),
+            attempt_count: Set(0),
+            lease_token: Set(None),
+            lease_expires_at: Set(None),
+            next_attempt_at: Set(None),
+            last_error: Set(None),
+            delivered_at: Set(Some(fired_at)),
+            cancelled_at: Set(None),
+        })
+        .on_conflict(
+            OnConflict::columns([
+                entities::code_trigger_fire::Column::TriggerId,
+                entities::code_trigger_fire::Column::WorkspaceId,
+                entities::code_trigger_fire::Column::PrNumber,
+                entities::code_trigger_fire::Column::HeadSha,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec_without_returning(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result == 1)
+}
+
 fn trigger_from_row(row: entities::code_trigger::Model) -> Result<CodeTrigger> {
     let condition = CodeTriggerCondition::from_str(&row.condition).ok_or_else(|| {
         AgentError::Store(format!(

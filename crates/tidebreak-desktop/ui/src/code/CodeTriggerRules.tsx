@@ -42,6 +42,8 @@ const CONDITIONS: CodeTriggerCondition[] = [
   "ready_to_merge",
   "merged",
   "closed",
+  "pr_opened",
+  "pr_updated",
 ];
 
 function conditionCopy(condition: CodeTriggerCondition): {
@@ -88,6 +90,18 @@ function conditionCopy(condition: CodeTriggerCondition): {
       return {
         title: "Closed",
         description: "The pull request closed without merging.",
+      };
+    case "pr_opened":
+      return {
+        title: "Pull request opens",
+        description:
+          "A pull request this repository's workspaces work on comes into existence.",
+      };
+    case "pr_updated":
+      return {
+        title: "Head moves",
+        description:
+          "A tracked pull request gets a new head. The first observed head never notifies.",
       };
   }
 }

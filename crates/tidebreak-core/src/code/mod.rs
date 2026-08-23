@@ -1138,6 +1138,14 @@ pub enum CodeTriggerCondition {
     Merged,
     /// The pull request closed without merging.
     Closed,
+    /// A pull request came into existence (decision 62). Edge-sourced from
+    /// the durable fact store's `first_seen_at`, never from
+    /// [`classify_trigger_condition`].
+    PrOpened,
+    /// A tracked pull request's head moved (decision 62). Edge-sourced from
+    /// the fact store, once per distinct head; the first observed head is a
+    /// silent baseline, never a notification.
+    PrUpdated,
 }
 
 impl CodeTriggerCondition {
@@ -1153,6 +1161,8 @@ impl CodeTriggerCondition {
             Self::ReadyToMerge => "ready_to_merge",
             Self::Merged => "merged",
             Self::Closed => "closed",
+            Self::PrOpened => "pr_opened",
+            Self::PrUpdated => "pr_updated",
         }
     }
 
@@ -1169,13 +1179,15 @@ impl CodeTriggerCondition {
             "ready_to_merge" => Some(Self::ReadyToMerge),
             "merged" => Some(Self::Merged),
             "closed" => Some(Self::Closed),
+            "pr_opened" => Some(Self::PrOpened),
+            "pr_updated" => Some(Self::PrUpdated),
             _ => None,
         }
     }
 
     /// Every condition, for enumerating the arming surface.
     #[must_use]
-    pub const fn all() -> [Self; 8] {
+    pub const fn all() -> [Self; 10] {
         [
             Self::ChecksFailed,
             Self::Conflicts,
@@ -1185,6 +1197,8 @@ impl CodeTriggerCondition {
             Self::ReadyToMerge,
             Self::Merged,
             Self::Closed,
+            Self::PrOpened,
+            Self::PrUpdated,
         ]
     }
 
@@ -1203,6 +1217,8 @@ impl CodeTriggerCondition {
             Self::ReadyToMerge => "the pull request is ready to merge",
             Self::Merged => "the pull request merged",
             Self::Closed => "the pull request closed without merging",
+            Self::PrOpened => "a pull request opened",
+            Self::PrUpdated => "the pull request's head moved",
         }
     }
 
@@ -1422,6 +1438,11 @@ impl CodeTriggerFire {
 /// conflicting branch reports conflicts rather than the failing checks that
 /// conflict caused. Returns `None` for a digest nothing is armed for — a draft,
 /// or a pull request merely waiting on pending checks.
+///
+/// Deliberately never returns [`CodeTriggerCondition::PrOpened`] or
+/// [`CodeTriggerCondition::PrUpdated`]: those are edges of the durable fact
+/// store (decision 62), not states a digest can carry, and the trigger
+/// sweep's fact pass fires them without a host read.
 #[must_use]
 pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerCondition> {
     let state = pr.state.trim().to_ascii_lowercase();

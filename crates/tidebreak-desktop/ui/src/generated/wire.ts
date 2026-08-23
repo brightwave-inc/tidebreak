@@ -1426,7 +1426,7 @@ export type CodeTriggerAction = "deliver" | "notify";
  * on. A trigger fires on the *transition* into one of these, once per head
  * SHA — see [`CodeTriggerFire`] (decision 60).
  */
-export type CodeTriggerCondition = "checks_failed" | "conflicts" | "changes_requested" | "review_required" | "behind" | "ready_to_merge" | "merged" | "closed";
+export type CodeTriggerCondition = "checks_failed" | "conflicts" | "changes_requested" | "review_required" | "behind" | "ready_to_merge" | "merged" | "closed" | "pr_opened" | "pr_updated";
 
 /**
  * Identifies one durable trigger rule bound to a repository.

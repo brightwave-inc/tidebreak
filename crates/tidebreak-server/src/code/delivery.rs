@@ -467,6 +467,15 @@ pub(crate) async fn query_pull_requests_by_number(
             .cmp(&left.updated_at)
             .then_with(|| left.id.cmp(&right.id))
     });
+    // The trigger sweep reads through here, and its stacked-child suppression
+    // keys on `stack_parent_number` (decision 62) — so this path persists and
+    // annotates the same way the list read does.
+    let workspaces_gaining_links =
+        persist_and_augment_pull_request_facts(&runtime.db, owner, &workspaces, &mut items).await;
+    for workspace_id in workspaces_gaining_links {
+        super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
+            .await;
+    }
     Ok(CodeDeliveryPullRequestsPage {
         capability,
         items,
