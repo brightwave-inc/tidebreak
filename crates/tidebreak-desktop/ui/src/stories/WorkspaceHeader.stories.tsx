@@ -63,6 +63,7 @@ function HeaderState({
               mergeCodePr: fn(),
               startCodeWatch: fn(),
               stopCodeWatch: fn(),
+              writeCodeCheckLogs: fn(async () => ({ logs: [], errors: [] })),
             }}
             workspaceId="ws-story"
             branchName="thet/ui-pane-redesign"

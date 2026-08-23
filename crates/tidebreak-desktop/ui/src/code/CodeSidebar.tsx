@@ -37,6 +37,7 @@ import {
   isPutAway,
   workspaceStackParent,
 } from "./workspaceCards";
+import { fetchFixErrorsLogs } from "./checkLogs";
 import { prWorkflowPrompt } from "./prActions";
 import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
 
@@ -266,6 +267,38 @@ export function CodeSidebar() {
                     if (!pr) return;
                     // Same prepared prompt the header control composes; the
                     // navigation makes the started turn visible.
+                    //
+                    // Fix-errors downloads the failing jobs' logs first, and
+                    // that read takes a second or two the rail cannot show —
+                    // so it navigates first and the turn starts on the
+                    // workspace the reader is already looking at.
+                    if (action === "fix_errors") {
+                      if (
+                        useCodeUiStore.getState().composerActionScope !== null
+                      ) {
+                        toast.error("Another agent action is already running");
+                        return;
+                      }
+                      void navigate({
+                        to: "/code/w/$workspaceId",
+                        params: { workspaceId: workspace.id },
+                      });
+                      void fetchFixErrorsLogs(client, workspace.id).then(
+                        (logs) => {
+                          if (
+                            !runComposerPrompt(
+                              workspace.id,
+                              prWorkflowPrompt(action, pr, logs),
+                            )
+                          ) {
+                            toast.error(
+                              "Another agent action is already running",
+                            );
+                          }
+                        },
+                      );
+                      return;
+                    }
                     if (
                       !runComposerPrompt(
                         workspace.id,

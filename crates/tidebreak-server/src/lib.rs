@@ -917,6 +917,10 @@ pub fn app(state: AppState) -> Router {
             get(routes::code::get_workspace_pr_comments),
         )
         .route(
+            "/code/workspaces/{id}/pr/check-logs",
+            post(routes::code::write_workspace_check_logs),
+        )
+        .route(
             "/code/workspaces/{id}/pr/merge",
             post(routes::code::merge_workspace_pr),
         )

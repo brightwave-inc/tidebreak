@@ -176,6 +176,9 @@ import {
   type CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   type CodeWorktreeRoot as WireCodeWorktreeRoot,
   type CodeForkTranscript as WireCodeForkTranscript,
+  type CodeCheckLog as WireCodeCheckLog,
+  type CodeCheckLogError as WireCodeCheckLogError,
+  type CodeCheckLogsSnapshot as WireCodeCheckLogsSnapshot,
   type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
   type PullRequestDigest as WirePullRequestDigest,
   type PullRequestCheck as WirePullRequestCheck,
@@ -1215,6 +1218,12 @@ export type CodeHarnessInstallSnapshot = WireCodeHarnessInstallSnapshot;
 export type CodeWorktreeRoot = WireCodeWorktreeRoot;
 /** The transcript file a fork wrote into the worktree, ready to hand on. */
 export type CodeForkTranscript = WireCodeForkTranscript;
+/** One failing check's job log, downloaded and waiting on disk. */
+export type CodeCheckLog = WireCodeCheckLog;
+/** One failing check whose job log could not be read. */
+export type CodeCheckLogError = WireCodeCheckLogError;
+/** The failing job logs written for a workspace's pull request. */
+export type CodeCheckLogsSnapshot = WireCodeCheckLogsSnapshot;
 
 /** Subscription quota windows exposed by Model Gateway or a direct harness. */
 export type CodeSubscriptionUsage = {

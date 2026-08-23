@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { fn, userEvent, within } from "storybook/test";
 
 import type { CodeWorkspacePrSnapshot } from "@/api";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
@@ -10,6 +10,7 @@ import type {
 import {
   blockedWatchPrGit,
   dirtyGit,
+  failingChecksPrGit,
   fixingPrGit,
   openPrGit,
   readyForPrGit,
@@ -38,11 +39,14 @@ function WorkflowState({
   snapshot,
   busy = null,
   watchTaskLink = false,
+  checkLogsHang = false,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   busy?: CodeWorkspacePrMutation | null;
   /** Offer the "Watching in …" link the workspace page wires up. */
   watchTaskLink?: boolean;
+  /** Leave the check-log download in flight, to hold the reading state. */
+  checkLogsHang?: boolean;
 }) {
   return (
     <WorkspaceWorkflowControl
@@ -53,6 +57,9 @@ function WorkflowState({
         mergeCodePr: fn(),
         startCodeWatch: fn(),
         stopCodeWatch: fn(),
+        writeCodeCheckLogs: checkLogsHang
+          ? () => new Promise(() => {})
+          : fn(async () => ({ logs: [], errors: [] })),
       }}
       workspaceId="ws-1"
       branchName="tidebreak/scoped-ui-workshop"
@@ -111,4 +118,26 @@ export const WatchBlocked: Story = {
 
 export const StoppingWatch: Story = {
   args: { snapshot: watchingPrGit, busy: "stop_watch" },
+};
+
+/** Failing checks with nobody watching: the button offers Fix errors. */
+export const FailingChecks: Story = {
+  args: { snapshot: failingChecksPrGit },
+};
+
+/**
+ * Pressed, and the failing jobs' logs are still downloading.
+ *
+ * The download is a host read the reader waits on before the turn starts, so
+ * the button says so rather than sitting on the action label doing nothing.
+ */
+export const ReadingCheckLogs: Story = {
+  args: { snapshot: failingChecksPrGit, checkLogsHang: true },
+  play: async ({ canvasElement }) => {
+    const button = within(canvasElement).getByRole("button", {
+      name: /fix ci/i,
+    });
+    await userEvent.click(button);
+    await within(canvasElement).findByText("Reading logs…");
+  },
 };

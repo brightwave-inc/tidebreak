@@ -11,6 +11,7 @@ pub(crate) mod browser_channel;
 pub(crate) mod browser_runtime;
 pub(crate) mod bus;
 pub(crate) mod checkpoint;
+pub(crate) mod ci_logs;
 pub(crate) mod clone;
 pub(crate) mod delivery;
 pub(crate) mod fork;

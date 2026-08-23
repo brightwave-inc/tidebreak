@@ -490,6 +490,13 @@ impl ScopedCode {
         self.runtime.workspace_pr_comments(&self.owner, id).await
     }
 
+    pub(crate) async fn workspace_check_logs(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<(Option<String>, super::ci_logs::WrittenCheckLogs), ServerError> {
+        self.runtime.workspace_check_logs(&self.owner, id).await
+    }
+
     pub(crate) async fn merge_workspace_pr(
         &self,
         id: WorkspaceId,

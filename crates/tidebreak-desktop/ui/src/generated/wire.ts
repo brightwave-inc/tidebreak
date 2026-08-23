@@ -863,6 +863,47 @@ harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested
 export type CodeApprovalState = "pending" | "approved" | "denied" | "abandoned";
 
 /**
+ * One failing check's downloaded job log:
+ * `POST /code/workspaces/{id}/pr/check-logs`.
+ *
+ * `path` is absolute and sits outside the Git worktree, in the same private
+ * storage a fork transcript uses. The prompt names it and the engine opens
+ * it; nothing is uploaded and nothing is indexable.
+ */
+export type CodeCheckLog = { 
+/**
+ * Check name as the host reports it.
+ */
+check: string, path: string, byte_len: number, 
+/**
+ * True when the file holds only the tail of the job log.
+ */
+truncated: boolean, 
+/**
+ * The job's host URL. A check without one has no log to download, so
+ * every entry here has one.
+ */
+url: string, };
+
+/**
+ * One failing check whose log could not be read.
+ */
+export type CodeCheckLogError = { check: string, message: string, };
+
+/**
+ * Failing job logs written for one workspace's pull request.
+ *
+ * A check with no downloadable log — an external CI provider, or a check-run
+ * URL that names no Actions job — is simply absent from both lists. The
+ * caller still names it in the prompt from the digest it already holds.
+ */
+export type CodeCheckLogsSnapshot = { 
+/**
+ * Head the logs were read against, when the host reported one.
+ */
+head_sha?: string, logs: Array<CodeCheckLog>, errors: Array<CodeCheckLogError>, };
+
+/**
  * Remembered clone destination plus observed `gh` status.
  */
 export type CodeCloneDefaults = { parent_dir?: string, gh_found: boolean, gh_authenticated?: boolean, gh_remediation: string, };

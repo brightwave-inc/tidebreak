@@ -32,6 +32,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { openExternal } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { fetchFixErrorsLogs } from "./checkLogs";
 import { prWorkflowPrompt, type PrPromptAction } from "./prActions";
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
@@ -69,6 +70,7 @@ export function WorkspaceWorkflowControl({
     | "mergeCodePr"
     | "startCodeWatch"
     | "stopCodeWatch"
+    | "writeCodeCheckLogs"
   >;
   workspaceId: string;
   branchName: string;
@@ -80,6 +82,9 @@ export function WorkspaceWorkflowControl({
   onOpenWatchTask?: () => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Downloading the failing job logs is a host read the reader waits on, so
+  // the primary button spins through it rather than looking dead.
+  const [attachingLogs, setAttachingLogs] = useState(false);
   const popoverTitleId = useId();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
@@ -154,7 +159,7 @@ export function WorkspaceWorkflowControl({
       void mergePr(true);
       return;
     }
-    if (busy !== null || agentActionRunning) {
+    if (busy !== null || agentActionRunning || attachingLogs) {
       toast.message("Another workspace action is already running");
       return;
     }
@@ -164,11 +169,31 @@ export function WorkspaceWorkflowControl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowShortcutPending, workspaceId]);
 
-  function runAgentAction(action: PrPromptAction) {
+  /**
+   * Hand one prepared prompt to the workspace's agent.
+   *
+   * Fix-errors takes a detour first: the server downloads the failing jobs'
+   * logs so the prompt can name files the agent reads, instead of asking it to
+   * go and find them. The scope is claimed before the download so a second
+   * press cannot start a second fetch, and a failed fetch still sends the
+   * prompt.
+   */
+  async function runAgentAction(action: PrPromptAction) {
     const pr = model.pr;
     if (!pr) return;
     setDetailsOpen(false);
-    runComposerPrompt(workspaceId, prWorkflowPrompt(action, pr));
+    if (action !== "fix_errors") {
+      runComposerPrompt(workspaceId, prWorkflowPrompt(action, pr));
+      return;
+    }
+    if (attachingLogs || agentActionRunning) return;
+    setAttachingLogs(true);
+    try {
+      const logs = await fetchFixErrorsLogs(client, workspaceId);
+      runComposerPrompt(workspaceId, prWorkflowPrompt(action, pr, logs));
+    } finally {
+      setAttachingLogs(false);
+    }
   }
 
   async function startWatch() {
@@ -342,7 +367,7 @@ export function WorkspaceWorkflowControl({
         await markReady();
         return;
       default:
-        runAgentAction(action);
+        await runAgentAction(action);
     }
   }
 
@@ -648,12 +673,15 @@ export function WorkspaceWorkflowControl({
                   : undefined
             }
             disabled={
-              busy !== null || agentActionRunning || model.stage === "loading"
+              busy !== null ||
+              agentActionRunning ||
+              attachingLogs ||
+              model.stage === "loading"
             }
-            aria-busy={busy === primary || agentActionRunning}
+            aria-busy={busy === primary || agentActionRunning || attachingLogs}
             onClick={() => void run(primary)}
           >
-            {busy === primary || agentActionRunning ? (
+            {busy === primary || agentActionRunning || attachingLogs ? (
               <Spinner aria-hidden />
             ) : primary === "watch_and_fix" ? (
               <CircleDotDashed aria-hidden />
@@ -668,7 +696,9 @@ export function WorkspaceWorkflowControl({
                 ? "Pushing…"
                 : busy === "create_pr" && primary === "create_pr"
                   ? "Creating…"
-                  : primaryLabel}
+                  : attachingLogs
+                    ? "Reading logs…"
+                    : primaryLabel}
             </span>
           </Button>
         ) : null}
@@ -682,7 +712,7 @@ export function WorkspaceWorkflowControl({
                 size="sm"
                 className="border-border-subtle rounded-none border-0 border-l bg-transparent px-1.5 hover:bg-background"
                 aria-label="More workspace actions"
-                disabled={busy !== null || agentActionRunning}
+                disabled={busy !== null || agentActionRunning || attachingLogs}
               >
                 <ChevronDown aria-hidden />
               </Button>

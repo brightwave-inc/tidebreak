@@ -142,6 +142,24 @@ export const openPrGit: CodeWorkspacePrSnapshot = {
   },
 };
 
+/** Failing checks with nobody watching: the Fix errors action's own state. */
+export const failingChecksPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  pr: {
+    ...openPrGit.pr!,
+    checks_summary: "7 passing, 1 failing",
+    checks: [
+      { name: "desktop test", bucket: "pass" },
+      {
+        name: "clippy",
+        bucket: "fail",
+        detail: "exit 101",
+        url: "https://github.com/example/tidebreak/actions/runs/32664268801/job/97255126659",
+      },
+    ],
+  },
+};
+
 const watchBase: CodeWatchSnapshot = {
   id: "watch-1",
   workspace_id: "ws-1",
