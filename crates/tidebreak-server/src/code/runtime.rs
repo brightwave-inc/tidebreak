@@ -1290,9 +1290,9 @@ impl CodeRuntime {
 
     /// Borrow a repository-scoped forge credential for one git operation in
     /// `worktree`, on a machine that lends them (decision 63). `Ok(None)` is
-    /// every machine that does not — and every checkout whose origin is not
-    /// a forge repository at all (a local path, a bare test origin): those
-    /// pushes carry no credential today and keep working exactly as they do.
+    /// every machine that does not — and every checkout whose origin
+    /// [`forge_lending_target`] rules out: those operations carry no
+    /// credential today and keep working exactly as they do.
     ///
     /// A refusal from the gateway fails the operation with its reason rather
     /// than falling back to an uncredentialed attempt — the attempt would
@@ -1306,7 +1306,7 @@ impl CodeRuntime {
         let Some(lender) = self.git_credentials() else {
             return Ok(None);
         };
-        let Ok(target) = super::delivery::repository_target_from_path(worktree).await else {
+        let Some(target) = forge_lending_target(worktree).await else {
             return Ok(None);
         };
         let repository = format!("{}/{}", target.owner, target.name);
@@ -1339,17 +1339,14 @@ impl CodeRuntime {
         .await
         .map_err(map_gh)?;
         // On a hosted machine, say whose identity a push would act as
-        // (decision 63) — only for a checkout whose origin is a forge
-        // repository, because only those pushes borrow the App's identity.
-        // Probed per caller and held fresh by the lender; a refusal simply
-        // leaves the field empty — the push itself reports refusals with
-        // their reasons.
+        // (decision 63) — only for a checkout the machine would actually
+        // lend the App's identity to, so the sentence is never wider than
+        // the lending. Probed per caller and held fresh by the lender; a
+        // refusal simply leaves the field empty — the push itself reports
+        // refusals with their reasons.
         if let Some(lender) = self.git_credentials() {
             let worktree = std::path::Path::new(&workspace.worktree_path);
-            if super::delivery::repository_target_from_path(worktree)
-                .await
-                .is_ok()
-            {
+            if forge_lending_target(worktree).await.is_some() {
                 if let Ok(identity) = lender.git_forge_identity(owner).await {
                     status.pushes_as = Some(identity.bot_login.unwrap_or(identity.app_name));
                 }
@@ -3409,6 +3406,28 @@ fn map_gh(err: GhError) -> ServerError {
         }
         GhError::Internal(message) => ServerError::internal(message),
     }
+}
+
+/// The origin a hosted machine may lend the forge's App identity to: a
+/// parseable forge repository on the forge's own host, and nothing else
+/// (decision 63).
+///
+/// The host gate is a security boundary, not a convenience. The origin URL
+/// is workspace state an agent can rewrite, and the parser accepts any
+/// `host/owner/repo` shape — without the gate, the next push would mint a
+/// live installation token and offer it to whatever host `origin` names.
+/// Only `owner/name` ever travels to the gateway, and the one-shot helper
+/// re-checks the same host at `get`, so both halves refuse independently.
+async fn forge_lending_target(
+    worktree: &std::path::Path,
+) -> Option<crate::routes::code::CodeGitHubRepositoryTarget> {
+    let target = super::delivery::repository_target_from_path(worktree)
+        .await
+        .ok()?;
+    target
+        .host
+        .eq_ignore_ascii_case(gh::GIT_CREDENTIAL_FORGE_HOST)
+        .then_some(target)
 }
 
 fn map_worktree(err: WorktreeError) -> ServerError {

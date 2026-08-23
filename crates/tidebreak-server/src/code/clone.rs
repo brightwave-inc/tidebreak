@@ -627,7 +627,8 @@ async fn clone_into(
         command.args(gh::GIT_CREDENTIAL_CONFIG_ARGS);
         command
             .env(gh::GIT_CREDENTIAL_USERNAME_ENV, &credential.username)
-            .env(gh::GIT_CREDENTIAL_SECRET_ENV, &credential.secret);
+            .env(gh::GIT_CREDENTIAL_SECRET_ENV, &credential.secret)
+            .env(gh::GIT_CREDENTIAL_HOST_ENV, gh::GIT_CREDENTIAL_FORGE_HOST);
     }
     command
         .args(["clone", "--progress", "--", url])

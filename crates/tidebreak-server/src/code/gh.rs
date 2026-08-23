@@ -39,6 +39,15 @@ pub(crate) const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
 pub(crate) const GIT_CREDENTIAL_USERNAME_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_USERNAME";
 pub(crate) const GIT_CREDENTIAL_SECRET_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_SECRET";
 
+/// The one host the one-shot helper may answer for, set beside the pair.
+pub(crate) const GIT_CREDENTIAL_HOST_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_HOST";
+
+/// The forge host a borrowed credential is confined to (decision 63).
+///
+/// One value for v1 because the gateway mints from exactly one GitHub App;
+/// a GHES forge would thread its own host through here.
+pub(crate) const GIT_CREDENTIAL_FORGE_HOST: &str = "github.com";
+
 /// Configuration that lends one borrowed credential to one git subprocess
 /// (decision 63).
 ///
@@ -46,13 +55,20 @@ pub(crate) const GIT_CREDENTIAL_SECRET_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_SEC
 /// load-bearing twice over: no configured helper can answer ahead of the
 /// borrowed credential, and — because git offers a successful credential to
 /// every helper's `store` — no helper like `git-credential-store` can write
-/// the dying token to disk. The one-shot helper then answers `get` from the
-/// environment and ignores every other action.
+/// the dying token to disk.
+///
+/// The one-shot helper then answers `get` from the environment — but only
+/// for `https` and only for the exact host named in
+/// [`GIT_CREDENTIAL_HOST_ENV`]. Git re-asks its helpers whenever a fetch or
+/// push needs another host's credential — a rewritten `origin`, a redirect —
+/// and without the check the environment pair would be offered to whatever
+/// host asked. A mismatched description reads to git as "no credential",
+/// never as an error.
 pub(crate) const GIT_CREDENTIAL_CONFIG_ARGS: [&str; 4] = [
     "-c",
     "credential.helper=",
     "-c",
-    "credential.helper=!f() { if [ \"$1\" = get ]; then printf 'username=%s\\npassword=%s\\n' \"$TIDEBREAK_GIT_CREDENTIAL_USERNAME\" \"$TIDEBREAK_GIT_CREDENTIAL_SECRET\"; fi; }; f",
+    "credential.helper=!f() { h=; p=; while IFS= read -r line; do case \"$line\" in host=*) if [ \"${line#host=}\" = \"$TIDEBREAK_GIT_CREDENTIAL_HOST\" ]; then h=1; fi ;; protocol=https) p=1 ;; esac; done; if [ \"$1\" = get ] && [ -n \"$h\" ] && [ -n \"$p\" ]; then printf 'username=%s\\npassword=%s\\n' \"$TIDEBREAK_GIT_CREDENTIAL_USERNAME\" \"$TIDEBREAK_GIT_CREDENTIAL_SECRET\"; fi; }; f",
 ];
 
 static GH_LAUNCH: OnceLock<GhLaunch> = OnceLock::new();
@@ -1773,7 +1789,8 @@ async fn git_with_credential(
     if let Some(credential) = credential {
         command
             .env(GIT_CREDENTIAL_USERNAME_ENV, &credential.username)
-            .env(GIT_CREDENTIAL_SECRET_ENV, &credential.secret);
+            .env(GIT_CREDENTIAL_SECRET_ENV, &credential.secret)
+            .env(GIT_CREDENTIAL_HOST_ENV, GIT_CREDENTIAL_FORGE_HOST);
     }
     let child = command
         .spawn()
@@ -2174,41 +2191,52 @@ mod tests {
     use tempfile::TempDir;
 
     /// The one-shot helper is real shell handed to real git: prove it
-    /// answers `get` with the environment pair, so a clone or push carrying
-    /// [`GIT_CREDENTIAL_CONFIG_ARGS`] authenticates without the secret ever
-    /// touching argv, a URL, or a file (decision 63).
+    /// answers `get` with the environment pair for the forge host over
+    /// `https` — and answers nothing for any other host or protocol, so a
+    /// rewritten origin or a redirect cannot walk the borrowed credential to
+    /// a host an attacker controls (decision 63).
     #[test]
-    fn the_one_shot_helper_answers_get_from_the_environment() {
+    fn the_one_shot_helper_answers_only_the_forge_host_over_https() {
         use std::io::Write as _;
 
-        let dir = TempDir::new().unwrap();
-        let mut command = StdCommand::new("git");
-        command.args(GIT_CREDENTIAL_CONFIG_ARGS);
-        command
-            .args(["credential", "fill"])
-            .current_dir(dir.path())
-            .env(GIT_CREDENTIAL_USERNAME_ENV, "x-access-token")
-            .env(GIT_CREDENTIAL_SECRET_ENV, "ghs_dying_token")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"protocol=https\nhost=github.com\npath=acme/demo.git\n\n")
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "git credential fill failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let answered = String::from_utf8_lossy(&output.stdout);
+        let fill = |description: &[u8]| {
+            let dir = TempDir::new().unwrap();
+            let mut command = StdCommand::new("git");
+            command.args(GIT_CREDENTIAL_CONFIG_ARGS);
+            command
+                .args(["credential", "fill"])
+                .current_dir(dir.path())
+                .env(GIT_CREDENTIAL_USERNAME_ENV, "x-access-token")
+                .env(GIT_CREDENTIAL_SECRET_ENV, "ghs_dying_token")
+                .env(GIT_CREDENTIAL_HOST_ENV, GIT_CREDENTIAL_FORGE_HOST)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            child.stdin.take().unwrap().write_all(description).unwrap();
+            let output = child.wait_with_output().unwrap();
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+            )
+        };
+
+        let (ok, answered) = fill(b"protocol=https\nhost=github.com\npath=acme/demo.git\n\n");
+        assert!(ok, "git credential fill failed for the forge host");
         assert!(answered.contains("username=x-access-token"), "{answered}");
         assert!(answered.contains("password=ghs_dying_token"), "{answered}");
+
+        // Any other host — a rewritten origin, a redirect — gets nothing.
+        // `fill` itself fails because no source answered and prompts are off,
+        // which is exactly the refusal a push would surface.
+        let (ok, answered) = fill(b"protocol=https\nhost=evil.example\npath=acme/demo.git\n\n");
+        assert!(!ok, "a foreign host must not fill");
+        assert!(!answered.contains("ghs_dying_token"), "{answered}");
+
+        let (ok, answered) = fill(b"protocol=http\nhost=github.com\npath=acme/demo.git\n\n");
+        assert!(!ok, "cleartext must not fill");
+        assert!(!answered.contains("ghs_dying_token"), "{answered}");
     }
 
     fn init_paired_repos() -> (TempDir, PathBuf, PathBuf) {

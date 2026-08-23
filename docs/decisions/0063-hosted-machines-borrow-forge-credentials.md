@@ -42,6 +42,14 @@ is `installation_only` cannot attribute it to the person.
    list, so no configured helper can answer ahead of the borrowed credential
    or store it when git offers it back.
 
+   The credential is confined to the forge's own host, twice over. The
+   machine lends only for an origin whose host is the forge's — the origin
+   URL is workspace state an agent can rewrite, and without the gate the
+   next push would offer a live token to whatever host `origin` names. And
+   the helper itself answers `get` only for `https` and that exact host, so
+   a rewrite or a redirect that slips past the first check still collects
+   nothing.
+
 2. **The repo-source probe answers per caller, from the gateway.** On a
    hosted machine the `github` source stops consulting `gh` — there is none —
    and reflects the gateway's probe for the requesting caller:
@@ -63,9 +71,9 @@ is `installation_only` cannot attribute it to the person.
    refusal — no forge, a repository outside the installation, a dead session
    — fails the clone or push with that reason rather than retrying without a
    credential. An uncredentialed retry would fail with a worse message and
-   blur which identity acted. A checkout whose origin is not a forge
-   repository at all — a local path, a bare test origin — borrows nothing
-   and pushes exactly as it does today.
+   blur which identity acted. A checkout whose origin is not a lendable
+   forge repository — a local path, a bare test origin, any host but the
+   forge's — borrows nothing and pushes exactly as it does today.
 
 5. **Nothing else changes.** Static-token self-host machines and desktops
    never build the lender, so every existing git and `gh` path is untouched.

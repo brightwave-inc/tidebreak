@@ -520,6 +520,42 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
     let body: serde_json::Value = status.json().await.unwrap();
     assert_eq!(body["pushes_as"], "acme-ship[bot]", "{body}");
 
+    // A rewritten origin on a foreign host — the exact move an agent in the
+    // workspace could make — is outside the lending: no identity is claimed
+    // and, through the same gate, no credential would be borrowed.
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://evil.example/acme/private.git",
+        ],
+    );
+    let status = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = status.json().await.unwrap();
+    assert!(body["pushes_as"].is_null(), "{body}");
+    assert!(
+        lender.minted().is_empty(),
+        "a foreign host must never reach the gateway"
+    );
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+
     // A refusal stops the push with the gateway's reason before git runs —
     // nothing reaches the network in this test.
     *lender.mint_refusal.lock().unwrap() = Some(GitForgeError::NoGitForge);
