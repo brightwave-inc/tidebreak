@@ -128,9 +128,16 @@ pub(crate) async fn write_failing_check_logs(
     let targets = checks
         .iter()
         .filter(|check| check.bucket == PullRequestCheckBucket::Fail)
+        // Owned, not borrowed: a `&PullRequestCheck` riding through the stream
+        // ties the mapped future to one lifetime, and the handler bound needs
+        // it general over any. The name is all this reads anyway.
         .filter_map(|check| {
             let url = check.url.as_deref()?;
-            Some((check, url.to_owned(), job_ref_from_check_url(url)?))
+            Some((
+                check.name.clone(),
+                url.to_owned(),
+                job_ref_from_check_url(url)?,
+            ))
         })
         .take(MAX_JOBS)
         .collect::<Vec<_>>();
@@ -163,19 +170,16 @@ pub(crate) async fn write_failing_check_logs(
         let raw = match raw {
             Ok(raw) => raw,
             Err(message) => {
-                failures.push(CheckLogFailure {
-                    check: check.name.clone(),
-                    message,
-                });
+                failures.push(CheckLogFailure { check, message });
                 continue;
             }
         };
-        let rendered = render_job_log(&check.name, &url, head_sha, &raw);
-        let name = log_file_name(&check.name, job.job_id);
+        let rendered = render_job_log(&check, &url, head_sha, &raw);
+        let name = log_file_name(&check, job.job_id);
         dir.publish(std::ffi::OsStr::new(&name), rendered.text.as_bytes())
             .await?;
         logs.push(WrittenCheckLog {
-            check: check.name.clone(),
+            check,
             path: private_root
                 .join(CI_LOGS_DIR)
                 .join(&name)
