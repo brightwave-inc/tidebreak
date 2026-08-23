@@ -928,6 +928,7 @@ mod tests {
             attention_reasons: Vec::new(),
             ready_to_merge: true,
             workspace_links: Vec::new(),
+            stack_parent_number: None,
             labels: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

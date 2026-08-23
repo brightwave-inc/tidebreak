@@ -1246,6 +1246,7 @@ describe("pull request facts (decision 62)", () => {
               relation: "contributed",
             },
           ],
+          stack_parent_number: 400,
           labels: [],
           created_at: "2026-08-22T10:00:00Z",
           updated_at: "2026-08-22T11:00:00Z",

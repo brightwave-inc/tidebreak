@@ -32,7 +32,11 @@ import {
   workspaceCommands,
 } from "./workspaceActions";
 import { WorkspaceCard } from "./WorkspaceCard";
-import { arrangeWorkspaces, isPutAway } from "./workspaceCards";
+import {
+  arrangeWorkspaces,
+  isPutAway,
+  workspaceStackParent,
+} from "./workspaceCards";
 import { prWorkflowPrompt } from "./prActions";
 import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
 
@@ -188,6 +192,13 @@ export function CodeSidebar() {
                     { childrenByWorkspace },
                     workspace.id,
                   )}
+                  stackParent={workspaceStackParent(workspace, workspaces)}
+                  onOpenStackParent={(workspaceId) =>
+                    void navigate({
+                      to: "/code/w/$workspaceId",
+                      params: { workspaceId },
+                    })
+                  }
                   onOpen={() =>
                     void navigate({
                       to: "/code/w/$workspaceId",

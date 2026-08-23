@@ -2069,6 +2069,7 @@ fn parse_pull_request(
         attention_reasons,
         ready_to_merge,
         workspace_links,
+        stack_parent_number: None,
         labels,
         created_at: datetime_field(value, "createdAt").unwrap_or_else(Utc::now),
         updated_at: datetime_field(value, "updatedAt").unwrap_or_else(Utc::now),
@@ -2486,7 +2487,7 @@ async fn persist_and_augment_pull_request_facts(
     let mut fact_ids: HashMap<usize, CodePullRequestId> = HashMap::new();
     for indices in groups.values() {
         let repository = &items[indices[0]].repository;
-        let known: HashMap<u64, CodePullRequestId> = match list_pull_request_facts_for_repo(
+        let mut repo_facts = match list_pull_request_facts_for_repo(
             db,
             owner,
             &repository.host,
@@ -2495,15 +2496,16 @@ async fn persist_and_augment_pull_request_facts(
         )
         .await
         {
-            Ok(facts) => facts
-                .into_iter()
-                .map(|fact| (fact.number, fact.id))
-                .collect(),
+            Ok(facts) => facts,
             Err(err) => {
                 tracing::debug!("fact read failed for a delivery page: {err}");
                 continue;
             }
         };
+        let known: HashMap<u64, CodePullRequestId> = repo_facts
+            .iter()
+            .map(|fact| (fact.number, fact.id))
+            .collect();
         for &index in indices {
             let item = &items[index];
             let exact_workspaces: Vec<WorkspaceId> = item
@@ -2525,6 +2527,15 @@ async fn persist_and_augment_pull_request_facts(
                     continue;
                 }
             };
+            // Keep the local fact set current with what was just written, so
+            // stack derivation below sees this pass's own observations.
+            match repo_facts
+                .iter_mut()
+                .find(|known| known.number == fact.number)
+            {
+                Some(existing) => *existing = fact,
+                None => repo_facts.push(fact),
+            }
             fact_ids.insert(index, id);
             for workspace_id in exact_workspaces {
                 match insert_pull_request_attribution(
@@ -2547,6 +2558,16 @@ async fn persist_and_augment_pull_request_facts(
                     Err(err) => tracing::debug!("attribution claim failed: {err}"),
                 }
             }
+        }
+        // Stack annotation rides the durable set, not the page: a parent
+        // outside the current page or filter still resolves (decision 62).
+        let parents = super::reconcile::stack_parents_by_head(&repo_facts);
+        for &index in indices {
+            let item = &mut items[index];
+            item.stack_parent_number = parents
+                .get(&item.base_branch)
+                .copied()
+                .filter(|parent| *parent != item.number);
         }
     }
 
