@@ -846,7 +846,7 @@ async fn a_hosted_machine_creates_and_reads_the_pull_request_over_rest() {
         .send()
         .await
         .unwrap();
-    assert_eq!(created.status(), reqwest::StatusCode::OK);
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let body: serde_json::Value = created.json().await.unwrap();
     assert_eq!(body["pr"]["number"], 7, "{body}");
     assert_eq!(
