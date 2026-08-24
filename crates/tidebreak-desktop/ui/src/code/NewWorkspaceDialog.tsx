@@ -211,10 +211,14 @@ export function NewWorkspaceDialog({
 
   // A pin this machine has never installed is minutes of npm. Warming it
   // when the dialog opens — and again when the engine changes — moves that
-  // off create, where it was a silent stall.
+  // off create, where it was a silent stall. The doctor entry is the only
+  // trigger: until the report lands, `harness` is the fallback guess rather
+  // than anything the reader picked, and downloading on a guess fetches
+  // hundreds of megabytes nobody asked for.
   const doctorEntry = allHarnesses.find((item) => item.kind === harness);
   const installed = Boolean(doctorEntry?.found);
-  const install = useWarmHarnessInstall(client, harness, open, installed);
+  const needsDownload = Boolean(doctorEntry && !doctorEntry.found);
+  const install = useWarmHarnessInstall(client, harness, open, needsDownload);
 
   const selectedRepo = repos.find((repo) => repo.id === repoId);
   const selectedHarness = selectableHarnesses.find(

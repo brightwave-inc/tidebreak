@@ -43,33 +43,46 @@ export function useWarmHarnessInstall(
   harness: HarnessKind | undefined,
   /** False while the surface is closed, so a hidden picker downloads nothing. */
   active: boolean,
-  /** The doctor's answer for `harness`. False starts the download. */
-  installed: boolean,
+  /**
+   * The doctor says this engine is missing.
+   *
+   * This is deliberately not "the doctor does not say it is present". A report
+   * that has not landed yet knows nothing about any engine, and downloading on
+   * that would fetch whichever engine the picker happened to fall back to.
+   */
+  needsDownload: boolean,
 ): CodeHarnessInstallSnapshot | undefined {
   const reloadDoctor = useCodeCatalogStore((state) => state.reloadDoctor);
   const installs = useCodeUpdatesStore((state) => state.harnessInstalls);
   const install = harness ? installs[harness] : undefined;
-  const wanted = Boolean(active && client && harness && !installed);
+  const wanted = Boolean(active && client && harness && needsDownload);
 
   useEffect(() => {
     if (!wanted || !client || !harness) return;
     let cancelled = false;
-    void client.startHarnessInstall(harness).then(
-      (snapshot) => {
-        // The answer is immediate; the phases after it arrive on the updates
-        // socket. Applying it here means the note shows even on the profile
-        // that never opened one.
-        if (!cancelled) {
-          useCodeUpdatesStore
-            .getState()
-            .apply({ type: "harness_install", install: snapshot });
-        }
-      },
-      // Nothing is broken yet: create still reports `harness_not_found` with
-      // the reason, and a member of a shared deployment may not install at
-      // all. A toast on picker open would be noise either way.
-      () => {},
-    );
+    // Warming a pin is an optimization on top of the create path's own
+    // ensure, so nothing here may take the surface down with it — a client
+    // that cannot install at all still has to render its picker.
+    try {
+      void client.startHarnessInstall(harness).then(
+        (snapshot) => {
+          // The answer is immediate; the phases after it arrive on the
+          // updates socket. Applying it here means the note shows even on the
+          // profile that never opened one.
+          if (!cancelled) {
+            useCodeUpdatesStore
+              .getState()
+              .apply({ type: "harness_install", install: snapshot });
+          }
+        },
+        // Nothing is broken yet: create still reports `harness_not_found`
+        // with the reason, and a member of a shared deployment may not
+        // install at all. A toast on picker open would be noise either way.
+        () => {},
+      );
+    } catch {
+      // Same reasoning as the rejection above.
+    }
     return () => {
       cancelled = true;
     };

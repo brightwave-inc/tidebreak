@@ -115,7 +115,7 @@ export function StartSessionPrompt({
     canInstallHarnesses(client) ? client : undefined,
     selectedKind,
     true,
-    installed,
+    Boolean(selected && !selected.found),
   );
 
   useEffect(() => {
