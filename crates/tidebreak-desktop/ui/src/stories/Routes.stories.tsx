@@ -206,7 +206,9 @@ function RoutesStory({ scenario }: { scenario: RouteScenario }) {
   return (
     <RouteStoryProviders client={state.client} policy={state.policy}>
       <div className="app-shell h-full min-h-0 w-full overflow-hidden">
-        <RouterProvider router={state.router as never} />
+        <div className="app-body">
+          <RouterProvider router={state.router as never} />
+        </div>
       </div>
     </RouteStoryProviders>
   );

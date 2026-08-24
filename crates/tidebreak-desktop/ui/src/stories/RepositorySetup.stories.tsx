@@ -303,5 +303,5 @@ export const NewWorkspaceNeedsHarness: Story = {
 
 export const CompactNewWorkspace: Story = {
   args: { scenario: "workspace" },
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };

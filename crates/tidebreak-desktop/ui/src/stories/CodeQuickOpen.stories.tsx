@@ -92,5 +92,5 @@ export const Failure: Story = {
 };
 
 export const Compact: Story = {
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };

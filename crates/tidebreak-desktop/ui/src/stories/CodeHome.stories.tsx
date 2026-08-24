@@ -198,7 +198,9 @@ function CodeHomeStory({ scenario }: { scenario: HomeScenario }) {
   return (
     <AppContextProvider value={appContext(state.client)}>
       <div className="app-shell h-full min-h-0 w-full overflow-hidden">
-        <RouterProvider router={state.router as never} />
+        <div className="app-body">
+          <RouterProvider router={state.router as never} />
+        </div>
       </div>
     </AppContextProvider>
   );
@@ -266,5 +268,5 @@ export const DenseSidebar: Story = {
 
 export const CompactFirstRepository: Story = {
   args: { scenario: "empty" },
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
