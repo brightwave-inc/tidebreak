@@ -136,18 +136,45 @@ export function harnessHonorsAnyCreateMode(entry: { caps: ModeCaps }): boolean {
 }
 
 /**
- * Why a picker row is not selectable. Ready rows return null.
+ * True when this engine is not on disk yet but Tidebreak ships a pin it can
+ * download.
+ *
+ * Every engine used to have to be installed before any of them could be used,
+ * because the doctor's only install control fetched all four. A missing pin is
+ * now a wait, not a fault: pick the engine and the download starts.
+ */
+export function harnessNeedsDownload(entry: {
+  found: boolean;
+  installable: boolean;
+}): boolean {
+  return !entry.found && entry.installable;
+}
+
+/**
+ * Why a picker row is not selectable. Ready rows return null, and so does a
+ * row that only needs downloading — see [`harnessNeedsDownload`].
  * Versions, paths, and capability names stay on the doctor.
  */
 export function harnessUnusableReason(entry: {
   found: boolean;
+  installable: boolean;
   authenticated?: boolean;
   caps: ModeCaps;
 }): string | null {
-  if (!entry.found) return "Not installed";
+  if (!entry.found && !entry.installable) return "Not installed";
   if (entry.authenticated === false) return "Sign in via your terminal";
   if (!harnessHonorsAnyCreateMode(entry)) return "Not available yet";
   return null;
+}
+
+/** True when this engine can be started right now, with nothing to wait for. */
+export function harnessCanStartNow(entry: {
+  found: boolean;
+  installable: boolean;
+  authenticated?: boolean;
+  caps: ModeCaps;
+}): boolean {
+  return entry.found && !harnessUnusableReason(entry);
 }
 
 /**

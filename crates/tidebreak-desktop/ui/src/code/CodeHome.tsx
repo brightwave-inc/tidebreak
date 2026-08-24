@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { FolderGit2, GitBranch, Plus, Sparkles } from "lucide-react";
 
+import type { HarnessKind } from "../api/types";
+
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,18 +18,20 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUiStore } from "./CodeUiStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { DoctorList } from "./DoctorList";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
-import { isHarnessReady } from "./labels";
+import { harnessUnusableReason } from "./labels";
 import { middleTruncate } from "./workspaceCards";
 
 /**
- * `/code` home: the doctor when no engine is usable, otherwise repo
- * registration and the registered list.
+ * `/code` home: the doctor when no engine can be started or downloaded,
+ * otherwise repo registration and the registered list.
  *
- * A reader who has not installed or signed in to a harness cannot start a
- * workspace, so the empty state is the remediation the doctor already wrote
- * rather than a blank register form.
+ * A machine with nothing downloaded yet is not blocked: picking an engine in
+ * the New Workspace dialog fetches it. The doctor only takes the page when
+ * every engine is signed out or unsupported, which is the one case a reader
+ * cannot resolve by starting a workspace.
  */
 
 export function CodeHome() {
@@ -51,18 +55,41 @@ function CodeHomeBody() {
   const refreshDoctor = useCodeCatalogStore((state) => state.refreshDoctor);
   const [addOpen, setAddOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const installs = useCodeUpdatesStore((state) => state.harnessInstalls);
+  const reloadDoctor = useCodeCatalogStore((state) => state.reloadDoctor);
 
   useEffect(() => {
     void refresh(client);
   }, [client, refresh]);
 
-  const ready = doctor?.harnesses.some(isHarnessReady) ?? false;
+  // Startable now, or one download away. Either way the reader can get to
+  // work from here, so the register form is what the page owes them.
+  const usable =
+    doctor?.harnesses.some((entry) => !harnessUnusableReason(entry)) ?? false;
   const showRepos = loaded && repos.length > 0;
-  const showEmpty = loaded && repos.length === 0 && ready;
-  const showDoctor = Boolean(doctor && !ready);
+  const showEmpty = loaded && repos.length === 0 && usable;
+  const showDoctor = Boolean(doctor && !usable);
   // Repos resolve before the doctor. Until one of the three settled
   // bodies can render, keep this slot filled so the empty state does not pop in.
   const showLoading = !showRepos && !showEmpty && !showDoctor && !error;
+
+  async function install(kind: HarnessKind) {
+    try {
+      const snapshot = await client.startHarnessInstall(kind, true);
+      useCodeUpdatesStore
+        .getState()
+        .apply({ type: "harness_install", install: snapshot });
+    } catch {
+      // Create still reports why, with the reason the server gave.
+    }
+  }
+
+  // Pick up an engine a download just put on disk.
+  useEffect(() => {
+    if (!Object.values(installs).some((item) => item?.phase === "ready"))
+      return;
+    void reloadDoctor(client).catch(() => {});
+  }, [client, installs, reloadDoctor]);
 
   async function onRefresh() {
     setRefreshing(true);
@@ -102,16 +129,17 @@ function CodeHomeBody() {
       )}
       {showDoctor && doctor && (
         <section className="flex flex-col gap-3">
-          <h2 className="text-lg font-semibold">Install a coding harness</h2>
+          <h2 className="text-lg font-semibold">Set up a coding engine</h2>
           <p className="text-muted-foreground text-sm">
-            No pinned harness is ready yet. Refresh to install the engines this
-            build drives, sign in from your own terminal, then start a
-            workspace.
+            No engine can start yet. Sign in to one from your own terminal, then
+            re-check.
           </p>
           <DoctorList
             report={doctor}
             onRefresh={() => void onRefresh()}
             refreshing={refreshing}
+            onInstall={(kind) => void install(kind)}
+            installs={installs}
           />
         </section>
       )}

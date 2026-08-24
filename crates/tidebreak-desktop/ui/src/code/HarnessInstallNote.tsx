@@ -4,12 +4,12 @@ import type { CodeHarnessInstallSnapshot } from "../api/types";
 import { HARNESS_LABELS } from "./labels";
 
 /**
- * What a warm harness install is doing, under the engine picker.
+ * What a harness download is doing, under the engine picker.
  *
  * A pinned engine is a 37-297MB npm install the first time its version is
  * used. Create used to pay for it with nothing on screen, so the surface that
- * knows which engine is next starts the install and says so here. Ready
- * installs render nothing: the picker already shows a usable engine.
+ * knows which engine is next starts the download and says so here. Engines
+ * already on disk render nothing: the picker already shows a usable engine.
  */
 export function HarnessInstallNote({
   install,
@@ -28,7 +28,7 @@ export function HarnessInstallNote({
         />
         <span>
           {label}
-          {version} could not be installed. {install.error}
+          {version} could not be downloaded. {install.error}
         </span>
       </p>
     );
@@ -40,8 +40,8 @@ export function HarnessInstallNote({
     >
       <Loader2 className="size-3.5 shrink-0 animate-spin" aria-hidden="true" />
       <span>
-        Installing {label}
-        {version}. First use downloads the engine.
+        Downloading {label}
+        {version}. This runs once, and takes a few minutes.
       </span>
     </p>
   );

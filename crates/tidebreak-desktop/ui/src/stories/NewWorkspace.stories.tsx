@@ -13,7 +13,13 @@ import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { CodeRepoSnapshot, HarnessKind } from "@/api/types";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { NewWorkspaceDialog } from "@/code/NewWorkspaceDialog";
-import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
+import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
+import {
+  harnessDoctor,
+  harnessDoctorCold,
+  harnessDoctorDegraded,
+  harnessInstallsInFlight,
+} from "./fixtures";
 
 /**
  * The new-workspace composer: the first message is the surface, and every
@@ -154,8 +160,10 @@ function withRouter(children: ReactNode) {
 
 function NewWorkspace({
   doctor = harnessDoctor,
+  installs,
 }: {
   doctor?: typeof harnessDoctor;
+  installs?: typeof harnessInstallsInFlight;
 }) {
   // Seed the catalog before the dialog mounts: its defaults read the store.
   const [seeded, setSeeded] = useState(false);
@@ -166,8 +174,9 @@ function NewWorkspace({
       sessionsByWorkspace: {},
       workspaces: [],
     });
+    useCodeUpdatesStore.setState({ harnessInstalls: installs ?? {} });
     setSeeded(true);
-  }, [doctor]);
+  }, [doctor, installs]);
   if (!seeded) return null;
   return (
     <AppContextProvider value={appContext()}>
@@ -194,9 +203,28 @@ type Story = StoryObj<typeof meta>;
 export const Default: Story = {};
 
 /**
- * Engines that need install or sign-in stay listed and dimmed in the engine
- * menu; a warm install for the missing pin reports under the message.
+ * Engines that cannot be fixed by waiting — no pin, or signed out — stay
+ * listed and dimmed in the engine menu with the one reason why.
  */
 export const EnginesNeedSetup: Story = {
   args: { doctor: harnessDoctorDegraded },
+};
+
+/**
+ * A machine with nothing downloaded. The engine menu still offers all four,
+ * because picking one is what fetches it; Create waits for the pin, and the
+ * line under the message says what the wait is.
+ */
+export const EngineDownloading: Story = {
+  args: {
+    doctor: harnessDoctorCold,
+    installs: {
+      claude_code: {
+        kind: "claude_code",
+        version: "2.1.234",
+        phase: "installing",
+        done: false,
+      },
+    },
+  },
 };

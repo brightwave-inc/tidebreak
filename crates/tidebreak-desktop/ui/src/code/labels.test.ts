@@ -9,6 +9,8 @@ import {
   effortLadder,
   gatewayCodeModels,
   groupCodeModelOptions,
+  harnessCanStartNow,
+  harnessNeedsDownload,
   harnessUnusableReason,
   preferredCodeModels,
   sessionLifecycleTooltip,
@@ -107,12 +109,14 @@ describe("harnessUnusableReason", () => {
     expect(
       harnessUnusableReason({
         found: false,
+        installable: false,
         caps: caps("supported", "supported", "supported"),
       }),
     ).toBe("Not installed");
     expect(
       harnessUnusableReason({
         found: true,
+        installable: true,
         authenticated: false,
         caps: caps("supported", "supported", "supported"),
       }),
@@ -120,12 +124,14 @@ describe("harnessUnusableReason", () => {
     expect(
       harnessUnusableReason({
         found: true,
+        installable: true,
         caps: caps("unsupported", "unsupported", "unsupported"),
       }),
     ).toBe("Not available yet");
     expect(
       harnessUnusableReason({
         found: true,
+        installable: true,
         caps: caps("supported", "unsupported", "unsupported"),
       }),
     ).toBeNull();
@@ -133,9 +139,26 @@ describe("harnessUnusableReason", () => {
     expect(
       harnessUnusableReason({
         found: true,
+        installable: true,
         caps: caps("unsupported", "unsupported", "supported"),
       }),
     ).toBeNull();
+  });
+
+  // The whole point of the lazy pin: an engine Tidebreak can fetch is a wait,
+  // not a fault, so the picker offers it and choosing it starts the download.
+  it("lets a downloadable engine be chosen", () => {
+    const entry = {
+      found: false,
+      installable: true,
+      caps: caps("supported", "supported", "supported"),
+    };
+    expect(harnessUnusableReason(entry)).toBeNull();
+    expect(harnessNeedsDownload(entry)).toBe(true);
+    expect(harnessCanStartNow(entry)).toBe(false);
+    expect(
+      harnessCanStartNow({ ...entry, found: true, authenticated: true }),
+    ).toBe(true);
   });
 });
 

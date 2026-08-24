@@ -7,6 +7,7 @@ import type {
   CodeDeliveryRunDetail,
   CodeDeliveryRunSummary,
   CodeGitHubRepositoryRef,
+  CodeHarnessInstallSnapshot,
   CodeRepoSnapshot,
   CodeSessionDigest,
   CodeSessionSnapshot,
@@ -17,6 +18,7 @@ import type {
   HarnessCaps,
   HarnessDoctorEntry,
   HarnessDoctorReport,
+  HarnessKind,
   PendingUserQuestions,
   GatewayApps,
   GatewayStatus,
@@ -462,6 +464,7 @@ function doctorEntry(
 ): HarnessDoctorEntry {
   return {
     found: true,
+    installable: true,
     tier: "reference",
     caps: fullCaps,
     commands: [],
@@ -504,6 +507,7 @@ export const harnessDoctor: HarnessDoctorReport = {
       version: "grok 1.0.5",
       tier: "best_effort",
       authenticated: false,
+      remediation: "Sign in to grok in your own terminal, then re-check.",
       caps: {
         ...fullCaps,
         mid_turn_steering: "unsupported",
@@ -520,7 +524,8 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
     doctorEntry({
       kind: "claude_code",
       found: false,
-      remediation: "Install Claude Code, then refresh.",
+      installable: false,
+      remediation: "This build ships no pinned Claude Code binary to download.",
       stderr: "claude: command not found",
     }),
     doctorEntry({
@@ -528,10 +533,60 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
       version: "codex-cli 0.147.0",
       tier: "secondary",
       authenticated: false,
-      remediation: "Run codex login in a terminal, then refresh.",
+      remediation: "Sign in to codex in your own terminal, then re-check.",
       caps: { ...fullCaps, mid_turn_steering: "supported" },
     }),
   ],
+};
+
+/** A fresh machine: nothing downloaded, and every engine one click away. */
+export const harnessDoctorCold: HarnessDoctorReport = {
+  harnesses: harnessDoctor.harnesses.map((entry) => ({
+    ...entry,
+    found: false,
+    authenticated: undefined,
+    path: undefined,
+    version: undefined,
+    remediation: "",
+  })),
+};
+
+/**
+ * The common middle: one engine in use, the rest never fetched, and one that
+ * arrived but was never signed into.
+ */
+export const harnessDoctorMixed: HarnessDoctorReport = {
+  harnesses: harnessDoctor.harnesses.map((entry, index) =>
+    index === 0 || entry.authenticated === false
+      ? entry
+      : {
+          ...entry,
+          found: false,
+          authenticated: undefined,
+          path: undefined,
+          version: undefined,
+        },
+  ),
+};
+
+/** One engine mid-download, one that failed, for the doctor's live states. */
+export const harnessInstallsInFlight: Partial<
+  Record<HarnessKind, CodeHarnessInstallSnapshot>
+> = {
+  codex: {
+    kind: "codex",
+    version: "0.147.0",
+    phase: "installing",
+    done: false,
+  },
+  opencode: {
+    kind: "opencode",
+    version: "1.18.18",
+    phase: "failed",
+    done: true,
+    error:
+      "npm install opencode-ai@1.18.18 failed: ETIMEDOUT registry.npmjs.org",
+  },
 };
 
 // ---------------------------------------------------------------------------

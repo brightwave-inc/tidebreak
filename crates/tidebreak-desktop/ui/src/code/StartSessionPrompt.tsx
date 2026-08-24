@@ -11,12 +11,18 @@ import type { ComposerWorkspaceFiles } from "@/Composer";
 import { CodeComposer } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { HarnessInstallNote } from "./HarnessInstallNote";
 import { HarnessPicker } from "./HarnessPicker";
+import {
+  canInstallHarnesses,
+  useWarmHarnessInstall,
+} from "./useHarnessInstall";
 import {
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
   gatewayCodeModels,
+  harnessCanStartNow,
   harnessUnusableReason,
   preferredCodeModels,
   requiresHarnessModelIds,
@@ -30,10 +36,15 @@ const NO_CATALOG_MODELS: ModelInfo[] = [];
 /**
  * Create-time harness + permission mode for a workspace with no session.
  *
- * The harness dropdown defaults to the first ready engine; the mode list and
- * default follow the selected engine's own capability flags, so start always
- * posts a mode that engine can honor, and an unsupervised one says so before
- * the session exists (decisions 0038, 0039).
+ * The harness dropdown defaults to the first engine that can start now; the
+ * mode list and default follow the selected engine's own capability flags, so
+ * start always posts a mode that engine can honor, and an unsupervised one
+ * says so before the session exists (decisions 0038, 0039).
+ *
+ * An engine this machine has not downloaded yet is still on offer. Picking it
+ * starts the download and the note under the picker says so; start stays
+ * disabled until the pin lands, because create would otherwise sit on the
+ * same npm install with nothing on screen.
  *
  * Cmd+Enter starts from anywhere on this surface, matching the new-workspace
  * dialog. The draft lives in the composer, so the shortcut goes through the
@@ -62,7 +73,8 @@ export function StartSessionPrompt({
     message: string,
     model?: string,
   ) => Promise<void> | void;
-  client?: Pick<ApiClient, "listCodeHarnessModels">;
+  client?: Pick<ApiClient, "listCodeHarnessModels"> &
+    Partial<Pick<ApiClient, "startHarnessInstall" | "getHarnessDoctor">>;
   catalogModels?: ModelInfo[];
   defaultModelKey?: string | null;
   /** Worktree files the first message names — a fork's transcript. */
@@ -81,11 +93,13 @@ export function StartSessionPrompt({
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
-  const ready = harnesses.filter((entry) => !harnessUnusableReason(entry));
+  const selectable = harnesses.filter((entry) => !harnessUnusableReason(entry));
   const selected =
     harnesses.find(
       (entry) => entry.kind === picked && !harnessUnusableReason(entry),
-    ) ?? ready[0];
+    ) ??
+    selectable.find((entry) => harnessCanStartNow(entry)) ??
+    selectable[0];
   const availableModes = selected ? createPermissionModes(selected.caps) : [];
   const mode: PermissionMode =
     selectedMode && availableModes.includes(selectedMode)
@@ -96,6 +110,13 @@ export function StartSessionPrompt({
 
   const selectedKind = selected?.kind;
   const model = selectedKind ? modelsByHarness[selectedKind] : undefined;
+  const installed = Boolean(selected?.found);
+  const install = useWarmHarnessInstall(
+    canInstallHarnesses(client) ? client : undefined,
+    selectedKind,
+    true,
+    installed,
+  );
 
   useEffect(() => {
     if (!selectedKind) {
@@ -186,6 +207,7 @@ export function StartSessionPrompt({
             setPicked(next);
           }}
         />
+        <HarnessInstallNote install={install} />
         {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
           <p className="text-muted-foreground text-xs">
             {UNSUPERVISED_AUTO_NOTE}
@@ -197,7 +219,7 @@ export function StartSessionPrompt({
       </div>
       <div className="mt-auto">
         <CodeComposer
-          disabled={starting || !selected}
+          disabled={starting || !selected || !installed}
           running={starting}
           permissionMode={mode}
           availableModes={availableModes}

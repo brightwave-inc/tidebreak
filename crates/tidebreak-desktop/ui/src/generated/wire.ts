@@ -2443,7 +2443,15 @@ description: string, };
 /**
  * One engine's probe, capabilities, and remediation.
  */
-export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
+export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean, 
+/**
+ * Whether Tidebreak ships a pin it can download for this engine.
+ *
+ * A `found: false, installable: true` engine is not a fault. Pick it and
+ * the download starts; the doctor is not a gate the reader must clear
+ * first.
+ */
+installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
 
 /**
  * Doctor report for every registered engine adapter.

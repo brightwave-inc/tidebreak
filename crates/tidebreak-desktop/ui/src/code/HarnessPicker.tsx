@@ -15,7 +15,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { HARNESS_LABELS, harnessUnusableReason } from "./labels";
+import {
+  HARNESS_LABELS,
+  harnessNeedsDownload,
+  harnessUnusableReason,
+} from "./labels";
+
+/** What picking a not-yet-downloaded engine does. */
+const DOWNLOAD_NOTE = "Downloads on first use";
 
 export const HARNESS_ICONS: Record<
   HarnessKind,
@@ -31,10 +38,12 @@ export const HARNESS_ICONS: Record<
  * Branded harness dropdown: logo and product name per row.
  *
  * Ready rows are selectable and carry nothing but the name — a vendor gloss
- * tells a reader picking an engine nothing they do not already know.
- * Unusable rows stay listed, disabled, with the one reason they cannot be
- * chosen; a quiet link to the doctor appears under the control while any row
- * is unusable. Versions and capability flags stay off this surface.
+ * tells a reader picking an engine nothing they do not already know. A row
+ * this machine has not downloaded yet is still selectable and says so, since
+ * choosing it is what starts the download. Only a row that cannot be fixed by
+ * waiting is disabled, with the one reason it cannot be chosen; a quiet link
+ * to the doctor appears under the control while any row is unusable. Versions
+ * and capability flags stay off this surface.
  */
 export function HarnessPicker({
   harnesses,
@@ -75,6 +84,8 @@ export function HarnessPicker({
         <SelectContent scrollButtons={false}>
           {harnesses.map((entry) => {
             const reason = harnessUnusableReason(entry);
+            const note =
+              reason ?? (harnessNeedsDownload(entry) ? DOWNLOAD_NOTE : null);
             const Icon = HARNESS_ICONS[entry.kind];
             return (
               <SelectItem
@@ -88,9 +99,9 @@ export function HarnessPicker({
                     <span className="truncate font-medium">
                       {HARNESS_LABELS[entry.kind]}
                     </span>
-                    {reason && (
+                    {note && (
                       <span className="text-muted-foreground truncate text-xs">
-                        {reason}
+                        {note}
                       </span>
                     )}
                   </span>

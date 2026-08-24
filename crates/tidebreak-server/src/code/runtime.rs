@@ -666,30 +666,6 @@ impl CodeRuntime {
         tidebreak_harness::ensure_installed(&self.data_dir, kind, Some(&node_root)).await
     }
 
-    #[cfg_attr(test, allow(dead_code))]
-    pub(crate) async fn refresh_pinned_harnesses(&self) {
-        let node_root = self.managed_node_root(true).await;
-        let installs = HarnessKind::ALL.iter().map(|kind| {
-            let node_root = node_root.as_ref();
-            async move {
-                let result = match node_root {
-                    Ok(root) => tidebreak_harness::ensure_installed(
-                        &self.data_dir,
-                        *kind,
-                        Some(root.as_path()),
-                    )
-                    .await
-                    .map(|_| ()),
-                    Err(err) => Err(err.clone()),
-                };
-                (*kind, result)
-            }
-        });
-        for (kind, result) in futures::future::join_all(installs).await {
-            self.record_pin_install(kind, result);
-        }
-    }
-
     pub(crate) fn adapter(
         &self,
         kind: HarnessKind,

@@ -41,15 +41,16 @@ import { PermissionModeMenu } from "../PermissionModeMenu";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { HarnessModelMenu } from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
+import { useWarmHarnessInstall } from "./useHarnessInstall";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
   gatewayCodeModels,
+  harnessCanStartNow,
   harnessUnusableReason,
   preferredCodeModels,
   requiresHarnessModelIds,
@@ -100,9 +101,15 @@ function recentRepoId(
   return known(newest?.repo_id) ?? known(remembered) ?? repos[0]?.id ?? "";
 }
 
-/** The engine this reader started last, if it can still be started. */
+/**
+ * The engine this reader started last, if it can still be started.
+ *
+ * Falling back to the first selectable row would open the dialog on an engine
+ * this machine has never downloaded while an installed one sits below it, so
+ * the fallback prefers an engine that can start now.
+ */
 function recentHarness(
-  ready: readonly HarnessDoctorEntry[],
+  selectable: readonly HarnessDoctorEntry[],
   sessions: Record<string, CodeSessionSnapshot>,
   remembered: HarnessKind | undefined,
 ): HarnessKind | undefined {
@@ -110,9 +117,12 @@ function recentHarness(
     b.created_at.localeCompare(a.created_at),
   )[0];
   for (const kind of [newest?.harness_kind, remembered]) {
-    if (kind && ready.some((entry) => entry.kind === kind)) return kind;
+    if (kind && selectable.some((entry) => entry.kind === kind)) return kind;
   }
-  return ready[0]?.kind;
+  return (
+    selectable.find((entry) => harnessCanStartNow(entry))?.kind ??
+    selectable[0]?.kind
+  );
 }
 
 /** Pickers a chord can open; one open at a time, chords toggle. */
@@ -138,8 +148,6 @@ export function NewWorkspaceDialog({
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
-  const reloadDoctor = useCodeCatalogStore((state) => state.reloadDoctor);
-  const harnessInstalls = useCodeUpdatesStore((state) => state.harnessInstalls);
   const lastCreate = useCodeUiStore((state) => state.lastCreate);
   const rememberCreate = useCodeUiStore((state) => state.rememberCreate);
   const [repoId, setRepoId] = useState("");
@@ -164,17 +172,17 @@ export function NewWorkspaceDialog({
   const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
 
   const allHarnesses = doctor?.harnesses ?? [];
-  const readyHarnesses = allHarnesses.filter(
+  const selectableHarnesses = allHarnesses.filter(
     (entry) => !harnessUnusableReason(entry),
   );
   // The doctor can land after the dialog opens, so the engine is derived
   // rather than seeded: a pick wins, and until there is one the recent
-  // engine follows whatever the report says is ready.
+  // engine follows whatever the report says can be chosen.
   const harness: HarnessKind =
-    (pickedHarness && readyHarnesses.some((e) => e.kind === pickedHarness)
+    (pickedHarness && selectableHarnesses.some((e) => e.kind === pickedHarness)
       ? pickedHarness
       : undefined) ??
-    recentHarness(readyHarnesses, sessions, lastCreate?.harness) ??
+    recentHarness(selectableHarnesses, sessions, lastCreate?.harness) ??
     "claude_code";
   const model = modelsByHarness[harness];
 
@@ -203,45 +211,13 @@ export function NewWorkspaceDialog({
 
   // A pin this machine has never installed is minutes of npm. Warming it
   // when the dialog opens — and again when the engine changes — moves that
-  // off create, where it was a silent stall. The doctor entry is the only
-  // trigger: an engine already on disk is never asked for.
+  // off create, where it was a silent stall.
   const doctorEntry = allHarnesses.find((item) => item.kind === harness);
-  const needsInstall = Boolean(doctorEntry && !doctorEntry.found);
-  const install = harnessInstalls[harness];
-
-  useEffect(() => {
-    if (!open || !needsInstall) return;
-    let cancelled = false;
-    void client.startHarnessInstall(harness).then(
-      (snapshot) => {
-        // The answer is immediate; the phases after it arrive on the updates
-        // socket. Applying it here means the note shows even on the profile
-        // that never opened one.
-        if (!cancelled) {
-          useCodeUpdatesStore
-            .getState()
-            .apply({ type: "harness_install", install: snapshot });
-        }
-      },
-      // Nothing is broken yet: create still reports `harness_not_found` with
-      // the reason, and a member of a shared deployment may not install at
-      // all. A toast on dialog open would be noise either way.
-      () => {},
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [client, harness, needsInstall, open]);
-
-  useEffect(() => {
-    // A finished install leaves the doctor report saying "Not installed", so
-    // the engine would stay unpickable until something re-read it.
-    if (!open || !needsInstall || !install?.done || install.error) return;
-    void reloadDoctor(client).catch(() => {});
-  }, [client, install, needsInstall, open, reloadDoctor]);
+  const installed = Boolean(doctorEntry?.found);
+  const install = useWarmHarnessInstall(client, harness, open, installed);
 
   const selectedRepo = repos.find((repo) => repo.id === repoId);
-  const selectedHarness = readyHarnesses.find(
+  const selectedHarness = selectableHarnesses.find(
     (entry) => entry.kind === harness,
   );
   const availableModes = selectedHarness
@@ -255,8 +231,13 @@ export function NewWorkspaceDialog({
     (selectedHarness
       ? defaultCreatePermissionMode(selectedHarness.caps)
       : "plan");
+  // An engine still downloading is a legal pick, not a legal start: create
+  // would sit on the same npm install with nothing but a spinner. The install
+  // note under the pills says what the wait is, and any engine already on
+  // disk is one pick away.
   const canCreate =
-    Boolean(repoId && selectedRepo && selectedHarness) && !creating;
+    Boolean(repoId && selectedRepo && selectedHarness && installed) &&
+    !creating;
   const modeNote =
     postedMode === "auto" &&
     selectedHarness &&
@@ -270,7 +251,10 @@ export function NewWorkspaceDialog({
   useEffect(() => {
     if (!open || !harness) return;
     // The reader's last model wins where it is still on offer; otherwise the
-    // catalog's default, then the first row.
+    // catalog's default, then the first row. `installed` is a dependency
+    // because an engine still downloading has no CLI to list models from:
+    // the gateway rows show meanwhile, and the native listing is fetched
+    // once the pin lands.
     const apply = (listed: CodeModelOption[]) => {
       setModelOptions(listed);
       setModelsByHarness((current) => {
@@ -300,6 +284,13 @@ export function NewWorkspaceDialog({
       setModelLoading(false);
       return;
     }
+    if (!installed) {
+      // `GET /code/harnesses/{kind}/models` runs the engine's own CLI, so it
+      // answers `harness_not_found` until the pin is on disk.
+      apply(gateway);
+      setModelLoading(false);
+      return;
+    }
     setModelOptions([]);
     setModelLoading(true);
     let cancelled = false;
@@ -314,7 +305,15 @@ export function NewWorkspaceDialog({
     // `lastCreate` seeds `modelsByHarness` when the dialog opens. Subscribing
     // this fetch to later writes would undo a deliberate pick after create.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, defaultModelKey, ensureHarnessModels, harness, models, open]);
+  }, [
+    client,
+    defaultModelKey,
+    ensureHarnessModels,
+    harness,
+    installed,
+    models,
+    open,
+  ]);
 
   function selectModel(next: string) {
     setModelsByHarness((current) => ({ ...current, [harness]: next }));

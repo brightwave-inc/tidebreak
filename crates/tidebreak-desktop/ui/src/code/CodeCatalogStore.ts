@@ -159,10 +159,10 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     const doctor = await client.refreshHarnessDoctor();
     set({ doctor });
   },
-  // The memoized read, for picking up an engine a warm install just put on
-  // disk. `refreshDoctor` is the doctor's own button: it re-probes every
-  // engine and installs every pin, which is far more than reading one result
-  // that already exists.
+  // The memoized read, for picking up an engine a download just put on disk.
+  // `refreshDoctor` is the doctor's own button: it drops every memoized probe
+  // and takes them all cold, which is far more than reading one result that
+  // already exists.
   reloadDoctor: async (client) => {
     set({ doctor: await client.getHarnessDoctor() });
   },

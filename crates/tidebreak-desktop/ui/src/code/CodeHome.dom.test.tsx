@@ -37,6 +37,7 @@ const READY_DOCTOR: HarnessDoctorReport = {
     {
       kind: "claude_code",
       found: true,
+      installable: true,
       tier: "reference",
       caps: {
         resume: "supported",
@@ -200,7 +201,7 @@ describe("CodeHome", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Install a coding harness" }),
+      await screen.findByRole("heading", { name: "Set up a coding engine" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("Start with a repository"),
