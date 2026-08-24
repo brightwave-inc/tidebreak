@@ -3420,7 +3420,7 @@ fn map_gh(err: GhError) -> ServerError {
 /// re-checks the same host at `get`, so both halves refuse independently.
 async fn forge_lending_target(
     worktree: &std::path::Path,
-) -> Option<crate::routes::code::CodeGitHubRepositoryTarget> {
+) -> Option<crate::routes::code::types::CodeGitHubRepositoryTarget> {
     let target = super::delivery::repository_target_from_path(worktree)
         .await
         .ok()?;
