@@ -29,8 +29,8 @@ use tidebreak_core::{
     CodePullRequestFact, CodePullRequestId, CodeSession, CodeSessionId, CodeSessionKind,
     CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
     CodeTriggerDeliveryId, CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload,
-    CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel, OwnerId, PullRequestCheck,
-    PullRequestDigest, RepoId, WorkspaceId,
+    CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel, OwnerId, PullRequestDigest, RepoId,
+    WorkspaceId,
 };
 use tracing::{debug, warn};
 
@@ -84,12 +84,16 @@ struct RepositoryWork {
     triggers: Vec<CodeTrigger>,
     workspace_ids: HashSet<WorkspaceId>,
     pr_numbers: HashSet<u64>,
+    /// Eligible workspaces by the pull-request number their column holds,
+    /// so a durable-row fire aims at exactly the holders (decision 66).
+    workspaces_by_number: HashMap<u64, HashSet<WorkspaceId>>,
 }
 
 #[derive(Default)]
 struct EligibleWorkspaces {
     workspace_ids: HashSet<WorkspaceId>,
     pr_numbers: HashSet<u64>,
+    workspaces_by_number: HashMap<u64, HashSet<WorkspaceId>>,
 }
 
 /// One pass over every enabled trigger. A failure on one repository never
@@ -193,6 +197,10 @@ async fn sweep_owner(
             work.workspace_ids.insert(workspace.id);
             if let Some(pr) = workspace.pr.as_ref() {
                 work.pr_numbers.insert(pr.number);
+                work.workspaces_by_number
+                    .entry(pr.number)
+                    .or_default()
+                    .insert(workspace.id);
             }
         }
     }
@@ -240,6 +248,7 @@ async fn sweep_owner(
                         triggers,
                         workspace_ids: eligible.workspace_ids,
                         pr_numbers: eligible.pr_numbers,
+                        workspaces_by_number: eligible.workspaces_by_number,
                     },
                 )),
                 Err(message) => {
@@ -433,7 +442,7 @@ async fn fire_fact_edge(
             if fact.created_at < trigger.created_at || fact.first_seen_at < trigger.created_at {
                 return Ok(());
             }
-            let digest = digest_from_fact(fact);
+            let digest = super::pr_facts::digest_from_fact(fact);
             fire_one(
                 runtime,
                 owner,
@@ -476,44 +485,77 @@ async fn fire_fact_edge(
                 insert_settled_trigger_fire(&runtime.db, &identity, Utc::now()).await?;
                 return Ok(());
             }
-            let digest = digest_from_fact(fact);
+            let digest = super::pr_facts::digest_from_fact(fact);
             fire_one(runtime, owner, trigger, workspace_id, &digest, head).await
         }
         _ => Ok(()),
     }
 }
 
-/// The minimal digest a fact-edge message composes from: identity and title,
-/// no checks — the fact store deliberately never carries check state.
-fn digest_from_fact(fact: &CodePullRequestFact) -> PullRequestDigest {
-    PullRequestDigest {
-        number: fact.number,
-        url: Some(fact.url.clone()),
-        state: fact.state.as_str().to_owned(),
-        title: Some(fact.title.clone()),
-        checks_summary: None,
-        checks: None,
-        draft: Some(fact.draft),
-        merged: Some(fact.state == tidebreak_core::CodePullRequestState::Merged),
-        review_decision: None,
-        mergeable: None,
-        merge_state_status: None,
-        head_branch: Some(fact.head_branch.clone()),
-        base_branch: Some(fact.base_branch.clone()),
-        head_sha: fact.head_sha.clone(),
-        auto_merge_enabled: None,
-        in_merge_queue: None,
-    }
-}
-
-/// Fetch one exact-number aggregate and deliver its matching facts.
+/// Consume the durable rows first (decision 66): a fresh live tier answers
+/// without a host read, and only the rows the store cannot answer freshly
+/// fall back to one exact-number read — which itself lands back on the
+/// store through the delivery path's persistence.
 async fn sweep_pull_requests(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
     repositories: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>,
     work_by_repository: &HashMap<RepositoryKey, Vec<RepositoryWork>>,
 ) -> Result<(), ServerError> {
-    let page = query_pull_requests_by_number(runtime, owner, repositories).await?;
+    let now = Utc::now();
+    let mut residual: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)> = Vec::new();
+    for (target, numbers) in repositories {
+        let key = RepositoryKey::from_target(&target);
+        let Some(repository_work) = work_by_repository.get(&key) else {
+            continue;
+        };
+        let repo_facts = match tidebreak_core::db::code::list_pull_request_facts_for_repo(
+            &runtime.db,
+            owner,
+            &target.host,
+            &target.owner,
+            &target.name,
+        )
+        .await
+        {
+            Ok(facts) => facts,
+            Err(err) => {
+                debug!(error = %err, "code-mode trigger sweep could not read fact rows");
+                residual.push((target, numbers));
+                continue;
+            }
+        };
+        let parents = super::reconcile::stack_parents_by_head(&repo_facts);
+        let mut stale = Vec::new();
+        for number in numbers {
+            let fresh = repo_facts.iter().find(|fact| {
+                fact.number == number
+                    && fact
+                        .live
+                        .as_ref()
+                        .is_some_and(|live| super::reconcile::live_tier_is_fresh(live, now))
+            });
+            let Some(fact) = fresh else {
+                stale.push(number);
+                continue;
+            };
+            let digest = super::pr_facts::digest_from_fact(fact);
+            let stack_parent = parents
+                .get(&fact.base_branch)
+                .copied()
+                .filter(|parent| *parent != fact.number);
+            for work in repository_work {
+                claim_fires_from_row(runtime, owner, work, &digest, stack_parent).await;
+            }
+        }
+        if !stale.is_empty() {
+            residual.push((target, stale));
+        }
+    }
+    if residual.is_empty() {
+        return Ok(());
+    }
+    let page = query_pull_requests_by_number(runtime, owner, residual).await?;
     if !github_available(owner, &page) {
         return Ok(());
     }
@@ -567,6 +609,63 @@ fn warn_source_errors(owner: &OwnerId, page: &CodeDeliveryPullRequestsPage) {
     }
 }
 
+/// Claim and deliver fires for one durable row's digest (decision 66): the
+/// same classification and the same stacked-child hold as the fetched path,
+/// aimed at the eligible workspaces whose column holds the pull request.
+async fn claim_fires_from_row(
+    runtime: &Arc<CodeRuntime>,
+    owner: &OwnerId,
+    work: &RepositoryWork,
+    digest: &PullRequestDigest,
+    stack_parent: Option<u64>,
+) {
+    // Without a head SHA the fire cannot be fingerprinted, and a fire that
+    // cannot be bounded would repeat every tick.
+    let Some(head_sha) = digest.head_sha.clone() else {
+        return;
+    };
+    let Some(condition) = classify_trigger_condition(digest) else {
+        return;
+    };
+    // A stacked child is behind or blocked *because of its parent*
+    // (decision 62). Firing Behind or ReviewRequired at it would send an
+    // agent to rebase onto a branch that moves with every parent push.
+    if stack_parent.is_some()
+        && matches!(
+            condition,
+            CodeTriggerCondition::Behind | CodeTriggerCondition::ReviewRequired
+        )
+    {
+        debug!(
+            number = digest.number,
+            parent = stack_parent,
+            "code-mode trigger held a stacked child's fire"
+        );
+        return;
+    }
+    let Some(workspaces) = work.workspaces_by_number.get(&digest.number) else {
+        return;
+    };
+    for trigger in work
+        .triggers
+        .iter()
+        .filter(|trigger| trigger.condition == condition)
+    {
+        for workspace_id in workspaces {
+            if let Err(err) =
+                fire_one(runtime, owner, trigger, *workspace_id, digest, &head_sha).await
+            {
+                warn!(
+                    trigger = %trigger.id,
+                    workspace = %workspace_id,
+                    error = %err.message(),
+                    "code-mode trigger sweep could not deliver a fire"
+                );
+            }
+        }
+    }
+}
+
 /// Claim and deliver one fire per matching trigger per linked workspace.
 async fn claim_fires(
     runtime: &Arc<CodeRuntime>,
@@ -579,7 +678,7 @@ async fn claim_fires(
     let Some(head_sha) = item.head_sha.clone() else {
         return;
     };
-    let digest = digest_from(item);
+    let digest = super::delivery::digest_from_summary(item);
     let Some(condition) = classify_trigger_condition(&digest) else {
         return;
     };
@@ -1072,39 +1171,6 @@ fn linked_workspaces(
 ///
 /// Both paths lowercase their host tokens already — `normalized_optional` here
 /// and `lower_token` in `gh.rs` — so the tokens pass straight through.
-fn digest_from(item: &CodeDeliveryPullRequestSummary) -> PullRequestDigest {
-    PullRequestDigest {
-        number: item.number,
-        url: Some(item.url.clone()),
-        state: item.state.clone(),
-        title: Some(item.title.clone()),
-        checks_summary: None,
-        checks: Some(
-            item.checks
-                .iter()
-                .map(|check| PullRequestCheck {
-                    name: check.name.clone(),
-                    bucket: check.bucket,
-                    detail: check.detail.clone(),
-                    url: check.url.clone(),
-                })
-                .collect(),
-        ),
-        draft: Some(item.draft),
-        // `state` alone cannot separate merged from closed on every host
-        // response, which is why the summary carries `merged_at`.
-        merged: Some(item.merged_at.is_some()),
-        review_decision: item.review_decision.clone(),
-        mergeable: item.mergeable.clone(),
-        merge_state_status: item.merge_state_status.clone(),
-        head_branch: Some(item.head_branch.clone()),
-        base_branch: Some(item.base_branch.clone()),
-        head_sha: item.head_sha.clone(),
-        auto_merge_enabled: Some(item.auto_merge_enabled),
-        in_merge_queue: None,
-    }
-}
-
 /// Abort the trigger sweep when the runtime is dropped.
 ///
 /// The loop holds a [`Weak`] runtime handle: an `Arc` would keep the runtime
@@ -1141,6 +1207,7 @@ mod tests {
     use super::*;
     use tidebreak_core::{CodeTriggerCondition, PullRequestCheckBucket};
 
+    use crate::code::delivery::digest_from_summary;
     use crate::routes::code::types::{CodeDeliveryCheck, CodeGitHubRepositoryRef};
 
     fn repository() -> CodeGitHubRepositoryRef {
@@ -1212,7 +1279,7 @@ mod tests {
             workflow_run_id: Some(1),
         }];
 
-        let digest = digest_from(&item);
+        let digest = digest_from_summary(&item);
         assert_eq!(digest.number, 12);
         assert_eq!(digest.head_sha.as_deref(), Some("abc123"));
         assert_eq!(digest.mergeable.as_deref(), Some("mergeable"));
@@ -1234,14 +1301,14 @@ mod tests {
         item.merged_at = Some(Utc::now());
 
         assert_eq!(
-            classify_trigger_condition(&digest_from(&item)),
+            classify_trigger_condition(&digest_from_summary(&item)),
             Some(CodeTriggerCondition::Merged)
         );
 
         let mut closed = summary();
         closed.state = "closed".to_owned();
         assert_eq!(
-            classify_trigger_condition(&digest_from(&closed)),
+            classify_trigger_condition(&digest_from_summary(&closed)),
             Some(CodeTriggerCondition::Closed)
         );
     }

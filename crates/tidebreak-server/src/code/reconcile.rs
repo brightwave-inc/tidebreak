@@ -30,6 +30,19 @@ use crate::routes::code::types::{
 /// sweeps never land on the same tick.
 pub(crate) const RECONCILE_SWEEP_INTERVAL: Duration = Duration::from_secs(61);
 
+/// A live tier younger than this answers a sweep without a host read
+/// (decision 66): two reconcile intervals plus slack, so one missed pass
+/// degrades to a fetch rather than a stale verdict.
+const LIVE_TIER_FRESH_SECS: i64 = (RECONCILE_SWEEP_INTERVAL.as_secs() as i64) * 2 + 30;
+
+/// Whether a sweep may consume this live tier instead of fetching.
+pub(crate) fn live_tier_is_fresh(
+    live: &tidebreak_core::CodePullRequestLiveState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now - live.observed_at <= chrono::Duration::seconds(LIVE_TIER_FRESH_SECS)
+}
+
 /// Abort the reconcile sweep when the runtime is dropped.
 ///
 /// The loop holds a [`Weak`] runtime handle: an `Arc` would keep the runtime

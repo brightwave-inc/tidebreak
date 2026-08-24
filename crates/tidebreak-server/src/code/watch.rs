@@ -433,13 +433,24 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
     let turn_in_flight = sessions
         .iter()
         .any(|other| other.lifecycle == CodeSessionLifecycle::Running);
-    let status = runtime
-        .refresh_workspace_pr(&owner, watch.workspace_id)
-        .await?;
+    // The store answers first (decision 66): the reconcile sweep's one list
+    // read per repository keeps the live tier fresh, and write-through keeps
+    // the workspace column equal to it. Only a missing or stale tier pays a
+    // host read here — which itself lands back on the store for every other
+    // consumer.
+    let pr = match fresh_stored_digest(runtime, &owner, &workspace).await {
+        Some(digest) => Some(digest),
+        None => {
+            runtime
+                .refresh_workspace_pr(&owner, watch.workspace_id)
+                .await?
+                .pr
+        }
+    };
     if turn_in_flight {
         return Ok(());
     }
-    let Some(pr) = status.pr else {
+    let Some(pr) = pr else {
         return park_watch(
             runtime.as_ref(),
             watch,
@@ -564,6 +575,36 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             Ok(())
         }
     }
+}
+
+/// The workspace's stored pull-request digest, when the fact row behind it
+/// confirms the live tier is fresh (decision 66). `None` sends the caller to
+/// a host read: no stored digest, no joinable URL, no fact row, or a tier
+/// older than the reconcile cadence promises.
+async fn fresh_stored_digest(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    workspace: &tidebreak_core::CodeWorkspace,
+) -> Option<PullRequestDigest> {
+    let stored = workspace.pr.as_ref()?;
+    let url = stored.url.as_deref()?;
+    let (host, repo_owner, repo_name, number) =
+        super::pr_facts::pull_request_identity_from_url(url)?;
+    let fact = tidebreak_core::db::code::get_pull_request_fact(
+        &runtime.db,
+        owner,
+        &host,
+        &repo_owner,
+        &repo_name,
+        number,
+    )
+    .await
+    .ok()??;
+    let live = fact.live.as_ref()?;
+    if !super::reconcile::live_tier_is_fresh(live, Utc::now()) {
+        return None;
+    }
+    Some(super::pr_facts::digest_from_fact(&fact))
 }
 
 /// The open pull request this workspace's pull request is stacked on, when
