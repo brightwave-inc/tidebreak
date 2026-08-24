@@ -174,11 +174,6 @@ export function defaultCreatePermissionMode(caps: ModeCaps): PermissionMode {
   return "plan";
 }
 
-/** True when this engine honors `--model` (or equivalent) on each turn. */
-export function harnessHonorsTurnModel(kind: HarnessKind): boolean {
-  return kind === "claude_code" || kind === "grok";
-}
-
 /** The modes create may post for this engine, each on its own flag. */
 export function createPermissionModes(caps: ModeCaps): PermissionMode[] {
   const modes: PermissionMode[] = [];
@@ -302,6 +297,23 @@ export function harnessCodeModels(
     reasoning_efforts: option.reasoning_efforts,
     fast_mode: option.fast_mode,
   }));
+}
+
+/**
+ * Pick the catalog whose identifiers the engine accepts.
+ *
+ * OpenCode needs the provider-qualified ids from `opencode models`; chat's
+ * gateway catalog often carries a bare or upstream id instead. Other engines
+ * keep the gateway catalog when it exists because their adapters accept those
+ * ids directly and the catalog carries the entitled display rows.
+ */
+export function preferredCodeModels(
+  kind: HarnessKind,
+  native: readonly CodeModelOption[],
+  gateway: readonly CodeModelOption[],
+): CodeModelOption[] {
+  if (kind === "opencode" && native.length > 0) return [...native];
+  return gateway.length > 0 ? [...gateway] : [...native];
 }
 
 /** One rail section of the code-mode picker: a vendor and its rows. */

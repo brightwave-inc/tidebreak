@@ -14,6 +14,7 @@ import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
@@ -61,6 +62,7 @@ function wrap(ui: ReactNode) {
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
+  useCodeUiStore.setState({ lastCreate: null });
 });
 
 const CAPS = {
@@ -290,7 +292,7 @@ describe("StartSessionPrompt", () => {
     );
   });
 
-  it("never carries a model across a harness switch", async () => {
+  it("keeps each harness model separate across switches", async () => {
     const user = userEvent.setup();
     const codex = deferred<{
       kind: "codex";
@@ -308,6 +310,13 @@ describe("StartSessionPrompt", () => {
                   id: "sonnet",
                   label: "Sonnet",
                   default: true,
+                  reasoning_efforts: [],
+                  fast_mode: false,
+                },
+                {
+                  id: "opus",
+                  label: "Opus",
+                  default: false,
                   reasoning_efforts: [],
                   fast_mode: false,
                 },
@@ -334,6 +343,8 @@ describe("StartSessionPrompt", () => {
     expect(
       await screen.findByRole("button", { name: "Model: Sonnet" }),
     ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Model: Sonnet" }));
+    await user.click(screen.getByRole("menuitem", { name: /Opus/ }));
     await user.click(screen.getByRole("combobox", { name: "Harness" }));
     await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
 
@@ -355,12 +366,35 @@ describe("StartSessionPrompt", () => {
             reasoning_efforts: [],
             fast_mode: false,
           },
+          {
+            id: "gpt-5.6-sol",
+            label: "GPT 5.6 Sol",
+            default: false,
+            reasoning_efforts: [],
+            fast_mode: false,
+          },
         ],
         reasoning_efforts: [],
       });
     });
     expect(
       await screen.findByRole("button", { name: "Model: GPT 5.6 Luna" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Model: GPT 5.6 Luna" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /GPT 5.6 Sol/ }));
+
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /Claude Code/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: Opus" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
     ).toBeInTheDocument();
   });
 

@@ -599,8 +599,9 @@ const TranscriptItem = memo(function TranscriptItem({
  * the group's own icon column.
  *
  * Closed by default, because the reason to group at all is that a burst of
- * calls is not what the reader came for. A run holding a failure is the
- * exception: it opens itself, the same way a failed row does.
+ * calls is not what the reader came for. Status never changes that choice: a
+ * failure is visible on the folded line, and the reader opens the detail when
+ * they need it.
  */
 export const CodeActivityGroup = memo(
   function CodeActivityGroup({
@@ -612,15 +613,7 @@ export const CodeActivityGroup = memo(
     signature: string;
     onReveal?: () => void;
   }) {
-    const unresolved = tools.some(
-      (tool) => tool.status === "failed" || tool.status === "denied",
-    );
-    const [expanded, setExpanded] = useState(unresolved);
-    useEffect(() => {
-      // A failure inside a closed group is a failure the reader has to go
-      // looking for. Opening is one-way: once they close it, it stays closed.
-      if (unresolved) setExpanded(true);
-    }, [unresolved]);
+    const [expanded, setExpanded] = useState(false);
 
     const lead = leadingCall(tools);
     const status = groupStatus(tools);
@@ -727,8 +720,7 @@ function totalDurationMs(tools: readonly CodeToolItem[]): number | null {
 /**
  * One engine action as a boxless line. The verb is a constant; the muted mono
  * subject is the command or path; the right slot is meta, one status glyph,
- * and a quiet chevron. Failed and denied open. Success stays closed. A running
- * call streams the last lines of output without growing the row.
+ * and a quiet chevron. Every status stays folded until the reader opens it.
  */
 export function CodeToolCard({
   name,
@@ -747,9 +739,7 @@ export function CodeToolCard({
   durationMs?: number | null;
   onReveal?: () => void;
 }) {
-  const [expanded, setExpanded] = useState(
-    status === "failed" || status === "denied",
-  );
+  const [expanded, setExpanded] = useState(false);
   const verb = toolVerb(detail, status);
   const subject = toolSubject(detail, name);
   const hasOutput = preview.trim().length > 0;
@@ -757,13 +747,7 @@ export function CodeToolCard({
   const duration = formatTurnDuration(durationMs);
   const exitCode = parseExitCode(preview);
 
-  useEffect(() => {
-    if (status === "succeeded") setExpanded(false);
-    if (status === "failed" || status === "denied") setExpanded(true);
-  }, [status]);
-
-  const showTail = status === "running" && hasOutput;
-  const showExpanded = expanded && status !== "running" && hasOutput;
+  const showExpanded = expanded && hasOutput;
 
   return (
     // Deliberately not a live region. A tool line changes on every streamed
@@ -796,7 +780,7 @@ export function CodeToolCard({
           <StatusGlyph status={status} />
         </>
       }
-      expanded={expanded || showTail}
+      expanded={expanded}
       onExpandedChange={(next) => {
         onReveal?.();
         setExpanded(next);
@@ -804,15 +788,16 @@ export function CodeToolCard({
       label={`${verb} ${subject} ${status}`}
       announce={false}
     >
-      {showTail && <StreamingTail text={preview} />}
-      {showExpanded && (
+      {showExpanded && status === "running" ? (
+        <StreamingTail text={preview} />
+      ) : showExpanded ? (
         <ToolOutputPreview
           text={preview}
           collapsedLines={12}
           bare
           onToggle={onReveal}
         />
-      )}
+      ) : null}
     </ToolCardShell>
   );
 }

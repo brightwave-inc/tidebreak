@@ -171,9 +171,9 @@ import {
   fenceReasonText,
   gatewayCodeModels,
   harnessCodeModels,
-  harnessHonorsTurnModel,
   HARNESS_LABELS,
   LIFECYCLE_LABELS,
+  preferredCodeModels,
   sessionLifecycleTooltip,
 } from "./labels";
 
@@ -497,10 +497,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     setStarting(true);
     try {
       const gateway = gatewayCodeModels(models, harness, defaultModelKey);
-      const listed =
-        gateway.length > 0
-          ? gateway
-          : await catalog.ensureHarnessModels(client, harness);
+      const native =
+        harness === "opencode" || gateway.length === 0
+          ? await catalog.ensureHarnessModels(client, harness)
+          : [];
+      const listed = preferredCodeModels(harness, native, gateway);
       const posted =
         model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
       const created = await client.createCodeSession(workspaceId, {
@@ -1764,7 +1765,14 @@ function CodeSessionPane({
       session.harness_kind,
       defaultModelKey,
     );
-    const listed = gateway.length > 0 ? gateway : (cachedModels ?? []);
+    const listed =
+      session.harness_kind === "opencode" && cachedModels === undefined
+        ? []
+        : preferredCodeModels(
+            session.harness_kind,
+            cachedModels ?? [],
+            gateway,
+          );
     if (
       !session.model ||
       listed.some((option) => option.id === session.model)
@@ -2089,6 +2097,9 @@ function CodeSessionPane({
           harness={session.harness_kind}
           model={model ?? undefined}
           modelOptions={modelOptions}
+          modelLoading={
+            session.harness_kind === "opencode" && cachedModels === undefined
+          }
           promptScope={workspaceId}
           sessionId={session.id}
           history={composerHistory}
@@ -2100,9 +2111,7 @@ function CodeSessionPane({
               .listCodeWorkspaceTree(workspaceId, { query })
               .then((tree) => tree.paths)
           }
-          onModelChange={
-            harnessHonorsTurnModel(session.harness_kind) ? setModel : undefined
-          }
+          onModelChange={setModel}
           onModeChange={changePermissionMode}
           onEffortChange={
             doctorEntry?.caps.reasoning_levels === "unsupported"
