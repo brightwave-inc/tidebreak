@@ -2015,7 +2015,7 @@ done
             "FAKE_CODEX_STEER".into(),
             dir.path().join("steer.json").to_string_lossy().into_owned(),
         ));
-        let session = Arc::new(attach(spec).await.unwrap());
+        let session = Arc::new(CodexSession::new(spec));
         let running = tokio::spawn({
             let session = Arc::clone(&session);
             async move {
