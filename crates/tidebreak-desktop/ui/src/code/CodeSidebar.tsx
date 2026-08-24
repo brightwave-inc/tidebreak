@@ -248,6 +248,7 @@ export function CodeSidebar() {
                       action === "open_source" ||
                       action === "push" ||
                       action === "create_pr" ||
+                      action === "compose_pr" ||
                       action === "merge" ||
                       action === "mark_ready"
                     ) {

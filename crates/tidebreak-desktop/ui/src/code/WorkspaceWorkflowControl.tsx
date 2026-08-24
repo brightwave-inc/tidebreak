@@ -38,6 +38,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import {
   checkSummary,
+  composePrPrompt,
   resolveWorkflowShortcut,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
@@ -88,6 +89,9 @@ export function WorkspaceWorkflowControl({
   const popoverTitleId = useId();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
+  const offerComposerPrompt = useCodeUiStore(
+    (state) => state.offerComposerPrompt,
+  );
   const workflowShortcutPending = useCodeUiStore(
     (state) => state.workflowShortcutPending,
   );
@@ -310,6 +314,13 @@ export function WorkspaceWorkflowControl({
       case "open_source":
         setDetailsOpen(false);
         onOpenSourceControl();
+        return;
+      case "compose_pr":
+        // A draft, not a turn: the request lands in the composer for the
+        // reader to edit and send, because opening a pull request publishes
+        // the branch.
+        setDetailsOpen(false);
+        offerComposerPrompt(workspaceId, composePrPrompt(baseRef));
         return;
       case "open_pr": {
         setDetailsOpen(false);
@@ -663,14 +674,16 @@ export function WorkspaceWorkflowControl({
             title={
               primary === "watch_and_fix"
                 ? "Start an agent task that watches this pull request and fixes actionable failures."
-                : primary === "mark_ready" ||
-                    primary === "merge" ||
-                    primary === "fix_errors" ||
-                    primary === "address_feedback" ||
-                    primary === "update_branch" ||
-                    primary === "resolve_conflicts"
-                  ? `Start an agent task to ${primaryLabel.toLowerCase()}.`
-                  : undefined
+                : primary === "compose_pr"
+                  ? "Draft a request in the composer to commit, push, and open a pull request. You review and send it."
+                  : primary === "mark_ready" ||
+                      primary === "merge" ||
+                      primary === "fix_errors" ||
+                      primary === "address_feedback" ||
+                      primary === "update_branch" ||
+                      primary === "resolve_conflicts"
+                    ? `Start an agent task to ${primaryLabel.toLowerCase()}.`
+                    : undefined
             }
             disabled={
               busy !== null ||

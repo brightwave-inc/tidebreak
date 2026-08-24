@@ -1000,7 +1000,7 @@ describe("CodeWorkspacePage", () => {
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
   });
 
-  it("opens Source control for local changes without crowding the composer", async () => {
+  it("drafts the Create PR request into the composer for local changes", async () => {
     const client = makeClient();
     client.getCodeWorkspacePr.mockResolvedValue({
       dirty: true,
@@ -1020,17 +1020,35 @@ describe("CodeWorkspacePage", () => {
       expect(control).toHaveTextContent("Uncommitted changes"),
     );
     await user.click(
-      within(control).getByRole("button", { name: "Review & commit" }),
+      within(control).getByRole("button", { name: "Create PR" }),
     );
 
+    // Offered, not sent: the request lands as an editable draft and no turn
+    // starts until the reader submits it.
+    const composer = await waitFor(() => {
+      const input = document.querySelector<HTMLTextAreaElement>(
+        "[data-composer-input]",
+      );
+      expect(input?.value).toContain("open a pull request against `main`");
+      return input!;
+    });
+    expect(composer.value).toContain("Do not merge.");
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+
+    // Hand review is one step away: the menu still opens Source control, and
+    // the suggested commit message still does not crowd the composer — the
+    // draft stays exactly what Create PR put there.
+    await user.click(
+      within(control).getByRole("button", { name: "More workspace actions" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Review & commit" }),
+    );
     expect(screen.getByRole("tab", { name: "Source control" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    expect(
-      (screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement)
-        .value,
-    ).toBe("");
+    expect(composer.value).not.toContain("improve login flow");
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     await user.click(screen.getByRole("button", { name: "Review sidebar" }));

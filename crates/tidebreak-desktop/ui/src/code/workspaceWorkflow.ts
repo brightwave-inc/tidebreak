@@ -11,6 +11,7 @@ export type WorkspaceWorkflowAction =
   | "open_source"
   | "push"
   | "create_pr"
+  | "compose_pr"
   | "open_pr";
 
 export type WorkspaceWorkflowTone =
@@ -69,17 +70,30 @@ export function workspaceWorkflowModel(
     };
   }
   if (snapshot.dirty) {
+    if (pr) {
+      return {
+        stage: "dirty",
+        tone: "warning",
+        summary: `#${pr.number} · Changes`,
+        title: `Pull request #${pr.number} has local changes`,
+        detail: "Review the worktree and choose a commit message.",
+        primary: "open_source",
+        secondary: pr.url ? ["open_pr"] : [],
+        pr,
+      };
+    }
+    // No pull request yet, so the useful next step is the whole trip: Create
+    // PR drafts the commit-push-open request into the composer for the reader
+    // to send. Hand review stays one step away in the menu.
     return {
       stage: "dirty",
       tone: "warning",
-      summary: pr ? `#${pr.number} · Changes` : "Uncommitted changes",
-      title: pr
-        ? `Pull request #${pr.number} has local changes`
-        : "Changes need review",
-      detail: "Review the worktree and choose a commit message.",
-      primary: "open_source",
-      secondary: pr?.url ? ["open_pr"] : [],
-      pr,
+      summary: "Uncommitted changes",
+      title: "Changes need a pull request",
+      detail:
+        "Create PR drafts a request in the composer to commit, push, and open a pull request.",
+      primary: "compose_pr",
+      secondary: ["open_source"],
     };
   }
   if (snapshot.unpushed) {
@@ -289,10 +303,11 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
  * A keyboard ask against the workflow.
  *
  * A chord names an intent, not an action: `pull_request` means "get this
- * branch in front of reviewers", which is a push on an unpushed branch, a
- * create on a pushed one, and a trip to GitHub once the pull request exists.
- * Binding chords to intents rather than to actions is what lets the reader
- * press the same key at every stage and always get the useful thing.
+ * branch in front of reviewers", which is a drafted commit-and-open request on
+ * a dirty worktree, a push on an unpushed branch, a create on a pushed one,
+ * and a trip to GitHub once the pull request exists. Binding chords to intents
+ * rather than to actions is what lets the reader press the same key at every
+ * stage and always get the useful thing.
  */
 export type WorkflowShortcut =
   | "next"
@@ -355,11 +370,13 @@ export function resolveWorkflowShortcut(
       return model.primary ? { run: model.primary } : { blocked: model.title };
     case "pull_request":
       // Commit and push come first whether or not a pull request exists, so
-      // these stages lead — reaching a pull request from uncommitted work
-      // means going through the commit box.
-      if (model.stage === "dirty" || model.stage === "github_setup") {
-        return { run: "open_source" };
+      // these stages lead. With no pull request yet, uncommitted work gets the
+      // drafted request that carries it all the way; with one open, new local
+      // changes go through the commit box to update it.
+      if (model.stage === "dirty") {
+        return { run: model.pr ? "open_source" : "compose_pr" };
       }
+      if (model.stage === "github_setup") return { run: "open_source" };
       if (model.stage === "unpushed") return { run: "push" };
       if (model.stage === "ready_for_pr") return { run: "create_pr" };
       if (model.pr) {
@@ -464,6 +481,8 @@ export function workspaceWorkflowActionLabel(
       return "Push";
     case "create_pr":
       return "Open PR";
+    case "compose_pr":
+      return "Create PR";
     case "open_pr":
       if (stage === "queued") return "View queue";
       return "View PR";
@@ -483,4 +502,24 @@ export function workspaceWorkflowActionLabel(
     case "resolve_conflicts":
       return "Resolve conflicts";
   }
+}
+
+/**
+ * The request the Create PR control drafts into the composer.
+ *
+ * Offered as a draft rather than run: opening a pull request publishes the
+ * branch, so the reader reads, edits, and sends the request instead of the
+ * button firing it. The agent it reaches sits in the worktree and can see the
+ * diff, so the prompt says what to do with the changes rather than repeating
+ * them. Merging stays with the user per decision 42.
+ */
+export function composePrPrompt(base?: string): string {
+  const target = base?.trim() ? `\`${base.trim()}\`` : "the default branch";
+  return [
+    "Review the uncommitted changes in this workspace, run focused validation,",
+    "commit with a clear message (split unrelated work into separate commits),",
+    `push the branch, and open a pull request against ${target}.`,
+    "Give the pull request a title and description that summarize what changed",
+    "and why. Do not merge.",
+  ].join(" ");
 }

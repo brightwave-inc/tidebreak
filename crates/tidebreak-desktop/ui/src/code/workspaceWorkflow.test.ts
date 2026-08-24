@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
 import {
+  composePrPrompt,
   resolveWorkflowShortcut,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
@@ -27,8 +28,14 @@ describe("workspaceWorkflowModel", () => {
   it("walks local work through review, push, and pull-request creation", () => {
     const dirty = workspaceWorkflowModel({ ...CLEAN, dirty: true });
     expect(dirty.summary).toBe("Uncommitted changes");
-    expect(dirty.primary).toBe("open_source");
+    expect(dirty.primary).toBe("compose_pr");
     expect(workspaceWorkflowActionLabel(dirty.primary!, dirty.stage)).toBe(
+      "Create PR",
+    );
+    // Hand review does not vanish behind the drafted request; it moves one
+    // step away into the menu.
+    expect(dirty.secondary).toEqual(["open_source"]);
+    expect(workspaceWorkflowActionLabel("open_source", dirty.stage)).toBe(
       "Review & commit",
     );
 
@@ -136,6 +143,8 @@ describe("workspaceWorkflowModel", () => {
       pr: existing,
     });
     expect(dirty.summary).toBe("#41 · Changes");
+    // With a pull request open there is nothing to create: new local changes
+    // go through the commit box to update it.
     expect(dirty.primary).toBe("open_source");
 
     const unpushed = workspaceWorkflowModel({
@@ -208,9 +217,10 @@ describe("resolveWorkflowShortcut", () => {
   it("carries one chord through commit, push, create, and view", () => {
     // Cmd+Shift+P names an intent, not an action: the reader means "get this in
     // front of reviewers" at every stage, and the action that serves it changes
-    // under them. Uncommitted work goes to the commit box rather than being
-    // refused, because that is the actual next step towards a pull request.
-    expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe(
+    // under them. Uncommitted work with no pull request gets the drafted
+    // commit-and-open request; with one open, it goes to the commit box.
+    expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe("compose_pr");
+    expect(chord("pull_request", { ...CLEAN, dirty: true, pr: pr({}) })).toBe(
       "open_source",
     );
     expect(chord("pull_request", { ...CLEAN, unpushed: true, ahead: 1 })).toBe(
@@ -362,5 +372,15 @@ describe("resolveWorkflowShortcut", () => {
     expect(chord("merge", null)).toBe(
       "blocked: Still reading this workspace's status",
     );
+  });
+});
+
+describe("composePrPrompt", () => {
+  it("names the base branch and keeps merging off the agent", () => {
+    const prompt = composePrPrompt("main");
+    expect(prompt).toContain("open a pull request against `main`");
+    expect(prompt).toContain("Do not merge.");
+    // A workspace without a recorded base still gets a sendable request.
+    expect(composePrPrompt(" ")).toContain("the default branch");
   });
 });
