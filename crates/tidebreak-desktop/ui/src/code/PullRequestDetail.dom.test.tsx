@@ -19,7 +19,7 @@ import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
 } from "../stories/fixtures";
-import { PullRequestDetailPanel } from "./PullRequestDetail";
+import { PullRequestDetailSheet } from "./PullRequestDetail";
 
 afterEach(cleanup);
 
@@ -52,7 +52,7 @@ function summaryFor(number: number) {
 
 async function renderPanel(number: number, api = client()) {
   render(
-    <PullRequestDetailPanel
+    <PullRequestDetailSheet
       client={api}
       summary={summaryFor(number)}
       onClose={vi.fn()}
@@ -63,7 +63,7 @@ async function renderPanel(number: number, api = client()) {
   await screen.findByRole("tab", { name: /Conversation/ });
 }
 
-describe("PullRequestDetailPanel", () => {
+describe("PullRequestDetailSheet", () => {
   it("accepts load, refresh, and mutation completions in Strict Mode", async () => {
     vi.mocked(toast.success).mockClear();
     const baseDetail = deliveryPullRequestDetails[2251]!;
@@ -99,7 +99,7 @@ describe("PullRequestDetailPanel", () => {
 
     render(
       <StrictMode>
-        <PullRequestDetailPanel
+        <PullRequestDetailSheet
           client={client({
             getCodeDeliveryPullRequestDetail: getDetail,
             runCodeDeliveryPullRequestAction: runAction,
@@ -278,7 +278,7 @@ describe("PullRequestDetailPanel", () => {
       onOpenWorkspace: vi.fn(),
     };
     const view = render(
-      <PullRequestDetailPanel
+      <PullRequestDetailSheet
         {...props}
         summary={summaryFor(2251)}
         initialDetail={deliveryPullRequestDetails[2251]}
@@ -291,7 +291,7 @@ describe("PullRequestDetailPanel", () => {
     await waitFor(() => expect(runAction).toHaveBeenCalledTimes(1));
 
     view.rerender(
-      <PullRequestDetailPanel
+      <PullRequestDetailSheet
         {...props}
         summary={summaryFor(2247)}
         initialDetail={deliveryPullRequestDetails[2247]}
@@ -344,5 +344,72 @@ describe("PullRequestDetailPanel", () => {
     expect(within(header).getByText("+2140")).toBeInTheDocument();
     expect(within(header).getByText("−83")).toBeInTheDocument();
     expect(within(header).getByText("devon")).toBeInTheDocument();
+  });
+
+  /**
+   * The confirmation is inline in the actions card, never a second Radix
+   * modal: the sheet is already one, and stacked modals share a dismiss
+   * layer and the body pointer-events lock.
+   */
+  it("admin-merges only through the inline confirmation, with the bypass flag", async () => {
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: true,
+        message: "Merged.",
+      }),
+    );
+    await renderPanel(
+      2251,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+    );
+
+    // The plain merge stays disabled while branch protection blocks it.
+    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "More pull request actions" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("menuitem", {
+        name: /Admin merge \(bypass protections\)/,
+      }),
+    );
+    expect(runAction).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Admin merge" }));
+    await waitFor(() => expect(runAction).toHaveBeenCalledTimes(1));
+    expect(runAction.mock.calls[0]![0]).toMatchObject({
+      action: {
+        type: "merge",
+        admin: true,
+        auto: false,
+        expected_head_sha: "82ab990",
+      },
+    });
+  });
+
+  it("abandons the admin merge on cancel", async () => {
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: true,
+        message: "Merged.",
+      }),
+    );
+    await renderPanel(
+      2251,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "More pull request actions" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("menuitem", {
+        name: /Admin merge \(bypass protections\)/,
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("button", { name: "Admin merge" })).toBeNull();
+    expect(runAction).not.toHaveBeenCalled();
   });
 });

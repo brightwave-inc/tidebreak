@@ -1941,7 +1941,9 @@ pub(crate) async fn comment_on_pull_request_target(
 }
 
 /// Repository-qualified merge for a PR that may not have a local Tidebreak
-/// workspace. The runner still admits only `gh pr merge` argv.
+/// workspace. The runner still admits only `gh pr merge` argv. `admin` is the
+/// user's explicit branch-protection bypass (`--admin`); callers reject the
+/// `admin && auto` pair before it gets here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn merge_pull_request_target(
     host: &str,
@@ -1950,6 +1952,7 @@ pub(crate) async fn merge_pull_request_target(
     number: u64,
     method: MergeMethod,
     auto: bool,
+    admin: bool,
     expected_head_sha: &str,
     search_path: Option<&str>,
 ) -> Result<(), GhError> {
@@ -1969,6 +1972,9 @@ pub(crate) async fn merge_pull_request_target(
     ];
     if auto {
         args.push("--auto".to_owned());
+    }
+    if admin {
+        args.push("--admin".to_owned());
     }
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_gh_user_merge(Path::new("."), &binary, &borrowed, GH_TIMEOUT)
@@ -2832,6 +2838,21 @@ exit 3
             42,
             MergeMethod::Squash,
             false,
+            false,
+            "abcdef123456",
+            Some(shim_dir.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        merge_pull_request_target(
+            "github.com",
+            "acme",
+            "app",
+            42,
+            MergeMethod::Squash,
+            false,
+            true,
             "abcdef123456",
             Some(shim_dir.path().to_str().unwrap()),
         )
@@ -2844,7 +2865,13 @@ exit 3
                 .contains("pr merge 42 --repo acme/app --squash --match-head-commit abcdef123456"),
             "{logged}"
         );
-        assert_eq!(logged.matches("pr merge").count(), 1, "{logged}");
+        // The admin bypass is a per-request flag, never a default.
+        assert!(
+            logged.contains("--match-head-commit abcdef123456 --admin"),
+            "{logged}"
+        );
+        assert_eq!(logged.matches("pr merge").count(), 2, "{logged}");
+        assert_eq!(logged.matches("--admin").count(), 1, "{logged}");
         assert!(!logged.contains("pr view"), "{logged}");
     }
 

@@ -1,4 +1,8 @@
-import type { CodeCheckLog, PullRequestDigest } from "../api/types";
+import type {
+  CodeCheckLog,
+  CodeDeliveryPullRequestSummary,
+  PullRequestDigest,
+} from "../api/types";
 import { prTone } from "./workspaceCards";
 
 export type PrWorkflowAction =
@@ -197,6 +201,77 @@ export type PrPromptAction = Exclude<
   PrWorkflowAction,
   "watch_and_fix" | "mark_ready" | "merge"
 >;
+
+/**
+ * A delivery row in the digest vocabulary the workflow prompts consume.
+ *
+ * The assignment is structural and checked: every digest field the prompt
+ * builder reads is present on the delivery summary under the same name. If
+ * either wire type drifts, this stops compiling rather than silently
+ * producing prompts with holes.
+ */
+export function deliveryPullRequestDigest(
+  summary: CodeDeliveryPullRequestSummary,
+): PullRequestDigest {
+  return summary;
+}
+
+export type PrAgentQuickAction = {
+  action: PrPromptAction;
+  label: string;
+};
+
+/**
+ * The agent-runnable chores this pull request currently has, in the order a
+ * reader resolves them: conflicts block everything, then failing checks, then
+ * review feedback, then a stale base. A settled pull request has none.
+ *
+ * More than one can apply at once — a conflicting PR with failing checks
+ * offers both — because each runs as its own prompt.
+ */
+export function prAgentQuickActions(
+  pr: PullRequestDigest,
+): PrAgentQuickAction[] {
+  const tone = prTone(pr);
+  if (tone === "merged" || tone === "closed") return [];
+  const items: PrAgentQuickAction[] = [];
+  if (prHasConflicts(pr)) {
+    items.push({ action: "resolve_conflicts", label: "Resolve conflicts" });
+  }
+  if (prCheckCounts(pr).failing > 0) {
+    items.push({ action: "fix_errors", label: "Fix failing checks" });
+  }
+  if (prHasChangesRequested(pr)) {
+    items.push({
+      action: "address_feedback",
+      label: "Address review feedback",
+    });
+  }
+  if (prIsBehind(pr)) {
+    items.push({ action: "update_branch", label: "Update branch from base" });
+  }
+  return items;
+}
+
+/**
+ * The fresh-agent variant of a workflow prompt.
+ *
+ * A fresh workspace is cut from the pull request's head commit, but onto its
+ * own Tidebreak branch — the server never checks out a shared branch
+ * directly. A bare "push" would therefore publish the wrong branch and leave
+ * the pull request untouched, so the suffix names the real push target.
+ */
+export function prFreshAgentPrompt(
+  action: PrPromptAction,
+  pr: PullRequestDigest,
+  logs: readonly CodeCheckLog[] = [],
+): string {
+  const head = pr.head_branch?.trim();
+  const suffix = head
+    ? `\n\nThis workspace was just created from \`${head}\`, the pull request's head branch, but the workspace branch itself is new and local. Publish your work to the pull request with \`git push origin HEAD:${head}\`. Do not push the workspace branch under its own name, and do not open a new pull request.`
+    : "";
+  return `${prWorkflowPrompt(action, pr, logs)}${suffix}`;
+}
 
 /**
  * Prompt actions run in the workspace's interactive session.

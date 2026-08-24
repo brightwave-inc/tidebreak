@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { PullRequestDigest } from "../api/types";
 import {
+  prAgentQuickActions,
+  prFreshAgentPrompt,
   prHasConflicts,
   prIsQueued,
   prWorkflowPrompt,
@@ -226,5 +228,66 @@ describe("prWorkflowPrompt", () => {
     expect(() => prWorkflowPrompt("merge", pr({}))).toBeDefined();
     // @ts-expect-error readying a draft is not an agent action
     expect(() => prWorkflowPrompt("mark_ready", pr({}))).toBeDefined();
+  });
+});
+
+describe("prAgentQuickActions", () => {
+  it("offers nothing on a settled pull request", () => {
+    expect(prAgentQuickActions(pr({ state: "merged" }))).toEqual([]);
+    expect(
+      prAgentQuickActions(pr({ state: "closed", mergeable: "conflicting" })),
+    ).toEqual([]);
+  });
+
+  it("maps each live chore to its prompt action, conflicts first", () => {
+    const actions = prAgentQuickActions(
+      pr({
+        mergeable: "conflicting",
+        review_decision: "changes_requested",
+        checks: [{ name: "ci", bucket: "fail" }],
+      }),
+    ).map((item) => item.action);
+    expect(actions).toEqual([
+      "resolve_conflicts",
+      "fix_errors",
+      "address_feedback",
+    ]);
+    expect(
+      prAgentQuickActions(pr({ merge_state_status: "behind" })).map(
+        (item) => item.action,
+      ),
+    ).toEqual(["update_branch"]);
+    expect(prAgentQuickActions(pr({}))).toEqual([]);
+  });
+});
+
+describe("prFreshAgentPrompt", () => {
+  it("names the pull request's head branch as the push target", () => {
+    const prompt = prFreshAgentPrompt(
+      "resolve_conflicts",
+      pr({ head_branch: "devon/shared-status-tone", base_branch: "main" }),
+    );
+    // The fresh workspace's own branch is local-only; a bare push would
+    // publish the wrong branch and leave the pull request untouched.
+    expect(prompt).toMatch(/git push origin HEAD:devon\/shared-status-tone/);
+    expect(prompt).toMatch(/do not open a new pull request/);
+    expect(
+      prompt.startsWith(
+        prWorkflowPrompt(
+          "resolve_conflicts",
+          pr({
+            head_branch: "devon/shared-status-tone",
+            base_branch: "main",
+          }),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("adds nothing without a head branch to push to", () => {
+    const digest = pr({});
+    expect(prFreshAgentPrompt("update_branch", digest)).toBe(
+      prWorkflowPrompt("update_branch", digest),
+    );
   });
 });
