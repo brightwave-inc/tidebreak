@@ -1804,6 +1804,10 @@ pub enum CodeUpdateNotice {
         #[ts(optional)]
         error: Option<String>,
     },
+    /// The pull-request store changed (decision 66). No payload: a delivery
+    /// surface re-reads its query, which the server answers from its own
+    /// store and caches. Not restated on connect.
+    Delivery,
 }
 
 impl CodeUpdateNotice {

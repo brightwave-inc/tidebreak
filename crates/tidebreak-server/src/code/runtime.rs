@@ -177,6 +177,8 @@ pub(crate) struct CodeRuntime {
     /// Workspaces whose digest was requested recently, with the owner each
     /// belongs to: the hot tier the refresher walks (decision 66).
     hot_prs: Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>,
+    /// When each owner last took a delivery nudge, for the debounce.
+    delivery_nudges: Mutex<HashMap<OwnerId, Instant>>,
     /// Paces and parks every conditional GitHub read (decision 66).
     host_gate: super::pr_fetch::HostGate,
     /// Base-branch rules, cached per branch: whether a merge queue runs
@@ -225,6 +227,10 @@ const BRANCH_RULES_TTL: Duration = Duration::from_secs(3600);
 /// (decision 66). The UI asks again while a workspace stays open, so the
 /// window only needs to outlive its poll spacing with room to spare.
 const HOT_WINDOW: Duration = Duration::from_secs(120);
+
+/// Floor between two delivery nudges to one owner (decision 66): a sweep
+/// updating many rows collapses to one re-read on the other side.
+const DELIVERY_NUDGE_DEBOUNCE: Duration = Duration::from_secs(3);
 
 /// One cached branch-rules answer. `rules: None` records a host that has no
 /// rules endpoint, so a known 404 is not re-read every refresh.
@@ -289,6 +295,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: Mutex::new(HashMap::new()),
+            delivery_nudges: Mutex::new(HashMap::new()),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
@@ -409,6 +416,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: Mutex::new(HashMap::new()),
+            delivery_nudges: Mutex::new(HashMap::new()),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
@@ -1618,6 +1626,23 @@ impl CodeRuntime {
         hot.insert(id, (owner.clone(), Instant::now()));
     }
 
+    /// One delivery nudge on the updates channel, debounced per owner
+    /// (decision 66): a sweep that moves several rows costs one re-read,
+    /// not one per row.
+    fn nudge_delivery_update(&self, owner: &OwnerId) {
+        {
+            let mut nudged = self.delivery_nudges.lock().expect("delivery nudges");
+            if let Some(last) = nudged.get(owner) {
+                if last.elapsed() < DELIVERY_NUDGE_DEBOUNCE {
+                    return;
+                }
+            }
+            nudged.insert(owner.clone(), Instant::now());
+        }
+        self.bus
+            .publish_update(owner, super::bus::CodeLiveUpdate::Delivery);
+    }
+
     /// The workspaces the hot refresher walks this tick.
     pub(super) fn hot_pull_request_workspaces(&self) -> Vec<(OwnerId, WorkspaceId)> {
         let mut hot = self.hot_prs.lock().expect("hot prs");
@@ -2035,6 +2060,10 @@ impl CodeRuntime {
         if !changed {
             return;
         }
+        // One delivery nudge per real change (decision 66): the delivery
+        // page and notification monitor re-read on receipt instead of on
+        // their own timers.
+        self.nudge_delivery_update(owner);
         let workspaces = match list_workspaces(&self.db, owner, None).await {
             Ok(workspaces) => workspaces,
             Err(_) => return,

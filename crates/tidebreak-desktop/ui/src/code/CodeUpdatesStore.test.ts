@@ -40,6 +40,7 @@ const EMPTY_STATE: CodeUpdatesState = {
   cloneJobs: {},
   harnessInstalls: {},
   viewedWorkspaceId: null,
+  deliveryRevision: 0,
 };
 
 afterEach(() => {
@@ -249,6 +250,14 @@ describe("reduceCodeUpdates", () => {
         done: false,
       },
     });
+    expect(noticeToAction({ type: "delivery" })).toEqual({ type: "delivery" });
+  });
+
+  it("bumps the delivery revision on each nudge (decision 66)", () => {
+    const first = reduceCodeUpdates(EMPTY_STATE, { type: "delivery" });
+    expect(first.deliveryRevision).toBe(1);
+    const second = reduceCodeUpdates(first, { type: "delivery" });
+    expect(second.deliveryRevision).toBe(2);
   });
 
   it("keeps one install state per engine", () => {

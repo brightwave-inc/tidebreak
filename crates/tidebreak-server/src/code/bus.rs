@@ -101,6 +101,9 @@ pub(crate) enum CodeLiveUpdate {
     /// Warm harness install progress. Not restated on connect; the doctor
     /// report is the durable answer for what is installed.
     HarnessInstall(HarnessInstallProgress),
+    /// The pull-request store changed (decision 66). No payload: delivery
+    /// surfaces re-read their queries on receipt.
+    Delivery,
 }
 
 /// Per-session broadcast channels for live journal events, plus one digest
