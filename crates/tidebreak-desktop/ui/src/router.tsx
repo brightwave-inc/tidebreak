@@ -251,7 +251,7 @@ const codeNotificationsRoute = createRoute({
 
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
-  return <CodeWorkspacePage key={workspaceId} workspaceId={workspaceId} />;
+  return <CodeWorkspacePage workspaceId={workspaceId} />;
 }
 
 export const settingsRoute = createRoute({
