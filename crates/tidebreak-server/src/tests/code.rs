@@ -2463,8 +2463,9 @@ async fn interrupting_a_queued_turn_stops_it_before_it_reaches_the_worktree() {
         "a stopped queued turn must never reach the worktree: {turns:?}"
     );
     // Stop declines to start the turn; it does not delete the message. The
-    // row stays in the durable queue, where the tray can retract or release
-    // it (decision 65).
+    // row stays in the durable queue, and the queue reads paused — sibling
+    // turn completion releases the checkout but wakes nobody, so an unpaused
+    // queue here would look live while nothing will ever run it.
     let rows = tidebreak_core::db::code::list_queued_turns(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -2478,6 +2479,49 @@ async fn interrupting_a_queued_turn_stops_it_before_it_reaches_the_worktree() {
         "the stopped message must stay queued, not vanish"
     );
     assert_eq!(rows[0].message, "queued");
+    assert!(
+        tidebreak_core::db::code::queue_paused(
+            &runtime.db,
+            &tidebreak_core::OwnerId::local(),
+            second_parsed
+        )
+        .await
+        .unwrap(),
+        "a stop aimed at queued work must pause the queue so the tray says so"
+    );
+
+    // Send-now is the release: it clears the pause and wakes the worker, and
+    // the held message finally runs now that the checkout is free.
+    let released = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/queued/send-now",
+            ids[1]
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), reqwest::StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let turns = tidebreak_core::db::code::list_turns(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                second_parsed,
+            )
+            .await
+            .unwrap();
+            if turns
+                .iter()
+                .any(|turn| turn.user_input == "queued" && turn.ended_at.is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("send-now must revive the paused queue once the checkout is free");
 }
 
 #[tokio::test]

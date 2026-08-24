@@ -27,7 +27,7 @@ use tidebreak_core::db::code::{
     accept_trigger_turn_delivery, append_event, bump_spawn_epoch, delete_queued_turn,
     get_open_turn, get_session, get_session_all_owners, insert_approval, insert_turn,
     next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
-    save_turn, set_session_subagents, CodeJournalError,
+    save_turn, set_queue_paused, set_session_subagents, CodeJournalError,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -99,6 +99,11 @@ pub(crate) enum WorkerError {
     /// head and tries again.
     #[error("the queued turn changed before it could start")]
     QueuedTurnStale,
+    /// A stop arrived while a queued turn waited for the workspace checkout.
+    /// Never reaches a caller: the drain loop pauses the queue so the rows
+    /// visibly hold until the reader resumes or fires send-now.
+    #[error("the queued turn was stopped before it could start")]
+    QueuedTurnStopped,
     #[error("{0}")]
     Failed(String),
     #[error("trigger delivery was already accepted")]
@@ -658,38 +663,47 @@ async fn next_child_pid(changes: Option<&mut watch::Receiver<Option<i64>>>) -> O
     *changes.borrow()
 }
 
-/// Wait for the workspace's turn lock, still answering control commands.
+/// How a wait for the workspace's turn lock ended.
 ///
-/// A queued turn can sit here for as long as a sibling's turn runs. Parking on
-/// a bare `lock()` would leave the worker deaf for that whole stretch: an
-/// interrupt sent while the message was still queued would be delivered to the
-/// engine only once the turn had started, which reads as the stop being
-/// ignored. Returns `None` when the turn should not start at all.
+/// The wait keeps answering control commands: a queued turn can sit on a
+/// sibling's turn for minutes, and parking on a bare `lock()` would leave the
+/// worker deaf for that whole stretch — an interrupt sent while the message
+/// was still queued would reach the engine only once the turn had started,
+/// which reads as the stop being ignored.
+enum WorktreeWait<'a> {
+    /// The checkout is ours; the turn starts.
+    Acquired(tokio::sync::MutexGuard<'a, ()>),
+    /// A stop arrived first. The turn must not start, and the caller owes the
+    /// reader an account of what happens to the queue it came from.
+    Stopped,
+    /// The worker is going away; leave everything exactly as it is.
+    Shutdown,
+}
+
 async fn await_worktree_turn<'a>(
     engine: &dyn HarnessSession,
     worktree_turn: &'a tokio::sync::Mutex<()>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
-) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+) -> WorktreeWait<'a> {
     loop {
         tokio::select! {
-            guard = worktree_turn.lock() => return Some(guard),
+            guard = worktree_turn.lock() => return WorktreeWait::Acquired(guard),
             command = commands.recv() => match command {
                 // Stopping something that has not started needs no engine
                 // call: declining to start is the stop. A queued row is not
-                // consumed by this — it stays in the durable queue, and the
-                // next wake reconsiders it.
+                // consumed by this — it stays in the durable queue.
                 Some(WorkerCommand::Interrupt { reply }) => {
                     let _ = reply.send(Ok(()));
-                    return None;
+                    return WorktreeWait::Stopped;
                 }
-                Some(WorkerCommand::Shutdown) | None => return None,
+                Some(WorkerCommand::Shutdown) | None => return WorktreeWait::Shutdown,
                 // There is no turn yet, so steering has nothing to steer, a
                 // second RunTurn is a conflict, and a mode switch belongs to
                 // whichever loop owns the session row. `apply_control` answers
                 // all three that way already.
                 Some(command) => {
                     if apply_control(engine, command, None).await == ControlFlow::Shutdown {
-                        return None;
+                        return WorktreeWait::Shutdown;
                     }
                 }
             },
@@ -822,7 +836,7 @@ async fn drain_queued(
         if session_was_ended(&sink.db, session).await {
             return;
         }
-        match queue_paused(&sink.db, session.id).await {
+        match queue_paused(&sink.db, &session.owner, session.id).await {
             Ok(true) => return,
             Ok(false) => {}
             Err(error) => {
@@ -871,6 +885,24 @@ async fn drain_queued(
             Ok(_) => {}
             // The row moved beneath the snapshot; the next read is current.
             Err(WorkerError::QueuedTurnStale) => {}
+            // A stop aimed at work that had not started holds the whole
+            // queue: nothing here will run until the reader says so, and the
+            // pause is what makes the tray say exactly that. Without it the
+            // rows would sit looking live while no wake is coming — sibling
+            // turn completion releases the checkout but notifies nobody.
+            // Resume or send-now clears the pause and wakes this worker.
+            Err(WorkerError::QueuedTurnStopped) => {
+                if let Err(error) =
+                    set_queue_paused(&sink.db, &session.owner, session.id, true).await
+                {
+                    warn!(
+                        session = %session.id,
+                        error = %error,
+                        "could not pause the queue after a stop"
+                    );
+                }
+                return;
+            }
             Err(WorkerError::Failed(detail)) => {
                 warn!(
                     session = %session.id,
@@ -1027,8 +1059,13 @@ async fn drive_turn_inner(
         // still listens for control: an interrupt that arrives while a turn is
         // queued has to stop it before it starts, not after.
         TurnWait::Queued => match await_worktree_turn(engine, worktree.lock, commands).await {
-            Some(guard) => guard,
-            None => return Err(WorkerError::Conflict("the queued turn was stopped".into())),
+            WorktreeWait::Acquired(guard) => guard,
+            WorktreeWait::Stopped => return Err(WorkerError::QueuedTurnStopped),
+            WorktreeWait::Shutdown => {
+                return Err(WorkerError::Conflict(
+                    "the session worker is shutting down".into(),
+                ))
+            }
         },
     };
     // Ending a session during that wait has to win. The lifecycle checks above
@@ -1514,6 +1551,7 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
         Err(WorkerError::SteeringRejected(_)) => "steering_rejected",
         Err(WorkerError::RelaunchRequired(_)) => "relaunch_required",
         Err(WorkerError::QueuedTurnStale) => "queued_turn_stale",
+        Err(WorkerError::QueuedTurnStopped) => "queued_turn_stopped",
         Err(WorkerError::Failed(_)) => "error",
         Err(WorkerError::TriggerDeliveryAccepted) => "trigger_delivery_accepted",
         Err(WorkerError::WorktreeBusy) => "worktree_busy",

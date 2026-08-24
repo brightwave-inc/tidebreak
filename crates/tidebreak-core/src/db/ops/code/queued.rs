@@ -275,7 +275,21 @@ fn queue_paused_setting(session_id: CodeSessionId) -> String {
 
 /// Whether promotion is paused for this session. Absent reads as running,
 /// exactly like the chat queue's per-chat pause key.
-pub async fn queue_paused(store: &DbStore, session_id: CodeSessionId) -> Result<bool> {
+///
+/// The key lives in the settings table, which carries no owner column, so
+/// the owner check anchors on the session row: a foreign owner reads the
+/// default and observes nothing.
+pub async fn queue_paused(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<bool> {
+    if super::session::get_session(store, owner, session_id)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
     Ok(
         entities::setting::Entity::find_by_id(queue_paused_setting(session_id))
             .one(&store.conn)
@@ -287,12 +301,22 @@ pub async fn queue_paused(store: &DbStore, session_id: CodeSessionId) -> Result<
 }
 
 /// Pause or release promotion for this session; queued rows stay put while
-/// paused.
+/// paused. Refuses a session the owner does not hold, for the same reason
+/// [`queue_paused`] anchors on the session row.
 pub async fn set_queue_paused(
     store: &DbStore,
+    owner: &OwnerId,
     session_id: CodeSessionId,
     paused: bool,
 ) -> Result<()> {
+    if super::session::get_session(store, owner, session_id)
+        .await?
+        .is_none()
+    {
+        return Err(AgentError::Store(format!(
+            "code session {session_id} not found"
+        )));
+    }
     let model = entities::setting::ActiveModel {
         key: Set(queue_paused_setting(session_id)),
         value_json: Set(serde_json::json!(paused)),

@@ -1517,6 +1517,7 @@ mod tests {
                 "m20260822_000008_trigger_delivery_receipts",
                 "m20260822_000009_code_pull_request_facts",
                 "m20260823_000010_trigger_fact_conditions",
+                "m20260824_000011_code_queued_turns",
             ]
         );
         assert!(db

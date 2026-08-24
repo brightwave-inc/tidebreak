@@ -2106,7 +2106,7 @@ impl CodeRuntime {
     ) -> Result<(Vec<CodeQueuedTurn>, bool), ServerError> {
         let _ = self.get_session(owner, id).await?;
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, id).await?;
-        let paused = tidebreak_core::db::code::queue_paused(&self.db, id).await?;
+        let paused = tidebreak_core::db::code::queue_paused(&self.db, owner, id).await?;
         Ok((queued, paused))
     }
 
@@ -2146,7 +2146,7 @@ impl CodeRuntime {
         paused: bool,
     ) -> Result<(), ServerError> {
         let _ = self.get_session(owner, id).await?;
-        tidebreak_core::db::code::set_queue_paused(&self.db, id, paused).await?;
+        tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, paused).await?;
         if !paused {
             self.wake_session_queue(id);
         }
@@ -2162,7 +2162,7 @@ impl CodeRuntime {
         id: CodeSessionId,
     ) -> Result<(), ServerError> {
         let _ = self.get_session(owner, id).await?;
-        tidebreak_core::db::code::set_queue_paused(&self.db, id, false).await?;
+        tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, false).await?;
         self.wake_session_queue(id);
         Ok(())
     }
@@ -3702,9 +3702,13 @@ fn map_worker(err: WorkerError) -> ServerError {
         }
         WorkerError::Failed(message) => ServerError::internal(message),
         // Only the drain loop drives promoted queue rows, and it re-reads on
-        // staleness. A caller seeing this took a path that does not exist.
+        // staleness and pauses on a stop. A caller seeing either took a path
+        // that does not exist.
         WorkerError::QueuedTurnStale => {
             ServerError::internal("the queued turn changed before it could start".to_owned())
+        }
+        WorkerError::QueuedTurnStopped => {
+            ServerError::internal("the queued turn was stopped before it could start".to_owned())
         }
         WorkerError::TriggerDeliveryAccepted => ServerError::conflict_kind(
             "trigger_delivery_accepted",

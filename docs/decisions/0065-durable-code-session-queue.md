@@ -61,8 +61,11 @@ by the session worker.**
   visible, editable, retractable rows. Send-now composes client-side as in
   chat: pause, move first, stop the live turn, release.
 - Stop keeps its meaning and loses its data loss: an interrupt that lands
-  while a queued turn waits on the workspace checkout declines to start it,
-  and the row stays queued instead of vanishing with the in-memory slot.
+  while a queued turn waits on the workspace checkout declines to start it
+  and pauses the queue. The rows hold visibly — the tray shows Paused —
+  until resume or send-now releases them. The pause is load-bearing, not
+  cosmetic: a sibling's turn ending releases the checkout but wakes nobody,
+  so an unpaused hold would stall silently while looking live.
 
 Deliberately excluded: trigger deliveries (they have their own durable
 outbox with leases and retries, decision 60); a per-workspace queue
@@ -90,9 +93,9 @@ lock already sequences siblings); merging the chat and code queue tables
 - A queued row whose start fails (a dead attachment blob, a failed
   preparation) is dropped with a harness notice, like chat's promoter
   dropping unpromotable rows — not retried forever.
-- An interrupt aimed at a queued-but-waiting turn leaves the rows parked
-  until the next wake (a new send, resume, or send-now). The tray makes the
-  parked state visible, which the old slot never was.
+- An interrupt aimed at a queued-but-waiting turn pauses the queue rather
+  than dropping the message, and the tray's Paused state is the recovery
+  path: resume or send-now clears it and wakes the worker.
 - The pre-1.0 schema regime applies: one appended migration
   (`m20260824_000011_code_queued_turns`), no baseline edit.
 
@@ -104,7 +107,8 @@ lock already sequences siblings); merging the chat and code queue tables
 - End-to-end: two mid-turn sends both park; list, edit, and retraction work
   against live rows; both survivors run in order after the live turn, each
   under its row's id; a stop pressed while a queued turn waits on a sibling
-  leaves the message queued, not run and not lost.
+  leaves the message queued and the queue paused, and send-now revives it
+  once the checkout is free.
 - The wrong implementation to guard against: promotion deleting the row in
   a separate write from the turn insert — a crash between them either loses
   a message or runs it twice. The transaction is the record's core.

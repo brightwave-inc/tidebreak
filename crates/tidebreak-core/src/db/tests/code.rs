@@ -2823,11 +2823,25 @@ async fn code_queue_pause_round_trips_and_an_ended_session_clears_its_rows() {
     let (_dir, store, session_id, _turn) = seeded_session().await;
     let owner = OwnerId::local();
 
-    assert!(!queue_paused(&store, session_id).await.unwrap());
-    set_queue_paused(&store, session_id, true).await.unwrap();
-    assert!(queue_paused(&store, session_id).await.unwrap());
-    set_queue_paused(&store, session_id, false).await.unwrap();
-    assert!(!queue_paused(&store, session_id).await.unwrap());
+    assert!(!queue_paused(&store, &owner, session_id).await.unwrap());
+    set_queue_paused(&store, &owner, session_id, true)
+        .await
+        .unwrap();
+    assert!(queue_paused(&store, &owner, session_id).await.unwrap());
+
+    // The pause anchors on the owner's session row: a foreign owner reads
+    // the default and cannot flip it.
+    let other = OwnerId::new("intruder").unwrap();
+    assert!(!queue_paused(&store, &other, session_id).await.unwrap());
+    assert!(set_queue_paused(&store, &other, session_id, false)
+        .await
+        .is_err());
+    assert!(queue_paused(&store, &owner, session_id).await.unwrap());
+
+    set_queue_paused(&store, &owner, session_id, false)
+        .await
+        .unwrap();
+    assert!(!queue_paused(&store, &owner, session_id).await.unwrap());
 
     enqueue_queued_turn(&store, &owner, &queued_message(session_id, "one"))
         .await
