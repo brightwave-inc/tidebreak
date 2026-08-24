@@ -42,7 +42,7 @@
 //! from the shared request path, which every background derivation uses for the
 //! same reason.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use schemars::JsonSchema;
@@ -127,8 +127,8 @@ pub(crate) enum Outcome {
     Recapped(String),
     /// The model declined: the turn is not worth a line.
     Declined,
-    /// Nothing to do — turn missing or unfinished, already recapped, a run
-    /// already in flight, or no utility model on this machine.
+    /// Nothing to do — the turn is missing, unfinished, already recapped, has
+    /// nothing to describe, or this machine has no utility model.
     NotApplicable,
 }
 
@@ -162,13 +162,21 @@ pub(crate) struct TurnRecapper {
     secrets: Arc<dyn tidebreak_core::SecretProvider>,
     provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    /// Sessions with a recap call in flight, shared by every clone.
+    /// Sessions with a recap call in flight, and at most one turn queued by a
+    /// completion that landed while that call was running.
     ///
-    /// Turns are minutes long, so unlike chat titling this queues no follow-up:
-    /// a second turn that finishes while the first recap is still running is
-    /// itself about to be recapped, and its line supersedes the one being
-    /// dropped.
-    in_flight: Arc<Mutex<HashSet<CodeSessionId>>>,
+    /// Dropping the later turn instead of queuing it is the one mistake this
+    /// must not make. Its line would never be written, `build_digest` walks
+    /// turns newest-first for the first one that has a narrative, and every
+    /// list surface would then keep showing where the *previous* turn stood
+    /// after newer work had already finished — the exact question the recap
+    /// exists to answer, answered wrongly. A slow utility call and a short
+    /// following turn are enough to hit it.
+    ///
+    /// Only the newest queued turn is kept. One it replaces was superseded
+    /// before its recap was ever written, and the newer turn's line describes
+    /// the session that turn left behind.
+    in_flight: Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
 }
 
 impl TurnRecapper {
@@ -190,7 +198,7 @@ impl TurnRecapper {
             secrets,
             provisioned_policy,
             os_policy,
-            in_flight: Arc::new(Mutex::new(HashSet::new())),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -212,9 +220,6 @@ impl TurnRecapper {
         session_id: CodeSessionId,
         turn_id: CodeTurnId,
     ) -> Result<Outcome> {
-        let Some(_claim) = RecapClaim::acquire(self, session_id) else {
-            return Ok(Outcome::NotApplicable);
-        };
         let Some(turn) = get_turn(&self.db, owner, turn_id).await? else {
             return Ok(Outcome::NotApplicable);
         };
@@ -380,22 +385,42 @@ impl TurnRecapper {
 
 impl TurnRecap for TurnRecapper {
     fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId) {
+        let Some((mut claim, mut turn_id)) =
+            RecapClaim::acquire(&self.in_flight, session_id, turn_id)
+        else {
+            // Coalesced behind the call already running for this session; that
+            // call will pick this turn up when it finishes.
+            return;
+        };
         let recapper = self.clone();
         tokio::spawn(async move {
-            // Logged either way. The work is invisible by design — no event, no
-            // turn outcome — so without a line here the only way to tell a
-            // declined recap from a broken one is to read the database.
-            match recapper.derive(&owner, session_id, turn_id).await {
-                Ok(Outcome::Recapped(recap)) => {
-                    eprintln!("tidebreak: recapped code turn {turn_id}: {recap}");
+            // Held for the duration and released on drop, so a call that
+            // returns early — or panics — does not lock the session out of
+            // recapping a later turn.
+            loop {
+                // Logged either way. The work is invisible by design — no
+                // event, no turn outcome — so without a line here the only way
+                // to tell a declined recap from a broken one is to read the
+                // database.
+                match recapper.derive(&owner, session_id, turn_id).await {
+                    Ok(Outcome::Recapped(recap)) => {
+                        eprintln!("tidebreak: recapped code turn {turn_id}: {recap}");
+                    }
+                    Ok(Outcome::Declined) => {
+                        eprintln!("tidebreak: left code turn {turn_id} without a recap");
+                    }
+                    Ok(Outcome::NotApplicable) => {}
+                    Err(error) => {
+                        eprintln!("tidebreak: could not recap code turn {turn_id}: {error}");
+                    }
                 }
-                Ok(Outcome::Declined) => {
-                    eprintln!("tidebreak: left code turn {turn_id} without a recap");
-                }
-                Ok(Outcome::NotApplicable) => {}
-                Err(error) => {
-                    eprintln!("tidebreak: could not recap code turn {turn_id}: {error}");
-                }
+                // Always drain, unlike titling's retry-only follow-up: a turn
+                // that finished while this call ran is a different turn and
+                // needs its own line, however well this one went.
+                let Some(next) = claim.take_pending_or_release() else {
+                    break;
+                };
+                turn_id = next;
             }
         });
     }
@@ -403,28 +428,157 @@ impl TurnRecap for TurnRecapper {
 
 /// A session's place in [`TurnRecapper::in_flight`], released on drop.
 struct RecapClaim {
-    in_flight: Arc<Mutex<HashSet<CodeSessionId>>>,
+    in_flight: Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
     session_id: CodeSessionId,
+    released: bool,
 }
 
 impl RecapClaim {
-    fn acquire(recapper: &TurnRecapper, session_id: CodeSessionId) -> Option<Self> {
-        let in_flight = recapper.in_flight.clone();
-        let claimed = in_flight
+    /// Claim `session_id`, or queue `turn_id` behind the call already running
+    /// for it.
+    ///
+    /// Takes the map rather than the recapper: the invariant is entirely about
+    /// this one field, and a test that had to build a recapper would need a
+    /// database, a provider, and a policy source to assert something none of
+    /// them take part in.
+    fn acquire(
+        in_flight: &Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
+        session_id: CodeSessionId,
+        turn_id: CodeTurnId,
+    ) -> Option<(Self, CodeTurnId)> {
+        let in_flight = in_flight.clone();
+        let mut guard = in_flight
             .lock()
-            .expect("recap claims are never held across a panic")
-            .insert(session_id);
-        claimed.then_some(Self {
-            in_flight,
-            session_id,
-        })
+            .expect("recap claims are never held across a panic");
+        match guard.entry(session_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(None);
+                drop(guard);
+                Some((
+                    Self {
+                        in_flight,
+                        session_id,
+                        released: false,
+                    },
+                    turn_id,
+                ))
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(Some(turn_id));
+                None
+            }
+        }
+    }
+
+    /// Take the one turn that completed while this call ran. With none queued,
+    /// release atomically so a concurrent next turn either queues here or
+    /// starts a fresh task; there is no gap in which its trigger can be lost.
+    fn take_pending_or_release(&mut self) -> Option<CodeTurnId> {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .expect("recap claims are never held across a panic");
+        let pending = in_flight.get_mut(&self.session_id).and_then(Option::take);
+        if pending.is_none() {
+            in_flight.remove(&self.session_id);
+            self.released = true;
+        }
+        pending
     }
 }
 
 impl Drop for RecapClaim {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         if let Ok(mut in_flight) = self.in_flight.lock() {
             in_flight.remove(&self.session_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn claims() -> Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>> {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    fn session() -> CodeSessionId {
+        CodeSessionId(uuid::Uuid::new_v4())
+    }
+
+    fn turn() -> CodeTurnId {
+        CodeTurnId(uuid::Uuid::new_v4())
+    }
+
+    /// A turn that finishes while an earlier recap is still running is queued,
+    /// not dropped.
+    ///
+    /// Dropping it left the newest turn with no narrative, and `build_digest`
+    /// walks turns newest-first for the first one that has a line — so every
+    /// list surface went on showing where the *previous* turn stood after newer
+    /// work had already finished. That is the question this feature exists to
+    /// answer, answered wrongly.
+    #[test]
+    fn a_turn_finishing_mid_recap_is_queued_rather_than_dropped() {
+        let in_flight = claims();
+        let session = session();
+        let (first, second) = (turn(), turn());
+
+        let (mut claim, running) =
+            RecapClaim::acquire(&in_flight, session, first).expect("the first turn claims");
+        assert_eq!(running, first);
+
+        // The second coalesces behind the running call rather than starting
+        // its own.
+        assert!(RecapClaim::acquire(&in_flight, session, second).is_none());
+
+        // And the running call picks it up instead of exiting.
+        assert_eq!(claim.take_pending_or_release(), Some(second));
+        assert_eq!(claim.take_pending_or_release(), None);
+
+        // Released, so the turn after that starts a fresh task.
+        assert!(RecapClaim::acquire(&in_flight, session, first).is_some());
+    }
+
+    /// Only the newest queued turn survives: one it replaced was superseded
+    /// before its recap was ever written.
+    #[test]
+    fn only_the_newest_queued_turn_is_kept() {
+        let in_flight = claims();
+        let session = session();
+        let (running, queued, newest) = (turn(), turn(), turn());
+
+        let (mut claim, _) =
+            RecapClaim::acquire(&in_flight, session, running).expect("the first turn claims");
+        assert!(RecapClaim::acquire(&in_flight, session, queued).is_none());
+        assert!(RecapClaim::acquire(&in_flight, session, newest).is_none());
+
+        assert_eq!(claim.take_pending_or_release(), Some(newest));
+    }
+
+    /// Two sessions never block each other.
+    #[test]
+    fn claims_are_per_session() {
+        let in_flight = claims();
+        let (one, other) = (session(), session());
+
+        assert!(RecapClaim::acquire(&in_flight, one, turn()).is_some());
+        assert!(RecapClaim::acquire(&in_flight, other, turn()).is_some());
+    }
+
+    /// A dropped claim frees the session, so a call that returned early — or
+    /// panicked — does not lock it out of recapping a later turn.
+    #[test]
+    fn dropping_a_claim_frees_the_session() {
+        let in_flight = claims();
+        let session = session();
+
+        let (claim, _) = RecapClaim::acquire(&in_flight, session, turn()).expect("claims");
+        drop(claim);
+        assert!(RecapClaim::acquire(&in_flight, session, turn()).is_some());
     }
 }
