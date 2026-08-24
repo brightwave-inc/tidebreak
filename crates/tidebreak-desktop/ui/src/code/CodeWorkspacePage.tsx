@@ -125,7 +125,7 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeInspector, PrTab, type InspectorTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
-import { FORK_FRAMING, forkTranscriptFile } from "./fork";
+import { forkFraming, forkTranscriptFile } from "./fork";
 import {
   useCodeUpdatesStore,
   useConversationDigests,
@@ -755,17 +755,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   /**
    * Hand one agent's transcript to a fresh one.
    *
-   * The server writes the file into the worktree, so the child reads it from
-   * its own working directory whatever engine it turns out to be. Nothing is
-   * sent here: the draft tab opens with the transcript attached and a framing
-   * line the reader edits first.
+   * The server writes the fork into private storage — the condensed
+   * transcript plus a full record per turn — so the child reads it from an
+   * absolute path whatever engine it turns out to be. `atTurnId` forks at
+   * the end of that turn; omitted, the fork covers the whole conversation.
+   * Nothing is sent here: the draft tab opens with the transcript attached
+   * and framing lines the reader edits first.
    */
-  async function forkConversation(sessionId: string) {
+  async function forkConversation(sessionId: string, atTurnId?: string) {
     try {
-      const written = await client.forkCodeSession(sessionId);
+      const written = await client.forkCodeSession(sessionId, atTurnId);
       setForkSource(written);
       selectConversation(null);
-      useCodeUiStore.getState().offerComposerPrompt(workspaceId, FORK_FRAMING);
+      useCodeUiStore
+        .getState()
+        .offerComposerPrompt(workspaceId, forkFraming(written));
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not fork this agent"));
     }
@@ -1119,6 +1123,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   defaultModelKey={defaultModelKey}
                   disabled={fenced || workspace?.status !== "active"}
                   onOpenTurnDiff={openTurnDiff}
+                  onForkFromTurn={
+                    session.kind === "interactive"
+                      ? (turnId) => void forkConversation(session.id, turnId)
+                      : undefined
+                  }
                   subagentCallId={subagentParam}
                   subagentSummary={digest?.subagents?.find(
                     (entry) => entry.call_id === subagentParam,
@@ -1679,6 +1688,7 @@ function CodeSessionPane({
   defaultModelKey,
   disabled,
   onOpenTurnDiff,
+  onForkFromTurn,
   subagentCallId,
   subagentSummary,
   onBackFromSubagent,
@@ -1692,6 +1702,8 @@ function CodeSessionPane({
   disabled: boolean;
   /** Scope the review sidebar to one turn's changes, from a turn's diffstat. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** Fork this conversation at the end of one turn, from its seam row. */
+  onForkFromTurn?: (turnId: string) => void;
   /** The spanning Task call to inspect inside this still-mounted session. */
   subagentCallId?: string;
   /** Current bounded rail summary, when the Task is still in the digest. */
@@ -2049,6 +2061,7 @@ function CodeSessionPane({
           decidingId={decidingId}
           approvalError={approvalError}
           onOpenTurnDiff={onOpenTurnDiff}
+          onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
           onReveal={follow.pauseFollow}
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}

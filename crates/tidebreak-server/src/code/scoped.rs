@@ -574,8 +574,9 @@ impl ScopedCode {
     pub(crate) async fn fork_transcript(
         &self,
         id: CodeSessionId,
+        at_turn: Option<tidebreak_core::CodeTurnId>,
     ) -> Result<super::fork::WrittenTranscript, ServerError> {
-        self.runtime.fork_transcript(&self.owner, id).await
+        self.runtime.fork_transcript(&self.owner, id, at_turn).await
     }
 
     pub(crate) async fn session_debug(

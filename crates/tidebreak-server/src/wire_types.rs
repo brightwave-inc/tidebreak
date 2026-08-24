@@ -469,6 +469,7 @@ mod tests {
         // Where new worktrees land, and the body that moves it.
         generate::collect_from::<crate::routes::code::CodeWorktreeRoot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeForkTranscript>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeForkBody>(&cfg, &mut out);
         // Failing CI job logs the fix-errors action downloads before it prompts.
         generate::collect_from::<crate::routes::code::CodeCheckLogsSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::SetCodeWorktreeRootBody>(&cfg, &mut out);

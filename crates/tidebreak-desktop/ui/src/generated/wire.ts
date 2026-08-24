@@ -1226,13 +1226,37 @@ source: AttentionSource, };
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
 
 /**
- * A written fork transcript: `POST /code/sessions/{id}/fork`.
- *
- * `path` is worktree-relative, which is what the child agent needs: the file
- * already sits in its working directory, so the prompt names a path rather
- * than carrying the bytes.
+ * Body of `POST /code/sessions/{id}/fork`. An absent body forks at the
+ * newest turn.
  */
-export type CodeForkTranscript = { path: string, byte_len: number, turns: number, 
+export type CodeForkBody = { 
+/**
+ * Fork at the end of this turn; later turns stay out of the handoff.
+ */
+at_turn?: CodeTurnId, };
+
+/**
+ * A written fork handoff: `POST /code/sessions/{id}/fork`.
+ *
+ * `path` is the condensed transcript, absolute under private storage so a
+ * child agent of any engine can read it without Git ever indexing it. `dir`
+ * is the fork's own directory, which also holds one full per-turn record —
+ * `turn-0007.md` for turn 7 — and any retained image attachments.
+ */
+export type CodeForkTranscript = { path: string, dir: string, byte_len: number, 
+/**
+ * Turns the condensed transcript renders in full.
+ */
+turns: number, 
+/**
+ * Turns the fork covers, up to and including the fork point.
+ */
+total_turns: number, 
+/**
+ * The fork point's turn ordinal, present when the conversation
+ * continued past it — later turns are excluded from the handoff.
+ */
+at_turn_ordinal?: number, 
 /**
  * True when anything was left out to fit the size cap: the oldest
  * turns, or the end of a turn too large on its own.
