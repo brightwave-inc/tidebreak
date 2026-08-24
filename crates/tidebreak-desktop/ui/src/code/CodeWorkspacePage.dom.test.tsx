@@ -20,6 +20,7 @@ import {
 } from "@tanstack/react-router";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
+import { HttpError } from "@/api/client";
 import type {
   CodeSessionSnapshot,
   CodeWorkspacePrSnapshot,
@@ -1047,22 +1048,16 @@ describe("CodeWorkspacePage", () => {
     expect(client.submitCodeTurn).not.toHaveBeenCalled();
   });
 
-  it("archives from a chord through the same confirmation the menu uses", async () => {
-    // Archiving removes a worktree. The keyboard path must not be the one that
-    // skips the dialog.
+  it("archives a clean workspace from the chord without confirmation", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);
-    const user = userEvent.setup();
     await screen.findByRole("heading", { name: /Fix login/ });
 
     act(() => useCodeUiStore.getState().requestArchiveWorkspace());
-    const confirmation = await screen.findByRole("alertdialog");
-    await user.click(
-      within(confirmation).getByRole("button", { name: "Archive" }),
-    );
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("drafts the Create PR request into the composer for local changes", async () => {
@@ -1135,16 +1130,52 @@ describe("CodeWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     await user.click(await screen.findByRole("menuitem", { name: "Archive" }));
-    const confirmation = await screen.findByRole("alertdialog");
-    await user.click(
-      within(confirmation).getByRole("button", { name: "Archive" }),
-    );
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: /Fix login/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("asks once before discarding changes during archive", async () => {
+    const client = makeClient();
+    client.archiveCodeWorkspace
+      .mockRejectedValueOnce(
+        new HttpError(
+          409,
+          "workspace has uncommitted or unpushed work; pass force to discard it",
+          "uncommitted",
+        ),
+      )
+      .mockResolvedValueOnce({ ...WORKSPACE, status: "archived" });
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    await screen.findByRole("heading", { name: /Fix login/ });
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Archive" }));
+
+    const confirmation = await screen.findByRole("alertdialog");
+    expect(confirmation).toHaveTextContent("Discard leftover work?");
+    expect(client.archiveCodeWorkspace).toHaveBeenCalledTimes(1);
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Discard and archive" }),
+    );
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
+    expect(client.archiveCodeWorkspace).toHaveBeenNthCalledWith(
+      1,
+      "ws-1",
+      false,
+    );
+    expect(client.archiveCodeWorkspace).toHaveBeenNthCalledWith(
+      2,
+      "ws-1",
+      true,
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("force-archives with one confirm and force=true from the header menu", async () => {
