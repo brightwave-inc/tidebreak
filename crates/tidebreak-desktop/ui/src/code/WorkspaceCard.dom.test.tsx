@@ -37,6 +37,7 @@ function renderCard(overrides?: {
   pr?: PullRequestDigest;
   density?: "compact" | "detailed";
   visibleMeta?: { repoChip: boolean; branch: boolean };
+  detailDefaultOpen?: boolean;
 }) {
   const onOpen = vi.fn();
   const onCommand = vi.fn();
@@ -59,6 +60,7 @@ function renderCard(overrides?: {
         hasPr: Boolean(overrides?.pr),
         archived: merged.status === "archived",
       })}
+      detailDefaultOpen={overrides?.detailDefaultOpen}
       onOpen={onOpen}
       onCommand={onCommand}
     />,
@@ -91,11 +93,16 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("toggle-terminal");
   });
 
-  it("keeps the PR visible in the row without turning it into workspace navigation", async () => {
+  it("keeps only the PR glyph in the row and puts its action in the hover detail", async () => {
     const user = userEvent.setup();
-    const { onOpen, onCommand } = renderCard({ pr });
+    const { onOpen, onCommand } = renderCard({
+      pr,
+      detailDefaultOpen: true,
+    });
+    const row = screen.getByRole("button", { name: /^Fix login/ });
 
-    expect(screen.getByText("#184")).toBeInTheDocument();
+    expect(row.querySelector('[data-pr-state="open"]')).toBeInTheDocument();
+    expect(row).not.toHaveTextContent("#184");
 
     await user.click(
       screen.getByRole("button", { name: "Open pull request #184" }),
@@ -103,6 +110,29 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("open-pr");
     // PR actions are siblings of the conversation row, never nested controls.
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("restores the hover detail with branch, checks, review, and actions", async () => {
+    const user = userEvent.setup();
+    const { onCommand } = renderCard({
+      pr: {
+        ...pr,
+        review_decision: "review_required",
+        mergeable: "mergeable",
+        merge_state_status: "blocked",
+        base_branch: "main",
+      },
+      detailDefaultOpen: true,
+    });
+
+    const detail = screen.getByTestId("workspace-hover-card");
+    expect(detail).toHaveTextContent("tidebreak/fix-login");
+    expect(detail).toHaveTextContent("8 passing · 1 pending");
+    expect(detail).toHaveTextContent("Review required");
+    expect(detail).toHaveTextContent("into main");
+
+    await user.click(screen.getByRole("button", { name: "Archive" }));
+    expect(onCommand).toHaveBeenCalledWith("archive");
   });
 
   it("speaks the header control's workflow vocabulary from the panel", async () => {
@@ -122,6 +152,7 @@ describe("WorkspaceCard", () => {
         density="detailed"
         visibleMeta={{ repoChip: true, branch: false }}
         commands={workspaceCommands({ hasPr: true, archived: false })}
+        detailDefaultOpen
         onOpen={vi.fn()}
         onCommand={vi.fn()}
         onWorkflowAction={onWorkflowAction}
@@ -141,6 +172,7 @@ describe("WorkspaceCard", () => {
         status: "archived",
         archived_at: "2026-08-18T00:00:00.000Z",
       },
+      detailDefaultOpen: true,
     });
 
     expect(screen.getByText("Archived")).toBeInTheDocument();
@@ -167,7 +199,7 @@ describe("WorkspaceCard", () => {
     ).toBeInTheDocument();
   });
 
-  it("detailed idle cards still show the harness and lifecycle", () => {
+  it("keeps idle lifecycle detail off the non-hover card", () => {
     const session: CodeSessionSnapshot = {
       id: "sess-1",
       workspace_id: workspace.id,
@@ -196,8 +228,8 @@ describe("WorkspaceCard", () => {
       />,
     );
 
-    expect(screen.getByText("Idle")).toBeInTheDocument();
-    expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
+    expect(screen.queryByText("Idle")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Claude Code")).not.toBeInTheDocument();
   });
 
   it("compact keeps the one-line read and the complete label", () => {
