@@ -18,7 +18,7 @@ use futures::StreamExt as _;
 use serde_json::Value;
 
 use crate::obo_gateway::GitCredential;
-use crate::routes::code::CodeGitHubRepositoryTarget;
+use crate::routes::code::types::CodeGitHubRepositoryTarget;
 use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket, PullRequestDigest};
 
 /// Timeout for one REST call — the same bound the `gh` runner gets.

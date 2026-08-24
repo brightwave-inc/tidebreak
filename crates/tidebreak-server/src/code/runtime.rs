@@ -1427,7 +1427,7 @@ impl CodeRuntime {
         worktree: &std::path::Path,
     ) -> Result<
         Option<(
-            crate::routes::code::CodeGitHubRepositoryTarget,
+            crate::routes::code::types::CodeGitHubRepositoryTarget,
             crate::obo_gateway::GitCredential,
         )>,
         ServerError,

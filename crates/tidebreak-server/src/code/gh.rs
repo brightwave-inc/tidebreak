@@ -515,7 +515,7 @@ pub(crate) async fn create_pull_request_rest(
     requested_body: Option<&str>,
     cache: &PrDigestCache,
     api_base: &str,
-    target: &crate::routes::code::CodeGitHubRepositoryTarget,
+    target: &crate::routes::code::types::CodeGitHubRepositoryTarget,
     credential: &GitCredential,
 ) -> Result<(PullRequestDigest, serde_json::Value), GhError> {
     let inspect = inspect_git(worktree, base_ref, title).await?;
