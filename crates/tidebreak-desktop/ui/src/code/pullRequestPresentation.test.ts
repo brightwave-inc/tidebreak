@@ -7,6 +7,7 @@ import {
   mergeBlockedReason,
   orderPullRequestComments,
   pullRequestLifecycle,
+  pullRequestListStatus,
   pullRequestReviewSummary,
   pullRequestSettledAt,
 } from "./pullRequestPresentation";
@@ -145,6 +146,46 @@ describe("checkCounts", () => {
   });
 });
 
+describe("pullRequestListStatus", () => {
+  it("treats a running check as waiting, not attention", () => {
+    expect(
+      pullRequestListStatus(
+        pr({ checks: [{ name: "preview", bucket: "pending" }] }),
+      ),
+    ).toEqual({
+      label: "Checks running",
+      tone: "pending",
+      group: "waiting",
+    });
+  });
+
+  it("moves queued and clear auto-merge pull requests out of attention", () => {
+    expect(
+      pullRequestListStatus(
+        pr({
+          in_merge_queue: true,
+          attention_reasons: ["checks_failed"],
+          checks: [{ name: "preview", bucket: "fail" }],
+        }),
+      ),
+    ).toMatchObject({ label: "In merge queue", group: "handed_off" });
+    expect(
+      pullRequestListStatus(pr({ auto_merge_enabled: true })),
+    ).toMatchObject({ label: "Auto-merge armed", group: "handed_off" });
+  });
+
+  it("keeps a blocked auto-merge pull request in attention", () => {
+    expect(
+      pullRequestListStatus(
+        pr({
+          auto_merge_enabled: true,
+          attention_reasons: ["conflicts"],
+        }),
+      ),
+    ).toMatchObject({ label: "Resolve conflicts", group: "attention" });
+  });
+});
+
 describe("mergeBlockedReason", () => {
   it("explains a blocked merge instead of letting the API refuse it", () => {
     expect(mergeBlockedReason(pr())).toBeNull();
@@ -161,7 +202,16 @@ describe("mergeBlockedReason", () => {
     expect(mergeBlockedReason(pr({ state: "closed" }))).toMatch(/Reopen/);
     expect(
       mergeBlockedReason(pr({ checks: [{ name: "ci", bucket: "fail" }] })),
-    ).toMatch(/checks are failing/);
+    ).toMatch(/failing check/);
+    expect(
+      mergeBlockedReason(
+        pr({
+          merge_state_status: "blocked",
+          review_decision: "review_required",
+          checks: [{ name: "preview", bucket: "pending" }],
+        }),
+      ),
+    ).toBe("Wait for the running check before merging.");
   });
 });
 

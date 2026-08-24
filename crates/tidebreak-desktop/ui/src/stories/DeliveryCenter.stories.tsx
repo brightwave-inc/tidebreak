@@ -442,6 +442,106 @@ type Story = StoryObj<typeof meta>;
 export const PullRequests: Story = {};
 
 /**
+ * The default grouping answers the page's main question: which pull requests
+ * still need the reader, and which ones have already been handed to GitHub.
+ */
+export const PullRequestAttentionGroups: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByText("Needs your attention")).toBeVisible();
+    await expect(await canvas.findByText("Ready to merge")).toBeVisible();
+    await expect(await canvas.findByText("Waiting")).toBeVisible();
+    await expect(await canvas.findByText("Handed off")).toBeVisible();
+  },
+};
+
+/** A running check stays blue and in Waiting instead of becoming a failure. */
+export const PullRequestRunningCheck: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const title = await canvas.findByText(
+      "Let the catalog say which scopes a server accepts",
+    );
+    const row = title.closest('[role="listitem"]');
+    if (!(row instanceof HTMLElement)) {
+      throw new Error("running-check row is missing");
+    }
+    await expect(row).toHaveAttribute("data-status-group", "waiting");
+    await expect(within(row).getByText("Checks running")).toBeVisible();
+    await expect(within(row).getByText("1 pending")).toBeVisible();
+  },
+};
+
+/** A running check blocks the merge without inventing a review requirement. */
+export const PullRequestRunningCheckDetail: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await canvas.findByText(
+        "Let the catalog say which scopes a server accepts",
+      ),
+    );
+    await expect(
+      await body.findByText("Wait for the running check before merging."),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: "Merge" }),
+    ).toBeDisabled();
+    await expect(
+      body.queryByText(/required review|review approval/i),
+    ).not.toBeInTheDocument();
+    await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
+    await expect(
+      await body.findByText("0 of 1 passed, 1 pending"),
+    ).toBeVisible();
+  },
+};
+
+/** Auto-merge and queue membership live on the PR mark and in one handoff group. */
+export const PullRequestMergeHandoffs: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    for (const [titleText, statusText] of [
+      ["Ask a hosted MCP server which scopes it accepts", "In merge queue"],
+      ["Apply reasoning effort changes to the next turn", "Auto-merge armed"],
+    ] as const) {
+      const title = await canvas.findByText(titleText);
+      const row = title.closest('[role="listitem"]');
+      if (!(row instanceof HTMLElement)) {
+        throw new Error(`${titleText} row is missing`);
+      }
+      await expect(row).toHaveAttribute("data-status-group", "handed_off");
+      await expect(within(row).getByText(statusText)).toBeVisible();
+    }
+  },
+};
+
+/** Repository grouping makes a many-repository queue scannable by ownership. */
+export const PullRequestsByRepository: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await canvas.findByRole("combobox", { name: "Group pull requests" }),
+    );
+    await userEvent.click(
+      await body.findByRole("option", { name: "Group: repository" }),
+    );
+    await expect(
+      canvasElement.querySelector(
+        '[data-pull-request-group="brightwave-inc/tidebreak"]',
+      ),
+    ).not.toBeNull();
+    await expect(
+      canvasElement.querySelector(
+        '[data-pull-request-group="brightwave-inc/model-gateway"]',
+      ),
+    ).not.toBeNull();
+  },
+};
+
+/**
  * The list carries every lifecycle at once. A merged or closed row used to
  * read "Review Pending", because GitHub drops the review decision the moment
  * a pull request settles.
@@ -457,7 +557,9 @@ export const PullRequestLifecycles: Story = {
     await expect(await canvas.findAllByText("Merged")).toHaveLength(2);
     await expect(await canvas.findAllByText("Closed")).toHaveLength(1);
     await expect(await canvas.findAllByText("Draft")).toHaveLength(1);
-    await expect(await canvas.findAllByText("Approved")).toHaveLength(1);
+    await expect(await canvas.findAllByText("Ready to merge")).not.toHaveLength(
+      0,
+    );
     await expect(await canvas.findAllByText("Changes requested")).toHaveLength(
       1,
     );

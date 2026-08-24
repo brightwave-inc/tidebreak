@@ -606,6 +606,8 @@ function parseCodeDeliveryPullRequestSummary(
       "mergeable",
       "merge_state_status",
       "auto_merge_enabled",
+      "in_merge_queue",
+      "comment_count",
       "checks",
       "attention_reasons",
       "ready_to_merge",
@@ -632,6 +634,10 @@ function parseCodeDeliveryPullRequestSummary(
     !optionalString(value.mergeable) ||
     !optionalString(value.merge_state_status) ||
     typeof value.auto_merge_enabled !== "boolean" ||
+    (value.in_merge_queue !== undefined &&
+      typeof value.in_merge_queue !== "boolean") ||
+    (value.comment_count !== undefined &&
+      !isNonNegativeInteger(value.comment_count)) ||
     !Array.isArray(value.checks) ||
     !Array.isArray(value.attention_reasons) ||
     !value.attention_reasons.every((reason) =>
@@ -674,6 +680,12 @@ function parseCodeDeliveryPullRequestSummary(
     head_branch: value.head_branch,
     base_branch: value.base_branch,
     auto_merge_enabled: value.auto_merge_enabled,
+    ...(value.in_merge_queue !== undefined
+      ? { in_merge_queue: value.in_merge_queue }
+      : {}),
+    ...(value.comment_count !== undefined
+      ? { comment_count: value.comment_count }
+      : {}),
     checks,
     attention_reasons: [...value.attention_reasons],
     ready_to_merge: value.ready_to_merge,

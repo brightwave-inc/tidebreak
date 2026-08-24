@@ -89,7 +89,10 @@ export function prIsBlocked(pr: PullRequestDigest): boolean {
 
 /** GitHub still wants a review approval on this pull request. */
 export function prNeedsApproval(pr: PullRequestDigest): boolean {
-  return pr.review_decision?.trim().toLowerCase() === "review_required";
+  return (
+    pr.review_decision?.trim().toLowerCase() === "review_required" &&
+    pr.merge_state_status?.trim().toLowerCase() === "blocked"
+  );
 }
 
 export function prHasChangesRequested(pr: PullRequestDigest): boolean {

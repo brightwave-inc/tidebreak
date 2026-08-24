@@ -321,7 +321,7 @@ describe("delivery pull request list", () => {
     expect(screen.queryByText("Review Pending")).toBeNull();
   });
 
-  it("still reports the review state on a live pull request", async () => {
+  it("reports the next useful state on a live pull request", async () => {
     renderList();
     expect(
       within(await rowFor("Build the delivery center")).getByText(
@@ -330,7 +330,7 @@ describe("delivery pull request list", () => {
     ).toBeInTheDocument();
     expect(
       within(await rowFor("Make workspace deep links durable")).getByText(
-        "Approved",
+        "Ready to merge",
       ),
     ).toBeInTheDocument();
     expect(
@@ -352,22 +352,39 @@ describe("delivery pull request list", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps the ready-to-merge and attention marks apart", async () => {
+  it("uses the pull request mark itself for attention and handoff state", async () => {
     renderList();
+    const ready = await rowFor("Make workspace deep links durable");
+    expect(ready).toHaveAttribute("data-status-group", "ready");
+    expect(within(ready).getByText("Ready to merge:")).toBeInTheDocument();
+
+    const attention = await rowFor("Build the delivery center");
+    expect(attention).toHaveAttribute("data-status-group", "attention");
     expect(
-      within(await rowFor("Make workspace deep links durable")).getByLabelText(
-        "Ready to merge",
-      ),
+      within(attention).getByText("Changes requested:"),
     ).toBeInTheDocument();
+    expect(within(attention).queryByLabelText("Needs attention")).toBeNull();
+  });
+
+  it("groups attention first and can regroup by repository", async () => {
+    const user = userEvent.setup();
+    renderList();
+
+    expect(await screen.findByText("Needs your attention")).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("combobox", { name: "Group pull requests" }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: "Group: repository" }),
+    );
     expect(
-      within(await rowFor("Build the delivery center")).getByLabelText(
-        "Needs attention",
+      document.querySelector(
+        '[data-pull-request-group="brightwave-inc/tidebreak"]',
       ),
-    ).toBeInTheDocument();
-    // A merged pull request is neither.
-    const merged = await rowFor("Cache the workspace digest between polls");
-    expect(within(merged).queryByLabelText("Ready to merge")).toBeNull();
-    expect(within(merged).queryByLabelText("Needs attention")).toBeNull();
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[data-pull-request-group="brightwave-inc/docs"]'),
+    ).not.toBeNull();
   });
 
   it("summarizes the checks per row", async () => {
@@ -383,6 +400,18 @@ describe("delivery pull request list", () => {
     expect(
       within(await rowFor("Document managed deployments")).getByText(
         "1 pending",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows comment counts without opening the pull request", async () => {
+    renderList();
+    expect(
+      within(await rowFor("Build the delivery center")).getByText("3 comments"),
+    ).toBeInTheDocument();
+    expect(
+      within(await rowFor("Make workspace deep links durable")).getByText(
+        "None",
       ),
     ).toBeInTheDocument();
   });

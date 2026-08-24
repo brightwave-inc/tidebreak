@@ -82,6 +82,8 @@ const DELIVERY_PR = {
   mergeable: "mergeable",
   merge_state_status: "blocked",
   auto_merge_enabled: false,
+  in_merge_queue: false,
+  comment_count: 3,
   checks: [
     {
       name: "desktop / storybook",
