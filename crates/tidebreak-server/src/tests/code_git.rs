@@ -115,6 +115,34 @@ fn json_id(value: &serde_json::Value) -> &str {
     value["id"].as_str().expect("id is a string")
 }
 
+/// Store a minimal pull-request digest on the workspace row, as the create
+/// path does the moment a pull request exists: the URL is the identity the
+/// conditional fetcher (decision 66) resolves everything else from.
+async fn seed_workspace_pull_request(runtime: &CodeRuntime, id: &str, url: &str, number: u64) {
+    let owner = tidebreak_core::OwnerId::local();
+    let id: tidebreak_core::WorkspaceId = id.parse().unwrap();
+    let mut workspace = runtime.get_workspace(&owner, id).await.unwrap();
+    workspace.pr = Some(tidebreak_core::PullRequestDigest {
+        number,
+        url: Some(url.to_owned()),
+        state: "open".into(),
+        title: None,
+        checks_summary: None,
+        checks: None,
+        draft: None,
+        merged: None,
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: None,
+        base_branch: None,
+        head_sha: None,
+        auto_merge_enabled: None,
+        in_merge_queue: None,
+    });
+    runtime.save_workspace(&workspace).await.unwrap();
+}
+
 async fn register_and_workspace(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
@@ -308,9 +336,21 @@ if [ "$1" = pr ] && [ "$2" = view ]; then
   echo '{{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"aaaaaaaa"}}'
   exit 0
 fi
-if [ "$1" = pr ] && [ "$2" = checks ]; then
-  printf 'lint\tpass\t1s\thttps://example.test/lint\n'
-  exit 0
+if [ "$1" = api ]; then
+  case "$*" in
+    *pulls/12/reviews*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *rules/branches/main*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *check-runs*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      echo '{{"check_runs":[{{"name":"lint","conclusion":"success","html_url":"https://example.test/lint"}}]}}'
+      exit 0;;
+    *pulls/12*)
+      printf 'HTTP/2.0 200 OK\r\nEtag: W/"pull-1"\r\n\r\n'
+      echo '{{"number":12,"html_url":"https://github.com/example/demo/pull/12","state":"open","head":{{"ref":"feature","sha":"aaaaaaaa"}},"base":{{"ref":"main"}}}}'
+      exit 0;;
+  esac
 fi
 exit 3
 "#,
@@ -351,10 +391,12 @@ exit 3
         logged.contains("--base main"),
         "gh pr create must pass the workspace base: {logged}"
     );
-    assert!(logged.contains("pr view"), "{logged}");
-    assert!(logged.contains("pr checks"), "{logged}");
-    // The view field list legitimately names mergeable/autoMergeRequest; a
-    // merge invocation or flag may never appear on the create/status path.
+    // The status read is the conditional REST fetcher (decision 66): the
+    // pull request, its head's check runs, and its reviews — never a
+    // `pr checks` table read or a merge/GraphQL invocation.
+    assert!(logged.contains("repos/example/demo/pulls/12"), "{logged}");
+    assert!(logged.contains("check-runs"), "{logged}");
+    assert!(!logged.contains("pr checks"), "{logged}");
     assert!(!logged.contains("pr merge"), "{logged}");
     assert!(!logged.contains("--merge"), "{logged}");
     assert!(!logged.contains("--auto"), "{logged}");
@@ -947,13 +989,17 @@ async fn a_push_drops_the_cached_pull_request_digest() {
     let id = json_id(&workspace);
     let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
 
-    // A gh shim that answers `pr view` from a file, so the test moves
+    // The workspace already knows its pull request by URL, as it does the
+    // moment one exists; the fetcher resolves identity from that URL.
+    seed_workspace_pull_request(&runtime, id, "https://github.com/example/demo/pull/12", 12).await;
+
+    // A gh shim that answers the REST reads from a file, so the test moves
     // GitHub's state without waiting out any cache.
     let shim_dir = tempfile::TempDir::new().unwrap();
-    let answer = shim_dir.path().join("view.json");
+    let answer = shim_dir.path().join("pull.json");
     std::fs::write(
         &answer,
-        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"aaaaaaaa"}"#,
+        r#"{"number":12,"html_url":"https://github.com/example/demo/pull/12","state":"open","head":{"ref":"feature","sha":"aaaaaaaa"},"base":{"ref":"main"}}"#,
     )
     .unwrap();
     write_executable(
@@ -964,13 +1010,21 @@ if [ "$1" = auth ]; then
   echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
   exit 0
 fi
-if [ "$1" = pr ] && [ "$2" = view ]; then
-  cat {answer}
-  exit 0
-fi
-if [ "$1" = pr ] && [ "$2" = checks ]; then
-  printf 'lint\tpass\t1s\thttps://example.test/lint\n'
-  exit 0
+if [ "$1" = api ]; then
+  case "$*" in
+    *pulls/12/reviews*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *rules/branches/main*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *check-runs*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      echo '{{"check_runs":[{{"name":"lint","conclusion":"success","html_url":"https://example.test/lint"}}]}}'
+      exit 0;;
+    *pulls/12*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      cat {answer}
+      exit 0;;
+  esac
 fi
 exit 3
 "#,
@@ -1010,7 +1064,7 @@ exit 3
     // GitHub's answer moves, as it does when new commits land on the head.
     std::fs::write(
         &answer,
-        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"bbbbbbbb"}"#,
+        r#"{"number":12,"html_url":"https://github.com/example/demo/pull/12","state":"open","head":{"ref":"feature","sha":"bbbbbbbb"},"base":{"ref":"main"}}"#,
     )
     .unwrap();
 
@@ -1118,11 +1172,18 @@ async fn a_digest_change_writes_through_to_every_holder_of_the_pull_request() {
     .await
     .unwrap();
 
+    // Both workspaces hold the pull request by URL, as they do the moment
+    // one exists; the fetcher resolves identity from that URL.
+    for id in [&a, &b] {
+        seed_workspace_pull_request(&runtime, id, "https://github.com/example/demo/pull/12", 12)
+            .await;
+    }
+
     let shim_dir = tempfile::TempDir::new().unwrap();
-    let answer = shim_dir.path().join("view.json");
+    let answer = shim_dir.path().join("pull.json");
     std::fs::write(
         &answer,
-        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"aaaaaaaa"}"#,
+        r#"{"number":12,"html_url":"https://github.com/example/demo/pull/12","state":"open","head":{"ref":"feature","sha":"aaaaaaaa"},"base":{"ref":"main"}}"#,
     )
     .unwrap();
     write_executable(
@@ -1133,13 +1194,21 @@ if [ "$1" = auth ]; then
   echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
   exit 0
 fi
-if [ "$1" = pr ] && [ "$2" = view ]; then
-  cat {answer}
-  exit 0
-fi
-if [ "$1" = pr ] && [ "$2" = checks ]; then
-  printf 'lint\tpass\t1s\thttps://example.test/lint\n'
-  exit 0
+if [ "$1" = api ]; then
+  case "$*" in
+    *pulls/12/reviews*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *rules/branches/main*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *check-runs*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      echo '{{"check_runs":[{{"name":"lint","conclusion":"success","html_url":"https://example.test/lint"}}]}}'
+      exit 0;;
+    *pulls/12*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      cat {answer}
+      exit 0;;
+  esac
 fi
 exit 3
 "#,
@@ -1165,7 +1234,7 @@ exit 3
     // GitHub moves, and only workspace A reads it.
     std::fs::write(
         &answer,
-        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"bbbbbbbb","mergeStateStatus":"BLOCKED"}"#,
+        r#"{"number":12,"html_url":"https://github.com/example/demo/pull/12","state":"open","mergeable_state":"blocked","head":{"ref":"feature","sha":"bbbbbbbb"},"base":{"ref":"main"}}"#,
     )
     .unwrap();
     let refreshed = client

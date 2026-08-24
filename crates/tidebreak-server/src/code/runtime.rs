@@ -177,6 +177,12 @@ pub(crate) struct CodeRuntime {
     /// sibling's turn starts after this one ends. See record 55.
     worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     pr_cache: PrDigestCache,
+    /// Paces and parks every conditional GitHub read (decision 66).
+    host_gate: super::pr_fetch::HostGate,
+    /// Base-branch rules, cached per branch: whether a merge queue runs
+    /// decides if the timeline read is worth paying, and the required
+    /// approval count anchors the review-decision word (decision 66).
+    branch_rules: Mutex<HashMap<String, CachedBranchRules>>,
     pub(crate) delivery_cache: DeliveryCache,
     pub(crate) clone_jobs: CloneJobs,
     /// Warm harness installs started ahead of a session create.
@@ -207,6 +213,17 @@ pub(crate) struct CodeRuntime {
     /// reads the model handles the app state owns and this runtime is built
     /// first. `None` until then, and in deployments that install none.
     recap: Mutex<Option<Arc<dyn super::recap::TurnRecap>>>,
+}
+
+/// How long one base branch's rules answer stands before the next read.
+/// Rules change on the order of releases, not pushes.
+const BRANCH_RULES_TTL: Duration = Duration::from_secs(3600);
+
+/// One cached branch-rules answer. `rules: None` records a host that has no
+/// rules endpoint, so a known 404 is not re-read every refresh.
+struct CachedBranchRules {
+    fetched_at: Instant,
+    rules: Option<super::pr_fetch::BranchRules>,
 }
 
 /// What a new session starts on, beyond the engine it is bound to.
@@ -265,6 +282,8 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
+            host_gate: super::pr_fetch::HostGate::default(),
+            branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
@@ -380,6 +399,8 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             pr_cache: PrDigestCache::default(),
+            host_gate: super::pr_fetch::HostGate::default(),
+            branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
@@ -1469,16 +1490,31 @@ impl CodeRuntime {
         let gh_path = self.gh_search_path_owned();
         let mut status = gh::workspace_git_status(
             std::path::Path::new(&workspace.worktree_path),
-            workspace.id,
             &workspace.title,
             &workspace.branch_name,
             &workspace.base_ref,
             workspace.pr.clone(),
-            &self.pr_cache,
             gh_path.as_deref(),
         )
         .await
         .map_err(map_gh)?;
+        // The digest comes through the conditional fetcher (decision 66):
+        // the fact row's ETags ride along, an unchanged answer is a free 304
+        // served from the row, and a changed one writes through to every
+        // holder. A failed fetch leaves the persisted digest standing.
+        if status.gh_found && status.gh_authenticated == Some(true) {
+            if let Some(cached) = self.pr_cache.get(workspace.id) {
+                status.pr = Some(cached);
+            } else if let Some(binary) = gh::authenticated_gh_binary(gh_path.as_deref()).await {
+                if let Some(digest) = self
+                    .fetched_workspace_digest(owner, &workspace, &binary)
+                    .await
+                {
+                    self.pr_cache.put(workspace.id, digest.clone());
+                    status.pr = Some(digest);
+                }
+            }
+        }
         // On a hosted machine the digest comes from the forge REST API with
         // a borrowed credential (decision 65) — there is no `gh` here to
         // refresh it. Cache-aware exactly like the `gh` path, borrowing only
@@ -1549,6 +1585,308 @@ impl CodeRuntime {
     ) -> Result<WorkspaceGitStatus, ServerError> {
         self.pr_cache.invalidate(id);
         self.workspace_pr(owner, id).await
+    }
+
+    /// The repository identity a workspace's pull request lives on: the
+    /// registered origin when the reconcile sweep has confirmed one, the
+    /// worktree's own remote otherwise.
+    async fn workspace_repository_target(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+    ) -> Option<crate::routes::code::types::CodeGitHubRepositoryTarget> {
+        let repo = self.get_repo(owner, workspace.repo_id).await.ok()?;
+        if let (Some(host), Some(repo_owner), Some(name)) = (
+            repo.origin_host.clone(),
+            repo.origin_owner.clone(),
+            repo.origin_name.clone(),
+        ) {
+            return Some(crate::routes::code::types::CodeGitHubRepositoryTarget {
+                host,
+                owner: repo_owner,
+                name,
+            });
+        }
+        super::delivery::repository_target_from_local(&repo)
+            .await
+            .ok()
+    }
+
+    /// The workspace's digest through the conditional fetcher (decision 66).
+    ///
+    /// Identity comes from the stored digest's URL, or a head lookup when
+    /// the workspace knows no pull request yet. Each endpoint sends the
+    /// row's stored ETag: a 304 answers from the row for free, and a 200
+    /// carries new state. The result lands on the row — live tier, fanout,
+    /// and the ETags for next time. `None` leaves the caller's persisted
+    /// digest standing: no pull request, a parked host, or a failed read.
+    async fn fetched_workspace_digest(
+        &self,
+        owner: &OwnerId,
+        workspace: &CodeWorkspace,
+        binary: &Path,
+    ) -> Option<PullRequestDigest> {
+        use super::pr_fetch::{self, EndpointRead};
+
+        let cwd = std::path::Path::new(&workspace.worktree_path);
+        let gate = &self.host_gate;
+        let stored_identity = workspace
+            .pr
+            .as_ref()
+            .and_then(|pr| pr.url.as_deref())
+            .and_then(super::pr_facts::pull_request_identity_from_url);
+        let (host, repo_owner, repo_name, number) = match stored_identity {
+            Some(identity) => identity,
+            None => {
+                let target = self.workspace_repository_target(owner, workspace).await?;
+                let found = match pr_fetch::read_pull_request_for_head(
+                    gate,
+                    cwd,
+                    binary,
+                    &target.host,
+                    &target.owner,
+                    &target.name,
+                    &workspace.branch_name,
+                )
+                .await
+                {
+                    Ok(found) => found?,
+                    Err(failure) => {
+                        tracing::debug!(error = %failure, "code-mode: pull-request lookup skipped");
+                        return None;
+                    }
+                };
+                (target.host, target.owner, target.name, found.number)
+            }
+        };
+        let stored = tidebreak_core::db::code::get_pull_request_fetch_state(
+            &self.db,
+            owner,
+            &host,
+            &repo_owner,
+            &repo_name,
+            number,
+        )
+        .await
+        .ok()
+        .flatten();
+        let (stored_fact, mut pull_etag, mut checks_etag, mut reviews_etag) = match stored {
+            Some(state) => (
+                Some(state.fact),
+                state.pull_etag,
+                state.checks_etag,
+                state.reviews_etag,
+            ),
+            None => (None, None, None, None),
+        };
+        let pull = match pr_fetch::read_pull_request(
+            gate,
+            cwd,
+            binary,
+            &host,
+            &repo_owner,
+            &repo_name,
+            number,
+            pull_etag.as_deref(),
+        )
+        .await
+        {
+            Ok(EndpointRead::Fresh { value, etag }) => {
+                pull_etag = etag;
+                value
+            }
+            Ok(EndpointRead::NotModified) => pr_fetch::rest_pull_from_fact(stored_fact.as_ref()?),
+            Ok(EndpointRead::Missing) => return None,
+            Err(failure) => {
+                tracing::debug!(error = %failure, "code-mode: pull-request read skipped");
+                return None;
+            }
+        };
+        let stored_live = stored_fact.as_ref().and_then(|fact| fact.live.as_ref());
+        let checks = match pull.head_sha.as_deref() {
+            Some(sha) => {
+                // A checks ETag names one head's answer; a moved head sends
+                // an unconditional read.
+                let same_head = stored_fact
+                    .as_ref()
+                    .and_then(|fact| fact.head_sha.as_deref())
+                    == Some(sha);
+                let conditional = if same_head {
+                    checks_etag.as_deref()
+                } else {
+                    None
+                };
+                match pr_fetch::read_check_runs(
+                    gate,
+                    cwd,
+                    binary,
+                    &host,
+                    &repo_owner,
+                    &repo_name,
+                    sha,
+                    conditional,
+                )
+                .await
+                {
+                    Ok(EndpointRead::Fresh { value, etag }) => {
+                        checks_etag = etag;
+                        value
+                    }
+                    Ok(EndpointRead::NotModified) => stored_live
+                        .and_then(|live| live.checks.clone())
+                        .unwrap_or_default(),
+                    Ok(EndpointRead::Missing) => Vec::new(),
+                    Err(failure) => {
+                        tracing::debug!(error = %failure, "code-mode: check-runs read skipped");
+                        checks_etag = None;
+                        stored_live
+                            .and_then(|live| live.checks.clone())
+                            .unwrap_or_default()
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+        let open = pull.state == "open";
+        let rules = if open {
+            self.branch_rules_for(
+                cwd,
+                binary,
+                &host,
+                &repo_owner,
+                &repo_name,
+                pull.base_branch.as_deref(),
+            )
+            .await
+        } else {
+            None
+        };
+        let review_decision = if open {
+            match pr_fetch::read_reviews(
+                gate,
+                cwd,
+                binary,
+                &host,
+                &repo_owner,
+                &repo_name,
+                number,
+                reviews_etag.as_deref(),
+            )
+            .await
+            {
+                Ok(EndpointRead::Fresh { value, etag }) => {
+                    reviews_etag = etag;
+                    pr_fetch::derive_review_decision(rules, &value)
+                }
+                Ok(EndpointRead::NotModified) => {
+                    stored_live.and_then(|live| live.review_decision.clone())
+                }
+                Ok(EndpointRead::Missing) => None,
+                Err(failure) => {
+                    tracing::debug!(error = %failure, "code-mode: reviews read skipped");
+                    reviews_etag = None;
+                    stored_live.and_then(|live| live.review_decision.clone())
+                }
+            }
+        } else {
+            None
+        };
+        let in_merge_queue = if open {
+            match rules {
+                // Rules that name no queue spare the timeline read; a queue
+                // — or a host that cannot answer the rules endpoint — pays
+                // it.
+                Some(rules) if !rules.has_merge_queue => Some(false),
+                _ => {
+                    pr_fetch::read_merge_queue_membership(
+                        gate,
+                        cwd,
+                        binary,
+                        &host,
+                        &repo_owner,
+                        &repo_name,
+                        number,
+                    )
+                    .await
+                }
+            }
+        } else {
+            Some(false)
+        };
+        let digest = pr_fetch::digest_from_parts(&pull, &checks, review_decision, in_merge_queue);
+        self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
+            .await;
+        if let Err(err) = tidebreak_core::db::code::set_pull_request_etags(
+            &self.db,
+            owner,
+            &host,
+            &repo_owner,
+            &repo_name,
+            number,
+            pull_etag.as_deref(),
+            checks_etag.as_deref(),
+            reviews_etag.as_deref(),
+        )
+        .await
+        {
+            tracing::debug!(error = %err, "code-mode: etag write failed");
+        }
+        Some(digest)
+    }
+
+    /// The base branch's rules, cached per branch for [`BRANCH_RULES_TTL`].
+    async fn branch_rules_for(
+        &self,
+        cwd: &Path,
+        binary: &Path,
+        host: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        branch: Option<&str>,
+    ) -> Option<super::pr_fetch::BranchRules> {
+        let branch = branch?;
+        let key = format!(
+            "{}/{}/{}/{}",
+            host.to_ascii_lowercase(),
+            repo_owner.to_ascii_lowercase(),
+            repo_name.to_ascii_lowercase(),
+            branch
+        );
+        {
+            let cache = self.branch_rules.lock().expect("branch rules");
+            if let Some(entry) = cache.get(&key) {
+                if entry.fetched_at.elapsed() <= BRANCH_RULES_TTL {
+                    return entry.rules;
+                }
+            }
+        }
+        let rules = match super::pr_fetch::read_branch_rules(
+            &self.host_gate,
+            cwd,
+            binary,
+            host,
+            repo_owner,
+            repo_name,
+            branch,
+        )
+        .await
+        {
+            Ok(super::pr_fetch::EndpointRead::Fresh { value, .. }) => Some(value),
+            // A host with no rules endpoint answers for the cache period
+            // too: hammering a known 404 helps nobody.
+            Ok(_) => None,
+            // A park or a transport failure states nothing; ask again next
+            // time.
+            Err(_) => return None,
+        };
+        self.branch_rules.lock().expect("branch rules").insert(
+            key,
+            CachedBranchRules {
+                fetched_at: Instant::now(),
+                rules,
+            },
+        );
+        rules
     }
 
     /// After a pull-request state change on the delivery surface, make every

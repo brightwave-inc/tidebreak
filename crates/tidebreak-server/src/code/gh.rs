@@ -25,7 +25,6 @@ use crate::obo_gateway::GitCredential;
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
-const PR_DIGEST_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_CHARS: usize = 4_096;
 const PR_CACHE_TTL: Duration = Duration::from_secs(20);
@@ -364,32 +363,24 @@ pub(crate) async fn push_branch(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn workspace_git_status(
     worktree: &Path,
-    workspace_id: WorkspaceId,
     title: &str,
     branch: &str,
     base_ref: &str,
     persisted: Option<PullRequestDigest>,
-    cache: &PrDigestCache,
     gh_search_path: Option<&str>,
 ) -> Result<WorkspaceGitStatus, GhError> {
     let inspect = inspect_git(worktree, base_ref, title).await?;
     let gh = observe_gh(gh_search_path).await;
-    let mut pr = persisted;
-    if gh.found && gh.authenticated == Some(true) {
-        if let Some(cached) = cache.get(workspace_id) {
-            pr = Some(cached);
-        } else if let Some(fresh) = load_pr_digest(worktree, &gh, gh_search_path).await? {
-            cache.put(workspace_id, fresh.clone());
-            pr = Some(fresh);
-        }
-    }
+    // The digest itself comes from the conditional fetcher (decision 66),
+    // which the runtime drives with the fact row's ETags; this observation
+    // only carries the persisted copy and the local git state.
     Ok(WorkspaceGitStatus {
         dirty: inspect.dirty,
         unpushed: inspect.unpushed,
         ahead: inspect.ahead,
         has_upstream: inspect.has_upstream,
         suggested_commit_message: inspect.suggested_commit_message,
-        pr,
+        pr: persisted,
         gh_found: gh.found,
         gh_authenticated: gh.authenticated,
         remediation: if gh.found && gh.authenticated == Some(true) {
@@ -402,6 +393,14 @@ pub(crate) async fn workspace_git_status(
         pushes_as: None,
         pushes_as_self: None,
     })
+}
+
+/// The `gh` binary to drive reads with, when one is present and signed in.
+pub(crate) async fn authenticated_gh_binary(search_path: Option<&str>) -> Option<PathBuf> {
+    let gh = observe_gh(search_path).await;
+    (gh.found && gh.authenticated == Some(true))
+        .then_some(gh.binary)
+        .flatten()
 }
 
 /// Create a pull request from the workspace branch. Never merges.
@@ -462,10 +461,9 @@ pub(crate) async fn create_pull_request(
         )
     })?;
     cache.invalidate(workspace_id);
-    if let Some(digest) = load_pr_digest(worktree, &gh, gh_search_path).await? {
-        cache.put(workspace_id, digest.clone());
-        return Ok(digest);
-    }
+    // A light digest from the creation answer. The caller's next status
+    // read enriches it through the conditional fetcher (decision 66), which
+    // needs exactly this URL to name the pull request.
     let url = stdout
         .lines()
         .map(str::trim)
@@ -491,7 +489,6 @@ pub(crate) async fn create_pull_request(
         auto_merge_enabled: None,
         in_merge_queue: None,
     };
-    cache.put(workspace_id, digest.clone());
     Ok(digest)
 }
 
@@ -1391,270 +1388,8 @@ fn powershell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-const PR_VIEW_FIELDS: &str = "number,url,state,title,isDraft,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName";
-const PR_DIGEST_HEAD_ATTEMPTS: usize = 2;
-
-#[derive(Debug)]
-struct PrViewSnapshot {
-    digest: PullRequestDigest,
-    head_oid: Option<String>,
-}
-
-async fn load_pr_digest(
-    worktree: &Path,
-    gh: &GhObservation,
-    _search_path: Option<&str>,
-) -> Result<Option<PullRequestDigest>, GhError> {
-    let Some(binary) = gh.binary.as_ref() else {
-        return Ok(None);
-    };
-    // The old loader could spend one GH_TIMEOUT on the initial view and one
-    // on its parallel checks/queue reads. Keep that same total wall-clock
-    // bound even though a changed head now causes a bounded retry.
-    Ok(timeout(
-        PR_DIGEST_TIMEOUT,
-        load_head_consistent_pr_digest(worktree, binary),
-    )
-    .await
-    .ok()
-    .flatten())
-}
-
-async fn load_head_consistent_pr_digest(
-    worktree: &Path,
-    binary: &Path,
-) -> Option<PullRequestDigest> {
-    let mut snapshot = load_pr_view_snapshot(worktree, binary).await?;
-
-    for _ in 0..PR_DIGEST_HEAD_ATTEMPTS {
-        let number = snapshot.digest.number;
-        let open = snapshot.digest.state == "open";
-        let checks_read = run_gh(worktree, binary, &["pr", "checks"], GH_TIMEOUT);
-        let queue_read = async {
-            if open {
-                load_merge_queue_state(worktree, binary, number).await
-            } else {
-                Some(false)
-            }
-        };
-        let (checks_table, in_merge_queue) = tokio::join!(checks_read, queue_read);
-
-        let Some(verified) = load_pr_view_snapshot(worktree, binary).await else {
-            return Some(conservative_pr_digest(snapshot.digest));
-        };
-        if same_pr_head(&snapshot, &verified) {
-            let checks = parse_pr_checks(&checks_table.unwrap_or_default());
-            let mut digest = verified.digest;
-            digest.checks_summary = summarize_checks(&checks);
-            digest.checks = (!checks.is_empty()).then_some(checks);
-            digest.in_merge_queue = if digest.state == "open" {
-                in_merge_queue
-            } else {
-                Some(false)
-            };
-            return Some(digest);
-        }
-
-        snapshot = verified;
-    }
-
-    Some(conservative_pr_digest(snapshot.digest))
-}
-
-async fn load_pr_view_snapshot(worktree: &Path, binary: &Path) -> Option<PrViewSnapshot> {
-    let json = run_gh(
-        worktree,
-        binary,
-        &["pr", "view", "--json", PR_VIEW_FIELDS],
-        GH_TIMEOUT,
-    )
-    .await
-    .ok()?;
-    pr_view_snapshot_from_json(&json, "")
-}
-
-fn same_pr_head(before: &PrViewSnapshot, after: &PrViewSnapshot) -> bool {
-    before.digest.number == after.digest.number
-        && before
-            .head_oid
-            .as_deref()
-            .zip(after.head_oid.as_deref())
-            .is_some_and(|(before, after)| before == after)
-}
-
-fn conservative_pr_digest(mut digest: PullRequestDigest) -> PullRequestDigest {
-    digest.checks_summary = None;
-    digest.checks = None;
-    digest.mergeable = None;
-    digest.merge_state_status = None;
-    digest.in_merge_queue = None;
-    digest
-}
-
-async fn load_merge_queue_state(worktree: &Path, binary: &Path, number: u64) -> Option<bool> {
-    let endpoint = format!("repos/{{owner}}/{{repo}}/issues/{number}/timeline?per_page=100");
-    let events = run_gh(
-        worktree,
-        binary,
-        &[
-            "api",
-            &endpoint,
-            "--paginate",
-            "--jq",
-            ".[] | select(.event == \"added_to_merge_queue\" or .event == \"removed_from_merge_queue\") | .event",
-        ],
-        GH_TIMEOUT,
-    )
-    .await
-    .ok()?;
-    Some(in_merge_queue_from_timeline_events(&events))
-}
-
-fn in_merge_queue_from_timeline_events(events: &str) -> bool {
-    events
-        .lines()
-        .map(str::trim)
-        .rfind(|event| matches!(*event, "added_to_merge_queue" | "removed_from_merge_queue"))
-        == Some("added_to_merge_queue")
-}
-
-/// Parse one `gh pr view --json` payload plus a `gh pr checks` table into the
-/// stored digest. Every field beyond the number is optional and tolerated
-/// missing.
-#[cfg(test)]
-pub(crate) fn digest_from_view_json(json: &str, checks_table: &str) -> Option<PullRequestDigest> {
-    pr_view_snapshot_from_json(json, checks_table).map(|snapshot| snapshot.digest)
-}
-
-fn pr_view_snapshot_from_json(json: &str, checks_table: &str) -> Option<PrViewSnapshot> {
-    let parsed: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
-    let number = parsed.get("number").and_then(|value| value.as_u64())?;
-    let url = parsed
-        .get("url")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let state = parsed
-        .get("state")
-        .and_then(|value| value.as_str())
-        .unwrap_or("open")
-        .to_ascii_lowercase();
-    let title = parsed
-        .get("title")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let checks = parse_pr_checks(checks_table);
-    let lower_token = |key: &str| {
-        parsed
-            .get(key)
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_ascii_lowercase)
-    };
-    let branch = |key: &str| {
-        parsed
-            .get(key)
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-    };
-    let head_oid = branch("headRefOid");
-    let digest = PullRequestDigest {
-        number,
-        url,
-        merged: Some(state == "merged"),
-        state,
-        title,
-        checks_summary: summarize_checks(&checks),
-        checks: if checks.is_empty() {
-            None
-        } else {
-            Some(checks)
-        },
-        draft: parsed.get("isDraft").and_then(|value| value.as_bool()),
-        review_decision: lower_token("reviewDecision"),
-        mergeable: lower_token("mergeable"),
-        merge_state_status: lower_token("mergeStateStatus"),
-        head_branch: branch("headRefName"),
-        base_branch: branch("baseRefName"),
-        head_sha: head_oid.clone(),
-        auto_merge_enabled: Some(
-            parsed
-                .get("autoMergeRequest")
-                .is_some_and(|value| !value.is_null()),
-        ),
-        in_merge_queue: None,
-    };
-    Some(PrViewSnapshot { digest, head_oid })
-}
-
-pub(crate) fn parse_pr_checks(output: &str) -> Vec<tidebreak_core::PullRequestCheck> {
-    use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket};
-
-    let mut checks = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("name\t") || lower.starts_with("check\t") {
-            continue;
-        }
-        let columns: Vec<&str> = trimmed.split('\t').collect();
-        let name = columns.first().copied().unwrap_or(trimmed).trim();
-        if name.is_empty() {
-            continue;
-        }
-        let status = columns.get(1).copied().unwrap_or(trimmed);
-        let status_lower = status.to_ascii_lowercase();
-        let bucket = if status_lower.contains("skip")
-            || status_lower.contains("neutral")
-            || status_lower.contains("cancel")
-        {
-            PullRequestCheckBucket::Skipped
-        } else if status_lower.contains("pass") || status_lower.contains("success") {
-            PullRequestCheckBucket::Pass
-        } else if status_lower.contains("fail") || status_lower.contains("error") {
-            PullRequestCheckBucket::Fail
-        } else if status_lower.contains("pend")
-            || status_lower.contains("progress")
-            || status_lower.contains("queued")
-        {
-            PullRequestCheckBucket::Pending
-        } else if lower.contains("skip") || lower.contains("neutral") || lower.contains("cancel") {
-            PullRequestCheckBucket::Skipped
-        } else if lower.contains("pass") || lower.contains("success") {
-            PullRequestCheckBucket::Pass
-        } else if lower.contains("fail") || lower.contains("error") {
-            PullRequestCheckBucket::Fail
-        } else {
-            PullRequestCheckBucket::Pending
-        };
-        let detail = columns
-            .get(1)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        let url = columns
-            .iter()
-            .map(|value| value.trim())
-            .find(|value| value.starts_with("http://") || value.starts_with("https://"))
-            .map(ToOwned::to_owned);
-        checks.push(PullRequestCheck {
-            name: name.to_owned(),
-            bucket,
-            detail,
-            url,
-        });
-    }
-    checks
-}
-
+/// One line for the digest header: passing, pending, and failing counts in
+/// the order a reader triages them.
 pub(crate) fn summarize_checks(checks: &[tidebreak_core::PullRequestCheck]) -> Option<String> {
     use tidebreak_core::PullRequestCheckBucket;
 
@@ -1942,11 +1677,7 @@ pub(crate) async fn run_gh(
     args: &[&str],
     limit: Duration,
 ) -> Result<String, String> {
-    if args
-        .iter()
-        .any(|arg| *arg == "merge" || *arg == "--merge" || *arg == "--auto" || *arg == "graphql")
-        || args.windows(2).any(|pair| pair == ["api", "graphql"])
-    {
+    if refuse_gh_args(args) {
         return Err("refusing to run a merge or GraphQL gh command".into());
     }
     spawn_gh(cwd, binary, args, limit).await
@@ -2276,6 +2007,26 @@ async fn spawn_gh_with_login_env(
     args: &[&str],
     limit: Duration,
 ) -> Result<String, String> {
+    let output = spawn_gh_output(cwd, binary, login_env, args, limit).await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if output.status.success() || args == ["pr", "checks"] {
+        // `gh pr checks` exits non-zero when checks are pending or failing;
+        // the table is still the digest we want.
+        if output.status.success() || !stdout.is_empty() {
+            return Ok(stdout);
+        }
+    }
+    Err(if stderr.is_empty() { stdout } else { stderr })
+}
+
+async fn spawn_gh_output(
+    cwd: &Path,
+    binary: &Path,
+    login_env: Option<&[(OsString, OsString)]>,
+    args: &[&str],
+    limit: Duration,
+) -> Result<std::process::Output, String> {
     let mut command = Command::new(binary);
     if let Some(login_env) = login_env {
         command.env_clear();
@@ -2296,20 +2047,110 @@ async fn spawn_gh_with_login_env(
     let child = command
         .spawn()
         .map_err(|err| format!("failed to spawn gh: {err}"))?;
-    let output = timeout(limit, child.wait_with_output())
+    timeout(limit, child.wait_with_output())
         .await
         .map_err(|_| format!("gh {} timed out", args.join(" ")))?
-        .map_err(|err| format!("gh {} failed: {err}", args.join(" ")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if output.status.success() || args == ["pr", "checks"] {
-        // `gh pr checks` exits non-zero when checks are pending or failing;
-        // the table is still the digest we want.
-        if output.status.success() || !stdout.is_empty() {
-            return Ok(stdout);
+        .map_err(|err| format!("gh {} failed: {err}", args.join(" ")))
+}
+
+/// One `gh api --include` answer: the status line, the caching and pacing
+/// headers the fetcher acts on, and the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawHttpResponse {
+    pub status: u16,
+    pub etag: Option<String>,
+    pub retry_after_secs: Option<u64>,
+    pub ratelimit_remaining: Option<u64>,
+    pub ratelimit_reset_epoch: Option<u64>,
+    pub body: String,
+}
+
+/// Run `gh api --include` and keep the HTTP answer whatever the exit code.
+///
+/// `gh api` exits non-zero for a 304 or a 4xx that is still a real answer
+/// this process must read — a 304 is the conditional fetcher's cheapest
+/// success, and a 403's headers say how long to park. Only a run that
+/// produced no HTTP status line at all is an error here.
+pub(crate) async fn run_gh_http(
+    cwd: &Path,
+    binary: &Path,
+    args: &[&str],
+    limit: Duration,
+) -> Result<RawHttpResponse, String> {
+    if refuse_gh_args(args) {
+        return Err("refusing to run a merge or GraphQL gh command".into());
+    }
+    let login_env = GH_LAUNCH
+        .get()
+        .filter(|launch| launch.binary == binary)
+        .and_then(|launch| launch.login_env.as_deref().map(Vec::as_slice));
+    let output = spawn_gh_output(cwd, binary, login_env, args, limit).await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    match parse_raw_http(&stdout) {
+        Some(response) => Ok(response),
+        None => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(if stderr.is_empty() {
+                format!("gh {} answered no HTTP status", args.join(" "))
+            } else {
+                stderr
+            })
         }
     }
-    Err(if stderr.is_empty() { stdout } else { stderr })
+}
+
+fn refuse_gh_args(args: &[&str]) -> bool {
+    args.iter()
+        .any(|arg| *arg == "merge" || *arg == "--merge" || *arg == "--auto" || *arg == "graphql")
+        || args.windows(2).any(|pair| pair == ["api", "graphql"])
+}
+
+/// Parse a `gh api --include` answer: status line, headers, blank line, body.
+fn parse_raw_http(stdout: &str) -> Option<RawHttpResponse> {
+    fn take_line<'a>(rest: &mut &'a str) -> &'a str {
+        let end = rest.find('\n').map_or(rest.len(), |index| index + 1);
+        let line = rest[..end].trim_end_matches(['\r', '\n']);
+        *rest = &rest[end..];
+        line
+    }
+    let mut rest = stdout;
+    let status_line = take_line(&mut rest);
+    let mut parts = status_line.split_whitespace();
+    if !parts.next()?.starts_with("HTTP/") {
+        return None;
+    }
+    let status: u16 = parts.next()?.parse().ok()?;
+    let mut etag = None;
+    let mut retry_after_secs = None;
+    let mut ratelimit_remaining = None;
+    let mut ratelimit_reset_epoch = None;
+    while !rest.is_empty() {
+        let line = take_line(&mut rest);
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("etag") {
+            etag = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("retry-after") {
+            retry_after_secs = value.parse().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-remaining") {
+            ratelimit_remaining = value.parse().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-reset") {
+            ratelimit_reset_epoch = value.parse().ok();
+        }
+    }
+    Some(RawHttpResponse {
+        status,
+        etag,
+        retry_after_secs,
+        ratelimit_remaining,
+        ratelimit_reset_epoch,
+        body: rest.trim().to_owned(),
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -2451,11 +2292,47 @@ mod tests {
     }
 
     #[test]
+    fn raw_http_answers_parse_status_headers_and_body() {
+        let ok = parse_raw_http(
+            "HTTP/2.0 200 OK\r\nEtag: W/\"abc\"\r\nX-Ratelimit-Remaining: 4200\r\n\r\n{\"number\":12}\n",
+        )
+        .unwrap();
+        assert_eq!(ok.status, 200);
+        assert_eq!(ok.etag.as_deref(), Some("W/\"abc\""));
+        assert_eq!(ok.ratelimit_remaining, Some(4200));
+        assert_eq!(ok.body, "{\"number\":12}");
+
+        let not_modified =
+            parse_raw_http("HTTP/2.0 304 Not Modified\r\nEtag: W/\"abc\"\r\n\r\n").unwrap();
+        assert_eq!(not_modified.status, 304);
+        assert!(not_modified.body.is_empty());
+
+        let parked = parse_raw_http(
+            "HTTP/1.1 403 Forbidden\nRetry-After: 90\n\n{\"message\":\"You have exceeded a secondary rate limit\"}",
+        )
+        .unwrap();
+        assert_eq!(parked.status, 403);
+        assert_eq!(parked.retry_after_secs, Some(90));
+
+        assert!(parse_raw_http("gh: command not found").is_none());
+        assert!(parse_raw_http("").is_none());
+    }
+
+    #[test]
     fn checks_summary_counts_buckets() {
-        let table = "lint\tpass\t1s\thttps://example.test/lint\ntest\tpending\t0\thttps://example.test/test\nfmt\tfail\t2s\thttps://example.test/fmt\nrelease\tskipping\t0\thttps://example.test/release\n";
-        let checks = parse_pr_checks(table);
-        assert_eq!(checks.len(), 4);
-        assert_eq!(checks[0].name, "lint");
+        use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket};
+        let check = |name: &str, bucket: PullRequestCheckBucket| PullRequestCheck {
+            name: name.into(),
+            bucket,
+            detail: None,
+            url: None,
+        };
+        let checks = vec![
+            check("lint", PullRequestCheckBucket::Pass),
+            check("test", PullRequestCheckBucket::Pending),
+            check("fmt", PullRequestCheckBucket::Fail),
+            check("release", PullRequestCheckBucket::Skipped),
+        ];
         assert_eq!(
             summarize_checks(&checks).as_deref(),
             Some("1 passing, 1 pending, 1 failing, 1 skipped")
@@ -2729,7 +2606,7 @@ exit 3
     }
 
     #[tokio::test]
-    async fn create_pr_uses_view_and_checks_and_never_merges() {
+    async fn create_pr_returns_the_creation_stub_and_never_merges() {
         let (_dir, work, _bare) = init_paired_repos();
         run(&work, &["git", "checkout", "-b", "tidebreak/first-change"]);
         std::fs::write(work.join("extra.txt"), "line\n").unwrap();
@@ -2788,10 +2665,10 @@ exit 3
             Some("https://github.com/example/demo/pull/12")
         );
         assert_eq!(digest.state, "open");
-        assert_eq!(
-            digest.checks_summary.as_deref(),
-            Some("1 passing, 0 pending, 0 failing")
-        );
+        // The creation answer is a stub: the conditional fetcher (decision
+        // 66) enriches it on the caller's next status read, so creation
+        // itself pays no view, checks, or timeline read.
+        assert_eq!(digest.checks_summary, None);
         let logged = std::fs::read_to_string(&log).unwrap();
         assert!(logged.contains("pr create"), "{logged}");
         assert!(
@@ -2799,10 +2676,8 @@ exit 3
             "gh pr create must target the workspace base, not the host default: {logged}"
         );
         assert!(!logged.contains("--base origin/main"), "{logged}");
-        assert!(logged.contains("pr view"), "{logged}");
-        assert!(logged.contains("pr checks"), "{logged}");
-        // The view field list legitimately names mergeable/autoMergeRequest;
-        // what may never appear is a merge invocation or flag.
+        assert!(!logged.contains("pr view"), "{logged}");
+        assert!(!logged.contains("pr checks"), "{logged}");
         assert!(!logged.contains("pr merge"), "{logged}");
         assert!(!logged.contains("--merge"), "{logged}");
         assert!(!logged.contains("--auto"), "{logged}");
@@ -3036,225 +2911,6 @@ exit 3
             classify_merge_error("something else entirely".into()),
             GhError::User(_)
         ));
-    }
-
-    #[test]
-    fn rich_pr_view_json_maps_to_digest() {
-        let json = r#"{
-            "number": 12,
-            "url": "https://github.com/example/demo/pull/12",
-            "state": "OPEN",
-            "title": "feat: first change",
-            "isDraft": true,
-            "reviewDecision": "CHANGES_REQUESTED",
-            "mergeable": "MERGEABLE",
-            "mergeStateStatus": "BLOCKED",
-            "autoMergeRequest": {"enabledAt": "2026-08-17T00:00:00Z"},
-            "headRefName": "tidebreak/first-change",
-            "headRefOid": "aaaaaaaa",
-            "baseRefName": "main"
-        }"#;
-        let digest = digest_from_view_json(json, "lint\tpass\t1s\n").unwrap();
-        assert_eq!(digest.number, 12);
-        assert_eq!(digest.state, "open");
-        assert_eq!(digest.draft, Some(true));
-        assert_eq!(digest.merged, Some(false));
-        assert_eq!(digest.review_decision.as_deref(), Some("changes_requested"));
-        assert_eq!(digest.mergeable.as_deref(), Some("mergeable"));
-        assert_eq!(digest.merge_state_status.as_deref(), Some("blocked"));
-        assert_eq!(
-            digest.head_branch.as_deref(),
-            Some("tidebreak/first-change")
-        );
-        assert_eq!(digest.base_branch.as_deref(), Some("main"));
-        assert_eq!(digest.auto_merge_enabled, Some(true));
-        assert_eq!(digest.in_merge_queue, None);
-        assert_eq!(
-            digest.checks_summary.as_deref(),
-            Some("1 passing, 0 pending, 0 failing")
-        );
-
-        // Older gh output without the extra fields still yields a digest, and
-        // a merged state is reflected in both `state` and `merged`.
-        let sparse = digest_from_view_json(
-            r#"{"number": 7, "state": "MERGED", "autoMergeRequest": null}"#,
-            "",
-        )
-        .unwrap();
-        assert_eq!(sparse.state, "merged");
-        assert_eq!(sparse.merged, Some(true));
-        assert_eq!(sparse.draft, None);
-        assert_eq!(sparse.review_decision, None);
-        assert_eq!(sparse.auto_merge_enabled, Some(false));
-        assert_eq!(sparse.in_merge_queue, None);
-        assert!(digest_from_view_json("not json", "").is_none());
-    }
-
-    #[test]
-    fn pr_view_snapshot_retains_head_oid_for_consistency_checks() {
-        let snapshot = pr_view_snapshot_from_json(
-            r#"{
-                "number": 12,
-                "state": "OPEN",
-                "mergeable": "MERGEABLE",
-                "mergeStateStatus": "CLEAN",
-                "headRefOid": "abcdef123456"
-            }"#,
-            "lint\tpass\t1s\n",
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.head_oid.as_deref(), Some("abcdef123456"));
-        assert_eq!(snapshot.digest.mergeable.as_deref(), Some("mergeable"));
-        assert_eq!(
-            snapshot.digest.checks_summary.as_deref(),
-            Some("1 passing, 0 pending, 0 failing")
-        );
-    }
-
-    #[tokio::test]
-    async fn pr_digest_retries_when_the_head_changes_during_auxiliary_reads() {
-        let work = TempDir::new().unwrap();
-        let shim_dir = TempDir::new().unwrap();
-        let view_count = shim_dir.path().join("view-count");
-        let checks_count = shim_dir.path().join("checks-count");
-        write_executable(
-            &shim_dir.path().join("gh"),
-            &format!(
-                r#"#!/bin/sh
-if [ "$1" = pr ] && [ "$2" = view ]; then
-  count=0
-  if [ -f {view_count} ]; then count=$(sed -n '1p' {view_count}); fi
-  count=$((count + 1))
-  printf '%s\n' "$count" > {view_count}
-  if [ "$count" -eq 1 ]; then
-    echo '{{"number":12,"state":"OPEN","title":"old head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"aaaaaaaa"}}'
-  else
-    echo '{{"number":12,"state":"OPEN","title":"new head","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","headRefOid":"bbbbbbbb"}}'
-  fi
-  exit 0
-fi
-if [ "$1" = pr ] && [ "$2" = checks ]; then
-  count=0
-  if [ -f {checks_count} ]; then count=$(sed -n '1p' {checks_count}); fi
-  count=$((count + 1))
-  printf '%s\n' "$count" > {checks_count}
-  if [ "$count" -eq 1 ]; then
-    printf 'old-head-check\tpass\t1s\thttps://example.test/old\n'
-  else
-    printf 'new-head-check\tfail\t1s\thttps://example.test/new\n'
-  fi
-  exit 0
-fi
-if [ "$1" = api ]; then
-  echo added_to_merge_queue
-  exit 0
-fi
-echo unexpected "$@" >&2
-exit 3
-"#,
-                view_count = shell_single_quote(&view_count.to_string_lossy()),
-                checks_count = shell_single_quote(&checks_count.to_string_lossy()),
-            ),
-        );
-        let gh = GhObservation {
-            found: true,
-            authenticated: Some(true),
-            viewer_login: None,
-            binary: Some(shim_dir.path().join("gh")),
-            remediation: String::new(),
-        };
-
-        let digest = load_pr_digest(work.path(), &gh, None)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(digest.title.as_deref(), Some("new head"));
-        assert_eq!(digest.mergeable.as_deref(), Some("conflicting"));
-        assert_eq!(digest.merge_state_status.as_deref(), Some("dirty"));
-        assert_eq!(
-            digest.checks_summary.as_deref(),
-            Some("0 passing, 0 pending, 1 failing")
-        );
-        assert_eq!(
-            digest
-                .checks
-                .as_deref()
-                .and_then(|checks| checks.first())
-                .map(|check| check.name.as_str()),
-            Some("new-head-check")
-        );
-        assert_eq!(digest.in_merge_queue, Some(true));
-        assert_eq!(std::fs::read_to_string(view_count).unwrap().trim(), "3");
-        assert_eq!(std::fs::read_to_string(checks_count).unwrap().trim(), "2");
-    }
-
-    #[tokio::test]
-    async fn pr_digest_stays_conservative_when_the_head_keeps_changing() {
-        let work = TempDir::new().unwrap();
-        let shim_dir = TempDir::new().unwrap();
-        let view_count = shim_dir.path().join("view-count");
-        write_executable(
-            &shim_dir.path().join("gh"),
-            &format!(
-                r#"#!/bin/sh
-if [ "$1" = pr ] && [ "$2" = view ]; then
-  count=0
-  if [ -f {view_count} ]; then count=$(sed -n '1p' {view_count}); fi
-  count=$((count + 1))
-  printf '%s\n' "$count" > {view_count}
-  echo "{{\"number\":12,\"state\":\"OPEN\",\"title\":\"head $count\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"head-$count\"}}"
-  exit 0
-fi
-if [ "$1" = pr ] && [ "$2" = checks ]; then
-  printf 'lint\tpass\t1s\thttps://example.test/lint\n'
-  exit 0
-fi
-if [ "$1" = api ]; then
-  echo added_to_merge_queue
-  exit 0
-fi
-echo unexpected "$@" >&2
-exit 3
-"#,
-                view_count = shell_single_quote(&view_count.to_string_lossy()),
-            ),
-        );
-        let gh = GhObservation {
-            found: true,
-            authenticated: Some(true),
-            viewer_login: None,
-            binary: Some(shim_dir.path().join("gh")),
-            remediation: String::new(),
-        };
-
-        let digest = load_pr_digest(work.path(), &gh, None)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(digest.title.as_deref(), Some("head 3"));
-        assert_eq!(digest.mergeable, None);
-        assert_eq!(digest.merge_state_status, None);
-        assert_eq!(digest.checks_summary, None);
-        assert_eq!(digest.checks, None);
-        assert_eq!(digest.in_merge_queue, None);
-        assert_eq!(std::fs::read_to_string(view_count).unwrap().trim(), "3");
-    }
-
-    #[test]
-    fn merge_queue_timeline_uses_the_latest_transition() {
-        assert!(in_merge_queue_from_timeline_events(
-            "added_to_merge_queue\n"
-        ));
-        assert!(!in_merge_queue_from_timeline_events(
-            "added_to_merge_queue\nremoved_from_merge_queue\n"
-        ));
-        assert!(in_merge_queue_from_timeline_events(
-            "removed_from_merge_queue\nadded_to_merge_queue\n"
-        ));
-        assert!(!in_merge_queue_from_timeline_events(""));
     }
 
     #[test]

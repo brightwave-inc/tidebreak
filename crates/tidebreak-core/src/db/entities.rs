@@ -1716,6 +1716,9 @@ pub mod code_pull_request {
         pub auto_merge_enabled: Option<bool>,
         pub in_merge_queue: Option<bool>,
         pub live_observed_at: Option<DateTimeUtc>,
+        pub pull_etag: Option<String>,
+        pub checks_etag: Option<String>,
+        pub reviews_etag: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

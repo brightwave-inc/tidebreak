@@ -50,7 +50,53 @@ impl MigratorTrait for Migrator {
             Box::new(TriggerFactConditions),
             Box::new(CodeQueuedTurns),
             Box::new(CodePullRequestLiveTier),
+            Box::new(CodePullRequestEtags),
         ]
+    }
+}
+
+/// Conditional-request ETags on pull-request facts (decision 66).
+///
+/// The row stores the ETag each fetch endpoint last answered with — the
+/// pull request, its head's check runs, and its reviews — so the next read
+/// sends `If-None-Match` and an unchanged answer costs a free 304.
+struct CodePullRequestEtags;
+
+impl MigrationName for CodePullRequestEtags {
+    fn name(&self) -> &str {
+        "m20260824_000013_code_pull_request_etags"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodePullRequestEtags {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // SQLite accepts one ADD COLUMN per ALTER, so each column is its own
+        // guarded statement.
+        for (name, column) in [
+            ("pull_etag", idens::CodePullRequest::PullEtag),
+            ("checks_etag", idens::CodePullRequest::ChecksEtag),
+            ("reviews_etag", idens::CodePullRequest::ReviewsEtag),
+        ] {
+            if manager.has_column("code_pull_request", name).await? {
+                continue;
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodePullRequest::Table)
+                        .add_column(ColumnDef::new(column).text())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: nullable columns on a table whose own
+        // migration's `down` drops it outright.
+        Ok(())
     }
 }
 
@@ -1607,6 +1653,7 @@ mod tests {
                 "m20260823_000010_trigger_fact_conditions",
                 "m20260824_000011_code_queued_turns",
                 "m20260824_000012_code_pull_request_live_tier",
+                "m20260824_000013_code_pull_request_etags",
             ]
         );
         assert!(db

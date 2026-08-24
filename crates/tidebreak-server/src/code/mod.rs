@@ -19,6 +19,7 @@ pub(crate) mod fork;
 pub(crate) mod gh;
 pub(crate) mod harness_install;
 pub(crate) mod pr_facts;
+pub(crate) mod pr_fetch;
 pub(crate) mod recap;
 pub(crate) mod reconcile;
 pub(crate) mod recovery;
