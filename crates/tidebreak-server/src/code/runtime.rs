@@ -1533,7 +1533,7 @@ impl CodeRuntime {
             // A digest that moved is a fresh host observation: write it onto
             // the fact row's live tier and fan the change out (decision 66).
             if let Some(digest) = &status.pr {
-                self.record_pull_request_live_state(owner, workspace.id, digest)
+                self.record_pull_request_live_state(owner, Some(workspace.id), digest)
                     .await;
             }
         }
@@ -1610,7 +1610,7 @@ impl CodeRuntime {
     pub(crate) async fn record_pull_request_live_state(
         &self,
         owner: &OwnerId,
-        source: WorkspaceId,
+        source: Option<WorkspaceId>,
         digest: &PullRequestDigest,
     ) {
         let Some(url) = digest.url.as_deref() else {
@@ -1653,7 +1653,7 @@ impl CodeRuntime {
             Err(_) => return,
         };
         for mut workspace in workspaces {
-            if workspace.id == source || workspace.status != CodeWorkspaceStatus::Active {
+            if source == Some(workspace.id) || workspace.status != CodeWorkspaceStatus::Active {
                 continue;
             }
             let holds = workspace

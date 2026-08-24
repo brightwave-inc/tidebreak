@@ -22,8 +22,9 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestId,
-    CodePullRequestRelation, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, DbStore, OwnerId,
-    PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind, RepoId, WorkspaceId,
+    CodePullRequestRelation, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId,
+    PullRequestCheck, PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind,
+    PullRequestDigest, RepoId, WorkspaceId,
 };
 
 use super::gh::{self, GhObservation};
@@ -480,7 +481,7 @@ pub(crate) async fn query_pull_requests_by_number(
     // keys on `stack_parent_number` (decision 62) — so this path persists and
     // annotates the same way the list read does.
     let workspaces_gaining_links =
-        persist_and_augment_pull_request_facts(&runtime.db, owner, &workspaces, &mut items).await;
+        persist_and_augment_pull_request_facts(runtime, owner, &workspaces, &mut items).await;
     for workspace_id in workspaces_gaining_links {
         super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
             .await;
@@ -727,7 +728,7 @@ pub(crate) async fn query_pull_requests(
                     .then_with(|| left.id.cmp(&right.id))
             });
             let workspaces_gaining_links = persist_and_augment_pull_request_facts(
-                &runtime.db,
+                runtime,
                 owner,
                 &workspace_index,
                 &mut items,
@@ -803,7 +804,7 @@ pub(crate) async fn pull_request_detail(
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let minted = persist_and_augment_pull_request_facts(
-        &runtime.db,
+        runtime,
         owner,
         &workspace_index,
         std::slice::from_mut(&mut summary),
@@ -2521,6 +2522,42 @@ fn workspace_links(
     links.into_iter().map(|(_, link)| link).collect()
 }
 
+/// Project one delivery summary into the digest vocabulary (decision 66):
+/// the same shape a workspace read stores, so the live tier and its
+/// write-through take one path no matter who observed the pull request.
+pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> PullRequestDigest {
+    PullRequestDigest {
+        number: item.number,
+        url: Some(item.url.clone()),
+        state: item.state.clone(),
+        title: Some(item.title.clone()),
+        checks_summary: None,
+        checks: Some(
+            item.checks
+                .iter()
+                .map(|check| PullRequestCheck {
+                    name: check.name.clone(),
+                    bucket: check.bucket,
+                    detail: check.detail.clone(),
+                    url: check.url.clone(),
+                })
+                .collect(),
+        ),
+        draft: Some(item.draft),
+        // `state` alone cannot separate merged from closed on every host
+        // response, which is why the summary carries `merged_at`.
+        merged: Some(item.merged_at.is_some()),
+        review_decision: item.review_decision.clone(),
+        mergeable: item.mergeable.clone(),
+        merge_state_status: item.merge_state_status.clone(),
+        head_branch: Some(item.head_branch.clone()),
+        base_branch: Some(item.base_branch.clone()),
+        head_sha: item.head_sha.clone(),
+        auto_merge_enabled: Some(item.auto_merge_enabled),
+        in_merge_queue: None,
+    }
+}
+
 /// Persist durable facts for the page's tracked pull requests and fold the
 /// stored attribution back into every item's workspace links (decision 62).
 ///
@@ -2531,11 +2568,12 @@ fn workspace_links(
 /// restate their digests. Best-effort throughout: a store failure degrades
 /// to the live heuristic links.
 async fn persist_and_augment_pull_request_facts(
-    db: &DbStore,
+    runtime: &CodeRuntime,
     owner: &OwnerId,
     workspaces: &[WorkspaceIndexEntry],
     items: &mut [CodeDeliveryPullRequestSummary],
 ) -> Vec<WorkspaceId> {
+    let db = &runtime.db;
     let mut minted = Vec::new();
     let now = Utc::now();
 
@@ -2590,6 +2628,13 @@ async fn persist_and_augment_pull_request_facts(
                     continue;
                 }
             };
+            // The summary is a fresh host observation: write it onto the
+            // row's live tier and fan real change out to every workspace
+            // holding the pull request (decision 66). One list read per
+            // repository is what keeps every surface fresh.
+            runtime
+                .record_pull_request_live_state(owner, None, &digest_from_summary(item))
+                .await;
             // Keep the local fact set current with what was just written, so
             // stack derivation below sees this pass's own observations.
             match repo_facts

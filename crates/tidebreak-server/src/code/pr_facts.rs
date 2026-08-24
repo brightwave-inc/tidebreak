@@ -706,6 +706,31 @@ pub(crate) fn pull_request_identity_from_url(url: &str) -> Option<(String, Strin
     Some((host.to_owned(), owner.to_owned(), name.to_owned(), number))
 }
 
+/// Project one fact row into the digest vocabulary every consumer already
+/// reads. The snapshot fields fill the identity; the live tier (decision 66)
+/// fills checks, review, and mergeability when a read has written it.
+pub(crate) fn digest_from_fact(fact: &CodePullRequestFact) -> tidebreak_core::PullRequestDigest {
+    let live = fact.live.as_ref();
+    tidebreak_core::PullRequestDigest {
+        number: fact.number,
+        url: Some(fact.url.clone()),
+        state: fact.state.as_str().to_owned(),
+        title: Some(fact.title.clone()),
+        checks_summary: live.and_then(|live| live.checks_summary.clone()),
+        checks: live.and_then(|live| live.checks.clone()),
+        draft: Some(fact.draft),
+        merged: Some(fact.state == CodePullRequestState::Merged),
+        review_decision: live.and_then(|live| live.review_decision.clone()),
+        mergeable: live.and_then(|live| live.mergeable.clone()),
+        merge_state_status: live.and_then(|live| live.merge_state_status.clone()),
+        head_branch: Some(fact.head_branch.clone()),
+        base_branch: Some(fact.base_branch.clone()),
+        head_sha: fact.head_sha.clone(),
+        auto_merge_enabled: live.and_then(|live| live.auto_merge_enabled),
+        in_merge_queue: live.and_then(|live| live.in_merge_queue),
+    }
+}
+
 fn timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {
     value
         .get(field)
@@ -863,5 +888,86 @@ mod tests {
 
         let partial = serde_json::json!({"number": 12, "state": "OPEN"});
         assert!(fact_from_gh_value(&owner, &target, &partial, now).is_none());
+    }
+
+    #[test]
+    fn identity_parses_only_plain_pull_urls() {
+        assert_eq!(
+            pull_request_identity_from_url("https://github.com/acme/tools/pull/412"),
+            Some((
+                "github.com".to_owned(),
+                "acme".to_owned(),
+                "tools".to_owned(),
+                412
+            ))
+        );
+        assert_eq!(
+            pull_request_identity_from_url("https://ghe.corp.example/acme/tools/pull/7/files"),
+            Some((
+                "ghe.corp.example".to_owned(),
+                "acme".to_owned(),
+                "tools".to_owned(),
+                7
+            ))
+        );
+        assert!(
+            pull_request_identity_from_url("https://github.com/acme/tools/issues/412").is_none()
+        );
+        assert!(pull_request_identity_from_url("https://github.com/acme/tools/pull/0").is_none());
+        assert!(pull_request_identity_from_url("not a url").is_none());
+    }
+
+    #[test]
+    fn fact_digests_carry_the_live_tier_when_present() {
+        let owner = OwnerId::local();
+        let now = Utc::now();
+        let mut fact = CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner,
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number: 412,
+            url: "https://github.com/acme/tools/pull/412".into(),
+            title: "First".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feat/x".into(),
+            base_branch: "main".into(),
+            head_sha: Some("aaa111".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        };
+        let bare = digest_from_fact(&fact);
+        assert_eq!(bare.number, 412);
+        assert!(bare.checks.is_none());
+        assert!(bare.merge_state_status.is_none());
+
+        fact.live = Some(tidebreak_core::CodePullRequestLiveState {
+            checks_summary: Some("1 pending".into()),
+            checks: Some(vec![tidebreak_core::PullRequestCheck {
+                name: "ci".into(),
+                bucket: tidebreak_core::PullRequestCheckBucket::Pending,
+                detail: None,
+                url: None,
+            }]),
+            review_decision: Some("review_required".into()),
+            mergeable: Some("mergeable".into()),
+            merge_state_status: Some("blocked".into()),
+            auto_merge_enabled: Some(true),
+            in_merge_queue: Some(false),
+            observed_at: now,
+        });
+        let enriched = digest_from_fact(&fact);
+        assert_eq!(enriched.merge_state_status.as_deref(), Some("blocked"));
+        assert_eq!(enriched.review_decision.as_deref(), Some("review_required"));
+        assert_eq!(enriched.checks.as_ref().unwrap().len(), 1);
+        assert_eq!(enriched.auto_merge_enabled, Some(true));
     }
 }
