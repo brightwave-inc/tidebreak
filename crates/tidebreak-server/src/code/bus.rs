@@ -63,6 +63,10 @@ pub(crate) struct SessionDigest {
     /// Harness subagents on this session, set only when any were observed
     /// (decision 52). Bounded on the session row.
     pub subagents: Option<Vec<CodeSubagentSummary>>,
+    /// Where this session stands, in a sentence, from the newest turn that
+    /// carries one (`super::recap`). Absent until a turn has been recapped,
+    /// and on machines with no utility model to derive one.
+    pub recap: Option<String>,
 }
 
 /// Progress of one in-flight `git clone` job.

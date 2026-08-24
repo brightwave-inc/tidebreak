@@ -3203,6 +3203,7 @@ export function parseCodeSessionDigest(
       "watch_detail",
       "watch_cycles",
       "subagents",
+      "recap",
     ]) ||
     !nonEmpty(value.workspace) ||
     !nonEmpty(value.session) ||
@@ -3216,7 +3217,8 @@ export function parseCodeSessionDigest(
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
     !optionalString(value.watch_detail) ||
-    (value.watch_cycles !== undefined && !isFiniteNumber(value.watch_cycles))
+    (value.watch_cycles !== undefined && !isFiniteNumber(value.watch_cycles)) ||
+    !optionalString(value.recap)
   ) {
     return null;
   }
@@ -3249,6 +3251,7 @@ export function parseCodeSessionDigest(
       ? { watch_cycles: value.watch_cycles }
       : {}),
     ...(subagents ? { subagents } : {}),
+    ...(value.recap !== undefined ? { recap: value.recap } : {}),
   };
 }
 
@@ -3291,6 +3294,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "watch_detail",
           "watch_cycles",
           "subagents",
+          "recap",
         ]) ||
         !nonEmpty(value.workspace) ||
         !nonEmpty(value.session) ||
@@ -3305,7 +3309,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           !isMember(value.watch_state, WATCH_STATES)) ||
         !optionalString(value.watch_detail) ||
         (value.watch_cycles !== undefined &&
-          !isFiniteNumber(value.watch_cycles))
+          !isFiniteNumber(value.watch_cycles)) ||
+        !optionalString(value.recap)
       ) {
         return null;
       }
@@ -3341,6 +3346,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           ? { watch_cycles: value.watch_cycles }
           : {}),
         ...(subagents ? { subagents } : {}),
+        ...(value.recap !== undefined ? { recap: value.recap } : {}),
       };
     }
     case "clone_progress": {

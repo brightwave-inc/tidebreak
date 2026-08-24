@@ -187,6 +187,12 @@ pub(crate) struct CodeRuntime {
     /// than queued, because the next turn on a still-unnamed workspace retries
     /// anyway (`super::titling`).
     pub(super) titling_in_flight: Mutex<std::collections::HashSet<tidebreak_core::WorkspaceId>>,
+    /// Derives a recap for each completed turn (`super::recap`).
+    ///
+    /// Installed after construction rather than taken in `new`, because it
+    /// reads the model handles the app state owns and this runtime is built
+    /// first. `None` until then, and in deployments that install none.
+    recap: Mutex<Option<Arc<dyn super::recap::TurnRecap>>>,
 }
 
 /// What a new session starts on, beyond the engine it is bound to.
@@ -257,6 +263,7 @@ impl CodeRuntime {
             reconcile_sweep: Mutex::new(None),
             reconcile_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
+            recap: Mutex::new(None),
         }
     }
 
@@ -361,6 +368,7 @@ impl CodeRuntime {
             reconcile_sweep: Mutex::new(None),
             reconcile_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
+            recap: Mutex::new(None),
         }
     }
 
@@ -374,6 +382,17 @@ impl CodeRuntime {
         &self,
     ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
         self.browser_runtime.clone()
+    }
+
+    /// Install the hook that recaps each completed turn (`super::recap`).
+    pub(crate) fn install_recap(&self, recap: Arc<dyn super::recap::TurnRecap>) {
+        *self.recap.lock().expect("code recap hook") = Some(recap);
+    }
+
+    /// The installed recap hook, if any. Cloned per session sink so a later
+    /// install never has to reach sinks that are already running.
+    fn recap_hook(&self) -> Option<Arc<dyn super::recap::TurnRecap>> {
+        self.recap.lock().expect("code recap hook").clone()
     }
 
     /// Revoke the session browser token and permanently tombstone its native
@@ -2936,6 +2955,7 @@ impl CodeRuntime {
             None,
             attached.subagents.clone(),
             self.gh_search_path_owned(),
+            self.recap_hook(),
         );
         let approval = self.approval_channel(session.id, session.permission_mode);
 

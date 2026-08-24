@@ -31,11 +31,13 @@ export function TurnReviewCard({
 }: {
   turn: TurnBoundary;
   /**
-   * The engine's own account of what it did this turn.
+   * Where the session stands, on the newest boundary only.
    *
-   * No event carries one yet — this is the slot it lands in when one does, so
-   * the summary is a documented gap rather than something invented from the
-   * transcript.
+   * Not the engine's own account of the turn — no engine event carries one,
+   * and that stays a documented gap. This is Tidebreak's recap, derived on the
+   * utility model after the turn completes and written for a reader who left
+   * and came back, which is why it sits at the bottom of the transcript rather
+   * than against every turn.
    */
   narrative?: ReactNode;
   /** Scope the review sidebar to this turn's changes. */

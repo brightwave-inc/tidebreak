@@ -629,6 +629,7 @@ mod tests {
             None,
             session.subagents.clone(),
             None,
+            None,
         );
         let private_root = _dir.path().join("private");
         std::fs::create_dir(&private_root).unwrap();

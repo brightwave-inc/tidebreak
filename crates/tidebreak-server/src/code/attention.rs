@@ -13,7 +13,7 @@ use tidebreak_core::db::code::{
     count_attributed_prs_for_workspace, count_turns, get_session, get_workspace,
     latest_event_created_at, latest_turn, latest_watch_for_session, list_approvals,
     list_recent_events, list_sessions, list_sessions_by_lifecycle_all_owners,
-    list_sessions_for_workspace, replace_session_attention, save_session,
+    list_sessions_for_workspace, list_turns, replace_session_attention, save_session,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeApprovalState, CodeEvent, CodeSession,
@@ -422,6 +422,14 @@ async fn build_digest(
     // predate the field and workspaces that never shipped read the same.
     let pr_count =
         count_attributed_prs_for_workspace(db, &session.owner, session.workspace_id).await?;
+    // The newest recapped turn speaks for the session: a turn the model
+    // declined to recap, or one whose call is still in flight, leaves the
+    // previous line standing rather than blanking the row mid-work.
+    let recap = list_turns(db, &session.owner, session.id)
+        .await?
+        .into_iter()
+        .rev()
+        .find_map(|turn| turn.narrative);
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -441,6 +449,7 @@ async fn build_digest(
         } else {
             Some(session.subagents.clone())
         },
+        recap,
     })
 }
 

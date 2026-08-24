@@ -1570,6 +1570,12 @@ pub struct CodeSessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub subagents: Option<Vec<CodeSubagentSummary>>,
+    /// Where this session stands, in a sentence, derived from the newest turn
+    /// that carries one. Absent until a turn has been recapped, and on
+    /// machines with no utility model to derive one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recap: Option<String>,
 }
 
 impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
@@ -1589,6 +1595,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             watch_detail: digest.watch_detail,
             watch_cycles: digest.watch_cycles,
             subagents: digest.subagents,
+            recap: digest.recap,
         }
     }
 }
@@ -1642,6 +1649,11 @@ pub enum CodeUpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         subagents: Option<Vec<CodeSubagentSummary>>,
+        /// Where this session stands, in a sentence, derived from the newest
+        /// turn that carries one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        recap: Option<String>,
     },
     /// Coalesced terminal activity. Not restated on connect.
     TerminalActivity {
@@ -1716,6 +1728,7 @@ impl CodeUpdateNotice {
             watch_detail: wire.watch_detail,
             watch_cycles: wire.watch_cycles,
             subagents: wire.subagents,
+            recap: wire.recap,
         }
     }
 }

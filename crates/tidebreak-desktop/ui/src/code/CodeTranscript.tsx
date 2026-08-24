@@ -74,6 +74,7 @@ export function CodeTranscript({
   scrollRef,
   contentRef,
   onScroll,
+  recap,
 }: {
   items: CodeTranscriptItem[];
   approvals?: Record<string, CodeApprovalSnapshot>;
@@ -108,6 +109,14 @@ export function CodeTranscript({
   scrollRef?: RefCallback<HTMLDivElement>;
   contentRef?: RefCallback<HTMLDivElement>;
   onScroll?: () => void;
+  /**
+   * Where the session stands, shown on the newest turn boundary.
+   *
+   * Derived after a turn completes rather than streamed with it, so it appears
+   * a moment later than the boundary it lands on — which is the point: it is
+   * written for the reader who left and came back, not the one watching.
+   */
+  recap?: string;
 }) {
   // The durable turn snapshot lands before the journal replay that fills in
   // assistant text and tool activity. Hide both sources until that initial
@@ -146,6 +155,15 @@ export function CodeTranscript({
         </div>
       </div>
     );
+  }
+  // The recap belongs to the session, so only its newest boundary carries one.
+  let newestBoundaryId: string | undefined;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === "turn_boundary") {
+      newestBoundaryId = item.id;
+      break;
+    }
   }
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
@@ -187,6 +205,7 @@ export function CodeTranscript({
                   onOpenTurnDiff={onOpenTurnDiff}
                   sessionId={sessionId}
                   onReveal={onReveal}
+                  recap={row.item.id === newestBoundaryId ? recap : undefined}
                 />,
               ),
         )}
@@ -427,6 +446,7 @@ const TranscriptItem = memo(function TranscriptItem({
   onOpenTurnDiff,
   sessionId,
   onReveal,
+  recap,
 }: {
   item: CodeTranscriptItem;
   animateStreaming: boolean;
@@ -443,6 +463,14 @@ const TranscriptItem = memo(function TranscriptItem({
   onOpenTurnDiff?: (turnId: string) => void;
   sessionId?: string;
   onReveal?: () => void;
+  /**
+   * Where the session stands, on the newest turn boundary only.
+   *
+   * Passed to exactly one row: the recap describes the session, not the turn,
+   * so repeating it at every boundary would fill a long transcript with stale
+   * copies of a line that is only true at the bottom.
+   */
+  recap?: string;
 }) {
   switch (item.kind) {
     case "user":
@@ -547,7 +575,17 @@ const TranscriptItem = memo(function TranscriptItem({
       );
     }
     case "turn_boundary":
-      return <TurnReviewCard turn={item} onOpenTurnDiff={onOpenTurnDiff} />;
+      return (
+        <TurnReviewCard
+          turn={item}
+          onOpenTurnDiff={onOpenTurnDiff}
+          narrative={
+            recap ? (
+              <span className="text-muted-foreground">{recap}</span>
+            ) : undefined
+          }
+        />
+      );
   }
 });
 

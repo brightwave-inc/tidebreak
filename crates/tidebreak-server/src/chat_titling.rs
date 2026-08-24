@@ -26,6 +26,13 @@
 //! workspace naming ([`crate::code::titling`]), which follows the same rules
 //! against a different store: same utility model, same nullable-title schema,
 //! same "an explicit name always wins" write discipline.
+//!
+//! Code-mode session recaps ([`crate::code::recap`]) share it too. A recap is
+//! not a name — it is a sentence, and it is rewritten every turn rather than
+//! written once — but it is the same call: one bounded string, derived on the
+//! utility role from material the reader authored, worth nothing if it fails.
+//! [`Proposal`] is what the three have in common, and it is why the request
+//! and retry path below is generic rather than title-shaped.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -57,24 +64,24 @@ const MAX_TITLE_SOURCE_MESSAGES: usize = 10;
 /// budgeting it against the model's context window.
 pub(crate) const MAX_TITLE_SOURCE_MESSAGE_BYTES: usize = 2 * 1024;
 
-/// Upper bound on tokens one titling call generates.
+/// Upper bound on tokens one derivation generates.
 ///
 /// Generous for a short JSON object, so a model that reasons before answering
 /// still has room to emit the object it was constrained to.
-const TITLE_MAX_OUTPUT_TOKENS: u32 = 512;
+const DERIVATION_MAX_OUTPUT_TOKENS: u32 = 512;
 
-/// Total provider calls one background titling run may make.
+/// Total provider calls one background derivation may make.
 ///
-/// Titling is cheap, invisible maintenance, and a transient broken stream
+/// This work is cheap, invisible maintenance, and a transient broken stream
 /// should not leave a useful conversation unnamed until the reader happens to
 /// send another message. Three attempts cover the ordinary one-off transport
 /// and provider failures without turning a background convenience into a retry
-/// loop. If all three fail, the chat stays untitled and the next user turn
+/// loop. If all three fail, the subject keeps whatever it had and the next turn
 /// starts a fresh run.
-const TITLE_ATTEMPTS: usize = 3;
+const DERIVATION_ATTEMPTS: usize = 3;
 
 /// Largest completion accepted before the call is abandoned.
-const MAX_TITLE_COMPLETION_BYTES: usize = 4 * 1024;
+const MAX_DERIVATION_COMPLETION_BYTES: usize = 4 * 1024;
 
 /// Title length asked for in prose, well under the bound the schema enforces.
 ///
@@ -89,21 +96,24 @@ pub(crate) const TITLE_TARGET_CHARS: usize = 60;
 /// `^[a-zA-Z0-9_-]{1,64}$`.
 const CHAT_TITLE_SCHEMA_NAME: &str = "chat_title";
 
-/// The model's answer to one titling call.
+/// One background derivation's answer: a bounded string, or nothing.
 ///
-/// `title` is nullable on purpose, and that is the whole reason this is a schema
-/// rather than a line of prose: asked for a string, a model always produces one,
-/// including for an exchange that has nothing to name yet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TitleProposal {
-    /// A short name for the conversation, or `null` when it has no subject yet.
-    #[schemars(length(max = MAX_CHAT_TITLE_CHARS))]
-    title: Option<String>,
-}
+/// The nullability is the whole reason these are schemas rather than a line of
+/// prose. Asked for a string, a model always produces one — including for an
+/// exchange that has nothing to name and a turn that has nothing to recap — so
+/// declining has to be a shape the answer can take.
+pub(crate) trait Proposal: for<'de> Deserialize<'de> + JsonSchema + Sized {
+    /// Longest answer accepted, matching the bound this proposal's schema
+    /// states. A longer one is rejected rather than truncated.
+    const MAX_CHARS: usize;
 
-impl TitleProposal {
-    /// The output constraint a titling call sends, carrying `name` on the wire.
+    /// What this derivation is called in its log and error lines.
+    const KIND: &'static str;
+
+    /// The proposed string, or `None` where the model declined.
+    fn proposed(self) -> Option<String>;
+
+    /// The output constraint the call sends, carrying `name` on the wire.
     ///
     /// The system prompt states the shape in prose as well. That is not
     /// redundancy for its own sake: this covers any OpenAI-compatible endpoint,
@@ -114,6 +124,24 @@ impl TitleProposal {
             name: name.to_owned(),
             schema: input_schema_for::<Self>(),
         }
+    }
+}
+
+/// The model's answer to one titling call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TitleProposal {
+    /// A short name for the conversation, or `null` when it has no subject yet.
+    #[schemars(length(max = MAX_CHAT_TITLE_CHARS))]
+    title: Option<String>,
+}
+
+impl Proposal for TitleProposal {
+    const MAX_CHARS: usize = MAX_CHAT_TITLE_CHARS;
+    const KIND: &'static str = "titling";
+
+    fn proposed(self) -> Option<String> {
+        self.title
     }
 }
 
@@ -234,7 +262,7 @@ impl ChatTitler {
         // the caller whose credential can actually drive it (decision 62).
         let owner = self.store.chat_owner(chat_id).await.unwrap_or_default();
         let provider = self.resolver.resolve_for(owner.as_ref()).await;
-        let title = derive_title_with_retries(
+        let title = derive_text_with_retries::<TitleProposal>(
             provider.as_ref(),
             utility,
             &system_prompt(),
@@ -347,13 +375,14 @@ fn user_message_digest(messages: &[Message]) -> Option<String> {
     (!digest.is_empty()).then_some(digest)
 }
 
-/// Ask for a name and retry the transient ways a call comes back unusable.
+/// Ask for one bounded string and retry the transient ways a call comes back
+/// unusable.
 ///
-/// `Ok(None)` is the model declining to name the subject; `subject` labels the
-/// log lines ("chat 42", "workspace ab12…"). The bounded retry policy is
-/// [`TITLE_ATTEMPTS`], shared by every consumer so a background naming call is
-/// equally patient wherever it runs.
-pub(crate) async fn derive_title_with_retries(
+/// `Ok(None)` is the model declining; `subject` labels the log lines ("chat 42",
+/// "workspace ab12…"). The bounded retry policy is [`DERIVATION_ATTEMPTS`],
+/// shared by every consumer so a background call is equally patient wherever it
+/// runs.
+pub(crate) async fn derive_text_with_retries<P: Proposal>(
     provider: &dyn ModelProvider,
     utility: &UtilityModel,
     system_prompt: &str,
@@ -361,27 +390,28 @@ pub(crate) async fn derive_title_with_retries(
     material: &str,
     subject: &str,
 ) -> Result<Option<String>> {
+    let kind = P::KIND;
     let mut attempt = 1;
     loop {
-        match request_title(provider, utility, system_prompt, schema_name, material).await {
+        match request_proposal::<P>(provider, utility, system_prompt, schema_name, material).await {
             Ok(None) => return Ok(None),
-            Ok(Some(proposed)) => match normalize_derived_title(&proposed) {
-                Some(title) => return Ok(Some(title)),
-                None if attempt < TITLE_ATTEMPTS => {
+            Ok(Some(proposed)) => match normalize_derived(&proposed, P::MAX_CHARS) {
+                Some(text) => return Ok(Some(text)),
+                None if attempt < DERIVATION_ATTEMPTS => {
                     eprintln!(
-                        "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} returned an unusable title for {subject}: {proposed:?}"
+                        "tidebreak: {kind} attempt {attempt}/{DERIVATION_ATTEMPTS} returned an unusable answer for {subject}: {proposed:?}"
                     );
                     attempt += 1;
                 }
                 None => {
                     return Err(AgentError::msg(format!(
-                        "titling model returned an unusable title: {proposed:?}"
+                        "{kind} model returned an unusable answer: {proposed:?}"
                     )))
                 }
             },
-            Err(error) if attempt < TITLE_ATTEMPTS => {
+            Err(error) if attempt < DERIVATION_ATTEMPTS => {
                 eprintln!(
-                    "tidebreak: titling attempt {attempt}/{TITLE_ATTEMPTS} failed for {subject}: {error}"
+                    "tidebreak: {kind} attempt {attempt}/{DERIVATION_ATTEMPTS} failed for {subject}: {error}"
                 );
                 attempt += 1;
             }
@@ -390,18 +420,19 @@ pub(crate) async fn derive_title_with_retries(
     }
 }
 
-/// Ask `provider` to name the subject `material` describes.
+/// Ask `provider` for the one string `material` calls for.
 ///
-/// `Ok(None)` is the model declining to name it. An answer that is not a title
-/// at all — a tool call, a refusal, an unparsable payload — is an error, since
-/// nothing downstream can tell those apart from a deliberate `null`.
-async fn request_title(
+/// `Ok(None)` is the model declining. An answer that is not a proposal at all —
+/// a tool call, a refusal, an unparsable payload — is an error, since nothing
+/// downstream can tell those apart from a deliberate `null`.
+async fn request_proposal<P: Proposal>(
     provider: &dyn ModelProvider,
     utility: &UtilityModel,
     system_prompt: &str,
     schema_name: &str,
     material: &str,
 ) -> Result<Option<String>> {
+    let kind = P::KIND;
     let request = ChatRequest {
         provider: utility.provider.clone(),
         model: utility.model.clone(),
@@ -409,12 +440,12 @@ async fn request_title(
         system: Some(system_prompt.to_owned()),
         messages: vec![ChatMessage::text(Role::User, material)],
         tools: Vec::new(),
-        max_tokens: Some(TITLE_MAX_OUTPUT_TOKENS),
+        max_tokens: Some(DERIVATION_MAX_OUTPUT_TOKENS),
         // Some reasoning models reject sampling controls outright, and the
         // schema already constrains the answer's shape.
         temperature: None,
         reasoning_effort: utility.reasoning_effort,
-        response_format: Some(TitleProposal::response_format(schema_name)),
+        response_format: Some(P::response_format(schema_name)),
         // One call, one prompt nothing else re-sends: cache writes here would
         // be a premium paid for entries that expire unread.
         prompt_cache: PromptCacheMode::OneShot,
@@ -427,8 +458,10 @@ async fn request_title(
         match event {
             ProviderEvent::TextDelta { text } => {
                 content.push_str(&text);
-                if content.len() > MAX_TITLE_COMPLETION_BYTES {
-                    return Err(AgentError::msg("titling completion exceeded its bound"));
+                if content.len() > MAX_DERIVATION_COMPLETION_BYTES {
+                    return Err(AgentError::msg(format!(
+                        "{kind} completion exceeded its bound"
+                    )));
                 }
             }
             ProviderEvent::ReasoningDelta { .. }
@@ -441,55 +474,52 @@ async fn request_title(
             // call here means the model ignored a request that advertised none.
             ProviderEvent::Stop { reason } => {
                 return Err(AgentError::msg(format!(
-                    "titling call stopped with {reason:?}"
+                    "{kind} call stopped with {reason:?}"
                 )))
             }
             ProviderEvent::Refusal { .. }
             | ProviderEvent::Failed { .. }
             | ProviderEvent::ToolCallStarted { .. }
             | ProviderEvent::ToolCallArgsDelta { .. } => {
-                return Err(AgentError::msg("titling call did not return a title"))
+                return Err(AgentError::msg(format!("{kind} call did not answer")))
             }
             // `ProviderEvent` is open. A variant this build has not learned is
-            // not a title either, and guessing at one is what this whole path
+            // not an answer either, and guessing at one is what this whole path
             // exists to avoid.
             other => {
                 return Err(AgentError::msg(format!(
-                    "titling call returned an unexpected event: {other:?}"
+                    "{kind} call returned an unexpected event: {other:?}"
                 )))
             }
         }
     }
     if !completed {
-        return Err(AgentError::msg("titling stream ended without a stop event"));
+        return Err(AgentError::msg(format!(
+            "{kind} stream ended without a stop event"
+        )));
     }
-    let proposal: TitleProposal =
-        serde_json::from_str(strip_json_fence(content.trim())).map_err(|error| {
-            AgentError::msg(format!("titling model returned invalid JSON: {error}"))
-        })?;
-    Ok(proposal.title)
+    let proposal: P = serde_json::from_str(strip_json_fence(content.trim()))
+        .map_err(|error| AgentError::msg(format!("{kind} model returned invalid JSON: {error}")))?;
+    Ok(proposal.proposed())
 }
 
-/// A model's proposed title as it would be stored, or `None` when it is not
-/// usable as a name.
+/// A model's proposed string as it would be stored, or `None` when it is not
+/// usable.
 ///
-/// Whitespace is collapsed because a title is rendered on one line, and the
+/// Whitespace is collapsed because these are rendered on one line, and the
 /// length bound is rejected rather than truncated: the schema already asked for
 /// a short answer, and the next turn can ask again.
-fn normalize_derived_title(proposed: &str) -> Option<String> {
-    let title = proposed
+fn normalize_derived(proposed: &str, max_chars: usize) -> Option<String> {
+    let text = proposed
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
         .to_owned();
-    if title.is_empty()
-        || title.chars().count() > MAX_CHAT_TITLE_CHARS
-        || title.chars().any(char::is_control)
-    {
+    if text.is_empty() || text.chars().count() > max_chars || text.chars().any(char::is_control) {
         return None;
     }
-    Some(title)
+    Some(text)
 }
 
 /// The leading `max_bytes` of `text`, cut on a character boundary.

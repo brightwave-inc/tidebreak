@@ -1790,6 +1790,10 @@ function CodeSessionPane({
   ]);
   const inferred = modelOptions.find((option) => option.default)?.id;
   const [model, setModel] = useState(session.model ?? inferred);
+  // The recap is derived after a turn completes and published on the digest
+  // channel rather than the journal, so the transcript reads it from here
+  // instead of from an item the reducer built.
+  const sessionDigest = useSessionDigest(workspaceId, session.id);
   // The row the server last answered with, so the pickers follow a switch the
   // route made rather than the list this page loaded the workspace with.
   const [settings, setSettings] = useState({
@@ -2050,6 +2054,7 @@ function CodeSessionPane({
           contentRef={follow.contentRef}
           onScroll={follow.onScroll}
           onDecide={decideApproval}
+          recap={sessionDigest?.recap}
           emptyState={
             subagentCallId
               ? subagentEmptyState(selectedSubagent?.status)
