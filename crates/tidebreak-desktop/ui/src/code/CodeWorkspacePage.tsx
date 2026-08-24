@@ -1842,10 +1842,15 @@ function CodeSessionPane({
   }, [inferred, session.model]);
 
   useEffect(() => {
-    pendingReasoningEffortRef.current = null;
+    // A refreshed row can still carry the stored effort while a mid-turn
+    // choice waits for its first submission. Keep that choice until an
+    // accepted submission clears it; changing sessions remounts this pane.
+    const pendingReasoningEffort = pendingReasoningEffortRef.current;
     setSettings({
       permissionMode: session.permission_mode,
-      reasoningEffort: session.reasoning_effort ?? null,
+      reasoningEffort: pendingReasoningEffort
+        ? pendingReasoningEffort.value
+        : (session.reasoning_effort ?? null),
       fastMode: session.fast_mode,
     });
   }, [
@@ -2004,9 +2009,12 @@ function CodeSessionPane({
         session.id,
         mode,
       );
+      const pendingReasoningEffort = pendingReasoningEffortRef.current;
       setSettings({
         permissionMode: updated.permission_mode,
-        reasoningEffort: updated.reasoning_effort ?? null,
+        reasoningEffort: pendingReasoningEffort
+          ? pendingReasoningEffort.value
+          : (updated.reasoning_effort ?? null),
         fastMode: updated.fast_mode,
       });
     } catch (err) {
@@ -2046,9 +2054,12 @@ function CodeSessionPane({
     setSettings((current) => ({ ...current, fastMode }));
     try {
       const updated = await client.setCodeSessionFastMode(session.id, fastMode);
+      const pendingReasoningEffort = pendingReasoningEffortRef.current;
       setSettings({
         permissionMode: updated.permission_mode,
-        reasoningEffort: updated.reasoning_effort ?? null,
+        reasoningEffort: pendingReasoningEffort
+          ? pendingReasoningEffort.value
+          : (updated.reasoning_effort ?? null),
         fastMode: updated.fast_mode,
       });
     } catch (err) {
