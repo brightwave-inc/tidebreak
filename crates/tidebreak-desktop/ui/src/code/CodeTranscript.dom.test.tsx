@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CodeTranscript } from "./CodeTranscript";
 import type { CodeApprovalSnapshot } from "../api/types";
@@ -245,6 +245,29 @@ describe("CodeTranscript", () => {
     expect(within(seam).getByText("· 2m 14s")).toBeInTheDocument();
     expect(within(seam).getByText(/2 files \+42 −7/)).toBeInTheDocument();
     expect(within(seam).queryByText(/in \//)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The seam is the fork point: "Fork from here" must hand the host this
+   * boundary's turn id, and the affordance must not render at all for a
+   * host that offers no fork — a menu with nothing in it is worse than none.
+   */
+  it("forks from a turn's seam menu", async () => {
+    const user = userEvent.setup();
+    const onForkFromTurn = vi.fn();
+    render(<CodeTranscript items={items} onForkFromTurn={onForkFromTurn} />);
+
+    await user.click(screen.getByRole("button", { name: "Turn actions" }));
+    await user.click(screen.getByRole("menuitem", { name: /Fork from here/ }));
+
+    expect(onForkFromTurn).toHaveBeenCalledWith("t1");
+  });
+
+  it("offers no turn actions without a fork handler", () => {
+    render(<CodeTranscript items={items} />);
+    expect(
+      screen.queryByRole("button", { name: "Turn actions" }),
+    ).not.toBeInTheDocument();
   });
 
   it("says why a failed turn failed", () => {

@@ -2868,20 +2868,26 @@ export class ApiClient {
   }
 
   /**
-   * Write one session's transcript into its worktree, for a fork to read.
+   * Write one fork of a session — the condensed transcript plus per-turn
+   * records — into private storage, for a child agent to read.
    *
-   * The child session is created separately: this call only produces the
-   * file, so the reader still picks the engine and edits the framing before
-   * anything is sent.
+   * `atTurnId` forks at the end of that turn; omitted, the fork covers the
+   * whole conversation. The child session is created separately: this call
+   * only produces the files, so the reader still picks the engine and edits
+   * the framing before anything is sent.
    */
-  async forkCodeSession(sessionId: string): Promise<CodeForkTranscript> {
+  async forkCodeSession(
+    sessionId: string,
+    atTurnId?: string,
+  ): Promise<CodeForkTranscript> {
     return requireParsed(
       parseCodeForkTranscript(
         await this.json(
           `/code/sessions/${encodeURIComponent(sessionId)}/fork`,
           {
             method: "POST",
-            headers: this.headers(),
+            headers: this.headers(true),
+            body: JSON.stringify(atTurnId ? { at_turn: atTurnId } : {}),
           },
         ),
       ),

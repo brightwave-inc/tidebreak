@@ -2777,14 +2777,17 @@ impl CodeRuntime {
         Ok((session, turns, events.events))
     }
 
-    /// Write this session's transcript into private storage for a fork to read.
+    /// Write one fork of this session — the condensed transcript plus a full
+    /// record per turn — into private storage, for a child agent to read.
     ///
+    /// `at_turn` forks at the end of that turn; `None` forks at the newest.
     /// The caller creates the child and names the absolute path in its first
     /// message. Git cannot index the transcript or its attachments.
     pub(crate) async fn fork_transcript(
         &self,
         owner: &OwnerId,
         session_id: CodeSessionId,
+        at_turn: Option<tidebreak_core::CodeTurnId>,
     ) -> Result<fork::WrittenTranscript, ServerError> {
         let session = self.get_session(owner, session_id).await?;
         let workspace = self
@@ -2795,12 +2798,17 @@ impl CodeRuntime {
                 ServerError::internal(format!("could not open private storage: {err}"))
             })?;
         let turns = list_turns(&self.db, owner, session_id).await?;
+        let Some(cut) = fork::cut_at(&turns, at_turn) else {
+            return Err(ServerError::bad_request(
+                "that turn is not part of this session",
+            ));
+        };
         let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
         fork::write_transcript(
             &private_root,
             self.blobs.as_ref(),
             &session,
-            &turns,
+            cut,
             &events.events,
         )
         .await

@@ -49,6 +49,14 @@ type Story = StoryObj<typeof meta>;
 export const Completed: Story = {};
 
 /**
+ * With a fork handler, the seam carries a quiet actions menu: "Fork from
+ * here" hands everything up to this turn to a fresh agent in a new tab.
+ */
+export const CompletedWithTurnActions: Story = {
+  args: { onForkFromTurn: fn() },
+};
+
+/**
  * The newest boundary carries the session recap, so a reader who left and came
  * back reads where the work stands instead of the last twenty tool calls.
  */
@@ -75,6 +83,21 @@ export const Failed: Story = {
       error: "the engine exited before the turn completed",
       diffstat: null,
     }),
+  },
+};
+
+/**
+ * A failed turn is a prime fork point — retry the ask in a fresh context —
+ * so the actions menu rides the failure card too.
+ */
+export const FailedWithTurnActions: Story = {
+  args: {
+    turn: boundary({
+      status: "failed",
+      error: "the engine exited before the turn completed",
+      diffstat: null,
+    }),
+    onForkFromTurn: fn(),
   },
 };
 

@@ -100,22 +100,35 @@ pub async fn submit_turn(
     }
 }
 
-/// `POST /code/sessions/{id}/fork` — write this session's transcript into the
-/// worktree and report where it landed.
+/// `POST /code/sessions/{id}/fork` — write this session's handoff into
+/// private storage and report where it landed.
 ///
 /// Creating the child session is a separate call: forking is a file, and the
 /// reader picks the engine and edits the framing before anything is sent.
+/// The body is optional so a client that predates fork points still forks at
+/// the newest turn.
 pub async fn fork_session(
     code: ScopedCode,
     Path(id): Path<CodeSessionId>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<CodeForkTranscript>), ServerError> {
-    let written = code.fork_transcript(id).await?;
+    let at_turn = if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<super::types::CodeForkBody>(&body)
+            .map_err(|err| ServerError::bad_request(format!("invalid fork body: {err}")))?
+            .at_turn
+    };
+    let written = code.fork_transcript(id, at_turn).await?;
     Ok((
         StatusCode::CREATED,
         Json(CodeForkTranscript {
             path: written.path,
+            dir: written.dir,
             byte_len: written.byte_len,
             turns: written.turns,
+            total_turns: written.total_turns,
+            at_turn_ordinal: written.at_turn_ordinal,
             truncated: written.truncated,
         }),
     ))

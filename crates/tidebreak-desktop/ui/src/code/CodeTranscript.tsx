@@ -68,6 +68,7 @@ export function CodeTranscript({
   streamStalled = false,
   animateStreaming = true,
   onOpenTurnDiff,
+  onForkFromTurn,
   emptyState,
   sessionId,
   onReveal,
@@ -95,6 +96,8 @@ export function CodeTranscript({
   animateStreaming?: boolean;
   /** Scope the review sidebar to one turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** Fork the conversation at the end of one turn, from its seam row. */
+  onForkFromTurn?: (turnId: string) => void;
   /** Copy for a filtered/read-only transcript with no captured rows. */
   emptyState?: { title: string; description: string };
   sessionId?: string;
@@ -203,6 +206,7 @@ export function CodeTranscript({
                   }
                   onDecide={onDecide}
                   onOpenTurnDiff={onOpenTurnDiff}
+                  onForkFromTurn={onForkFromTurn}
                   sessionId={sessionId}
                   onReveal={onReveal}
                   recap={row.item.id === newestBoundaryId ? recap : undefined}
@@ -444,6 +448,7 @@ const TranscriptItem = memo(function TranscriptItem({
   approvalError,
   onDecide,
   onOpenTurnDiff,
+  onForkFromTurn,
   sessionId,
   onReveal,
   recap,
@@ -461,6 +466,7 @@ const TranscriptItem = memo(function TranscriptItem({
     feedback?: string,
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
+  onForkFromTurn?: (turnId: string) => void;
   sessionId?: string;
   onReveal?: () => void;
   /**
@@ -579,6 +585,7 @@ const TranscriptItem = memo(function TranscriptItem({
         <TurnReviewCard
           turn={item}
           onOpenTurnDiff={onOpenTurnDiff}
+          onForkFromTurn={onForkFromTurn}
           narrative={
             recap ? (
               <span className="text-muted-foreground">{recap}</span>

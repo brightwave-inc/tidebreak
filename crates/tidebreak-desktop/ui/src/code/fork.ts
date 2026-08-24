@@ -4,14 +4,27 @@ import type { CodeForkTranscript } from "../api/types";
 /**
  * Forking one agent into another: what the child is handed, and how.
  *
- * The server writes the parent's transcript into private storage, so the
- * child needs an absolute path rather than bytes. That path travels as a
- * composer chip and is named on the way out.
+ * The server writes the fork into private storage as one directory — the
+ * condensed transcript plus a full record per turn — so the child needs an
+ * absolute path rather than bytes. The transcript path travels as a composer
+ * chip and is named on the way out; the framing lines tell the child how to
+ * use the two layers, and stay the reader's to edit.
  */
 
-/** The opening line a fork seeds, editable before it is sent. */
-export const FORK_FRAMING =
-  "Read the attached transcript first, then pick up where that agent left off.";
+/** The opening lines a fork seeds, editable before they are sent. */
+export function forkFraming(transcript: CodeForkTranscript): string {
+  const base =
+    "Read the attached transcript first, then pick up where that agent left off. " +
+    "It is condensed: each turn's full record — complete tool output and " +
+    "subagent activity — sits in the same directory, so open one only when " +
+    "the transcript is not enough.";
+  if (transcript.at_turn_ordinal === undefined) return base;
+  return (
+    `${base} The transcript ends at turn ${transcript.at_turn_ordinal}, ` +
+    "where this fork was taken; the conversation continued past it, so the " +
+    "worktree may hold changes the transcript does not describe."
+  );
+}
 
 /** The transcript chip for a fork the server has already written. */
 export function forkTranscriptFile(

@@ -1403,21 +1403,33 @@ export function parseCodeForkTranscript(
     !isRecord(value) ||
     !onlyKeys<WireCodeForkTranscript>(value, [
       "path",
+      "dir",
       "byte_len",
       "turns",
+      "total_turns",
+      "at_turn_ordinal",
       "truncated",
     ]) ||
     typeof value.path !== "string" ||
+    typeof value.dir !== "string" ||
     typeof value.byte_len !== "number" ||
     typeof value.turns !== "number" ||
+    typeof value.total_turns !== "number" ||
+    (value.at_turn_ordinal !== undefined &&
+      !isFiniteNumber(value.at_turn_ordinal)) ||
     typeof value.truncated !== "boolean"
   ) {
     return null;
   }
   return {
     path: value.path,
+    dir: value.dir,
     byte_len: value.byte_len,
     turns: value.turns,
+    total_turns: value.total_turns,
+    ...(value.at_turn_ordinal !== undefined
+      ? { at_turn_ordinal: value.at_turn_ordinal }
+      : {}),
     truncated: value.truncated,
   };
 }

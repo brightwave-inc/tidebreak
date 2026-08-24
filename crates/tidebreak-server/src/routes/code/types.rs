@@ -395,19 +395,40 @@ pub struct CodeRepoSource {
     pub remediation: Option<String>,
 }
 
-/// A written fork transcript: `POST /code/sessions/{id}/fork`.
+/// A written fork handoff: `POST /code/sessions/{id}/fork`.
 ///
-/// `path` is worktree-relative, which is what the child agent needs: the file
-/// already sits in its working directory, so the prompt names a path rather
-/// than carrying the bytes.
+/// `path` is the condensed transcript, absolute under private storage so a
+/// child agent of any engine can read it without Git ever indexing it. `dir`
+/// is the fork's own directory, which also holds one full per-turn record —
+/// `turn-0007.md` for turn 7 — and any retained image attachments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeForkTranscript {
     pub path: String,
+    pub dir: String,
     pub byte_len: u64,
+    /// Turns the condensed transcript renders in full.
     pub turns: u32,
+    /// Turns the fork covers, up to and including the fork point.
+    pub total_turns: u32,
+    /// The fork point's turn ordinal, present when the conversation
+    /// continued past it — later turns are excluded from the handoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub at_turn_ordinal: Option<i64>,
     /// True when anything was left out to fit the size cap: the oldest
     /// turns, or the end of a turn too large on its own.
     pub truncated: bool,
+}
+
+/// Body of `POST /code/sessions/{id}/fork`. An absent body forks at the
+/// newest turn.
+#[derive(Debug, Default, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeForkBody {
+    /// Fork at the end of this turn; later turns stay out of the handoff.
+    #[serde(default)]
+    #[ts(optional)]
+    pub at_turn: Option<tidebreak_core::CodeTurnId>,
 }
 
 /// Where new worktrees land: `GET`/`PUT /code/worktree-root`.

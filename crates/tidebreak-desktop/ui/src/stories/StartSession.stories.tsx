@@ -8,9 +8,9 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 
-import type { ComposerWorkspaceFiles } from "@/Composer";
+import type { CodeForkTranscript } from "@/api/types";
 import { useCodeUiStore } from "@/code/CodeUiStore";
-import { FORK_FRAMING, forkTranscriptFile } from "@/code/fork";
+import { forkFraming, forkTranscriptFile } from "@/code/fork";
 import { StartSessionPrompt } from "@/code/StartSessionPrompt";
 import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 
@@ -31,18 +31,18 @@ function withRouter(children: ReactNode) {
 function StartSession({
   harnesses,
   starting = false,
-  workspaceFiles,
+  fork,
 }: {
   harnesses: typeof harnessDoctor.harnesses;
   starting?: boolean;
-  workspaceFiles?: ComposerWorkspaceFiles;
+  fork?: CodeForkTranscript;
 }) {
-  // A fork seeds the framing line the same way the workspace page does, so
+  // A fork seeds the framing lines the same way the workspace page does, so
   // the story shows the state the reader actually lands in.
   useEffect(() => {
-    if (!workspaceFiles) return;
-    useCodeUiStore.getState().offerComposerPrompt("ws-1", FORK_FRAMING);
-  }, [workspaceFiles]);
+    if (!fork) return;
+    useCodeUiStore.getState().offerComposerPrompt("ws-1", forkFraming(fork));
+  }, [fork]);
   return (
     <StartSessionPrompt
       workspaceId="ws-1"
@@ -51,7 +51,9 @@ function StartSession({
       selectedMode={null}
       onSelectMode={fn()}
       onStart={fn()}
-      workspaceFiles={workspaceFiles}
+      workspaceFiles={
+        fork ? { items: [forkTranscriptFile(fork)], onRemove: fn() } : undefined
+      }
     />
   );
 }
@@ -83,39 +85,51 @@ export const NeedsSetup: Story = {
 };
 
 /**
- * A fork: the parent's transcript is already in the worktree, so the child
- * gets a path rather than an upload, and the framing line stays editable.
- * Any engine can be the one that reads it.
+ * A fork: the parent's handoff is already on disk, so the child gets a path
+ * rather than an upload, and the framing lines stay editable. Any engine can
+ * be the one that reads it.
  */
 export const ForkedFromAnotherAgent: Story = {
   args: {
-    workspaceFiles: {
-      items: [
-        forkTranscriptFile({
-          path: "/private/forks/9c1f4a2e.md",
-          byte_len: 48_120,
-          turns: 14,
-          truncated: false,
-        }),
-      ],
-      onRemove: fn(),
+    fork: {
+      path: "/private/forks/9c1f4a2e/6a01/transcript.md",
+      dir: "/private/forks/9c1f4a2e/6a01",
+      byte_len: 48_120,
+      turns: 14,
+      total_turns: 14,
+      truncated: false,
     },
   },
 };
 
-/** A long parent: the oldest turns did not fit, and the chip says so. */
+/**
+ * A fork taken at an earlier turn: the framing warns that the worktree can
+ * be ahead of the transcript.
+ */
+export const ForkedFromAnEarlierTurn: Story = {
+  args: {
+    fork: {
+      path: "/private/forks/9c1f4a2e/8b22/transcript.md",
+      dir: "/private/forks/9c1f4a2e/8b22",
+      byte_len: 21_004,
+      turns: 7,
+      total_turns: 7,
+      at_turn_ordinal: 7,
+      truncated: false,
+    },
+  },
+};
+
+/** A long parent: the oldest turns did not fit in full, and the chip says so. */
 export const ForkedFromALongSession: Story = {
   args: {
-    workspaceFiles: {
-      items: [
-        forkTranscriptFile({
-          path: "/private/forks/3b70de55.md",
-          byte_len: 524_288,
-          turns: 6,
-          truncated: true,
-        }),
-      ],
-      onRemove: fn(),
+    fork: {
+      path: "/private/forks/3b70de55/1c9d/transcript.md",
+      dir: "/private/forks/3b70de55/1c9d",
+      byte_len: 524_288,
+      turns: 6,
+      total_turns: 41,
+      truncated: true,
     },
   },
 };

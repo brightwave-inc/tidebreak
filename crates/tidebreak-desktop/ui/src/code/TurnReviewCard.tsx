@@ -1,11 +1,23 @@
 import type { ReactNode } from "react";
-import { Check, CircleSlash, TriangleAlert } from "lucide-react";
+import {
+  Check,
+  CircleSlash,
+  GitFork,
+  MoreHorizontal,
+  TriangleAlert,
+} from "lucide-react";
 
 import type { Diffstat } from "../api/types";
 import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
-import { FOCUS_RING, HOVER_TINT } from "./interactive";
+import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 
 /**
  * What a turn came to, at the seam where it ended.
@@ -28,6 +40,7 @@ export function TurnReviewCard({
   turn,
   narrative,
   onOpenTurnDiff,
+  onForkFromTurn,
 }: {
   turn: TurnBoundary;
   /**
@@ -42,6 +55,8 @@ export function TurnReviewCard({
   narrative?: ReactNode;
   /** Scope the review sidebar to this turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
+  /** Hand everything up to this turn to a fresh agent, in a new tab. */
+  onForkFromTurn?: (turnId: string) => void;
 }) {
   const duration = formatTurnDuration(turn.durationMs);
   const diffstat = turn.diffstat && (
@@ -50,6 +65,9 @@ export function TurnReviewCard({
       turnId={turn.turnId}
       onOpenTurnDiff={onOpenTurnDiff}
     />
+  );
+  const actions = turn.turnId && onForkFromTurn && (
+    <TurnActionsMenu turnId={turn.turnId} onForkFromTurn={onForkFromTurn} />
   );
 
   if (turn.status === "failed") {
@@ -67,7 +85,12 @@ export function TurnReviewCard({
         </p>
         <p>{turn.error ?? "The engine stopped without saying why."}</p>
         {narrative}
-        {diffstat && <div className="flex items-center gap-2">{diffstat}</div>}
+        {(diffstat || actions) && (
+          <div className="flex items-center gap-2">
+            {diffstat}
+            {actions}
+          </div>
+        )}
       </div>
     );
   }
@@ -80,6 +103,7 @@ export function TurnReviewCard({
         {duration && <span className="tabular-nums">· {duration}</span>}
         {narrative}
         {diffstat}
+        {actions}
       </SeamRow>
     );
   }
@@ -91,6 +115,7 @@ export function TurnReviewCard({
       {duration && <span className="tabular-nums">· {duration}</span>}
       {narrative}
       {diffstat}
+      {actions}
     </SeamRow>
   );
 }
@@ -118,6 +143,44 @@ function SeamRow({
     >
       {children}
     </div>
+  );
+}
+
+/**
+ * What the reader can do with a finished turn, behind one quiet trigger.
+ *
+ * Forking is the only entry today, but the seam is where per-turn actions
+ * belong, so the affordance is a menu rather than a bare fork button.
+ */
+function TurnActionsMenu({
+  turnId,
+  onForkFromTurn,
+}: {
+  turnId: string;
+  onForkFromTurn: (turnId: string) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
+            FOCUS_RING_TIGHT,
+            HOVER_TINT,
+          )}
+          aria-label="Turn actions"
+        >
+          <MoreHorizontal className="size-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-52">
+        <DropdownMenuItem onSelect={() => onForkFromTurn(turnId)}>
+          <GitFork />
+          Fork from here
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

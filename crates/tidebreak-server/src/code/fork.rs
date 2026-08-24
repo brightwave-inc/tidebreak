@@ -1,35 +1,60 @@
 //! Fork: the parent session's transcript, written outside the Git worktree as
 //! markdown so a sibling agent of any engine can read it.
 //!
-//! Pure serialization of what the journal already holds. No model call and no
-//! summary — a generated one would be a second thing to be wrong, and the
-//! point of the file is that the child sees what the parent saw.
+//! Each fork is one immutable directory holding two layers. `transcript.md`
+//! is the condensed conversation — tool calls as one-line entries, subagent
+//! work summarized by its `Task` call — and stays deliberately small so the
+//! child spends its context on the work rather than on history. Next to it,
+//! one full record per turn (`turn-0007.md` for turn 7) holds what the
+//! summary leaves out: complete tool output previews, subagent activity, and
+//! the engine's reasoning. The child reads the summary first and opens a
+//! record only when the summary is not enough.
 //!
-//! The file lands under Tidebreak's profile data directory. Git cannot index
-//! the transcript or the retained attachment generations.
+//! Pure serialization of what the journal already holds. No model call and no
+//! generated summary — that would be a second thing to be wrong; the point of
+//! these files is that the child sees what the parent saw.
+//!
+//! The files land under Tidebreak's profile data directory. Git cannot index
+//! the transcript, the records, or the retained attachment generations.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tidebreak_core::{
     BlobStore, CodeEvent, CodeSession, CodeTurn, CodeTurnId, DocumentBlob, HarnessKind,
-    SequencedCodeEvent, ToolDetail, ToolOutcome,
+    HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
 };
 
 /// Directory holding fork transcripts below the workspace's private root.
 pub(crate) const FORKS_DIR: &str = "forks";
 
-/// Largest transcript written, in bytes. Bounds the whole file, header
-/// included.
+/// The condensed transcript's file name inside a fork's directory.
+pub(crate) const SUMMARY_NAME: &str = "transcript.md";
+
+/// Largest condensed transcript written, in bytes. Bounds the whole file,
+/// header included.
 ///
 /// A long session can hold megabytes of assistant text. The child needs
 /// recent context far more than it needs the first turn, so the oldest turns
-/// are dropped to fit and the header says so. One turn can be over the cap by
-/// itself, so that one is cut rather than written past it.
+/// fall back to one-line stubs — and past that are dropped — to fit, and the
+/// header says so. One turn can be over the cap by itself, so that one is cut
+/// rather than written past it.
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 
-/// Largest set of retained fork images materialized in one request.
+/// Largest single full-record file. A record over this keeps its head — the
+/// ask and the first steps — and says where it was cut.
+const MAX_RECORD_FILE_BYTES: usize = 256 * 1024;
+
+/// Largest set of full records written for one fork. Records are kept from
+/// the newest turn back; older turns past the budget get no record file, and
+/// their stubs say so.
+const MAX_RECORD_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Largest set of retained fork images materialized in one request. Retained
+/// from the newest turn back; a turn past the budget keeps its transcript
+/// entry but not its image bytes.
 const MAX_FORK_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
 type ForkLockRegistry = Mutex<
@@ -59,78 +84,134 @@ fn fork_lock(
     lock
 }
 
-/// A written fork transcript, as the route reports it.
+/// A session's turns sliced at a fork point.
+pub(crate) struct ForkCut<'a> {
+    /// The turns the fork covers, oldest first, ending at the fork point.
+    pub(crate) turns: &'a [CodeTurn],
+    /// Turns of the session that ran after the fork point.
+    pub(crate) excluded: usize,
+}
+
+/// Slice a session's turns at the end of `at_turn`.
+///
+/// `None` forks at the newest turn. Returns `None` when `at_turn` names a
+/// turn that is not part of this session, which the route reports rather
+/// than silently forking the whole conversation.
+pub(crate) fn cut_at(turns: &[CodeTurn], at_turn: Option<CodeTurnId>) -> Option<ForkCut<'_>> {
+    let Some(at) = at_turn else {
+        return Some(ForkCut { turns, excluded: 0 });
+    };
+    let position = turns.iter().position(|turn| turn.id == at)?;
+    Some(ForkCut {
+        turns: &turns[..=position],
+        excluded: turns.len() - position - 1,
+    })
+}
+
+/// A written fork, as the route reports it.
 pub(crate) struct WrittenTranscript {
-    /// Absolute path, in the form the composer shows and the engine opens.
+    /// Absolute path of the condensed transcript, in the form the composer
+    /// shows and the engine opens.
     pub(crate) path: String,
-    /// Bytes on disk.
+    /// Absolute path of the fork's directory, holding the per-turn records
+    /// and any retained attachments next to the transcript.
+    pub(crate) dir: String,
+    /// Bytes of the condensed transcript on disk.
     pub(crate) byte_len: u64,
-    /// Turns the file actually contains.
+    /// Turns the condensed transcript renders in full.
     pub(crate) turns: u32,
-    /// True when anything was left out to fit [`MAX_TRANSCRIPT_BYTES`]:
-    /// older turns, or the end of a turn too large on its own.
+    /// Turns the fork covers, up to and including the fork point.
+    pub(crate) total_turns: u32,
+    /// The fork point's ordinal, when the conversation continued past it.
+    pub(crate) at_turn_ordinal: Option<i64>,
+    /// True when anything was left out of the condensed transcript to fit
+    /// [`MAX_TRANSCRIPT_BYTES`]: turns reduced to stubs or dropped, or the
+    /// end of a turn too large on its own.
     pub(crate) truncated: bool,
 }
 
-/// Render one session's transcript and write it under private storage.
+/// Render one fork and write its directory under private storage.
 ///
-/// A session can be forked again over a file the last child is already
-/// reading, so the write is published by rename: a reader sees one whole
-/// version or another and never the middle of one. Each write stages its own
-/// sibling file, so two forks racing on one session cannot mix their bytes —
-/// the later rename simply wins.
-///
-/// Each image-bearing write keeps its immutable attachment generation for the
-/// worktree lifecycle. An earlier child can therefore keep reading paths from
-/// its transcript after a later fork publishes another generation.
+/// Every fork writes a fresh generation directory named by a UUID, so a
+/// child keeps reading a whole, immutable handoff no matter how many later
+/// forks the same session produces. The generation is kept for the worktree
+/// lifecycle; a failure before the transcript publishes removes the whole
+/// directory rather than leaving a partial handoff for the child to trip
+/// over.
 pub(crate) async fn write_transcript(
     private_root: &Path,
     blobs: &dyn BlobStore,
     session: &CodeSession,
-    turns: &[CodeTurn],
+    cut: ForkCut<'_>,
     events: &[SequencedCodeEvent],
 ) -> std::io::Result<WrittenTranscript> {
     let write_lock = fork_lock(private_root, session.id);
     let _write = write_lock.lock().await;
     let generation = uuid::Uuid::new_v4();
-    let rendered =
-        render_transcript_with_generation(private_root, session, turns, events, generation);
-    let retained = &turns[rendered.dropped..];
-    let has_attachments = retained.iter().any(|turn| !turn.attachments.is_empty());
-    let mut attachment_scope = if has_attachments {
-        let mut scope =
-            super::scratch::scratch_scope(private_root, FORKS_DIR, session.id.0, generation)?;
-        materialize_attachments(
-            private_root,
-            &mut scope,
-            blobs,
-            session,
-            retained,
-            generation,
+    let turns = cut.turns;
+    let engine = harness_label(session.harness_kind);
+
+    let scope = super::scratch::scratch_scope(private_root, FORKS_DIR, session.id.0, generation)?;
+
+    let retained_images = plan_attachment_retention(turns);
+    materialize_attachments(&scope, blobs, turns, &retained_images).await?;
+
+    let records = render_turn_records(
+        private_root,
+        session,
+        turns,
+        events,
+        engine,
+        generation,
+        &retained_images,
+    );
+    for (ordinal, markdown) in &records.files {
+        scope
+            .publish(
+                std::ffi::OsStr::new(&record_name(*ordinal)),
+                markdown.as_bytes(),
+            )
+            .await?;
+    }
+
+    let rendered = render_transcript_with_generation(
+        private_root,
+        session,
+        turns,
+        cut.excluded,
+        events,
+        generation,
+        &records.ordinals,
+        &retained_images,
+    );
+    scope
+        .publish(
+            std::ffi::OsStr::new(SUMMARY_NAME),
+            rendered.markdown.as_bytes(),
         )
         .await?;
-        Some(scope)
-    } else {
-        None
-    };
+    scope.keep();
 
-    let dir = super::scratch::scratch_dir(private_root, FORKS_DIR)?;
-    let name = format!("{}.md", session.id);
-    dir.publish(std::ffi::OsStr::new(&name), rendered.markdown.as_bytes())
-        .await?;
-    if let Some(scope) = attachment_scope.take() {
-        scope.keep();
-    }
+    let dir = private_root
+        .join(FORKS_DIR)
+        .join(session.id.to_string())
+        .join(generation.to_string());
     Ok(WrittenTranscript {
-        path: private_root
-            .join(FORKS_DIR)
-            .join(format!("{}.md", session.id))
-            .display()
-            .to_string(),
+        path: dir.join(SUMMARY_NAME).display().to_string(),
+        dir: dir.display().to_string(),
         byte_len: rendered.markdown.len() as u64,
         turns: rendered.turns,
+        total_turns: turns.len() as u32,
+        at_turn_ordinal: (cut.excluded > 0)
+            .then(|| turns.last().map(|turn| turn.ordinal))
+            .flatten(),
         truncated: rendered.truncated,
     })
+}
+
+/// A turn's full-record file name, `turn-0007.md` for turn 7.
+fn record_name(ordinal: i64) -> String {
+    format!("turn-{ordinal:04}.md")
 }
 
 /// A rendered transcript and what had to be left out of it.
@@ -138,20 +219,25 @@ struct RenderedTranscript {
     markdown: String,
     turns: u32,
     truncated: bool,
-    dropped: usize,
 }
 
-/// Serialize a session as markdown, newest turns kept when it will not fit.
+/// Serialize a session as condensed markdown, newest turns kept in full.
 ///
 /// The result is never larger than [`MAX_TRANSCRIPT_BYTES`]. Turns are kept
-/// from the newest back; the header counts against the same budget, and a
-/// turn that is over the budget by itself is cut instead of overrunning it.
+/// in full from the newest back; older turns fall back to one-line stubs
+/// pointing at their record files, then drop entirely, oldest first. The
+/// header counts against the same budget, and a turn that is over the budget
+/// by itself is cut instead of overrunning it.
+#[allow(clippy::too_many_arguments)]
 fn render_transcript_with_generation(
     private_root: &Path,
     session: &CodeSession,
     turns: &[CodeTurn],
+    excluded: usize,
     events: &[SequencedCodeEvent],
     generation: uuid::Uuid,
+    record_ordinals: &HashSet<i64>,
+    retained_images: &HashSet<CodeTurnId>,
 ) -> RenderedTranscript {
     let engine = harness_label(session.harness_kind);
     let mut sections: Vec<String> = Vec::with_capacity(turns.len());
@@ -163,13 +249,22 @@ fn render_transcript_with_generation(
             events,
             engine,
             generation,
+            retained_images.contains(&turn.id),
         ));
     }
 
     // The header is part of the file, so it is part of the budget. Its length
-    // depends on how many turns are dropped, which is what the budget decides
-    // — so reserve the longest it can be, the one that drops every turn.
-    let reserved = header(session, turns.len(), turns.len(), engine).len();
+    // depends on how many turns are reduced, which is what the budget decides
+    // — so reserve the longest it can be, the one that reduces every turn.
+    let reserved = header(
+        session,
+        turns,
+        excluded,
+        turns.len(),
+        record_ordinals,
+        engine,
+    )
+    .len();
     let budget = MAX_TRANSCRIPT_BYTES.saturating_sub(reserved);
 
     // Budget from the end: the last turn is the one the child most needs.
@@ -192,8 +287,34 @@ fn render_transcript_with_generation(
     }
     let dropped = sections.len() - kept;
 
+    // Turns that lost their full section still get a one-line stub — what was
+    // asked, and where the full record is — newest first, while they fit.
+    let stubs: Vec<String> = turns[..dropped]
+        .iter()
+        .map(|turn| render_stub(turn, record_ordinals.contains(&turn.ordinal)))
+        .collect();
+    let mut stub_from = dropped;
+    for (at, stub) in stubs.iter().enumerate().rev() {
+        if used + stub.len() + 1 > budget {
+            break;
+        }
+        used += stub.len() + 1;
+        stub_from = at;
+    }
+
     let mut out = String::with_capacity(reserved + used);
-    out.push_str(&header(session, turns.len(), dropped, engine));
+    out.push_str(&header(
+        session,
+        turns,
+        excluded,
+        dropped,
+        record_ordinals,
+        engine,
+    ));
+    for stub in &stubs[stub_from..] {
+        out.push('\n');
+        out.push_str(stub);
+    }
     for section in &sections[dropped..] {
         out.push('\n');
         out.push_str(section);
@@ -203,44 +324,50 @@ fn render_transcript_with_generation(
         markdown: out,
         turns: kept as u32,
         truncated: dropped > 0 || clipped,
-        dropped,
     }
 }
 
-#[cfg(test)]
-fn render_transcript(
-    session: &CodeSession,
-    turns: &[CodeTurn],
-    events: &[SequencedCodeEvent],
-) -> RenderedTranscript {
-    render_transcript_with_generation(
-        Path::new("/private"),
-        session,
-        turns,
-        events,
-        uuid::Uuid::nil(),
-    )
+/// Decide which turns keep their image bytes, newest back, within
+/// [`MAX_FORK_ATTACHMENT_BYTES`].
+///
+/// A turn keeps all of its images or none of them, so a transcript entry
+/// never names half of what a message attached. The first turn that would
+/// overflow the budget stops retention: everything older is dropped with it,
+/// and the transcript says so per turn.
+fn plan_attachment_retention(turns: &[CodeTurn]) -> HashSet<CodeTurnId> {
+    let mut retained = HashSet::new();
+    let mut total: u64 = 0;
+    for turn in turns.iter().rev() {
+        if turn.attachments.is_empty() {
+            continue;
+        }
+        let Some(cost) = turn
+            .attachments
+            .iter()
+            .try_fold(0u64, |sum, image| sum.checked_add(image.byte_len))
+            .and_then(|sum| total.checked_add(sum))
+        else {
+            break;
+        };
+        if cost > MAX_FORK_ATTACHMENT_BYTES {
+            break;
+        }
+        total = cost;
+        retained.insert(turn.id);
+    }
+    retained
 }
 
 async fn materialize_attachments(
-    private_root: &Path,
-    scope: &mut super::scratch::ScratchScope,
+    scope: &super::scratch::ScratchScope,
     blobs: &dyn BlobStore,
-    session: &CodeSession,
     turns: &[CodeTurn],
-    generation: uuid::Uuid,
+    retained: &HashSet<CodeTurnId>,
 ) -> std::io::Result<()> {
-    let total = turns
-        .iter()
-        .flat_map(|turn| &turn.attachments)
-        .try_fold(0u64, |total, image| total.checked_add(image.byte_len))
-        .ok_or_else(|| std::io::Error::other("fork attachment byte length overflow"))?;
-    if total > MAX_FORK_ATTACHMENT_BYTES {
-        return Err(std::io::Error::other(format!(
-            "fork attachments exceed the {MAX_FORK_ATTACHMENT_BYTES}-byte limit"
-        )));
-    }
     for turn in turns {
+        if !retained.contains(&turn.id) {
+            continue;
+        }
         for (ordinal, image) in turn.attachments.iter().enumerate() {
             let bytes = blobs
                 .get(image.blob_id)
@@ -265,16 +392,6 @@ async fn materialize_attachments(
             }
             let name = fork_attachment_name(turn, ordinal, image);
             scope.publish(std::ffi::OsStr::new(&name), &bytes).await?;
-            debug_assert_eq!(
-                fork_attachment_path(private_root, session.id, generation, turn, ordinal, image),
-                private_root
-                    .join(FORKS_DIR)
-                    .join(session.id.to_string())
-                    .join(generation.to_string())
-                    .join(name)
-                    .display()
-                    .to_string()
-            );
         }
     }
     Ok(())
@@ -311,29 +428,74 @@ fn fork_attachment_path(
         .to_string()
 }
 
-/// The file's opening: where the transcript came from, and what is missing.
-fn header(session: &CodeSession, total: usize, dropped: usize, engine: &str) -> String {
+/// The file's opening: where the transcript came from, what it condenses,
+/// and where the full records are.
+fn header(
+    session: &CodeSession,
+    turns: &[CodeTurn],
+    excluded: usize,
+    reduced: usize,
+    record_ordinals: &HashSet<i64>,
+    engine: &str,
+) -> String {
+    let total = turns.len();
     let mut out = String::new();
     let _ = writeln!(out, "# Transcript of a {engine} session");
     out.push('\n');
-    let _ = writeln!(
+    let _ = write!(
         out,
-        "Recorded from the session started {}. {} turn{}{}.",
+        "Recorded from the session started {}. {} turn{}",
         session.created_at.to_rfc3339(),
         total,
         if total == 1 { "" } else { "s" },
-        if dropped > 0 {
-            format!(", of which the {dropped} oldest are not included here")
-        } else {
-            String::new()
-        }
     );
+    if excluded > 0 {
+        if let Some(at) = turns.last() {
+            let _ = write!(
+                out,
+                ", forked at the end of turn {}; the conversation continued for {} more turn{}, so the worktree may already hold work this transcript does not describe",
+                at.ordinal,
+                excluded,
+                if excluded == 1 { "" } else { "s" },
+            );
+        }
+    }
+    out.push_str(".\n");
+    if reduced > 0 {
+        let _ = writeln!(
+            out,
+            "The {reduced} oldest turn{} appear{} only as stubs here, or not at all, to fit this file's size cap.",
+            if reduced == 1 { "" } else { "s" },
+            if reduced == 1 { "s" } else { "" },
+        );
+    }
     out.push('\n');
     out.push_str(
-        "Messages and tool calls are as the engine reported them. Work a \
-         subagent did inside a `Task` call is summarized by that call rather \
-         than transcribed.\n",
+        "Messages and tool calls are as the engine reported them, condensed: a \
+         tool call is one line, and work a subagent did inside a `Task` call is \
+         summarized by that call.\n",
     );
+    if !record_ordinals.is_empty() {
+        out.push('\n');
+        out.push_str(
+            "Each turn also has a full record in this file's directory — \
+             `turn-0007.md` for turn 7 — holding complete tool output and \
+             subagent activity. Read a full record only when this summary is \
+             not enough.\n",
+        );
+        let missing = turns
+            .iter()
+            .filter(|turn| !record_ordinals.contains(&turn.ordinal))
+            .count();
+        if missing > 0 {
+            let _ = writeln!(
+                out,
+                "The {missing} oldest turn{} ha{} no record file; they were dropped to fit the record size cap.",
+                if missing == 1 { "" } else { "s" },
+                if missing == 1 { "s" } else { "ve" },
+            );
+        }
+    }
     out
 }
 
@@ -357,6 +519,32 @@ fn clip(section: &mut String, budget: usize) {
     }
 }
 
+/// One reduced turn: the ask's first line, and where the full record is.
+///
+/// The heading deliberately differs from a full section's `— you`, so the
+/// child can tell a stub from a turn it can read here.
+fn render_stub(turn: &CodeTurn, has_record: bool) -> String {
+    let asked = turn.user_input.trim();
+    let asked = if asked.is_empty() {
+        "_(empty)_".to_owned()
+    } else {
+        let flat = one_line(asked);
+        format!("“{flat}”")
+    };
+    let mut out = String::new();
+    let _ = writeln!(out, "## Turn {} (condensed)\n", turn.ordinal);
+    let _ = writeln!(
+        out,
+        "Asked: {asked}. {}",
+        if has_record {
+            format!("Full record: `{}`.", record_name(turn.ordinal))
+        } else {
+            "No record file was retained for this turn.".to_owned()
+        }
+    );
+    out
+}
+
 /// One turn: what the reader asked, then what the engine said and did.
 fn render_turn(
     private_root: &Path,
@@ -365,25 +553,18 @@ fn render_turn(
     events: &[SequencedCodeEvent],
     engine: &str,
     generation: uuid::Uuid,
+    images_retained: bool,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "## Turn {} — you\n", turn.ordinal);
-    if !turn.attachments.is_empty() {
-        let noun = if turn.attachments.len() == 1 {
-            "Image"
-        } else {
-            "Images"
-        };
-        let _ = writeln!(out, "{noun} attached to this message:");
-        for (ordinal, image) in turn.attachments.iter().enumerate() {
-            let _ = writeln!(
-                out,
-                "- `{}`",
-                fork_attachment_path(private_root, session_id, generation, turn, ordinal, image)
-            );
-        }
-        out.push('\n');
-    }
+    render_attachment_list(
+        &mut out,
+        private_root,
+        session_id,
+        turn,
+        generation,
+        images_retained,
+    );
     let asked = turn.user_input.trim();
     let _ = writeln!(
         out,
@@ -400,6 +581,42 @@ fn render_turn(
         let _ = writeln!(out, "{line}\n");
     }
     out
+}
+
+/// The attached-image list a turn section opens with, in both layers.
+fn render_attachment_list(
+    out: &mut String,
+    private_root: &Path,
+    session_id: tidebreak_core::CodeSessionId,
+    turn: &CodeTurn,
+    generation: uuid::Uuid,
+    images_retained: bool,
+) {
+    if turn.attachments.is_empty() {
+        return;
+    }
+    if !images_retained {
+        let _ = writeln!(
+            out,
+            "Images attached to this message were not retained: they fell \
+             outside the fork's attachment size cap.\n",
+        );
+        return;
+    }
+    let noun = if turn.attachments.len() == 1 {
+        "Image"
+    } else {
+        "Images"
+    };
+    let _ = writeln!(out, "{noun} attached to this message:");
+    for (ordinal, image) in turn.attachments.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "- `{}`",
+            fork_attachment_path(private_root, session_id, generation, turn, ordinal, image)
+        );
+    }
+    out.push('\n');
 }
 
 /// The engine's own messages and tool calls for one turn, in journal order.
@@ -468,11 +685,7 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
                 *line = format!(
                     "{}{}",
                     tool_line(&name, &started, detail.as_ref()),
-                    match outcome {
-                        ToolOutcome::Succeeded => "",
-                        ToolOutcome::Failed => " (failed)",
-                        ToolOutcome::Denied => " (denied)",
-                    }
+                    outcome_suffix(outcome)
                 );
             }
             CodeEvent::TurnFailed { error } => {
@@ -483,6 +696,283 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
         }
     }
     lines
+}
+
+/// The full-record files for a fork, newest turns first when over budget.
+struct RenderedRecords {
+    /// `(ordinal, markdown)` for each record that fit, oldest first.
+    files: Vec<(i64, String)>,
+    /// The ordinals in `files`, for the summary's stubs and header.
+    ordinals: HashSet<i64>,
+}
+
+/// Render every turn's full record, kept from the newest back within
+/// [`MAX_RECORD_TOTAL_BYTES`], each clipped to [`MAX_RECORD_FILE_BYTES`].
+fn render_turn_records(
+    private_root: &Path,
+    session: &CodeSession,
+    turns: &[CodeTurn],
+    events: &[SequencedCodeEvent],
+    engine: &str,
+    generation: uuid::Uuid,
+    retained_images: &HashSet<CodeTurnId>,
+) -> RenderedRecords {
+    let started: HashSet<CodeTurnId> = events
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            CodeEvent::TurnStarted { turn_id } => Some(*turn_id),
+            _ => None,
+        })
+        .collect();
+
+    let mut files: Vec<(i64, String)> = Vec::with_capacity(turns.len());
+    let mut total = 0usize;
+    for turn in turns.iter().rev() {
+        let mut record = render_turn_record(
+            private_root,
+            session,
+            turn,
+            events,
+            engine,
+            generation,
+            retained_images.contains(&turn.id),
+            started.contains(&turn.id),
+        );
+        clip(&mut record, MAX_RECORD_FILE_BYTES);
+        if total + record.len() > MAX_RECORD_TOTAL_BYTES {
+            break;
+        }
+        total += record.len();
+        files.push((turn.ordinal, record));
+    }
+    files.reverse();
+    let ordinals = files.iter().map(|(ordinal, _)| *ordinal).collect();
+    RenderedRecords { files, ordinals }
+}
+
+/// One turn's full record: the complete ask, then everything the journal
+/// holds for the turn — messages, reasoning, tool calls with their output
+/// previews, and subagent activity nested under the `Task` call that ran it.
+#[allow(clippy::too_many_arguments)]
+fn render_turn_record(
+    private_root: &Path,
+    session: &CodeSession,
+    turn: &CodeTurn,
+    events: &[SequencedCodeEvent],
+    engine: &str,
+    generation: uuid::Uuid,
+    images_retained: bool,
+    events_in_window: bool,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Turn {} — full record\n", turn.ordinal);
+    let _ = writeln!(out, "## Turn {} — you\n", turn.ordinal);
+    render_attachment_list(
+        &mut out,
+        private_root,
+        session.id,
+        turn,
+        generation,
+        images_retained,
+    );
+    let asked = turn.user_input.trim();
+    let _ = writeln!(
+        out,
+        "{}\n",
+        if asked.is_empty() { "_(empty)_" } else { asked }
+    );
+
+    if !events_in_window {
+        let _ = writeln!(
+            out,
+            "_The journal's replay window no longer holds this turn's events; \
+             only the request above survives._",
+        );
+        return out;
+    }
+    let blocks = record_blocks(turn.id, events);
+    if blocks.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "## Turn {} — {engine}\n", turn.ordinal);
+    for block in blocks {
+        let _ = writeln!(out, "{block}\n");
+    }
+    out
+}
+
+/// The engine's work for one turn, at full fidelity, in journal order.
+///
+/// Unlike [`turn_lines`], subagent events stay — indented under their `Task`
+/// call — tool previews ride their call, and reasoning runs are kept as
+/// quoted blocks.
+fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut inside = false;
+    let mut reasoning: Vec<&str> = Vec::new();
+    // An open call remembers its block, its opening detail, and its depth, so
+    // the completion can rewrite the same block with the outcome and preview.
+    let mut open: Vec<(String, usize, String, ToolDetail, bool)> = Vec::new();
+
+    fn flush_reasoning(blocks: &mut Vec<String>, reasoning: &mut Vec<&str>) {
+        if reasoning.is_empty() {
+            return;
+        }
+        let text = reasoning.join("");
+        *reasoning = Vec::new();
+        if text.trim().is_empty() {
+            return;
+        }
+        let mut block = String::from("> _Thinking:_");
+        for line in text.trim().lines() {
+            block.push_str("\n> ");
+            block.push_str(line);
+        }
+        blocks.push(block);
+    }
+
+    for entry in events {
+        if let CodeEvent::TurnStarted { turn_id: started } = &entry.event {
+            if inside {
+                break;
+            }
+            inside = *started == turn_id;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if let CodeEvent::ReasoningDelta { text } = &entry.event {
+            reasoning.push(text);
+            continue;
+        }
+        flush_reasoning(&mut blocks, &mut reasoning);
+        match &entry.event {
+            CodeEvent::AssistantMessage {
+                text,
+                parent_call_id,
+            } => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if parent_call_id.is_none() {
+                    blocks.push(text.trim().to_owned());
+                } else {
+                    blocks.push(format!(
+                        "  - The subagent said:\n{}",
+                        indent_block(text.trim(), "    ")
+                    ));
+                }
+            }
+            CodeEvent::UserSteered { text } => {
+                if !text.trim().is_empty() {
+                    blocks.push(format!("**You, mid-turn:** {}", text.trim()));
+                }
+            }
+            CodeEvent::ToolStarted {
+                call_id,
+                name,
+                detail,
+                parent_call_id,
+            } => {
+                let nested = parent_call_id.is_some();
+                open.push((
+                    call_id.clone(),
+                    blocks.len(),
+                    name.clone(),
+                    detail.clone(),
+                    nested,
+                ));
+                let line = tool_line(name, detail, None);
+                blocks.push(if nested { format!("  {line}") } else { line });
+            }
+            CodeEvent::ToolCompleted {
+                call_id,
+                outcome,
+                preview,
+                detail,
+                ..
+            } => {
+                let Some(found) = open.iter().position(|(id, ..)| id == call_id) else {
+                    continue;
+                };
+                let (_, at, name, started, nested) = open.remove(found);
+                let Some(block) = blocks.get_mut(at) else {
+                    continue;
+                };
+                let indent = if nested { "  " } else { "" };
+                let mut line = format!(
+                    "{indent}{}{}",
+                    tool_line(&name, &started, detail.as_ref()),
+                    outcome_suffix(outcome)
+                );
+                if !preview.trim().is_empty() {
+                    line.push('\n');
+                    line.push_str(&fenced(preview.trim_end(), &format!("{indent}  ")));
+                }
+                *block = line;
+            }
+            CodeEvent::HarnessNotice { level, message } => {
+                blocks.push(format!(
+                    "**Engine notice ({}):** {}",
+                    notice_level(*level),
+                    message.trim()
+                ));
+            }
+            CodeEvent::TurnFailed { error } => {
+                blocks.push(format!("**The turn failed:** {}", error.message.trim()));
+            }
+            CodeEvent::TurnInterrupted => {
+                blocks.push("**The turn was interrupted.**".to_owned());
+            }
+            _ => {}
+        }
+    }
+    flush_reasoning(&mut blocks, &mut reasoning);
+    blocks
+}
+
+fn outcome_suffix(outcome: &ToolOutcome) -> &'static str {
+    match outcome {
+        ToolOutcome::Succeeded => "",
+        ToolOutcome::Failed => " (failed)",
+        ToolOutcome::Denied => " (denied)",
+    }
+}
+
+fn notice_level(level: HarnessNoticeLevel) -> &'static str {
+    match level {
+        HarnessNoticeLevel::Info => "info",
+        HarnessNoticeLevel::Warning => "warning",
+        HarnessNoticeLevel::Error => "error",
+    }
+}
+
+/// A preview as a fenced block, indented to sit under its call's bullet.
+///
+/// The fence outgrows any backtick run inside the content, so a preview that
+/// itself contains fenced code cannot break out of the block.
+fn fenced(content: &str, indent: &str) -> String {
+    let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest_run + 1).max(3));
+    let mut out = format!("{indent}{fence}");
+    for line in content.lines() {
+        out.push('\n');
+        out.push_str(indent);
+        out.push_str(line);
+    }
+    out.push('\n');
+    out.push_str(indent);
+    out.push_str(&fence);
+    out
+}
+
+/// Prefix every line of a block, so nested content stays under its bullet.
+fn indent_block(text: &str, indent: &str) -> String {
+    text.lines()
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A tool call as one line: what it was, and what it was pointed at.
@@ -586,6 +1076,27 @@ mod tests {
             .collect()
     }
 
+    /// Render the condensed transcript as if every turn had a record file and
+    /// every image was retained, which is what most summary tests care about.
+    fn render_transcript(
+        session: &CodeSession,
+        turns: &[CodeTurn],
+        events: &[SequencedCodeEvent],
+    ) -> RenderedTranscript {
+        let records: HashSet<i64> = turns.iter().map(|turn| turn.ordinal).collect();
+        let retained: HashSet<CodeTurnId> = turns.iter().map(|turn| turn.id).collect();
+        render_transcript_with_generation(
+            Path::new("/private"),
+            session,
+            turns,
+            0,
+            events,
+            uuid::Uuid::nil(),
+            &records,
+            &retained,
+        )
+    }
+
     /// The contract the child reads: its own turns, in order, and nobody
     /// else's. Scoping by `TurnStarted` boundaries is the only thing keeping
     /// turn two's work out of turn one's section.
@@ -635,13 +1146,16 @@ mod tests {
         assert!(markdown.contains("Looking at the test now."));
         // The completion's detail names the command the start could not.
         assert!(markdown.contains("- `Bash` — cargo test -p auth (failed)"));
+        // The summary stays condensed: the tool's output lives in the record.
+        assert!(!markdown.contains("1 failed"));
         // Turn two's message must not have leaked into turn one's section.
         let turn_two = markdown.find("## Turn 2 — you").expect("turn two heading");
         assert!(markdown.find("Pushed.").expect("second message") > turn_two);
     }
 
     /// Subagent chatter belongs to the subagent. The parent's `Task` call is
-    /// what the child needs to see, not the thousand lines inside it.
+    /// what the child needs to see in the summary, not the thousand lines
+    /// inside it.
     #[test]
     fn leaves_subagent_events_to_the_task_call_that_ran_them() {
         let session = session();
@@ -693,10 +1207,59 @@ mod tests {
         assert!(markdown.contains("**The turn failed:** the engine exited"));
     }
 
-    /// Over budget, the oldest turns go and the header says how many. The
-    /// child needs the end of the conversation, not the start of it.
+    /// The fork point is a turn boundary: later turns leave the handoff, and
+    /// their count survives so the header can warn about the shared worktree.
     #[test]
-    fn drops_the_oldest_turns_to_fit_and_says_so() {
+    fn cuts_at_a_turn_and_counts_the_excluded_tail() {
+        let session = session();
+        let turns: Vec<CodeTurn> = (1..=5)
+            .map(|ordinal| turn(session.id, ordinal, "work"))
+            .collect();
+
+        let cut = cut_at(&turns, Some(turns[1].id)).expect("a known turn");
+        assert_eq!(cut.turns.len(), 2);
+        assert_eq!(cut.excluded, 3);
+
+        let whole = cut_at(&turns, None).expect("no fork point");
+        assert_eq!(whole.turns.len(), 5);
+        assert_eq!(whole.excluded, 0);
+
+        assert!(cut_at(&turns, Some(CodeTurnId::new())).is_none());
+    }
+
+    /// The header names the fork point and the tail that ran after it: the
+    /// worktree is shared, so the child must know the transcript is not the
+    /// whole story of the files it sees.
+    #[test]
+    fn says_when_the_conversation_continued_past_the_fork_point() {
+        let session = session();
+        let turns: Vec<CodeTurn> = (1..=2)
+            .map(|ordinal| turn(session.id, ordinal, "work"))
+            .collect();
+        let records: HashSet<i64> = turns.iter().map(|turn| turn.ordinal).collect();
+
+        let markdown = render_transcript_with_generation(
+            Path::new("/private"),
+            &session,
+            &turns,
+            3,
+            &[],
+            uuid::Uuid::nil(),
+            &records,
+            &HashSet::new(),
+        )
+        .markdown;
+
+        assert!(markdown.contains("forked at the end of turn 2"));
+        assert!(markdown.contains("continued for 3 more turns"));
+        assert!(!markdown.contains("## Turn 3"));
+    }
+
+    /// Over budget, the oldest turns fall back to stubs that name their
+    /// record files, and the header says how many were reduced. The child
+    /// needs the end of the conversation in full, not the start of it.
+    #[test]
+    fn reduces_the_oldest_turns_to_stubs_and_says_so() {
         let session = session();
         let bulk = "x".repeat(200 * 1024);
         let turns: Vec<CodeTurn> = (1..=5)
@@ -706,9 +1269,40 @@ mod tests {
         let rendered = render_transcript(&session, &turns, &[]);
         assert!(rendered.truncated);
         assert_eq!(rendered.turns, 2);
-        assert!(rendered.markdown.contains("the 3 oldest are not included"));
+        assert!(rendered.markdown.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(rendered.markdown.contains("The 3 oldest turns appear"));
         assert!(rendered.markdown.contains("## Turn 5 — you"));
         assert!(!rendered.markdown.contains("## Turn 1 — you"));
+        // The stub points the child at the full record it still has.
+        assert!(rendered.markdown.contains("## Turn 1 (condensed)"));
+        assert!(rendered.markdown.contains("`turn-0001.md`"));
+    }
+
+    /// A stub must not promise a record that was never written.
+    #[test]
+    fn a_stub_says_when_its_record_was_dropped() {
+        let session = session();
+        let bulk = "x".repeat(300 * 1024);
+        let turns: Vec<CodeTurn> = (1..=3)
+            .map(|ordinal| turn(session.id, ordinal, &bulk))
+            .collect();
+        let records: HashSet<i64> = [3].into_iter().collect();
+
+        let markdown = render_transcript_with_generation(
+            Path::new("/private"),
+            &session,
+            &turns,
+            0,
+            &[],
+            uuid::Uuid::nil(),
+            &records,
+            &HashSet::new(),
+        )
+        .markdown;
+
+        assert!(markdown.contains("## Turn 1 (condensed)"));
+        assert!(markdown.contains("No record file was retained"));
+        assert!(!markdown.contains("`turn-0001.md`"));
     }
 
     /// The cap bounds the file, not the turns inside it, so the header has to
@@ -773,93 +1367,288 @@ mod tests {
         );
     }
 
-    /// A session can be forked again while the last child still has the file
-    /// open. Every read has to land on a whole document, which is what the
-    /// stage-then-rename is for — a plain write truncates in place first.
-    #[tokio::test]
-    async fn a_reader_never_catches_a_re_fork_mid_write() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let private = tempfile::tempdir().expect("tempdir");
-        let blob_root = tempfile::tempdir().expect("blob tempdir");
-        let blobs = FsBlobStore::new(blob_root.path());
+    /// The record keeps what the summary condenses away: tool output, the
+    /// subagent's own calls and words, and the engine's reasoning.
+    #[test]
+    fn a_record_holds_previews_subagent_work_and_reasoning() {
         let session = session();
-        let short = vec![turn(session.id, 1, "hello")];
-        let long: Vec<CodeTurn> = (1..=20)
-            .map(|ordinal| turn(session.id, ordinal, &"x".repeat(8 * 1024)))
-            .collect();
-        write_transcript(private.path(), &blobs, &session, &short, &[])
-            .await
-            .expect("first write");
-        let path = private
-            .path()
-            .join(format!("{FORKS_DIR}/{}.md", session.id));
+        let only = turn(session.id, 1, "audit the crate");
+        let events = seq(vec![
+            CodeEvent::TurnStarted { turn_id: only.id },
+            CodeEvent::ReasoningDelta {
+                text: "the tests look".to_owned(),
+            },
+            CodeEvent::ReasoningDelta {
+                text: " flaky".to_owned(),
+            },
+            CodeEvent::ToolStarted {
+                call_id: "task-1".to_owned(),
+                name: "Task".to_owned(),
+                detail: ToolDetail::Other {
+                    summary: "audit".to_owned(),
+                },
+                parent_call_id: None,
+            },
+            CodeEvent::ToolStarted {
+                call_id: "sub-1".to_owned(),
+                name: "Bash".to_owned(),
+                detail: ToolDetail::Command {
+                    cmd: "cargo tree".to_owned(),
+                    cwd: String::new(),
+                },
+                parent_call_id: Some("task-1".to_owned()),
+            },
+            CodeEvent::ToolCompleted {
+                call_id: "sub-1".to_owned(),
+                outcome: ToolOutcome::Succeeded,
+                preview: "tidebreak-core v0.1.0".to_owned(),
+                detail: None,
+                parent_call_id: Some("task-1".to_owned()),
+            },
+            CodeEvent::AssistantMessage {
+                text: "two crates look unused".to_owned(),
+                parent_call_id: Some("task-1".to_owned()),
+            },
+            CodeEvent::ToolCompleted {
+                call_id: "task-1".to_owned(),
+                outcome: ToolOutcome::Succeeded,
+                preview: "audit done".to_owned(),
+                detail: None,
+                parent_call_id: None,
+            },
+            CodeEvent::UserSteered {
+                text: "skip the benches".to_owned(),
+            },
+        ]);
 
-        let done = Arc::new(AtomicBool::new(false));
-        let reader = {
-            let path = path.clone();
-            let done = Arc::clone(&done);
-            tokio::task::spawn_blocking(move || {
-                let mut reads = 0usize;
-                while !done.load(Ordering::Relaxed) {
-                    let seen = std::fs::read_to_string(&path).expect("the file is always there");
-                    assert!(
-                        seen.starts_with("# Transcript of a Claude Code session"),
-                        "a reader caught {} bytes mid-write",
-                        seen.len()
-                    );
-                    reads += 1;
-                }
-                reads
-            })
-        };
+        let record = render_turn_record(
+            Path::new("/private"),
+            &session,
+            &only,
+            &events,
+            "Claude Code",
+            uuid::Uuid::nil(),
+            false,
+            true,
+        );
 
-        for _ in 0..20 {
-            for turns in [&long, &short] {
-                write_transcript(private.path(), &blobs, &session, turns, &[])
-                    .await
-                    .expect("re-fork");
-            }
-        }
-        done.store(true, Ordering::Relaxed);
-        assert!(reader.await.expect("reader") > 0, "the reader never ran");
-
-        // Nothing staged is left behind for the child engine to trip over.
-        let left: Vec<String> = std::fs::read_dir(private.path().join(FORKS_DIR))
-            .expect("forks dir")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
-            .collect();
-        assert_eq!(left, vec![format!("{}.md", session.id)]);
+        assert!(record.contains("# Turn 1 — full record"));
+        assert!(record.contains("> _Thinking:_\n> the tests look flaky"));
+        assert!(record.contains("  - `Bash` — cargo tree"));
+        assert!(record.contains("tidebreak-core v0.1.0"));
+        assert!(record.contains("  - The subagent said:\n    two crates look unused"));
+        assert!(record.contains("audit done"));
+        assert!(record.contains("**You, mid-turn:** skip the benches"));
     }
 
-    /// The child engine reads an absolute path outside every Git worktree.
+    /// A preview that carries its own fences must not break out of the block
+    /// the record wraps it in.
+    #[test]
+    fn a_record_preview_cannot_escape_its_fence() {
+        let session = session();
+        let only = turn(session.id, 1, "show me");
+        let events = seq(vec![
+            CodeEvent::TurnStarted { turn_id: only.id },
+            CodeEvent::ToolStarted {
+                call_id: "call-1".to_owned(),
+                name: "Read".to_owned(),
+                detail: ToolDetail::Other {
+                    summary: "README".to_owned(),
+                },
+                parent_call_id: None,
+            },
+            CodeEvent::ToolCompleted {
+                call_id: "call-1".to_owned(),
+                outcome: ToolOutcome::Succeeded,
+                preview: "````\nfour ticks\n````".to_owned(),
+                detail: None,
+                parent_call_id: None,
+            },
+        ]);
+
+        let record = render_turn_record(
+            Path::new("/private"),
+            &session,
+            &only,
+            &events,
+            "Claude Code",
+            uuid::Uuid::nil(),
+            false,
+            true,
+        );
+
+        let fence = "`````";
+        let opens = record.matches(fence).count();
+        assert_eq!(opens, 2, "the wrapping fence must outgrow the content");
+    }
+
+    /// A turn whose events fell out of the bounded replay window still gets a
+    /// record for its ask, and the record says why the rest is missing.
+    #[test]
+    fn a_record_says_when_the_journal_window_dropped_its_events() {
+        let session = session();
+        let old = turn(session.id, 1, "the first ask");
+        let record = render_turn_record(
+            Path::new("/private"),
+            &session,
+            &old,
+            &[],
+            "Claude Code",
+            uuid::Uuid::nil(),
+            false,
+            false,
+        );
+
+        assert!(record.contains("the first ask"));
+        assert!(record.contains("replay window no longer holds"));
+    }
+
+    /// Records are kept from the newest turn back within the total budget, so
+    /// an enormous session loses its oldest records rather than its newest.
+    #[test]
+    fn drops_the_oldest_records_over_the_total_budget() {
+        let session = session();
+        let bulk = "x".repeat(MAX_RECORD_FILE_BYTES * 2);
+        let turns: Vec<CodeTurn> = (1..=40)
+            .map(|ordinal| turn(session.id, ordinal, &bulk))
+            .collect();
+
+        let records = render_turn_records(
+            Path::new("/private"),
+            &session,
+            &turns,
+            &[],
+            "Claude Code",
+            uuid::Uuid::nil(),
+            &HashSet::new(),
+        );
+
+        assert!(records.files.len() < turns.len());
+        assert!(records.ordinals.contains(&40));
+        assert!(!records.ordinals.contains(&1));
+        let total: usize = records.files.iter().map(|(_, text)| text.len()).sum();
+        assert!(total <= MAX_RECORD_TOTAL_BYTES);
+        for (_, text) in &records.files {
+            assert!(text.len() <= MAX_RECORD_FILE_BYTES);
+        }
+    }
+
+    /// The child engine reads absolute paths outside every Git worktree: the
+    /// condensed transcript, and one record per turn next to it.
     #[tokio::test]
-    async fn writes_the_file_into_private_storage() {
+    async fn writes_the_fork_directory_into_private_storage() {
         let private = tempfile::tempdir().expect("tempdir");
         let blob_root = tempfile::tempdir().expect("blob tempdir");
         let blobs = FsBlobStore::new(blob_root.path());
         let session = session();
-        let only = turn(session.id, 1, "hello");
+        let turns = vec![
+            turn(session.id, 1, "hello"),
+            turn(session.id, 2, "and again"),
+        ];
 
-        let written = write_transcript(private.path(), &blobs, &session, &[only], &[])
-            .await
-            .expect("write");
+        let written = write_transcript(
+            private.path(),
+            &blobs,
+            &session,
+            ForkCut {
+                turns: &turns,
+                excluded: 0,
+            },
+            &[],
+        )
+        .await
+        .expect("write");
 
-        assert_eq!(
-            written.path,
-            private
-                .path()
-                .join(FORKS_DIR)
-                .join(format!("{}.md", session.id))
-                .display()
-                .to_string()
-        );
-        assert_eq!(written.turns, 1);
+        assert!(written.path.ends_with(SUMMARY_NAME));
+        assert!(written.path.starts_with(&written.dir));
+        assert_eq!(written.turns, 2);
+        assert_eq!(written.total_turns, 2);
+        assert_eq!(written.at_turn_ordinal, None);
         assert!(!written.truncated);
         let on_disk = std::fs::read_to_string(&written.path).expect("read");
         assert_eq!(written.byte_len, on_disk.len() as u64);
         assert!(on_disk.contains("hello"));
+        let dir = Path::new(&written.dir);
+        assert!(dir.join("turn-0001.md").is_file());
+        assert!(dir.join("turn-0002.md").is_file());
+    }
+
+    /// A fork at an earlier turn keeps later turns — and their records — out
+    /// of the handoff entirely, and reports the fork point.
+    #[tokio::test]
+    async fn a_fork_point_keeps_later_turns_out_of_the_directory() {
+        let private = tempfile::tempdir().expect("tempdir");
+        let blob_root = tempfile::tempdir().expect("blob tempdir");
+        let blobs = FsBlobStore::new(blob_root.path());
+        let session = session();
+        let turns: Vec<CodeTurn> = (1..=3)
+            .map(|ordinal| turn(session.id, ordinal, "work"))
+            .collect();
+        let cut = cut_at(&turns, Some(turns[0].id)).expect("known turn");
+
+        let written = write_transcript(private.path(), &blobs, &session, cut, &[])
+            .await
+            .expect("write");
+
+        assert_eq!(written.turns, 1);
+        assert_eq!(written.total_turns, 1);
+        assert_eq!(written.at_turn_ordinal, Some(1));
+        let dir = Path::new(&written.dir);
+        assert!(dir.join("turn-0001.md").is_file());
+        assert!(!dir.join("turn-0002.md").exists());
+        let markdown = std::fs::read_to_string(&written.path).expect("read");
+        assert!(markdown.contains("forked at the end of turn 1"));
+    }
+
+    /// A session can be forked again while the last child still reads its
+    /// handoff. Generations are immutable: a re-fork writes a fresh directory
+    /// and leaves every earlier one untouched.
+    #[tokio::test]
+    async fn a_refork_writes_a_new_generation_and_keeps_the_old() {
+        let private = tempfile::tempdir().expect("tempdir");
+        let blob_root = tempfile::tempdir().expect("blob tempdir");
+        let blobs = FsBlobStore::new(blob_root.path());
+        let session = session();
+        let first_turns = vec![turn(session.id, 1, "hello")];
+        let second_turns = vec![
+            turn(session.id, 1, "hello"),
+            turn(session.id, 2, "more work"),
+        ];
+
+        let first = write_transcript(
+            private.path(),
+            &blobs,
+            &session,
+            ForkCut {
+                turns: &first_turns,
+                excluded: 0,
+            },
+            &[],
+        )
+        .await
+        .expect("first write");
+        let second = write_transcript(
+            private.path(),
+            &blobs,
+            &session,
+            ForkCut {
+                turns: &second_turns,
+                excluded: 0,
+            },
+            &[],
+        )
+        .await
+        .expect("second write");
+
+        assert_ne!(first.dir, second.dir);
+        let earlier = std::fs::read_to_string(&first.path).expect("earlier generation");
+        assert!(earlier.contains("hello"));
+        assert!(!earlier.contains("more work"));
+        let session_dir = private.path().join(FORKS_DIR).join(session.id.to_string());
+        assert_eq!(
+            std::fs::read_dir(session_dir).expect("session dir").count(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -892,10 +1681,20 @@ mod tests {
             .await
             .unwrap();
         only.attachments = vec![first, second];
+        let turns = vec![only];
 
-        let written = write_transcript(private.path(), blobs.as_ref(), &session, &[only], &[])
-            .await
-            .unwrap();
+        let written = write_transcript(
+            private.path(),
+            blobs.as_ref(),
+            &session,
+            ForkCut {
+                turns: &turns,
+                excluded: 0,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
 
         let markdown = std::fs::read_to_string(written.path).unwrap();
         let paths: Vec<&str> = markdown
@@ -910,103 +1709,59 @@ mod tests {
         assert!(!private.path().join("attachments").exists());
     }
 
+    /// Images over the retention cap no longer fail the fork: the newest
+    /// turns keep their bytes, older ones lose them, and both layers say so
+    /// where the image would have been listed.
     #[tokio::test]
-    async fn a_refork_keeps_the_prior_image_generation_readable() {
+    async fn drops_the_oldest_images_over_the_retention_cap() {
         let private = tempfile::tempdir().unwrap();
         let blob_root = tempfile::tempdir().unwrap();
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(blob_root.path()));
         let session = session();
-        let first_bytes = b"\x89PNG\r\n\x1a\nfirst".to_vec();
-        let first_image = ImageRef {
-            blob_id: DocumentBlob::from_bytes(&first_bytes).id,
+        let bytes = b"\x89PNG\r\n\x1a\nimage".to_vec();
+        let real = ImageRef {
+            blob_id: DocumentBlob::from_bytes(&bytes).id,
             media_type: ImageMediaType::Png,
             width: 1,
             height: 1,
-            byte_len: first_bytes.len() as u64,
+            byte_len: bytes.len() as u64,
         };
-        blobs
-            .put(first_image.blob_id, first_bytes.clone())
-            .await
-            .unwrap();
-        let mut first_turn = turn(session.id, 1, "look at the first image");
-        first_turn.attachments = vec![first_image];
-        let first_written =
-            write_transcript(private.path(), blobs.as_ref(), &session, &[first_turn], &[])
-                .await
-                .unwrap();
-        let first_markdown = std::fs::read_to_string(first_written.path).unwrap();
-        let first_path = first_markdown
-            .lines()
-            .find_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
-            .unwrap()
-            .to_owned();
-        assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
-
-        let second_bytes = b"GIF89asecond".to_vec();
-        let second_image = ImageRef {
-            blob_id: DocumentBlob::from_bytes(&second_bytes).id,
-            media_type: ImageMediaType::Gif,
+        blobs.put(real.blob_id, bytes.clone()).await.unwrap();
+        // The old turn's image claims (nearly) the whole budget, so retaining
+        // the newest turn leaves no room for it.
+        let huge = ImageRef {
+            blob_id: DocumentBlob::from_bytes(b"never read").id,
+            media_type: ImageMediaType::Png,
             width: 1,
             height: 1,
-            byte_len: second_bytes.len() as u64,
+            byte_len: MAX_FORK_ATTACHMENT_BYTES,
         };
-        blobs
-            .put(second_image.blob_id, second_bytes.clone())
-            .await
-            .unwrap();
-        let mut second_turn = turn(session.id, 2, "look at the second image");
-        second_turn.attachments = vec![second_image];
-        let second_written = write_transcript(
+        let mut old = turn(session.id, 1, "look at this");
+        old.attachments = vec![huge];
+        let mut new = turn(session.id, 2, "and this");
+        new.attachments = vec![real];
+        let turns = vec![old, new];
+
+        let written = write_transcript(
             private.path(),
             blobs.as_ref(),
             &session,
-            &[second_turn],
+            ForkCut {
+                turns: &turns,
+                excluded: 0,
+            },
             &[],
         )
         .await
         .unwrap();
-        let second_markdown = std::fs::read_to_string(second_written.path).unwrap();
-        let second_path = second_markdown
+
+        let markdown = std::fs::read_to_string(&written.path).unwrap();
+        assert!(markdown.contains("were not retained"));
+        let retained: Vec<&str> = markdown
             .lines()
-            .find_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
-            .unwrap();
-
-        assert_ne!(first_path, second_path);
-        assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
-        assert_eq!(std::fs::read(second_path).unwrap(), second_bytes);
-        let session_dir = private.path().join(FORKS_DIR).join(session.id.to_string());
-        assert_eq!(std::fs::read_dir(session_dir).unwrap().count(), 2);
-    }
-
-    #[tokio::test]
-    async fn rejects_an_attachment_generation_over_the_byte_limit() {
-        let private = tempfile::tempdir().unwrap();
-        let blob_root = tempfile::tempdir().unwrap();
-        let blobs = FsBlobStore::new(blob_root.path());
-        let session = session();
-        let bytes = b"\x89PNG\r\n\x1a\nimage";
-        let image = ImageRef {
-            blob_id: DocumentBlob::from_bytes(bytes).id,
-            media_type: ImageMediaType::Png,
-            width: 1,
-            height: 1,
-            byte_len: MAX_FORK_ATTACHMENT_BYTES + 1,
-        };
-        let mut only = turn(session.id, 1, "look");
-        only.attachments = vec![image];
-
-        let error = match write_transcript(private.path(), &blobs, &session, &[only], &[]).await {
-            Ok(_) => panic!("an over-limit generation must fail"),
-            Err(error) => error,
-        };
-
-        assert!(error.to_string().contains("fork attachments exceed"));
-        let session_dir = private.path().join(FORKS_DIR).join(session.id.to_string());
-        let retained = if session_dir.exists() {
-            std::fs::read_dir(session_dir).unwrap().count()
-        } else {
-            0
-        };
-        assert_eq!(retained, 0);
+            .filter_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
+            .collect();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(std::fs::read(retained[0]).unwrap(), bytes);
     }
 }
