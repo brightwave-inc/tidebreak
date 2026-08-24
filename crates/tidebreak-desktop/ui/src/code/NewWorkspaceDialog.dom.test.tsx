@@ -22,12 +22,14 @@ import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
-import type { ParsedHarnessModel } from "./parsers";
+import type { CodeTurnSubmission, ParsedHarnessModel } from "./parsers";
 
 const toastError = vi.hoisted(() => vi.fn());
+const toastSuccess = vi.hoisted(() => vi.fn());
 vi.mock("sonner", () => ({
   toast: {
     error: toastError,
+    success: toastSuccess,
   },
 }));
 
@@ -39,6 +41,7 @@ afterEach(() => {
     pendingComposerPrompt: null,
   });
   toastError.mockReset();
+  toastSuccess.mockReset();
 });
 
 const CAPS = {
@@ -105,6 +108,23 @@ function session(workspaceId: string, kind: HarnessKind, createdAt: string) {
     unrecognized_event_count: 0,
     created_at: createdAt,
   } as unknown as CodeSessionSnapshot;
+}
+
+function claudeModels() {
+  return vi.fn(async () => ({
+    kind: "claude_code" as const,
+    models: [
+      {
+        id: "sonnet",
+        label: "Sonnet",
+        default: true,
+        reasoning_efforts: [],
+        fast_mode: false,
+      },
+    ],
+    reasoning_efforts: [],
+    fast_mode: false,
+  }));
 }
 
 function app(client: Partial<AppContextValue["client"]>): AppContextValue {
@@ -222,13 +242,16 @@ describe("NewWorkspaceDialog", () => {
       { initialUrl: "/code" },
     );
 
-    const repoField = screen.getByRole("combobox", { name: "Repo" });
-    expect(repoField).toHaveTextContent("tidebreak");
-    expect(repoField).toHaveFocus();
-    expect(repoField).toBeEnabled();
-    expect(screen.getByRole("combobox", { name: "Harness" })).toHaveTextContent(
-      "Codex CLI",
+    // Prompt-centric: the message is where focus lands, not a settings field.
+    expect(
+      screen.getByRole("textbox", { name: "First message" }),
+    ).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Repo" })).toHaveTextContent(
+      "tidebreak",
     );
+    expect(
+      screen.getByRole("button", { name: "Harness: Codex CLI" }),
+    ).toBeEnabled();
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: "Model: GPT 5.6 Sol" }),
@@ -236,8 +259,8 @@ describe("NewWorkspaceDialog", () => {
     );
     // Allow is the default where the engine honors it, and it says so.
     expect(
-      screen.getByRole("combobox", { name: "Permission mode" }),
-    ).toHaveTextContent("Allow all");
+      screen.getByRole("button", { name: "Permissions: Allow all" }),
+    ).toBeEnabled();
     expect(
       screen.getByText(/every action runs without asking/),
     ).toBeInTheDocument();
@@ -263,12 +286,13 @@ describe("NewWorkspaceDialog", () => {
         repoId: "repo-new",
         harness: "codex",
         modelsByHarness: { codex: "gpt-5.6-sol" },
+        permissionMode: "allow",
       }),
     );
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
   });
 
-  it("lists repo, harness, model, then starting prompt, then the rest", async () => {
+  it("creates on Enter in the message; Shift+Enter stays a newline", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
       repos,
@@ -277,23 +301,20 @@ describe("NewWorkspaceDialog", () => {
         notices: [],
       } as never,
     });
+    const createCodeWorkspace = vi.fn(async () =>
+      workspace("ws-enter", "repo-new", "2026-08-20T00:00:00.000Z"),
+    );
     await renderWithRouter(
       <AppContextProvider
         value={app({
-          listCodeHarnessModels: vi.fn(async () => ({
-            kind: "claude_code" as const,
-            models: [
-              {
-                id: "sonnet",
-                label: "Sonnet",
-                default: true,
-                reasoning_efforts: [],
-                fast_mode: false,
-              },
-            ],
-            reasoning_efforts: [],
-            fast_mode: false,
-          })),
+          createCodeWorkspace,
+          createCodeSession: vi.fn(async () =>
+            session("ws-enter", "claude_code", "2026-08-20T00:00:00.000Z"),
+          ),
+          submitCodeTurn: vi.fn(
+            async () => ({ kind: "turn" }) as unknown as CodeTurnSubmission,
+          ),
+          listCodeHarnessModels: claudeModels(),
         })}
       >
         <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
@@ -301,25 +322,15 @@ describe("NewWorkspaceDialog", () => {
       { initialUrl: "/code" },
     );
 
-    const labels = [
-      ...screen
-        .getByRole("dialog")
-        .querySelectorAll(
-          "form > div > span.font-medium, form > label > span.font-medium",
-        ),
-    ].map((el) => el.textContent);
-    expect(labels).toEqual([
-      "Repo",
-      "Harness",
-      "Model",
-      "Starting prompt",
-      "Title",
-      "Base ref",
-      "Permission mode",
-    ]);
+    const message = screen.getByRole("textbox", { name: "First message" });
+    fireEvent.change(message, { target: { value: "ship the fix" } });
+    fireEvent.keyDown(message, { key: "Enter", shiftKey: true });
+    expect(createCodeWorkspace).not.toHaveBeenCalled();
+    fireEvent.keyDown(message, { key: "Enter" });
+    await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalled());
   });
 
-  it("inserts a starting prompt into the workspace composer after create", async () => {
+  it("sends the first message as the session's first turn", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
       repos,
@@ -334,25 +345,16 @@ describe("NewWorkspaceDialog", () => {
     const createCodeSession = vi.fn(async () =>
       session("ws-prompt", "claude_code", "2026-08-20T00:00:00.000Z"),
     );
-    await renderWithRouter(
+    const submitCodeTurn = vi.fn(
+      async () => ({ kind: "turn" }) as unknown as CodeTurnSubmission,
+    );
+    const { router } = await renderWithRouter(
       <AppContextProvider
         value={app({
           createCodeWorkspace,
           createCodeSession,
-          listCodeHarnessModels: vi.fn(async () => ({
-            kind: "claude_code" as const,
-            models: [
-              {
-                id: "sonnet",
-                label: "Sonnet",
-                default: true,
-                reasoning_efforts: [],
-                fast_mode: false,
-              },
-            ],
-            reasoning_efforts: [],
-            fast_mode: false,
-          })),
+          submitCodeTurn,
+          listCodeHarnessModels: claudeModels(),
         })}
       >
         <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
@@ -360,7 +362,7 @@ describe("NewWorkspaceDialog", () => {
       { initialUrl: "/code" },
     );
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Starting prompt" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
       target: { value: "  list the files  " },
     });
     fireEvent.keyDown(screen.getByRole("dialog"), {
@@ -368,12 +370,66 @@ describe("NewWorkspaceDialog", () => {
       metaKey: true,
     });
 
-    await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-prompt"),
+    );
+    expect(submitCodeTurn).toHaveBeenCalledWith(
+      "sess-ws-prompt",
+      "list the files",
+    );
+    // Sent, not parked: nothing left for the workspace composer to take.
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+  });
+
+  it("hands the message to the workspace composer when the turn cannot be sent", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const submitCodeTurn = vi.fn(async () => {
+      throw new Error("engine crashed on spawn");
+    });
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(async () =>
+            workspace("ws-held", "repo-new", "2026-08-20T00:00:00.000Z"),
+          ),
+          createCodeSession: vi.fn(async () =>
+            session("ws-held", "claude_code", "2026-08-20T00:00:00.000Z"),
+          ),
+          submitCodeTurn,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "list the files" },
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-held"),
+    );
     expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
-      scope: "ws-prompt",
+      scope: "ws-held",
       text: "list the files",
       submit: false,
     });
+    expect(toastError).toHaveBeenCalledWith(
+      "Session started, but the first message could not be sent. engine crashed on spawn",
+    );
   });
 
   it("drops the previous harness model while the next catalog loads", async () => {
@@ -419,8 +475,10 @@ describe("NewWorkspaceDialog", () => {
     expect(
       await screen.findByRole("button", { name: "Model: Sonnet" }),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
+    await user.click(
+      screen.getByRole("button", { name: "Harness: Claude Code" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /Codex CLI/ }));
 
     expect(
       screen.queryByRole("button", { name: "Model: Sonnet" }),
@@ -509,21 +567,25 @@ describe("NewWorkspaceDialog", () => {
     );
     await user.click(screen.getByRole("menuitem", { name: /Claude Opus 5/ }));
 
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /opencode/ }));
+    await user.click(
+      screen.getByRole("button", { name: "Harness: Claude Code" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /opencode/ }));
     await user.click(
       await screen.findByRole("button", { name: "Model: Kimi K3" }),
     );
     await user.click(screen.getByRole("menuitem", { name: /DeepSeek V4 Pro/ }));
 
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /Claude Code/ }));
+    await user.click(screen.getByRole("button", { name: "Harness: opencode" }));
+    await user.click(screen.getByRole("menuitem", { name: /Claude Code/ }));
     expect(
       await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
     ).toBeEnabled();
 
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /opencode/ }));
+    await user.click(
+      screen.getByRole("button", { name: "Harness: Claude Code" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /opencode/ }));
     expect(
       await screen.findByRole("button", { name: "Model: DeepSeek V4 Pro" }),
     ).toBeEnabled();
@@ -541,20 +603,7 @@ describe("NewWorkspaceDialog", () => {
     await renderWithRouter(
       <AppContextProvider
         value={app({
-          listCodeHarnessModels: vi.fn(async () => ({
-            kind: "claude_code" as const,
-            models: [
-              {
-                id: "sonnet",
-                label: "Sonnet",
-                default: true,
-                reasoning_efforts: [],
-                fast_mode: false,
-              },
-            ],
-            reasoning_efforts: [],
-            fast_mode: false,
-          })),
+          listCodeHarnessModels: claudeModels(),
         })}
       >
         <NewWorkspaceDialog
@@ -567,7 +616,7 @@ describe("NewWorkspaceDialog", () => {
       { initialUrl: "/code" },
     );
 
-    const repoField = screen.getByRole("combobox", { name: "Repo" });
+    const repoField = screen.getByRole("button", { name: "Repo" });
     expect(repoField).toHaveTextContent("legacy");
     expect(repoField).toBeEnabled();
   });
@@ -616,6 +665,9 @@ describe("NewWorkspaceDialog", () => {
       { initialUrl: "/code" },
     );
 
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "list the files" },
+    });
     fireEvent.keyDown(screen.getByRole("dialog"), {
       key: "Enter",
       metaKey: true,
@@ -629,12 +681,18 @@ describe("NewWorkspaceDialog", () => {
     expect(
       useCodeCatalogStore.getState().sessionsByWorkspace[created.id],
     ).toBeUndefined();
+    // No session to send to, so the message waits in the workspace composer.
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
+      scope: "ws-recover",
+      text: "list the files",
+      submit: false,
+    });
     expect(toastError).toHaveBeenCalledWith(
       "Workspace created, but the session could not start. Codex sign-in expired",
     );
   });
 
-  it("keeps plain Enter in a text field out of create", async () => {
+  it("keeps Enter in the name and base popovers out of create", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
       repos,
@@ -653,20 +711,7 @@ describe("NewWorkspaceDialog", () => {
           createCodeSession: vi.fn(async () =>
             session("ws-typed", "claude_code", "2026-08-21T00:00:00.000Z"),
           ),
-          listCodeHarnessModels: vi.fn(async () => ({
-            kind: "claude_code" as const,
-            models: [
-              {
-                id: "sonnet",
-                label: "Sonnet",
-                default: true,
-                reasoning_efforts: [],
-                fast_mode: false,
-              },
-            ],
-            reasoning_efforts: [],
-            fast_mode: false,
-          })),
+          listCodeHarnessModels: claudeModels(),
         })}
       >
         <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
@@ -675,15 +720,26 @@ describe("NewWorkspaceDialog", () => {
     );
 
     const user = userEvent.setup();
-    // Enter on a single-line field would submit the form around it, cutting a
-    // worktree from a keystroke that only meant "done typing".
-    await user.click(screen.getByRole("textbox", { name: "Title" }));
-    await user.keyboard("rail polish{Enter}");
-    await user.click(screen.getByRole("textbox", { name: "Base ref" }));
-    await user.keyboard("{Enter}");
+    // Enter in a popover field means "done typing", never "cut a worktree".
+    await user.click(screen.getByRole("button", { name: "Workspace name" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Name" }),
+      "rail polish{Enter}",
+    );
+    expect(
+      screen.queryByRole("textbox", { name: "Name" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Base ref" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Base ref" }),
+      "{Enter}",
+    );
     expect(createCodeWorkspace).not.toHaveBeenCalled();
 
-    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
     await waitFor(() =>
       expect(createCodeWorkspace).toHaveBeenCalledWith({
         repo_id: "repo-new",
@@ -691,6 +747,154 @@ describe("NewWorkspaceDialog", () => {
         base_ref: "main",
       }),
     );
+  });
+
+  it("stays open and clears the message when Create more is on", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    let creates = 0;
+    const createCodeWorkspace = vi.fn(async () => {
+      creates += 1;
+      return workspace(
+        `ws-more-${creates}`,
+        "repo-new",
+        "2026-08-21T00:00:00.000Z",
+      );
+    });
+    const createCodeSession = vi.fn(async () =>
+      session("ws-more", "claude_code", "2026-08-21T00:00:00.000Z"),
+    );
+    const submitCodeTurn = vi.fn(
+      async () => ({ kind: "turn" }) as unknown as CodeTurnSubmission,
+    );
+    const onOpenChange = vi.fn();
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          createCodeSession,
+          submitCodeTurn,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={onOpenChange} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    const message = screen.getByRole("textbox", { name: "First message" });
+    fireEvent.change(message, { target: { value: "first task" } });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    await waitFor(() => expect(submitCodeTurn).toHaveBeenCalledTimes(1));
+
+    // Still here, message cleared, settings kept — ready to fire the next one.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe("/code");
+    expect(message).toHaveValue("");
+    expect(toastSuccess).toHaveBeenCalled();
+
+    fireEvent.change(message, { target: { value: "second task" } });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalledTimes(2));
+    expect(submitCodeTurn).toHaveBeenLastCalledWith(
+      "sess-ws-more",
+      "second task",
+    );
+  });
+
+  it("toggles the pickers from their chords", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    await screen.findByRole("button", { name: "Model: Sonnet" });
+
+    const dialog = screen.getByRole("dialog");
+    // Cmd+N again: the repo menu, matching the shell chord that opened this.
+    fireEvent.keyDown(dialog, { code: "KeyN", metaKey: true });
+    expect(
+      await screen.findByRole("menuitem", { name: /tidebreak/ }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(dialog, { code: "KeyN", metaKey: true });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("menuitem", { name: /tidebreak/ }),
+      ).not.toBeInTheDocument(),
+    );
+
+    // Alt+M: the model menu, search and all.
+    fireEvent.keyDown(dialog, { code: "KeyM", altKey: true });
+    expect(
+      await screen.findByRole("searchbox", { name: "Search models" }),
+    ).toBeInTheDocument();
+
+    // Alt+B swaps straight over to the base popover.
+    fireEvent.keyDown(dialog, { code: "KeyB", altKey: true });
+    expect(
+      await screen.findByRole("textbox", { name: "Base ref" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("searchbox", { name: "Search models" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("opens on the remembered permission mode when the engine honors it", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    useCodeUiStore.setState({
+      lastCreate: { modelsByHarness: {}, permissionMode: "plan" },
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    // The engine's default would be Allow; the reader's last pick wins.
+    expect(
+      screen.getByRole("button", { name: "Permissions: Plan" }),
+    ).toBeEnabled();
   });
 
   it("opens a mixed model catalog on every vendor at once", async () => {

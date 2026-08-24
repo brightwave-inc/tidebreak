@@ -1009,9 +1009,7 @@ describe("app shell", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(
-      within(dialog).getByText(
-        "One worktree and one session on the selected repo.",
-      ),
+      within(dialog).getByRole("textbox", { name: "First message" }),
     ).toBeInTheDocument();
     expect(createChat).not.toHaveBeenCalled();
     expect(router.state.location.pathname).toBe("/code");

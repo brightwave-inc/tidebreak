@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
+import {
+  Check,
+  ChevronDown,
+  Ellipsis,
+  FolderGit2,
+  GitBranch,
+} from "lucide-react";
 
 import type {
   PermissionMode,
@@ -12,31 +19,32 @@ import type {
 } from "../api/types";
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { friendlyErrorMessage } from "@/lib/utils";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { shouldSubmitComposerKey } from "../Composer";
+import { PermissionModeMenu } from "../PermissionModeMenu";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { HarnessModelMenu } from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
-import { HarnessPicker } from "./HarnessPicker";
+import { HARNESS_ICONS } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
   createPermissionModes,
@@ -45,27 +53,37 @@ import {
   harnessUnusableReason,
   preferredCodeModels,
   requiresHarnessModelIds,
-  PERMISSION_MODE_LABELS,
+  HARNESS_LABELS,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
   type CodeModelOption,
 } from "./labels";
 
 /**
- * Create a workspace and its first session, then open it.
+ * Create a workspace, its first session, and — when a first message is typed —
+ * its first turn, then open it.
  *
- * Every field arrives answered, so the dialog is one keystroke deep: Cmd+Enter
- * from anywhere in it creates with what is on screen. Repo, harness, and model
- * open on what this reader used last — the catalog knows, and `lastCreate`
- * covers a fresh window. The starting prompt is optional: filled in, it lands
- * in the workspace composer after create. The title is optional too: left
- * blank, the server generates a two-word name and later replaces it with one
- * derived from the first turn, the same way chats are named.
+ * The dialog is a composer, not a form: the message is the surface, and every
+ * setting is a pill that opens on what this reader used last (repo, engine,
+ * model, and permission mode stick via `lastCreate`; the catalog covers a
+ * fresh window). Enter creates, Shift+Enter breaks a line, and Cmd+Enter
+ * creates from anywhere in the dialog, pickers included. Each pill has its own
+ * chord — Cmd+N again for the repo, and Alt+E / M / P / B / N for engine,
+ * model, permissions, base ref, and name — so a create never needs the mouse.
  *
- * Permission mode defaults to the most autonomous posture the harness honors
- * (decision 0039, amended). Whichever posture that is, the row states it.
- * The harness picker lists every doctor entry. Ready rows are selectable;
- * unusable ones stay visible and dimmed.
+ * A typed message is posted as the session's first turn once the session
+ * exists. If the session or the turn fails, the text is handed to the
+ * workspace composer as a draft instead — never dropped. "Create more" keeps
+ * the dialog open after a create, clearing only the message and name, for
+ * firing off several tasks on the same sticky settings.
+ *
+ * The title is optional: left blank, the server generates a two-word name and
+ * later replaces it with one derived from the first turn, the same way chats
+ * are named. Permission mode defaults to the most autonomous posture the
+ * engine honors (decision 0039, amended); whichever posture is armed, the
+ * note under the message states it. The engine menu lists every doctor entry —
+ * ready rows are selectable; unusable ones stay visible, dimmed, with the
+ * reason.
  */
 
 /** The repo this reader worked on last: newest workspace, then storage. */
@@ -96,6 +114,9 @@ function recentHarness(
   }
   return ready[0]?.kind;
 }
+
+/** Pickers a chord can open; one open at a time, chords toggle. */
+type PickerId = "repo" | "engine" | "model" | "mode" | "base" | "name";
 
 export function NewWorkspaceDialog({
   open,
@@ -130,12 +151,16 @@ export function NewWorkspaceDialog({
     null,
   );
   const [creating, setCreating] = useState(false);
+  const [createMore, setCreateMore] = useState(false);
   const [modelsByHarness, setModelsByHarness] = useState<
     Partial<Record<HarnessKind, string>>
   >({});
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
-  const repoTrigger = useRef<HTMLButtonElement>(null);
+  const [openPicker, setOpenPicker] = useState<PickerId | null>(null);
+  const openPickerNow = useRef<PickerId | null>(null);
+  openPickerNow.current = openPicker;
+  const promptInput = useRef<HTMLTextAreaElement>(null);
   const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
 
   const allHarnesses = doctor?.harnesses ?? [];
@@ -166,9 +191,11 @@ export function NewWorkspaceDialog({
     );
     setPickedHarness(null);
     setPermissionMode(null);
+    setCreateMore(false);
     setModelsByHarness({ ...lastCreate?.modelsByHarness });
     setModelOptions([]);
     setModelLoading(false);
+    setOpenPicker(null);
     // Reset against the dialog opening, not against catalog refreshes
     // mid-open — a workspace created elsewhere must not move this form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -220,14 +247,25 @@ export function NewWorkspaceDialog({
   const availableModes = selectedHarness
     ? createPermissionModes(selectedHarness.caps)
     : [];
+  const honors = (mode: PermissionMode | null | undefined) =>
+    mode && availableModes.includes(mode) ? mode : undefined;
   const postedMode =
-    permissionMode && availableModes.includes(permissionMode)
-      ? permissionMode
-      : selectedHarness
-        ? defaultCreatePermissionMode(selectedHarness.caps)
-        : "plan";
+    honors(permissionMode) ??
+    honors(lastCreate?.permissionMode) ??
+    (selectedHarness
+      ? defaultCreatePermissionMode(selectedHarness.caps)
+      : "plan");
   const canCreate =
     Boolean(repoId && selectedRepo && selectedHarness) && !creating;
+  const modeNote =
+    postedMode === "auto" &&
+    selectedHarness &&
+    autoIsUnsupervised(selectedHarness.caps)
+      ? UNSUPERVISED_AUTO_NOTE
+      : postedMode === "allow"
+        ? ALLOW_ALL_NOTE
+        : null;
+  const installNote = install && (!install.done || install.error);
 
   useEffect(() => {
     if (!open || !harness) return;
@@ -282,6 +320,37 @@ export function NewWorkspaceDialog({
     setModelsByHarness((current) => ({ ...current, [harness]: next }));
   }
 
+  function focusPrompt() {
+    window.requestAnimationFrame(() => {
+      // Clicking from one pill straight to another closes the first and opens
+      // the second in one gesture; the freshly opened menu keeps focus.
+      if (openPickerNow.current !== null) return;
+      promptInput.current?.focus();
+    });
+  }
+
+  /** One picker open at a time; closing by chord puts focus back on the message. */
+  function pickerProps(id: PickerId) {
+    return {
+      open: openPicker === id,
+      onOpenChange: (next: boolean) => {
+        setOpenPicker((current) =>
+          next ? id : current === id ? null : current,
+        );
+        if (!next) focusPrompt();
+      },
+    };
+  }
+
+  function togglePicker(id: PickerId) {
+    if (openPicker === id) {
+      setOpenPicker(null);
+      focusPrompt();
+      return;
+    }
+    setOpenPicker(id);
+  }
+
   async function create() {
     if (!canCreate) return;
     setCreating(true);
@@ -301,9 +370,6 @@ export function NewWorkspaceDialog({
       }
       upsertWorkspace(workspace);
       const prompt = startingPrompt.trim();
-      if (prompt) {
-        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
-      }
       try {
         const gateway = gatewayCodeModels(models, harness, defaultModelKey);
         const native =
@@ -324,11 +390,46 @@ export function NewWorkspaceDialog({
           harness,
           model: posted,
           modelsByHarness,
+          permissionMode: postedMode,
         });
+        if (prompt) {
+          try {
+            await client.submitCodeTurn(session.id, prompt);
+          } catch (error) {
+            // Never drop typed words: the workspace composer holds them.
+            useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+            toast.error(
+              `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
+            );
+          }
+        }
       } catch (error) {
+        // No session to send to; the workspace composer holds the text and
+        // start-session on the workspace page picks it up.
+        if (prompt) {
+          useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+        }
         toast.error(
           `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
         );
+      }
+      if (createMore) {
+        // Stay here on the same settings; only what named this task clears.
+        setStartingPrompt("");
+        setTitle("");
+        focusPrompt();
+        const workspaceId = workspace.id;
+        toast.success(`Started ${workspace.title}`, {
+          action: {
+            label: "Open",
+            onClick: () =>
+              void navigate({
+                to: "/code/w/$workspaceId",
+                params: { workspaceId },
+              }),
+          },
+        });
+        return;
       }
       onOpenChange(false);
       await navigate({
@@ -345,180 +446,347 @@ export function NewWorkspaceDialog({
     void create();
   }
 
+  const HarnessIcon = HARNESS_ICONS[harness];
+  const anyUnusable = allHarnesses.some((entry) =>
+    harnessUnusableReason(entry),
+  );
+  // Typed as a plain string: the settings child route is not in the
+  // registered route union, the same escape HarnessPicker uses.
+  const harnessesPath: string = "/settings/coding-harnesses";
+  const shownBaseRef =
+    baseRef.trim() || selectedRepo?.default_base_ref || "base";
+  const alt = (key: string) => (command ? `⌥${key}` : `Alt+${key}`);
+
   return (
     <Dialog open={open} onOpenChange={creating ? undefined : onOpenChange}>
       <DialogContent
-        className="max-w-md gap-5 p-5"
+        className="max-w-3xl gap-0 overflow-hidden p-0 sm:rounded-xl"
+        withCloseButton={false}
         aria-busy={creating}
+        aria-describedby={undefined}
         onOpenAutoFocus={(event) => {
-          const trigger = repoTrigger.current;
-          if (!trigger || trigger.hasAttribute("disabled")) return;
+          // Prompt-centric: the message is where a create starts, so it is
+          // where focus lands. Settings are pills a chord away.
           event.preventDefault();
-          trigger.focus();
+          promptInput.current?.focus();
         }}
         onKeyDownCapture={(event) => {
-          if (event.key !== "Enter") return;
-          // Cmd+Enter (Ctrl+Enter off macOS) creates with what is on screen,
-          // whichever field has focus. An open picker portals its list out of
-          // this element, but React still routes the key through here, so the
-          // chord works with a dropdown up as well.
-          if (event.metaKey || event.ctrlKey) {
-            event.preventDefault();
-            void create();
+          // Cmd reads as Ctrl off macOS, and either chord is accepted on
+          // both: the dialog is one surface, not worth a per-platform miss.
+          const mod = event.metaKey || event.ctrlKey;
+          if (event.key === "Enter") {
+            // Cmd+Enter creates with what is on screen, whichever element has
+            // focus. An open picker portals its list out of this element, but
+            // React still routes the key through here, so the chord works
+            // with a dropdown up as well.
+            if (mod && !event.altKey && !event.shiftKey) {
+              event.preventDefault();
+              void create();
+            }
             return;
           }
-          // Plain Enter stays field-local. A single-line input inside a form
-          // submits it, so Enter on Title or Base ref used to cut a worktree
-          // from a keystroke that only meant "done typing" — and the create
-          // it started left the chord looking broken for the rest of the
-          // dialog's life. The check is on this element rather than on each
-          // field so a picker's own search box, which lives in a portal, is
-          // left to handle its own Enter.
+          if (creating) return;
+          // Every pill has a chord, so a create never needs the mouse. These
+          // ride on `event.code`: on macOS an Option chord types an accented
+          // character, and `key` would carry that instead of the letter.
           if (
-            event.target instanceof HTMLInputElement &&
-            event.currentTarget.contains(event.target)
+            mod &&
+            !event.altKey &&
+            !event.shiftKey &&
+            event.code === "KeyN"
           ) {
             event.preventDefault();
+            togglePicker("repo");
+            return;
           }
+          if (!event.altKey || mod || event.shiftKey) return;
+          const chord: Partial<Record<string, PickerId>> = {
+            KeyE: "engine",
+            KeyM: "model",
+            KeyP: "mode",
+            KeyB: "base",
+            KeyN: "name",
+          };
+          const picker = chord[event.code];
+          if (!picker) return;
+          event.preventDefault();
+          togglePicker(picker);
         }}
       >
-        <DialogHeader>
-          <DialogTitle>New workspace</DialogTitle>
-          <DialogDescription>
-            One worktree and one session on the selected repo.
-          </DialogDescription>
-        </DialogHeader>
-        <form className="flex flex-col gap-3" onSubmit={submit}>
-          <div className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Repo</span>
-            <Select
-              value={repoId || undefined}
-              onValueChange={(value) => {
-                setRepoId(value);
-                const next = repos.find((repo) => repo.id === value);
-                if (next) setBaseRef(next.default_base_ref);
-              }}
-              disabled={creating || repos.length === 0}
-            >
-              <SelectTrigger aria-label="Repo" ref={repoTrigger}>
-                <SelectValue placeholder="No repos" />
-              </SelectTrigger>
-              <SelectContent scrollButtons={false}>
+        <DialogTitle className="sr-only">New workspace</DialogTitle>
+        <form className="flex min-w-0 flex-col" onSubmit={submit}>
+          <div className="flex min-w-0 items-center gap-1 px-3 pt-3">
+            <DropdownMenu {...pickerProps("repo")}>
+              <WithTooltip label={`Repo · ${command ? "⌘N" : "Ctrl+N"}`}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-8 max-w-64 gap-2 px-2.5"
+                    disabled={creating || repos.length === 0}
+                    aria-label="Repo"
+                  >
+                    <FolderGit2 className="size-4 shrink-0 opacity-70" />
+                    <span className="truncate">
+                      {selectedRepo?.display_name ?? "No repos"}
+                    </span>
+                    <ChevronDown className="size-4 shrink-0 opacity-50" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </WithTooltip>
+              <DropdownMenuContent align="start" className="z-[60] w-64">
                 {repos.map((repo) => (
-                  <SelectItem key={repo.id} value={repo.id}>
-                    {repo.display_name}
-                  </SelectItem>
+                  <DropdownMenuItem
+                    key={repo.id}
+                    onSelect={() => {
+                      setRepoId(repo.id);
+                      setBaseRef(repo.default_base_ref);
+                    }}
+                    className="flex items-center gap-2"
+                  >
+                    <FolderGit2 className="text-muted-foreground size-4 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {repo.display_name}
+                    </span>
+                    {repo.id === repoId && (
+                      <Check className="size-4 shrink-0" />
+                    )}
+                  </DropdownMenuItem>
                 ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Harness</span>
-            <HarnessPicker
-              harnesses={allHarnesses}
-              value={harness}
-              onChange={(next) => {
-                setModelOptions([]);
-                setModelLoading(true);
-                setPickedHarness(next);
-              }}
-              disabled={creating}
-            />
-            <HarnessInstallNote install={install} />
-          </div>
-          <div className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Model</span>
-            <HarnessModelMenu
-              harness={harness}
-              options={modelOptions}
-              value={model}
-              onChange={selectModel}
-              loading={modelLoading}
-              disabled={creating}
-              variant="field"
-            />
-          </div>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Starting prompt</span>
-            <Textarea
-              value={startingPrompt}
-              onChange={(event) => setStartingPrompt(event.target.value)}
-              disabled={creating}
-              placeholder="Optional"
-              rows={3}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Title</span>
-            <Input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              disabled={creating}
-              placeholder="Named automatically"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Base ref</span>
-            <Input
-              value={baseRef}
-              onChange={(event) => setBaseRef(event.target.value)}
-              disabled={creating}
-              placeholder={selectedRepo?.default_base_ref}
-            />
-          </label>
-          <div className="flex flex-col gap-1 text-sm">
-            <span className="font-medium">Permission mode</span>
-            <Select
-              value={postedMode}
-              onValueChange={(next) =>
-                setPermissionMode(next as PermissionMode)
-              }
-              disabled={creating || availableModes.length === 0}
-            >
-              <SelectTrigger aria-label="Permission mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent scrollButtons={false}>
-                {availableModes.map((mode) => (
-                  <SelectItem key={mode} value={mode}>
-                    {PERMISSION_MODE_LABELS[mode]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {postedMode === "auto" &&
-              selectedHarness &&
-              autoIsUnsupervised(selectedHarness.caps) && (
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Popover {...pickerProps("name")}>
+              <WithTooltip label={`Name · ${alt("N")}`}>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="text-muted-foreground h-8 max-w-48 gap-1.5 px-2"
+                    disabled={creating}
+                    aria-label="Workspace name"
+                  >
+                    <Ellipsis className="size-4 shrink-0" />
+                    {title.trim() && (
+                      <span className="text-foreground truncate text-xs">
+                        {title.trim()}
+                      </span>
+                    )}
+                  </Button>
+                </PopoverTrigger>
+              </WithTooltip>
+              <PopoverContent
+                align="start"
+                className="z-[60] flex w-72 flex-col gap-1.5 p-3"
+              >
+                <span className="text-xs font-medium">Name</span>
+                <Input
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Named automatically"
+                  aria-label="Name"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.metaKey || event.ctrlKey)
+                      return;
+                    event.preventDefault();
+                    togglePicker("name");
+                  }}
+                />
                 <p className="text-muted-foreground text-xs">
-                  {UNSUPERVISED_AUTO_NOTE}
+                  Left blank, the first turn names it.
                 </p>
-              )}
-            {postedMode === "allow" && (
-              <p className="text-muted-foreground text-xs">{ALLOW_ALL_NOTE}</p>
-            )}
+              </PopoverContent>
+            </Popover>
+            <div className="min-w-4 flex-1" />
+            <Popover {...pickerProps("base")}>
+              <WithTooltip label={`Base ref · ${alt("B")}`}>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="text-muted-foreground h-8 max-w-56 gap-1.5 px-2"
+                    disabled={creating || !selectedRepo}
+                    aria-label="Base ref"
+                  >
+                    <GitBranch className="size-4 shrink-0" />
+                    <span className="truncate">From {shownBaseRef}</span>
+                    <ChevronDown className="size-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+              </WithTooltip>
+              <PopoverContent
+                align="end"
+                className="z-[60] flex w-72 flex-col gap-1.5 p-3"
+              >
+                <span className="text-xs font-medium">Base ref</span>
+                <Input
+                  value={baseRef}
+                  onChange={(event) => setBaseRef(event.target.value)}
+                  placeholder={selectedRepo?.default_base_ref}
+                  aria-label="Base ref"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.metaKey || event.ctrlKey)
+                      return;
+                    event.preventDefault();
+                    togglePicker("base");
+                  }}
+                />
+                <p className="text-muted-foreground text-xs">
+                  The branch, tag, or commit the worktree is cut from.
+                </p>
+              </PopoverContent>
+            </Popover>
           </div>
-          <DialogFooter>
+          <textarea
+            ref={promptInput}
+            value={startingPrompt}
+            onChange={(event) => setStartingPrompt(event.target.value)}
+            disabled={creating}
+            aria-label="First message"
+            placeholder="Describe the first task (optional)"
+            className="placeholder:text-muted-foreground max-h-[45vh] min-h-36 w-full resize-none bg-transparent px-4 py-3 text-base outline-none"
+            onKeyDown={(event) => {
+              if (!shouldSubmitComposerKey(event.nativeEvent)) return;
+              event.preventDefault();
+              void create();
+            }}
+          />
+          {(installNote || modeNote) && (
+            <div className="flex flex-col gap-1 px-4 pb-1.5">
+              <HarnessInstallNote install={install} />
+              {modeNote && (
+                <p className="text-muted-foreground text-xs">{modeNote}</p>
+              )}
+            </div>
+          )}
+          <div className="flex min-w-0 items-center gap-1 px-3 pb-3">
+            <DropdownMenu {...pickerProps("engine")}>
+              <WithTooltip label={`Engine · ${alt("E")}`}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="h-8 min-w-0 max-w-48 gap-2 px-2"
+                    disabled={creating || allHarnesses.length === 0}
+                    aria-label={`Harness: ${HARNESS_LABELS[harness]}`}
+                  >
+                    <HarnessIcon className="size-4 shrink-0" />
+                    <span className="truncate">{HARNESS_LABELS[harness]}</span>
+                    <ChevronDown className="size-4 shrink-0 opacity-50" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </WithTooltip>
+              <DropdownMenuContent
+                align="start"
+                side="top"
+                className="z-[60] w-64"
+              >
+                {allHarnesses.map((entry) => {
+                  const reason = harnessUnusableReason(entry);
+                  const Icon = HARNESS_ICONS[entry.kind];
+                  return (
+                    <DropdownMenuItem
+                      key={entry.kind}
+                      disabled={Boolean(reason)}
+                      onSelect={() => {
+                        setModelOptions([]);
+                        setModelLoading(true);
+                        setPickedHarness(entry.kind);
+                      }}
+                      className="flex items-start gap-2.5"
+                    >
+                      <Icon className="mt-0.5 size-4 shrink-0" />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="truncate font-medium">
+                          {HARNESS_LABELS[entry.kind]}
+                        </span>
+                        {reason && (
+                          <span className="text-muted-foreground text-xs">
+                            {reason}
+                          </span>
+                        )}
+                      </span>
+                      {entry.kind === harness && (
+                        <Check className="size-4 shrink-0" />
+                      )}
+                    </DropdownMenuItem>
+                  );
+                })}
+                {anyUnusable && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => void navigate({ to: harnessesPath })}
+                      className="text-muted-foreground text-sm"
+                    >
+                      Coding harnesses…
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {(modelOptions.length > 0 || modelLoading) && (
+              <WithTooltip label={`Model · ${alt("M")}`}>
+                <span className="inline-flex min-w-0">
+                  <HarnessModelMenu
+                    harness={harness}
+                    options={modelOptions}
+                    value={model}
+                    onChange={selectModel}
+                    loading={modelLoading}
+                    disabled={creating}
+                    {...pickerProps("model")}
+                  />
+                </span>
+              </WithTooltip>
+            )}
+            <WithTooltip label={`Permissions · ${alt("P")}`}>
+              <span className="inline-flex min-w-0">
+                <PermissionModeMenu
+                  scopeKey="code-create"
+                  value={postedMode}
+                  disabled={creating || availableModes.length === 0}
+                  availableModes={availableModes}
+                  onChange={(mode) => setPermissionMode(mode)}
+                  {...pickerProps("mode")}
+                />
+              </span>
+            </WithTooltip>
+            <div className="min-w-4 flex-1" />
+            <WithTooltip label="Stay here after create to fire off another">
+              <label
+                className={cn(
+                  "flex h-8 shrink-0 cursor-pointer items-center gap-2 px-2 text-sm",
+                  createMore ? "text-foreground" : "text-muted-foreground",
+                  creating && "cursor-not-allowed opacity-50",
+                )}
+              >
+                <Switch
+                  checked={createMore}
+                  onCheckedChange={setCreateMore}
+                  disabled={creating}
+                  aria-label="Create more"
+                  className="h-5 w-9"
+                  thumbClassName="size-4 data-[state=checked]:translate-x-4"
+                />
+                <span className="truncate">Create more</span>
+              </label>
+            </WithTooltip>
             <Button
-              type="button"
-              variant="ghost"
-              onClick={() => onOpenChange(false)}
-              disabled={creating}
+              type="submit"
+              disabled={!canCreate}
+              className="h-8 shrink-0"
             >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!canCreate}>
               {creating ? "Creating…" : "Create"}
               {!creating && (
-                <span
-                  className="ml-1 inline-flex items-center gap-0.5 text-2xs font-medium opacity-60"
+                <kbd
+                  className="font-sans text-2xs font-medium opacity-60"
                   aria-hidden="true"
                 >
-                  <kbd className="font-sans">{command ? "⌘" : "Ctrl"}</kbd>
-                  <kbd className="font-sans">↩</kbd>
-                </span>
+                  ↩
+                </kbd>
               )}
             </Button>
-          </DialogFooter>
+          </div>
         </form>
       </DialogContent>
     </Dialog>

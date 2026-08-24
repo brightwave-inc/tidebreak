@@ -102,6 +102,7 @@ export function PermissionModePicker({
       scopeKey={scopeKey}
       value={value}
       disabled={locked}
+      availableModes={availableModes}
       onChange={async (mode: PermissionMode) => {
         if (!availableModes.includes(mode)) {
           throw new Error(PERMISSION_MODE_UNAVAILABLE_REASON);
@@ -170,6 +171,8 @@ export function HarnessModelMenu({
   disabled,
   loading = false,
   variant = "composer",
+  open: controlledOpen,
+  onOpenChange,
 }: {
   harness: HarnessKind;
   options: readonly CodeModelOption[];
@@ -179,12 +182,20 @@ export function HarnessModelMenu({
   loading?: boolean;
   /** Composer sits above the draft; field fills a form row. */
   variant?: "composer" | "field";
+  /** Open the menu from outside — a surface's keyboard shortcut. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const current =
     options.find((option) => option.id === value) ??
     options.find((option) => option.default) ??
     options[0];
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    if (controlledOpen === undefined) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  };
   const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
   const currentRow = useRef<HTMLDivElement>(null);
@@ -229,13 +240,19 @@ export function HarnessModelMenu({
       : (activeGroup?.options ?? []);
   const locked = disabled || !onChange;
   useEffect(() => {
-    // A mixed catalog opens on the whole list, which runs past the fold. The
-    // row the session is on is put on screen rather than left to be found.
+    // Opening resets the search and rail — whether the trigger or a caller's
+    // keyboard chord opened it — and puts the session's row on screen: a
+    // mixed catalog opens on the whole list, which runs past the fold.
     if (!open) return;
+    setQuery("");
+    setActiveGroupId(openingGroupId);
     const frame = requestAnimationFrame(() =>
       currentRow.current?.scrollIntoView({ block: "nearest" }),
     );
     return () => cancelAnimationFrame(frame);
+    // `openingGroupId` moving mid-open (a catalog answer landing) must not
+    // yank the rail out from under the reader.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   if (!current) {
     if (variant !== "field" && !loading) return null;
@@ -247,7 +264,7 @@ export function HarnessModelMenu({
         className={
           variant === "field"
             ? "h-10 w-full justify-between px-3 font-normal"
-            : "h-8 max-w-56 gap-2"
+            : "h-8 max-w-56 min-w-0 gap-2"
         }
         disabled
         aria-label={loading ? "Loading models" : "Model: Default"}
@@ -286,16 +303,7 @@ export function HarnessModelMenu({
   }
 
   return (
-    <DropdownMenu
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) {
-          setQuery("");
-          setActiveGroupId(openingGroupId);
-        }
-      }}
-    >
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
@@ -303,7 +311,7 @@ export function HarnessModelMenu({
           className={
             variant === "field"
               ? "h-10 w-full justify-between px-3 font-normal"
-              : "h-8 max-w-56 gap-2"
+              : "h-8 max-w-56 min-w-0 gap-2"
           }
           disabled={locked}
           aria-label={`Model: ${current.label}`}
@@ -328,10 +336,9 @@ export function HarnessModelMenu({
         align="start"
         side={variant === "field" ? "bottom" : "top"}
         collisionPadding={12}
-        className={cn(
-          "model-menu-content w-80 p-0",
-          variant === "field" && "z-[60]",
-        )}
+        // z-[60] matches the select primitive: this menu also opens inside
+        // dialogs, whose overlay sits at z-50.
+        className="model-menu-content z-[60] w-80 p-0"
         onKeyDownCapture={(event) => {
           if (
             (event.metaKey || event.ctrlKey) &&
