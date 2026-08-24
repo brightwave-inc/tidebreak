@@ -472,8 +472,12 @@ async fn auto_run_on_create_runs_after_setup() {
 #[tokio::test]
 async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
     let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
-    let (router, token, _runtime, dir) =
+    let (router, token, runtime, dir) =
         code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    // Status reads on a forge checkout now refresh the digest over REST
+    // (decision 65); a dead loopback port keeps this test off the network
+    // while the borrow accounting below stays observable.
+    runtime.set_forge_api_base(Some("http://127.0.0.1:9/".to_owned()));
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_paired_repo(dir.path());
@@ -538,6 +542,18 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
         body["pushes_as_self"].is_null(),
         "the App's identity is never claimed as the caller's own: {body}"
     );
+    // The forge checkout's status read borrows once for the REST digest
+    // (decision 65); the read fails on the dead port and degrades silently.
+    let digest_borrows = lender.minted().len();
+    assert!(digest_borrows > 0, "the digest read borrows per operation");
+    assert!(
+        lender
+            .minted()
+            .iter()
+            .all(|repository| repository == "acme/demo"),
+        "every borrow names the one forge repository: {:?}",
+        lender.minted()
+    );
 
     // A rewritten origin on a foreign host — the exact move an agent in the
     // workspace could make — is outside the lending: no identity is claimed
@@ -560,8 +576,9 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
         .unwrap();
     let body: serde_json::Value = status.json().await.unwrap();
     assert!(body["pushes_as"].is_null(), "{body}");
-    assert!(
-        lender.minted().is_empty(),
+    assert_eq!(
+        lender.minted().len(),
+        digest_borrows,
         "a foreign host must never reach the gateway"
     );
     run(
@@ -588,7 +605,19 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
     assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(kind, "git_forge_refused");
     assert!(message.contains("no git forge"), "{message}");
-    assert_eq!(lender.minted(), vec!["acme/demo".to_owned()]);
+    assert_eq!(
+        lender.minted().len(),
+        digest_borrows + 1,
+        "the refused push asked exactly once more"
+    );
+    assert!(
+        lender
+            .minted()
+            .iter()
+            .all(|repository| repository == "acme/demo"),
+        "{:?}",
+        lender.minted()
+    );
 }
 
 /// Decision 65: once the caller's own account acts, the git card names them
@@ -596,8 +625,9 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
 #[tokio::test]
 async fn a_hosted_git_card_names_the_person_once_connected() {
     let lender = Arc::new(FakeLender::offering_person("mira-chen"));
-    let (router, token, _runtime, dir) =
+    let (router, token, runtime, dir) =
         code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_forge_api_base(Some("http://127.0.0.1:9/".to_owned()));
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_paired_repo(dir.path());
@@ -690,4 +720,215 @@ async fn a_workspace_without_a_person_identity_keeps_the_checkouts_own() {
         let signature = run_stdout(&path, &["git", "log", "-1", "--format=%an <%ae>"]);
         assert_eq!(signature, "Dev <dev@example.com>");
     }
+}
+
+/// Decision 65: with no `gh` anywhere, a hosted machine creates the pull
+/// request over the forge REST API with a borrowed credential, persists the
+/// authored fact from the creation answer, and the card's digest — state,
+/// checks, queue — reads over the same surface. A gateway refusal fails the
+/// operation with the gateway's reason before anything reaches the forge.
+#[tokio::test]
+async fn a_hosted_machine_creates_and_reads_the_pull_request_over_rest() {
+    type Recorded = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    let recorded: Recorded = Arc::default();
+
+    fn rest_pull_request(head_ref: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": 7,
+            "html_url": "https://github.com/acme/demo/pull/7",
+            "title": "Add the hosted change",
+            "state": "open",
+            "merged": false,
+            "draft": false,
+            "user": { "login": "mira-chen" },
+            "head": { "ref": head_ref, "sha": "feedfeedfeedfeedfeed" },
+            "base": { "ref": "main" },
+            "mergeable": true,
+            "mergeable_state": "clean",
+            "auto_merge": null,
+            "created_at": "2026-08-24T10:00:00Z",
+            "updated_at": "2026-08-24T10:00:00Z",
+            "merged_at": null,
+            "closed_at": null,
+        })
+    }
+
+    let create_recorded = Arc::clone(&recorded);
+    let create = move |headers: axum::http::HeaderMap,
+                       axum::Json(body): axum::Json<serde_json::Value>| {
+        let recorded = Arc::clone(&create_recorded);
+        async move {
+            // The borrowed credential rides as the bearer — asserted
+            // server-side so a drifted client fails the test.
+            let bearer = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            assert_eq!(bearer, "Bearer ghs_fake_borrowed");
+            let head = body["head"].as_str().unwrap_or_default().to_owned();
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(body);
+            (
+                axum::http::StatusCode::CREATED,
+                axum::Json(rest_pull_request(&head)),
+            )
+        }
+    };
+    let list = || async { axum::Json(serde_json::json!([rest_pull_request("hosted-branch")])) };
+    let detail = || async { axum::Json(rest_pull_request("hosted-branch")) };
+    let checks = || async {
+        axum::Json(serde_json::json!({
+            "check_runs": [
+                { "name": "test", "status": "completed", "conclusion": "success",
+                  "html_url": "https://github.com/acme/demo/runs/1" },
+                { "name": "clippy", "status": "in_progress", "conclusion": null,
+                  "html_url": "https://github.com/acme/demo/runs/2" },
+            ]
+        }))
+    };
+    let timeline = || async { axum::Json(serde_json::json!([])) };
+    let router = axum::Router::new()
+        .route("/repos/acme/demo/pulls", axum::routing::post(create))
+        .route("/repos/acme/demo/pulls", axum::routing::get(list))
+        .route("/repos/acme/demo/pulls/7", axum::routing::get(detail))
+        .route(
+            "/repos/acme/demo/commits/{sha}/check-runs",
+            axum::routing::get(checks),
+        )
+        .route(
+            "/repos/acme/demo/issues/7/timeline",
+            axum::routing::get(timeline),
+        );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let api = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_forge_api_base(Some(format!("http://{api}")));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "hosted change").await;
+    let id = json_id(&workspace);
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    std::fs::write(path.join("feature.txt"), "line\n").unwrap();
+    let committed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(committed.status(), reqwest::StatusCode::OK);
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/pr"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "title": "Add the hosted change" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["pr"]["number"], 7, "{body}");
+    assert_eq!(
+        body["pr"]["url"], "https://github.com/acme/demo/pull/7",
+        "{body}"
+    );
+    assert_eq!(
+        body["pr"]["checks_summary"], "1 passing, 1 pending, 0 failing",
+        "the digest's checks ride REST too: {body}"
+    );
+
+    let sent = recorded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(sent.len(), 1, "one create request reached the forge");
+    assert_eq!(sent[0]["title"], "Add the hosted change");
+    assert_eq!(sent[0]["base"], "main");
+    assert_eq!(sent[0]["head"], workspace["branch_name"]);
+    assert!(
+        lender
+            .minted()
+            .iter()
+            .all(|repository| repository == "acme/demo"),
+        "every borrow names the one repository: {:?}",
+        lender.minted()
+    );
+
+    // The authored fact came straight from the creation answer — no `gh`
+    // exists here to re-read it (decision 62 meets decision 65).
+    let facts: serde_json::Value = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pull-requests"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let fact = &facts["items"][0];
+    assert_eq!(fact["number"], 7, "{facts}");
+    assert_eq!(fact["author"], "mira-chen", "{facts}");
+    assert_eq!(fact["relation"], "authored", "{facts}");
+}
+
+/// Decision 65: a gateway refusal fails the pull-request creation with the
+/// gateway's reason, before anything reaches the forge.
+#[tokio::test]
+async fn a_hosted_pull_request_create_fails_closed_with_the_gateway_refusal() {
+    let lender = Arc::new(FakeLender::refusing(GitForgeError::NotConnected {
+        connect_url: Some("https://gateway.example/account/apps".to_owned()),
+    }));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_forge_api_base(Some("http://127.0.0.1:9/".to_owned()));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "refused change").await;
+    let id = json_id(&workspace);
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+
+    let refused = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/pr"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(refused).await;
+    assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(kind, "git_forge_refused");
+    assert!(message.contains("connect your GitHub account"), "{message}");
 }

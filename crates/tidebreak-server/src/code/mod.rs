@@ -14,6 +14,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod ci_logs;
 pub(crate) mod clone;
 pub(crate) mod delivery;
+pub(crate) mod forge_rest;
 pub(crate) mod fork;
 pub(crate) mod gh;
 pub(crate) mod harness_install;
