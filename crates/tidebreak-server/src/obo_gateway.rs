@@ -1,16 +1,21 @@
 //! Per-caller gateway capabilities for gateway-authenticated hosted machines
-//! (decisions 51 and 62).
+//! (decisions 51, 62, and 63).
 //!
 //! A hosted machine that authenticates callers against a Model Gateway
 //! (decision 49) already holds each caller's short-lived, machine-bound
-//! token. This module turns that token into two capabilities for the same
-//! user, each through the gateway's RFC 8693 exchange:
+//! token. This module turns that token into three capabilities for the same
+//! user:
 //!
 //! - **Inference** (decision 51): a short-lived, inference-only token the
-//!   router presents as the credential for the caller's turns.
+//!   router presents as the credential for the caller's turns, through the
+//!   gateway's RFC 8693 exchange.
 //! - **Entitlements** (decision 62): a short-lived catalog capability that
 //!   reads the caller's own member catalog, so the picker offers exactly the
 //!   models their account entitles them to.
+//! - **Git identity** (decision 63): a repository-scoped forge credential
+//!   borrowed per clone or push, presented with the machine-bound token
+//!   directly — the gateway's git-credential surface is authenticated like
+//!   its principal read, not through the exchange.
 //!
 //! The deployment needs no inference secret of its own, and the gateway
 //! meters every turn to the user who drove it.
@@ -18,8 +23,9 @@
 //! Three rules are load-bearing:
 //!
 //! - **Nothing here is durable.** Exchanged tokens live in this process's
-//!   memory, keyed by owner, and are minted again near expiry. They are never
-//!   written to the store, never logged, and never returned to a client.
+//!   memory, keyed by owner, and are minted again near expiry; a borrowed git
+//!   credential lives only for the operation that borrowed it. None of them
+//!   are written to the store, logged, or returned to a client.
 //! - **The exchange never falls back.** A refusal fails the caller's turn
 //!   closed. The server does not retry onto a shared credential, and one
 //!   user's refusal leaves every other user's turns running.
@@ -66,6 +72,15 @@ const CATALOG_STALE_GRACE_SECONDS: u64 = 3600;
 /// below anything that could stall the process.
 const CATALOG_RESPONSE_LIMIT: usize = 1024 * 1024;
 
+/// How long one caller's probed git-forge identity stays fresh.
+///
+/// The identity decorates surfaces that refetch often — the PR card reloads
+/// on every content revision — while the underlying answer changes on the
+/// pace of a deployment registering a forge. Sixty seconds keeps the picker
+/// honest within a minute of a forge appearing without asking the gateway
+/// per render.
+const GIT_FORGE_FRESH_SECONDS: u64 = 60;
+
 /// The OAuth token-exchange grant the gateway accepts for this flow.
 const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
@@ -103,6 +118,18 @@ struct UserSlot {
     subject: std::sync::Mutex<Arc<str>>,
     token: tokio::sync::Mutex<Option<CachedToken>>,
     catalog: tokio::sync::Mutex<Option<CachedCatalog>>,
+    git_forge: tokio::sync::Mutex<Option<CachedGitForge>>,
+}
+
+/// One caller's probed git-forge answer and when it was read.
+///
+/// Refusals are cached beside availability: a deployment with no forge is the
+/// common case, and re-asking the gateway on every PR-card render would turn
+/// "not offered" into traffic. Transport failures are never cached — the next
+/// read asks again.
+struct CachedGitForge {
+    outcome: Result<GitForgeIdentity, GitForgeError>,
+    fetched_at_unix: u64,
 }
 
 /// One caller's fetched entitlement snapshot and its revalidation state.
@@ -137,6 +164,67 @@ struct ExchangeResponse {
     expires_in: u64,
 }
 
+/// The forge identity a hosted machine's git operations act as (decision 63).
+///
+/// Work done with a borrowed credential lands as the deployment's GitHub App,
+/// not as the caller — this is what the UI says so with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitForgeIdentity {
+    /// The gateway's display name for the forge app.
+    pub app_name: String,
+    /// The bot account work lands as, `<slug>[bot]`, when the gateway has
+    /// recorded the App slug.
+    pub bot_login: Option<String>,
+}
+
+/// One borrowed, repository-scoped forge credential (decision 63).
+///
+/// Held for the length of a single git operation and dropped. Deliberately
+/// no `Clone`, and `Debug` redacts the secret: the secret is the whole
+/// value, and the fewer copies and formatters that can touch it, the better.
+pub(crate) struct GitCredential {
+    /// Login half of the HTTP basic pair — `x-access-token` for GitHub Apps.
+    pub username: String,
+    /// The repository-scoped installation token, dead within about an hour.
+    pub secret: String,
+}
+
+impl std::fmt::Debug for GitCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitCredential")
+            .field("username", &self.username)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Why the gateway would not lend a git identity or credential.
+///
+/// The stable codes of the gateway's git-credential surface (gateway ADR
+/// 0083), plus the two local outcomes: a caller this process holds no live
+/// session for, and a gateway that could not be read. Each variant is phrased
+/// by its consumer — the repo-source probe words them as availability, a
+/// clone or push words them as the operation's failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GitForgeError {
+    /// The caller's machine-bound session is gone; they sign in again.
+    SignInRequired(String),
+    /// No forge with a mintable App identity is available to this caller.
+    NoGitForge,
+    /// More than one forge is available; the gateway refuses to pick.
+    AmbiguousGitForge,
+    /// The forge's identity is a person's own Connect, never lent to a
+    /// shared machine.
+    ConnectModeForge,
+    /// The forge has no approved GitHub App installation yet.
+    ForgeAppNotInstalled,
+    /// The App installation does not cover the requested repository.
+    RepositoryNotInstalled,
+    /// The gateway or the forge could not serve the request; retryable.
+    Unavailable(String),
+}
+
 /// Per-caller inference credentials for a gateway-authenticated deployment.
 ///
 /// Construct one per process with [`OboGateway::from_config`], record each
@@ -149,6 +237,15 @@ pub(crate) struct OboGateway {
     token_url: reqwest::Url,
     /// The member catalog a caller's exchanged capability reads.
     catalog_url: reqwest::Url,
+    /// The git-credential mint, presented with the machine-bound token
+    /// directly (decision 63).
+    git_credential_url: reqwest::Url,
+    /// The no-mint git-forge availability probe beside it.
+    git_forge_url: reqwest::Url,
+    /// This machine's `tidebreak:<sha256>` resource, named in every
+    /// git-credential request so the gateway verifies the token lives in
+    /// exactly this machine's resource.
+    resource: String,
     /// The normalized gateway base, stamped onto per-caller snapshots so
     /// their frozen model identities digest a stable deployment URL.
     gateway_base_url: String,
@@ -177,22 +274,37 @@ impl OboGateway {
         let Some(gateway_url) = config.auth_gateway_url.as_deref() else {
             return Ok(None);
         };
+        // The same requirement gateway authentication states at boot
+        // (decision 49): without the public URL there is no machine resource,
+        // and without the resource no git-credential request can name what
+        // the presented token must live in.
+        let Some(public_url) = config.public_url.as_deref() else {
+            return Err(AgentError::config(
+                "TIDEBREAK_PUBLIC_URL is required with TIDEBREAK_AUTH_GATEWAY_URL so user credentials can be bound to this exact machine",
+            ));
+        };
+        let resource = tidebreak_core::config::tidebreak_machine_resource(
+            &crate::auth::canonical_public_url(public_url)?,
+        );
         let base = config
             .auth_gateway_verifier_url
             .as_deref()
             .unwrap_or(gateway_url);
-        Ok(Some(Arc::new(Self::new(base)?)))
+        Ok(Some(Arc::new(Self::new(base, resource)?)))
     }
 
-    /// Build an exchange client against `base_url`.
+    /// Build an exchange client against `base_url`, acting as the machine
+    /// bound to `resource`.
     ///
     /// # Errors
     /// Fails when `base_url` is unparseable, carries credentials, a query, or
     /// a fragment, or is cleartext outside loopback development.
-    pub(crate) fn new(base_url: &str) -> Result<Self> {
+    pub(crate) fn new(base_url: &str, resource: String) -> Result<Self> {
         let base = normalized_gateway_base(base_url)?;
         let token_url = join_below(&base, "oauth/token")?;
         let catalog_url = join_below(&base, "api/v1/me/catalog")?;
+        let git_credential_url = join_below(&base, "api/v1/tidebreak/git-credential")?;
+        let git_forge_url = join_below(&base, "api/v1/tidebreak/git-forge")?;
         let gateway_base_url = base.as_str().trim_end_matches('/').to_owned();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -204,6 +316,9 @@ impl OboGateway {
         Ok(Self {
             token_url,
             catalog_url,
+            git_credential_url,
+            git_forge_url,
+            resource,
             gateway_base_url,
             client,
             users: std::sync::Mutex::new(HashMap::new()),
@@ -238,6 +353,7 @@ impl OboGateway {
                         subject: std::sync::Mutex::new(bearer),
                         token: tokio::sync::Mutex::new(None),
                         catalog: tokio::sync::Mutex::new(None),
+                        git_forge: tokio::sync::Mutex::new(None),
                     }),
                 );
             }
@@ -508,6 +624,187 @@ impl OboGateway {
         })
     }
 
+    /// The forge identity this caller's git operations would act as, probed
+    /// from the gateway without minting anything (decision 63).
+    ///
+    /// Settled answers — an identity, or a named refusal like "no forge" —
+    /// are held fresh for [`GIT_FORGE_FRESH_SECONDS`], because the surfaces
+    /// that render them refetch far faster than deployments change. A dead
+    /// session and a transport failure are never held: the next read asks
+    /// again.
+    ///
+    /// # Errors
+    /// Fails when this process holds no live token for `owner`, when the
+    /// gateway names a refusal, and on transport failure.
+    pub(crate) async fn git_forge_identity(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<GitForgeIdentity, GitForgeError> {
+        let Some(slot) = self.slot_for(owner)? else {
+            return Err(GitForgeError::SignInRequired(
+                "this machine holds no live Model Gateway session for you; sign in again".into(),
+            ));
+        };
+        // Holding this across the probe is the single-flight gate, exactly
+        // like the inference token and the catalog.
+        let mut cached = slot.git_forge.lock().await;
+        let now = unix_time();
+        if let Some(held) = cached.as_ref() {
+            if now.saturating_sub(held.fetched_at_unix) < GIT_FORGE_FRESH_SECONDS {
+                return held.outcome.clone();
+            }
+        }
+        let subject = subject_of(&slot)?;
+        let outcome = self.fetch_git_forge(&subject).await;
+        match &outcome {
+            Ok(_)
+            | Err(
+                GitForgeError::NoGitForge
+                | GitForgeError::AmbiguousGitForge
+                | GitForgeError::ConnectModeForge
+                | GitForgeError::ForgeAppNotInstalled
+                | GitForgeError::RepositoryNotInstalled,
+            ) => {
+                *cached = Some(CachedGitForge {
+                    outcome: outcome.clone(),
+                    fetched_at_unix: now,
+                });
+            }
+            Err(GitForgeError::SignInRequired(_) | GitForgeError::Unavailable(_)) => {}
+        }
+        outcome
+    }
+
+    /// Borrow one repository-scoped forge credential for `owner`'s git
+    /// operation against `repository` (`owner/repo`), minted by the gateway
+    /// per request (decision 63).
+    ///
+    /// Deliberately no cache and no single-flight: each clone or push
+    /// borrows its own dying credential, which is the contract that keeps
+    /// nothing durable on this machine. The caller holds the result for the
+    /// length of the operation and drops it.
+    ///
+    /// # Errors
+    /// Fails when this process holds no live token for `owner`, when the
+    /// gateway names a refusal, and on transport failure.
+    pub(crate) async fn git_credential(
+        &self,
+        owner: &OwnerId,
+        repository: &str,
+    ) -> Result<GitCredential, GitForgeError> {
+        let Some(slot) = self.slot_for(owner)? else {
+            return Err(GitForgeError::SignInRequired(
+                "this machine holds no live Model Gateway session for you; sign in again".into(),
+            ));
+        };
+        let subject = subject_of(&slot)?;
+        let response = self
+            .client
+            .post(self.git_credential_url.clone())
+            .bearer_auth(subject.as_ref())
+            .json(&serde_json::json!({
+                "resource": self.resource,
+                "repository": repository,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                GitForgeError::Unavailable(format!(
+                    "the Model Gateway git-credential request failed: {error}"
+                ))
+            })?;
+        let status = response.status();
+        let body = read_bounded(response, RESPONSE_LIMIT)
+            .await
+            .map_err(|error| GitForgeError::Unavailable(error.to_string()))?;
+        if !status.is_success() {
+            return Err(git_refusal(status, &body));
+        }
+        #[derive(serde::Deserialize)]
+        struct CredentialAnswer {
+            username: String,
+            secret: String,
+        }
+        let answer: CredentialAnswer = serde_json::from_slice(&body).map_err(|error| {
+            GitForgeError::Unavailable(format!(
+                "the Model Gateway returned an unreadable git credential: {error}"
+            ))
+        })?;
+        if answer.username.is_empty() || answer.secret.is_empty() {
+            return Err(GitForgeError::Unavailable(
+                "the Model Gateway returned an empty git credential".into(),
+            ));
+        }
+        Ok(GitCredential {
+            username: answer.username,
+            secret: answer.secret,
+        })
+    }
+
+    /// One probe of the gateway's git-forge surface with the caller's
+    /// machine-bound token.
+    async fn fetch_git_forge(&self, subject: &str) -> Result<GitForgeIdentity, GitForgeError> {
+        let response = self
+            .client
+            .get(self.git_forge_url.clone())
+            .query(&[("resource", self.resource.as_str())])
+            .bearer_auth(subject)
+            .send()
+            .await
+            .map_err(|error| {
+                GitForgeError::Unavailable(format!(
+                    "the Model Gateway git-forge probe failed: {error}"
+                ))
+            })?;
+        let status = response.status();
+        let body = read_bounded(response, RESPONSE_LIMIT)
+            .await
+            .map_err(|error| GitForgeError::Unavailable(error.to_string()))?;
+        if !status.is_success() {
+            return Err(git_refusal(status, &body));
+        }
+        #[derive(serde::Deserialize)]
+        struct GitForgeAnswer {
+            app_name: String,
+            #[serde(default)]
+            bot_login: Option<String>,
+        }
+        let answer: GitForgeAnswer = serde_json::from_slice(&body).map_err(|error| {
+            GitForgeError::Unavailable(format!(
+                "the Model Gateway returned an unreadable git-forge answer: {error}"
+            ))
+        })?;
+        Ok(GitForgeIdentity {
+            app_name: answer.app_name,
+            bot_login: answer.bot_login,
+        })
+    }
+
+    /// The recorded slot for `owner`, or `None` for a caller this process
+    /// has never authenticated.
+    fn slot_for(&self, owner: &OwnerId) -> Result<Option<Arc<UserSlot>>, GitForgeError> {
+        let users = self.users.lock().map_err(|_| {
+            GitForgeError::Unavailable(
+                "on-behalf-of gateway state is unavailable in this process".into(),
+            )
+        })?;
+        Ok(users.get(owner).cloned())
+    }
+
+    /// Force the next [`OboGateway::git_forge_identity`] to probe, from tests.
+    #[cfg(test)]
+    async fn expire_git_forge_for_test(&self, owner: &OwnerId) {
+        let slot = {
+            let users = self.users.lock().unwrap();
+            users.get(owner).cloned()
+        };
+        if let Some(slot) = slot {
+            if let Some(held) = slot.git_forge.lock().await.as_mut() {
+                held.fetched_at_unix = 0;
+            }
+        }
+    }
+
     /// Seed a caller's snapshot directly, for tests that need routes without
     /// a live fake gateway behind them.
     #[cfg(test)]
@@ -565,6 +862,174 @@ fn exchange_refusal(body: &[u8]) -> AgentError {
         _ => AgentError::msg(format!(
             "the Model Gateway refused the on-behalf-of token exchange: {detail}"
         )),
+    }
+}
+
+/// The newest machine-bound bearer recorded in `slot`.
+fn subject_of(slot: &UserSlot) -> Result<Arc<str>, GitForgeError> {
+    slot.subject
+        .lock()
+        .map(|subject| subject.clone())
+        .map_err(|_| {
+            GitForgeError::Unavailable(
+                "on-behalf-of gateway state is unavailable in this process".into(),
+            )
+        })
+}
+
+/// Turn a refused git-forge or git-credential response into its typed cause.
+///
+/// The gateway's stable codes map one to one; a response without a readable
+/// code falls back on the status — a bare 404 is a gateway too old to serve
+/// the surface, and a bare 401/403 is a dead session. A body that decodes to
+/// nothing recognizable is still a refusal, never a reason to keep going.
+fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
+    if let Ok(refusal) = serde_json::from_slice::<OAuthError>(body) {
+        let detail = refusal
+            .error_description
+            .clone()
+            .unwrap_or_else(|| refusal.error.clone());
+        match refusal.error.as_str() {
+            "no_git_forge" => return GitForgeError::NoGitForge,
+            "ambiguous_git_forge" => return GitForgeError::AmbiguousGitForge,
+            "connect_mode_forge" => return GitForgeError::ConnectModeForge,
+            "forge_app_not_installed" => return GitForgeError::ForgeAppNotInstalled,
+            "repository_not_installed" => return GitForgeError::RepositoryNotInstalled,
+            "forge_credential_mint_failed" => {
+                return GitForgeError::Unavailable(format!(
+                    "the deployment's git forge could not mint a credential: {detail}"
+                ));
+            }
+            _ => {
+                if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    return GitForgeError::SignInRequired(format!(
+                        "the Model Gateway refused your session for git credentials: {detail}"
+                    ));
+                }
+                return GitForgeError::Unavailable(format!(
+                    "the Model Gateway refused the git-credential request: {detail}"
+                ));
+            }
+        }
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return GitForgeError::Unavailable(
+            "the Model Gateway does not serve git credentials; update the deployment".into(),
+        );
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return GitForgeError::SignInRequired(
+            "the Model Gateway refused your session for git credentials; sign in again".into(),
+        );
+    }
+    GitForgeError::Unavailable(format!(
+        "the Model Gateway git-credential request failed with status {status}"
+    ))
+}
+
+/// Per-caller git-forge lending, as code mode consumes it (decision 63).
+///
+/// A seam rather than a concrete handle so code-mode tests fake the
+/// gateway's answers without a live server behind them.
+#[async_trait]
+pub(crate) trait GitCredentialLender: Send + Sync {
+    /// The identity work would land as, or the named reason none is offered.
+    async fn git_forge_identity(&self, owner: &OwnerId) -> Result<GitForgeIdentity, GitForgeError>;
+
+    /// Borrow one repository-scoped credential for one git operation against
+    /// `repository` (`owner/repo`).
+    async fn git_credential(
+        &self,
+        owner: &OwnerId,
+        repository: &str,
+    ) -> Result<GitCredential, GitForgeError>;
+}
+
+#[async_trait]
+impl GitCredentialLender for OboGateway {
+    async fn git_forge_identity(&self, owner: &OwnerId) -> Result<GitForgeIdentity, GitForgeError> {
+        OboGateway::git_forge_identity(self, owner).await
+    }
+
+    async fn git_credential(
+        &self,
+        owner: &OwnerId,
+        repository: &str,
+    ) -> Result<GitCredential, GitForgeError> {
+        OboGateway::git_credential(self, owner, repository).await
+    }
+}
+
+/// Scripted git-forge lending for code-mode tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// A lender whose answers are set by the test: an identity (or refusal)
+    /// for the probe, an optional refusal for mints, and a record of every
+    /// repository a mint was asked for.
+    pub(crate) struct FakeLender {
+        pub(crate) identity: std::sync::Mutex<Result<GitForgeIdentity, GitForgeError>>,
+        pub(crate) mint_refusal: std::sync::Mutex<Option<GitForgeError>>,
+        pub(crate) minted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeLender {
+        /// A deployment whose forge serves this caller as `bot_login`.
+        pub(crate) fn offering(bot_login: &str) -> Self {
+            Self {
+                identity: std::sync::Mutex::new(Ok(GitForgeIdentity {
+                    app_name: "Acme Forge".to_owned(),
+                    bot_login: Some(bot_login.to_owned()),
+                })),
+                mint_refusal: std::sync::Mutex::new(None),
+                minted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A deployment whose gateway refuses both surfaces with `error`.
+        pub(crate) fn refusing(error: GitForgeError) -> Self {
+            Self {
+                identity: std::sync::Mutex::new(Err(error.clone())),
+                mint_refusal: std::sync::Mutex::new(Some(error)),
+                minted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Every repository a mint was asked for, in order.
+        pub(crate) fn minted(&self) -> Vec<String> {
+            self.minted.lock().expect("minted").clone()
+        }
+    }
+
+    #[async_trait]
+    impl GitCredentialLender for FakeLender {
+        async fn git_forge_identity(
+            &self,
+            _owner: &OwnerId,
+        ) -> Result<GitForgeIdentity, GitForgeError> {
+            self.identity.lock().expect("identity").clone()
+        }
+
+        async fn git_credential(
+            &self,
+            _owner: &OwnerId,
+            repository: &str,
+        ) -> Result<GitCredential, GitForgeError> {
+            self.minted
+                .lock()
+                .expect("minted")
+                .push(repository.to_owned());
+            match self.mint_refusal.lock().expect("mint refusal").clone() {
+                Some(error) => Err(error),
+                None => Ok(GitCredential {
+                    username: "x-access-token".to_owned(),
+                    secret: "ghs_fake_borrowed".to_owned(),
+                }),
+            }
+        }
     }
 }
 
@@ -696,6 +1161,13 @@ mod tests {
         catalog_reads: Arc<AtomicUsize>,
         /// The member catalog it serves, with a fixed `ETag` of `"fake-1"`.
         catalog: Arc<std::sync::Mutex<serde_json::Value>>,
+        /// How many git-forge probes it has served.
+        forge_probes: Arc<AtomicUsize>,
+        /// How many git credentials it has minted.
+        credential_mints: Arc<AtomicUsize>,
+        /// The `error` code the git surfaces refuse with, with its status, or
+        /// empty to succeed.
+        git_refusal: Arc<std::sync::Mutex<Option<(u16, String)>>>,
     }
 
     impl FakeGateway {
@@ -706,6 +1178,9 @@ mod tests {
                 refusal: Arc::new(std::sync::Mutex::new(String::new())),
                 latency: Duration::ZERO,
                 catalog_reads: Arc::new(AtomicUsize::new(0)),
+                forge_probes: Arc::new(AtomicUsize::new(0)),
+                credential_mints: Arc::new(AtomicUsize::new(0)),
+                git_refusal: Arc::new(std::sync::Mutex::new(None)),
                 catalog: Arc::new(std::sync::Mutex::new(serde_json::json!({
                     "models": [
                         {
@@ -848,15 +1323,121 @@ mod tests {
                     }
                 }),
             );
+            let forge_state = self.clone();
+            let app = app.route(
+                "/api/v1/tidebreak/git-forge",
+                axum::routing::get(
+                    move |headers: axum::http::HeaderMap,
+                          query: axum::extract::Query<HashMap<String, String>>| {
+                        let state = forge_state.clone();
+                        async move {
+                            // The probe rides the caller's machine-bound
+                            // token directly, never an exchanged capability,
+                            // and names this machine's exact resource.
+                            let bearer = machine_bound_bearer(&headers);
+                            assert!(
+                                bearer.starts_with("mg_at_"),
+                                "the probe must present the machine-bound subject, got {bearer:?}"
+                            );
+                            assert_eq!(
+                                query.get("resource").map(String::as_str),
+                                Some(TEST_RESOURCE)
+                            );
+                            state.forge_probes.fetch_add(1, Ordering::SeqCst);
+                            if let Some(refused) = state.next_git_refusal() {
+                                return refused;
+                            }
+                            Json(serde_json::json!({
+                                "app_id": "0193a1c0-0000-7000-8000-000000000001",
+                                "app_name": "Acme Forge",
+                                "bot_login": "acme-ship[bot]",
+                            }))
+                            .into_response()
+                        }
+                    },
+                ),
+            );
+            let credential_state = self.clone();
+            let app = app.route(
+                "/api/v1/tidebreak/git-credential",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                        let state = credential_state.clone();
+                        async move {
+                            let bearer = machine_bound_bearer(&headers);
+                            assert!(
+                                bearer.starts_with("mg_at_"),
+                                "the mint must present the machine-bound subject, got {bearer:?}"
+                            );
+                            assert_eq!(body["resource"], TEST_RESOURCE);
+                            let repository =
+                                body["repository"].as_str().unwrap_or_default().to_owned();
+                            assert!(
+                                repository.split('/').count() == 2,
+                                "the mint must name owner/repo, got {repository:?}"
+                            );
+                            state.credential_mints.fetch_add(1, Ordering::SeqCst);
+                            if let Some(refused) = state.next_git_refusal() {
+                                return refused;
+                            }
+                            let serial = state.credential_mints.load(Ordering::SeqCst);
+                            Json(serde_json::json!({
+                                "username": "x-access-token",
+                                "secret": format!("ghs_fake_{serial}_for_{repository}"),
+                                "expires_at": "2027-01-01T00:00:00Z",
+                                "app_id": "0193a1c0-0000-7000-8000-000000000001",
+                            }))
+                            .into_response()
+                        }
+                    },
+                ),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
-            let inference = Arc::new(OboGateway::new(&format!("http://{address}")).unwrap());
+            let inference = Arc::new(
+                OboGateway::new(&format!("http://{address}"), TEST_RESOURCE.to_owned()).unwrap(),
+            );
             (inference, server)
         }
+
+        /// The configured git refusal as a ready response, or `None`.
+        fn next_git_refusal(&self) -> Option<axum::response::Response> {
+            let held = self
+                .git_refusal
+                .lock()
+                .map(|refusal| refusal.clone())
+                .unwrap_or_default()?;
+            let (status, code) = held;
+            Some(
+                (
+                    axum::http::StatusCode::from_u16(status)
+                        .unwrap_or(axum::http::StatusCode::BAD_REQUEST),
+                    Json(serde_json::json!({
+                        "error": code,
+                        "error_description": "the fake gateway refused",
+                    })),
+                )
+                    .into_response(),
+            )
+        }
     }
+
+    /// The bearer half of an Authorization header.
+    fn machine_bound_bearer(headers: &axum::http::HeaderMap) -> String {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The machine resource every git request must name.
+    const TEST_RESOURCE: &str =
+        "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed";
 
     use axum::response::IntoResponse as _;
 
@@ -1106,8 +1687,19 @@ mod tests {
         );
 
         config.auth_gateway_url = Some("https://gateway.example".to_owned());
+        assert!(
+            OboGateway::from_config(&config).is_err(),
+            "a gateway deployment without a public URL cannot name its machine resource"
+        );
+
+        config.public_url = Some("https://machine.example".to_owned());
         let inference = OboGateway::from_config(&config).unwrap().unwrap();
         assert_eq!(inference.gateway_base_url(), "https://gateway.example");
+        assert_eq!(
+            inference.resource,
+            tidebreak_core::config::tidebreak_machine_resource("https://machine.example"),
+            "the git-credential resource is the machine's own"
+        );
     }
 
     /// The exchange is a server-to-server call, so it honors the same
@@ -1119,6 +1711,7 @@ mod tests {
         config.profile = Profile::SelfHost;
         config.auth_gateway_url = Some("https://public.example".to_owned());
         config.auth_gateway_verifier_url = Some("https://gateway.internal".to_owned());
+        config.public_url = Some("https://machine.example".to_owned());
 
         let inference = OboGateway::from_config(&config).unwrap().unwrap();
         assert_eq!(
@@ -1131,10 +1724,15 @@ mod tests {
     /// A gateway deployed under a subpath keeps its prefix.
     #[test]
     fn a_subpath_deployment_keeps_its_prefix() {
-        let inference = OboGateway::new("https://example.test/gateway").unwrap();
+        let inference =
+            OboGateway::new("https://example.test/gateway", TEST_RESOURCE.to_owned()).unwrap();
         assert_eq!(
             inference.token_url.as_str(),
             "https://example.test/gateway/oauth/token"
+        );
+        assert_eq!(
+            inference.git_credential_url.as_str(),
+            "https://example.test/gateway/api/v1/tidebreak/git-credential"
         );
         assert_eq!(inference.gateway_base_url(), "https://example.test/gateway");
     }
@@ -1143,10 +1741,11 @@ mod tests {
     /// assembly, not at the first turn.
     #[test]
     fn an_unusable_gateway_url_is_refused_at_assembly() {
-        assert!(OboGateway::new("https://user:pass@example.test").is_err());
-        assert!(OboGateway::new("https://example.test?probe=1").is_err());
-        assert!(OboGateway::new("http://gateway.example").is_err());
-        assert!(OboGateway::new("http://127.0.0.1:8080").is_ok());
+        let resource = || TEST_RESOURCE.to_owned();
+        assert!(OboGateway::new("https://user:pass@example.test", resource()).is_err());
+        assert!(OboGateway::new("https://example.test?probe=1", resource()).is_err());
+        assert!(OboGateway::new("http://gateway.example", resource()).is_err());
+        assert!(OboGateway::new("http://127.0.0.1:8080", resource()).is_ok());
     }
 
     /// Decision 62's happy path: a recorded caller's snapshot is their own
@@ -1255,6 +1854,121 @@ mod tests {
             2,
             "each caller fetches their own catalog"
         );
+        server.abort();
+    }
+
+    /// Decision 63's happy path: a recorded caller borrows a
+    /// repository-scoped credential, minted per operation — two borrows are
+    /// two mints, because nothing durable is held.
+    #[tokio::test]
+    async fn a_caller_borrows_a_dying_credential_per_operation() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        let first = obo.git_credential(&alice, "acme/demo").await.unwrap();
+        assert_eq!(first.username, "x-access-token");
+        assert!(first.secret.ends_with("for_acme/demo"));
+        let second = obo.git_credential(&alice, "acme/demo").await.unwrap();
+        assert_ne!(first.secret, second.secret, "each operation borrows anew");
+        assert_eq!(gateway.credential_mints.load(Ordering::SeqCst), 2);
+        assert_eq!(gateway.served(), 0, "no exchange is involved");
+        server.abort();
+    }
+
+    /// The probe names the forge identity for the UI and stays fresh across
+    /// the rapid refetches its surfaces make.
+    #[tokio::test]
+    async fn the_probe_names_the_forge_identity_and_holds_it_fresh() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        let identity = obo.git_forge_identity(&alice).await.unwrap();
+        assert_eq!(identity.app_name, "Acme Forge");
+        assert_eq!(identity.bot_login.as_deref(), Some("acme-ship[bot]"));
+        obo.git_forge_identity(&alice).await.unwrap();
+        assert_eq!(
+            gateway.forge_probes.load(Ordering::SeqCst),
+            1,
+            "a fresh identity must not re-probe"
+        );
+
+        obo.expire_git_forge_for_test(&alice).await;
+        obo.git_forge_identity(&alice).await.unwrap();
+        assert_eq!(gateway.forge_probes.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    /// The gateway's stable refusal codes arrive typed, and a settled refusal
+    /// is held like a settled identity — "not offered" is the common case and
+    /// must not turn every render into gateway traffic.
+    #[tokio::test]
+    async fn a_named_git_refusal_is_typed_and_held() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        *gateway.git_refusal.lock().unwrap() = Some((404, "no_git_forge".to_owned()));
+        assert_eq!(
+            obo.git_forge_identity(&alice).await.unwrap_err(),
+            GitForgeError::NoGitForge
+        );
+        assert_eq!(
+            obo.git_forge_identity(&alice).await.unwrap_err(),
+            GitForgeError::NoGitForge
+        );
+        assert_eq!(
+            gateway.forge_probes.load(Ordering::SeqCst),
+            1,
+            "a settled refusal must not re-probe"
+        );
+
+        *gateway.git_refusal.lock().unwrap() = Some((403, "connect_mode_forge".to_owned()));
+        obo.expire_git_forge_for_test(&alice).await;
+        assert_eq!(
+            obo.git_forge_identity(&alice).await.unwrap_err(),
+            GitForgeError::ConnectModeForge
+        );
+
+        *gateway.git_refusal.lock().unwrap() = Some((422, "repository_not_installed".to_owned()));
+        assert_eq!(
+            obo.git_credential(&alice, "acme/demo").await.unwrap_err(),
+            GitForgeError::RepositoryNotInstalled
+        );
+        server.abort();
+    }
+
+    /// A dead session is sign-in-required on the git surfaces too, and a
+    /// caller this process never authenticated borrows nothing.
+    #[tokio::test]
+    async fn git_credentials_fail_closed_without_a_live_session() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        *gateway.git_refusal.lock().unwrap() = Some((401, "invalid_token".to_owned()));
+        assert!(matches!(
+            obo.git_credential(&alice, "acme/demo").await.unwrap_err(),
+            GitForgeError::SignInRequired(_)
+        ));
+
+        let stranger = owner("user:stranger");
+        assert!(matches!(
+            obo.git_credential(&stranger, "acme/demo")
+                .await
+                .unwrap_err(),
+            GitForgeError::SignInRequired(_)
+        ));
+        assert!(matches!(
+            obo.git_forge_identity(&stranger).await.unwrap_err(),
+            GitForgeError::SignInRequired(_)
+        ));
+        assert_eq!(gateway.credential_mints.load(Ordering::SeqCst), 1);
         server.abort();
     }
 }

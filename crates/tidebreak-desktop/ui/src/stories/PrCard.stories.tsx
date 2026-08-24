@@ -7,6 +7,7 @@ import { PrCardView } from "@/code/PrCard";
 import {
   cleanGit,
   dirtyGit,
+  hostedAppGit,
   openPrGit,
   readyForPrGit,
   unpushedGit,
@@ -67,6 +68,15 @@ export const Committing: Story = {
 
 export const Unpushed: Story = {
   args: { snapshot: unpushedGit },
+};
+
+/**
+ * A gateway-authenticated hosted machine pushes with the deployment's GitHub
+ * App identity, and the card says so plainly: work lands as the App's bot
+ * account, not as the person (issue #2510).
+ */
+export const HostedPushesAsApp: Story = {
+  args: { snapshot: hostedAppGit },
 };
 
 export const ReadyForPullRequest: Story = {

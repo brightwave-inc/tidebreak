@@ -1835,6 +1835,13 @@ async fn bind_inner(
         code_host_tool_broker,
         browser_runtime,
         browser_bridge_command,
+        // On a gateway-authenticated hosted machine, git operations borrow
+        // per-caller forge credentials from the same on-behalf-of handle the
+        // router exchanges through (decision 63).
+        state
+            .on_behalf_of_gateway
+            .clone()
+            .map(|gateway| gateway as Arc<dyn obo_gateway::GitCredentialLender>),
     ));
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.

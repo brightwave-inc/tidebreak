@@ -6076,8 +6076,13 @@ async fn a_cached_provider_is_never_shared_between_callers() {
 
     let dir = tempfile::tempdir().unwrap();
     let (store, secrets) = empty_deployment(&dir).await;
-    let gateway_obo =
-        Arc::new(crate::obo_gateway::OboGateway::new("https://gateway.example").unwrap());
+    let gateway_obo = Arc::new(
+        crate::obo_gateway::OboGateway::new(
+            "https://gateway.example",
+            "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed".to_owned(),
+        )
+        .unwrap(),
+    );
     let alice = tidebreak_core::OwnerId::new("user:alice").unwrap();
     let bob = tidebreak_core::OwnerId::new("user:bob").unwrap();
     gateway_obo.record_caller(&alice, "mg_at_alice".into());

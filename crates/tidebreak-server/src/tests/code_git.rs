@@ -10,21 +10,31 @@ use axum::Router;
 use tokio::net::TcpListener;
 
 use crate::code::CodeRuntime;
+use crate::obo_gateway::test_support::FakeLender;
+use crate::obo_gateway::{GitCredentialLender, GitForgeError};
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{QuickAction, RepoId};
 use tidebreak_harness::AdapterRegistry;
 
 async fn code_app() -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with(None).await
+}
+
+/// The git app, optionally on a "hosted machine" that lends gateway git
+/// credentials (decision 63).
+async fn code_app_with(
+    lender: Option<Arc<dyn GitCredentialLender>>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code-git.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
-    let runtime = Arc::new(CodeRuntime::with_registry(
-        db,
-        dir.path().to_path_buf(),
-        registry,
-    ));
+    let mut runtime = CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry);
+    if let Some(lender) = lender {
+        runtime = runtime.with_git_credentials(lender);
+    }
+    let runtime = Arc::new(runtime);
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store_trait,
@@ -438,4 +448,126 @@ async fn auto_run_on_create_runs_after_setup() {
     let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
     let stamped = std::fs::read_to_string(path.join("stamp.txt")).unwrap();
     assert_eq!(stamped, "auto\n");
+}
+
+/// Decision 63: a hosted machine's push borrows nothing for a local origin
+/// and keeps working exactly as before; the git card names the acting App
+/// identity only once the checkout's origin is a forge repository; and a
+/// gateway refusal fails the push with its reason before git runs.
+#[tokio::test]
+async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
+    let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
+    let (router, token, _runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "hosted change").await;
+    let id = json_id(&workspace);
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    // A local bare origin is not a forge repository: nothing is borrowed and
+    // the push lands exactly as it always has.
+    std::fs::write(path.join("extra.txt"), "line\n").unwrap();
+    let committed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(committed.status(), reqwest::StatusCode::OK);
+    let pushed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/push"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pushed.status(), reqwest::StatusCode::OK);
+    assert!(
+        lender.minted().is_empty(),
+        "a local origin must borrow nothing"
+    );
+
+    // The identity line follows the origin: absent for the local origin,
+    // present once the checkout points at a forge repository.
+    let status = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = status.json().await.unwrap();
+    assert!(body["pushes_as"].is_null(), "{body}");
+
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    let status = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = status.json().await.unwrap();
+    assert_eq!(body["pushes_as"], "acme-ship[bot]", "{body}");
+
+    // A rewritten origin on a foreign host — the exact move an agent in the
+    // workspace could make — is outside the lending: no identity is claimed
+    // and, through the same gate, no credential would be borrowed.
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://evil.example/acme/private.git",
+        ],
+    );
+    let status = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = status.json().await.unwrap();
+    assert!(body["pushes_as"].is_null(), "{body}");
+    assert!(
+        lender.minted().is_empty(),
+        "a foreign host must never reach the gateway"
+    );
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+
+    // A refusal stops the push with the gateway's reason before git runs —
+    // nothing reaches the network in this test.
+    *lender.mint_refusal.lock().unwrap() = Some(GitForgeError::NoGitForge);
+    let refused = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/push"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(refused).await;
+    assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(kind, "git_forge_refused");
+    assert!(message.contains("no git forge"), "{message}");
+    assert_eq!(lender.minted(), vec!["acme/demo".to_owned()]);
 }

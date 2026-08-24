@@ -15,20 +15,30 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::code::CodeRuntime;
+use crate::obo_gateway::test_support::FakeLender;
+use crate::obo_gateway::{GitCredentialLender, GitForgeError};
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_harness::AdapterRegistry;
 
 async fn code_app() -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with(None).await
+}
+
+/// The clone app, optionally on a "hosted machine" that lends gateway git
+/// credentials (decision 63).
+async fn code_app_with(
+    lender: Option<Arc<dyn GitCredentialLender>>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code-clone.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = AdapterRegistry::new();
     registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
-    let runtime = Arc::new(CodeRuntime::with_registry(
-        db,
-        dir.path().to_path_buf(),
-        registry,
-    ));
+    let mut runtime = CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry);
+    if let Some(lender) = lender {
+        runtime = runtime.with_git_credentials(lender);
+    }
+    let runtime = Arc::new(runtime);
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store_trait,
@@ -444,4 +454,94 @@ async fn a_machine_that_remembers_a_destination_clones_without_being_given_one()
         parent.join("second").exists(),
         "the clone lands under the remembered destination"
     );
+}
+
+async fn fetch_sources(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+) -> serde_json::Value {
+    client
+        .get(format!("http://{addr}/code/repos/sources"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+fn source<'a>(sources: &'a serde_json::Value, kind: &str) -> &'a serde_json::Value {
+    sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["kind"] == kind)
+        .expect(kind)
+}
+
+/// Decision 63: on a hosted machine the `github` source reflects the
+/// gateway's per-caller answer. An offered forge carries the attribution
+/// sentence; a deployment with no forge reads as "not offered, because…",
+/// never as an error.
+#[tokio::test]
+async fn a_hosted_machine_offers_github_per_caller_from_the_gateway() {
+    let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
+    let (router, token, _runtime, _dir) =
+        code_app_with(Some(lender as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let sources = fetch_sources(&client, addr, &token).await;
+    let github = source(&sources, "github");
+    assert_eq!(github["available"], true);
+    let hint = github["remediation"].as_str().unwrap();
+    assert!(hint.contains("acme-ship[bot]"), "{hint}");
+    assert!(hint.contains("not as your GitHub account"), "{hint}");
+    // Local registration and plain git URLs stay offered as before.
+    assert_eq!(source(&sources, "local")["available"], true);
+    assert_eq!(source(&sources, "git_url")["available"], true);
+
+    let refused = Arc::new(FakeLender::refusing(GitForgeError::NoGitForge));
+    let (router, token, _runtime, _dir) =
+        code_app_with(Some(refused as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let sources = fetch_sources(&client, addr, &token).await;
+    let github = source(&sources, "github");
+    assert_eq!(github["available"], false);
+    let reason = github["remediation"].as_str().unwrap();
+    assert!(reason.contains("no git forge"), "{reason}");
+}
+
+/// Decision 63 rule 4: a clone the gateway refuses fails with the gateway's
+/// reason — before any network is touched — and the mint was asked for
+/// exactly the repository the caller named.
+#[tokio::test]
+async fn a_hosted_clone_fails_closed_with_the_gateway_refusal() {
+    let lender = Arc::new(FakeLender::refusing(GitForgeError::RepositoryNotInstalled));
+    let (router, token, _runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let parent = dir.path().join("checkouts");
+    std::fs::create_dir_all(&parent).unwrap();
+
+    let started = client
+        .post(format!("http://{addr}/code/repos/clone"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "github": "acme/private",
+            "parent_dir": parent,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(started.status(), reqwest::StatusCode::ACCEPTED);
+    let job: serde_json::Value = started.json().await.unwrap();
+    let finished = wait_job(&client, addr, &token, job["id"].as_str().unwrap()).await;
+    assert_eq!(finished["done"], true, "{finished}");
+    let error = finished["error"].as_str().expect("the clone fails");
+    assert!(error.contains("does not cover"), "{error}");
+    assert_eq!(lender.minted(), vec!["acme/private".to_owned()]);
 }

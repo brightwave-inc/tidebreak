@@ -137,7 +137,7 @@ impl ScopedCode {
     }
 
     pub(crate) async fn repo_sources(&self) -> Result<CodeRepoSources, ServerError> {
-        self.runtime.repo_sources().await
+        self.runtime.repo_sources(&self.owner).await
     }
 
     pub(crate) async fn start_clone(

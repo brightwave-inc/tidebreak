@@ -1756,6 +1756,7 @@ export function parseCodeWorkspacePr(
       "gh_found",
       "gh_authenticated",
       "remediation",
+      "pushes_as",
       "watch",
     ]) ||
     typeof value.dirty !== "boolean" ||
@@ -1766,7 +1767,8 @@ export function parseCodeWorkspacePr(
     typeof value.gh_found !== "boolean" ||
     (value.gh_authenticated !== undefined &&
       typeof value.gh_authenticated !== "boolean") ||
-    typeof value.remediation !== "string"
+    typeof value.remediation !== "string" ||
+    (value.pushes_as !== undefined && typeof value.pushes_as !== "string")
   ) {
     return null;
   }
@@ -1781,6 +1783,7 @@ export function parseCodeWorkspacePr(
     ...(value.gh_authenticated !== undefined
       ? { gh_authenticated: value.gh_authenticated }
       : {}),
+    ...(value.pushes_as !== undefined ? { pushes_as: value.pushes_as } : {}),
   };
   if (value.pr !== undefined) {
     const pr = parsePullRequestDigest(value.pr);
