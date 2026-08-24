@@ -1,4 +1,4 @@
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 
 use crate::code::ScopedCode;
 use crate::error::ServerError;
@@ -6,7 +6,7 @@ use crate::extract::Json;
 
 use super::types::{
     CodeHarnessInstallSnapshot, HarnessDoctorEntry, HarnessDoctorReport, HarnessModel,
-    HarnessModelList,
+    HarnessModelList, InstallHarnessQuery,
 };
 use tidebreak_core::HarnessKind;
 
@@ -18,9 +18,12 @@ pub async fn list_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorReport
 /// The explicit re-probe decision 0034 puts behind the doctor's refresh: drop
 /// the memoized probes, then report what a cold read finds. This is how a
 /// harness installed or signed into while the app runs becomes visible.
+///
+/// Refresh does not install. It used to `npm install` every pin, which spent
+/// hundreds of megabytes and minutes on three engines the reader had not
+/// asked for to make a fourth usable. An engine downloads when someone picks
+/// it, or when they press Download on its doctor row.
 pub async fn refresh_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorReport>, ServerError> {
-    #[cfg(not(test))]
-    code.refresh_pinned_harnesses().await;
     code.invalidate_probes();
     Ok(Json(doctor(&code).await?))
 }
@@ -28,16 +31,21 @@ pub async fn refresh_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorRep
 /// Start the pinned install of one engine ahead of a session create, and
 /// report where that install stands.
 ///
-/// The New Workspace dialog calls this when it opens and when the engine
-/// changes. A cold pin is minutes of `npm install`; on the create path that
-/// is a silent stall, so it runs here instead and reports on
+/// Every surface that picks an engine calls this when it opens and when the
+/// engine changes. A cold pin is minutes of `npm install`; on the create path
+/// that is a silent stall, so it runs here instead and reports on
 /// `WS /code/updates`. Answers immediately in every case — already installed,
 /// already running, or now started — and never installs twice for one pin.
+///
+/// `?deliberate=true` marks a reader who pressed Download rather than a picker
+/// warming its selection, which is the only case that retries a managed-Node
+/// install that already failed.
 pub async fn install_harness(
     code: ScopedCode,
     Path(kind): Path<HarnessKind>,
+    Query(query): Query<InstallHarnessQuery>,
 ) -> Result<Json<CodeHarnessInstallSnapshot>, ServerError> {
-    Ok(Json(code.start_harness_install(kind)?))
+    Ok(Json(code.start_harness_install(kind, query.deliberate)?))
 }
 
 /// Models this harness currently lists. Not on the doctor path.
@@ -100,18 +108,22 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 .map(|session| session.unrecognized_event_count)
                 .sum();
             let install_error = code.pin_install_error(*kind);
+            let installable = tidebreak_harness::pin_for(*kind).is_some();
             let remediation = if let Some(err) = install_error {
-                format!("could not install the pinned {kind} binary: {err}")
-            } else if !probe.found {
-                format!("refresh to install the pinned {kind} binary")
-            } else if probe.authenticated == Some(false) {
-                format!("sign in to {kind} in your own terminal, then refresh")
+                format!("could not download the pinned {kind} binary: {err}")
+            } else if probe.found && probe.authenticated == Some(false) {
+                format!("sign in to {kind} in your own terminal, then re-check")
+            } else if !probe.found && !installable {
+                format!("this build ships no pinned {kind} binary to download")
             } else {
+                // A missing but installable engine has nothing for the reader
+                // to repair: picking it downloads it.
                 String::new()
             };
             HarnessDoctorEntry {
                 kind: *kind,
                 found: probe.found,
+                installable,
                 path: probe
                     .binary_path
                     .as_ref()

@@ -99,10 +99,16 @@ impl CodeRuntime {
     /// Answers immediately in every case: the pin is already installed, an
     /// install this process started is still running, or a fresh one is now
     /// detached. Two callers never produce two installs.
+    ///
+    /// `deliberate` separates the two callers. A picker warms the pin because
+    /// a surface opened, so a failed managed-Node install stays failed rather
+    /// than restarting every time someone opens a dialog. The doctor's
+    /// Install button is a person asking, so it retries Node first.
     pub(crate) fn start_harness_install(
         self: &Arc<Self>,
         owner: &OwnerId,
         kind: HarnessKind,
+        deliberate: bool,
     ) -> Result<CodeHarnessInstallSnapshot, ServerError> {
         let pin = tidebreak_harness::pin_for(kind).ok_or_else(|| {
             ServerError::unprocessable_kind(
@@ -137,16 +143,18 @@ impl CodeRuntime {
         let runtime = Arc::clone(self);
         let owner = owner.clone();
         tokio::spawn(async move {
-            runtime.run_harness_install(&owner, kind).await;
+            runtime.run_harness_install(&owner, kind, deliberate).await;
         });
         Ok(job.to_snapshot())
     }
 
-    async fn run_harness_install(self: Arc<Self>, owner: &OwnerId, kind: HarnessKind) {
-        // `false`, like the create path: ensure the managed Node runtime and
-        // wait for it. A retry here would re-trigger a Node install because a
-        // dialog opened.
-        match self.ensure_pinned_harness(kind, false).await {
+    async fn run_harness_install(
+        self: Arc<Self>,
+        owner: &OwnerId,
+        kind: HarnessKind,
+        retry_node: bool,
+    ) {
+        match self.ensure_pinned_harness(kind, retry_node).await {
             Ok(binary) => {
                 self.record_pin_install(kind, Ok(()));
                 // The doctor's memoized probe was taken before this install

@@ -245,6 +245,12 @@ pub struct HarnessDoctorReport {
 pub struct HarnessDoctorEntry {
     pub kind: HarnessKind,
     pub found: bool,
+    /// Whether Tidebreak ships a pin it can download for this engine.
+    ///
+    /// A `found: false, installable: true` engine is not a fault. Pick it and
+    /// the download starts; the doctor is not a gate the reader must clear
+    /// first.
+    pub installable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub path: Option<String>,
@@ -1595,6 +1601,14 @@ pub struct CodeApprovalDecisionBody {
 pub enum CodeApprovalDecision {
     Approve,
     Deny,
+}
+
+/// Query for `POST /code/harnesses/{kind}/install`.
+#[derive(Debug, Default, Deserialize)]
+pub struct InstallHarnessQuery {
+    /// A reader pressed Install. Absent means a picker warmed its selection.
+    #[serde(default)]
+    pub deliberate: bool,
 }
 
 /// Query for `GET /code/approvals`.

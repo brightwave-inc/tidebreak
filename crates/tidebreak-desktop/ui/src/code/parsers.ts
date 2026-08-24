@@ -2669,6 +2669,7 @@ export function parseHarnessDoctorEntry(
     !onlyKeys<WireHarnessDoctorEntry>(value, [
       "kind",
       "found",
+      "installable",
       "path",
       "version",
       "tier",
@@ -2699,6 +2700,9 @@ export function parseHarnessDoctorEntry(
   return {
     kind: value.kind,
     found: value.found,
+    // A server that predates the field offers no on-demand download, which
+    // is what this build did before the pin became lazy.
+    installable: value.installable === true,
     tier: value.tier,
     caps,
     remediation: value.remediation,

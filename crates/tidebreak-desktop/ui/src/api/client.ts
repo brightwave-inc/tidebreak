@@ -2179,12 +2179,21 @@ export class ApiClient {
    * that follow arrive on `WS /code/updates`. Safe to call repeatedly — an
    * installed pin answers `ready` and one already running is not restarted.
    */
+  /**
+   * Start — or report — the pinned download of one engine.
+   *
+   * `deliberate` marks a reader who pressed Install rather than a picker
+   * warming its selection. Only that case retries a managed-Node install that
+   * already failed.
+   */
   async startHarnessInstall(
     kind: HarnessKind,
+    deliberate = false,
   ): Promise<CodeHarnessInstallSnapshot> {
+    const path = `/code/harnesses/${encodeURIComponent(kind)}/install`;
     return requireParsed(
       parseCodeHarnessInstall(
-        await this.json(`/code/harnesses/${encodeURIComponent(kind)}/install`, {
+        await this.json(deliberate ? `${path}?deliberate=true` : path, {
           method: "POST",
           headers: this.headers(),
         }),

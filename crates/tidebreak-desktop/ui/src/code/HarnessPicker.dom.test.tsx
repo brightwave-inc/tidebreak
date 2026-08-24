@@ -31,6 +31,7 @@ function entry(
 ): HarnessDoctorEntry {
   return {
     found: true,
+    installable: true,
     version: "9.9.9",
     path: "/opt/harness",
     tier: "reference",
@@ -52,7 +53,7 @@ describe("HarnessPicker", () => {
         harnesses={[
           entry({ kind: "claude_code" }),
           entry({ kind: "codex" }),
-          entry({ kind: "opencode", found: false }),
+          entry({ kind: "opencode", found: false, installable: false }),
         ]}
         value="claude_code"
         onChange={onChange}
@@ -70,6 +71,34 @@ describe("HarnessPicker", () => {
     ).toHaveAttribute("aria-disabled", "true");
     await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
     expect(onChange).toHaveBeenCalledWith("codex");
+  });
+
+  // The lazy pin: an engine this machine has never fetched is a wait, not a
+  // fault, so it stays selectable and picking it is what starts the download.
+  it("offers an engine that has not been downloaded yet", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    await renderWithRouter(
+      <HarnessPicker
+        harnesses={[
+          entry({ kind: "claude_code" }),
+          entry({
+            kind: "opencode",
+            found: false,
+            version: undefined,
+            path: undefined,
+          }),
+        ]}
+        value="claude_code"
+        onChange={onChange}
+      />,
+    );
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    const row = screen.getByRole("option", { name: /opencode/ });
+    expect(row).toHaveTextContent("Downloads on first use");
+    expect(row).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(row);
+    expect(onChange).toHaveBeenCalledWith("opencode");
   });
 
   it("keeps an Auto-only engine selectable and never renders doctor strings", async () => {

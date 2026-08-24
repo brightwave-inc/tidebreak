@@ -63,6 +63,7 @@ function harness(kind: HarnessKind): HarnessDoctorEntry {
   return {
     kind,
     found: true,
+    installable: true,
     tier: "reference",
     caps: { ...CAPS },
     commands: [],
@@ -191,6 +192,74 @@ describe("NewWorkspaceDialog", () => {
         claude_code: "claude-opus-5",
       },
     });
+  });
+
+  // A report that has not landed knows nothing about any engine, so the
+  // dialog falls back to a guess to render. Downloading on that guess fetches
+  // hundreds of megabytes of whichever engine the fallback named, and takes
+  // the dialog down on any client that cannot install at all.
+  it("downloads nothing until the doctor names a missing engine", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      workspaces: [],
+      sessionsByWorkspace: {},
+      doctor: { harnesses: [] } as never,
+    });
+    const startHarnessInstall = vi.fn(async () => {
+      throw new Error("the dialog must not ask for this");
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          startHarnessInstall,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      screen.getByRole("textbox", { name: "First message" }),
+    ).toBeInTheDocument();
+    expect(startHarnessInstall).not.toHaveBeenCalled();
+  });
+
+  it("downloads the engine the doctor reports missing", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      workspaces: [],
+      sessionsByWorkspace: {},
+      doctor: {
+        harnesses: [{ ...harness("claude_code"), found: false }],
+      } as never,
+    });
+    const startHarnessInstall = vi.fn(async () => ({
+      kind: "claude_code" as const,
+      version: "2.1.234",
+      phase: "installing",
+      done: false,
+    }));
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          startHarnessInstall,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    await waitFor(() =>
+      expect(startHarnessInstall).toHaveBeenCalledWith("claude_code"),
+    );
+    // Create waits for the pin rather than stalling minutes on it.
+    expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
   });
 
   it("opens on the last repo, harness, and model, and creates on Cmd+Enter", async () => {

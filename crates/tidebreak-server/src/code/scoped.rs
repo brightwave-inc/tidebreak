@@ -805,13 +805,10 @@ impl ScopedCode {
     pub(crate) fn start_harness_install(
         &self,
         kind: HarnessKind,
+        deliberate: bool,
     ) -> Result<CodeHarnessInstallSnapshot, ServerError> {
-        self.runtime.start_harness_install(&self.owner, kind)
-    }
-
-    #[cfg(not(test))]
-    pub(crate) async fn refresh_pinned_harnesses(&self) {
-        self.runtime.refresh_pinned_harnesses().await;
+        self.runtime
+            .start_harness_install(&self.owner, kind, deliberate)
     }
 }
 
