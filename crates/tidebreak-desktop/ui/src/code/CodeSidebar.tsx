@@ -166,6 +166,7 @@ export function CodeSidebar() {
             {group.workspaces.map((workspace) => {
               const digest = digests[workspace.id];
               const pr = digest?.pr_state ?? workspace.pr;
+              const creating = workspace.status === "creating";
               return (
                 <WorkspaceCard
                   key={workspace.id}
@@ -186,16 +187,22 @@ export function CodeSidebar() {
                     // order; the chip would say it twice on every row.
                     repoChip:
                       prefs.showRepoChip && prefs.sortMode !== "by-repo",
-                    branch: prefs.showBranch,
+                    branch: prefs.showBranch && !creating,
                   }}
-                  commands={workspaceCommands({
-                    hasPr: Boolean(pr),
-                    archived: isPutAway(workspace),
-                    hasSession: Boolean(sessions[workspace.id]),
-                    attentionPinned:
-                      (digest?.attention ?? sessions[workspace.id]?.attention)
-                        ?.state.type === "manual",
-                  })}
+                  commands={
+                    creating
+                      ? []
+                      : workspaceCommands({
+                          hasPr: Boolean(pr),
+                          archived: isPutAway(workspace),
+                          hasSession: Boolean(sessions[workspace.id]),
+                          attentionPinned:
+                            (
+                              digest?.attention ??
+                              sessions[workspace.id]?.attention
+                            )?.state.type === "manual",
+                        })
+                  }
                   childSessions={watchChildren(
                     { childrenByWorkspace },
                     workspace.id,
@@ -207,12 +214,13 @@ export function CodeSidebar() {
                       params: { workspaceId },
                     })
                   }
-                  onOpen={() =>
+                  onOpen={() => {
+                    if (creating) return;
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
-                    })
-                  }
+                    });
+                  }}
                   onOpenChildSession={(sessionId) =>
                     void navigate({
                       to: "/code/w/$workspaceId",

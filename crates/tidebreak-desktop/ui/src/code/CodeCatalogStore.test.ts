@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CodeWorkspaceSnapshot } from "../api/types";
-import { useCodeCatalogStore } from "./CodeCatalogStore";
+import {
+  OPTIMISTIC_WORKSPACE_ID_PREFIX,
+  useCodeCatalogStore,
+} from "./CodeCatalogStore";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
 
@@ -41,6 +44,19 @@ describe("CodeCatalogStore.upsertWorkspace", () => {
       useCodeCatalogStore.getState().workspaces.map((item) => item.id),
     ).toEqual(["ws-a", "ws-b"]);
     expect(useCodeCatalogStore.getState().workspaces[1]?.title).toBe("viewed");
+  });
+
+  it("replaces a temporary workspace in place", () => {
+    const pending = workspace(
+      `${OPTIMISTIC_WORKSPACE_ID_PREFIX}one`,
+      "2026-08-24T12:00:00.000Z",
+    );
+    const created = workspace("ws-created", pending.created_at, "Created");
+    useCodeCatalogStore.setState({ workspaces: [pending] });
+
+    useCodeCatalogStore.getState().replaceWorkspace(pending.id, created);
+
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([created]);
   });
 });
 
@@ -185,5 +201,55 @@ describe("CodeCatalogStore.refresh", () => {
     expect(client.listCodeWorkspaces).toHaveBeenCalledOnce();
     expect(client.getHarnessDoctor).toHaveBeenCalledOnce();
     expect(client.listCodeHarnessModels).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps temporary workspaces while the server list catches up", async () => {
+    const pending = workspace(
+      `${OPTIMISTIC_WORKSPACE_ID_PREFIX}one`,
+      "2026-08-24T12:00:00.000Z",
+    );
+    useCodeCatalogStore.setState({ workspaces: [pending] });
+    const client = {
+      listCodeRepos: vi.fn(async () => []),
+      listCodeWorkspaces: vi.fn(async () => []),
+      getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+      listCodeHarnessModels: vi.fn(async (kind: string) => ({
+        kind,
+        models: [],
+      })),
+    };
+
+    await useCodeCatalogStore.getState().refresh(client as never);
+
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([pending]);
+  });
+
+  it("keeps a completed local create when an older refresh finishes", async () => {
+    const pending = workspace(
+      `${OPTIMISTIC_WORKSPACE_ID_PREFIX}one`,
+      "2026-08-24T12:00:00.000Z",
+    );
+    const created = workspace("ws-created", pending.created_at, "Created");
+    useCodeCatalogStore.setState({ workspaces: [pending] });
+    let resolveWorkspaces!: (workspaces: CodeWorkspaceSnapshot[]) => void;
+    const listed = new Promise<CodeWorkspaceSnapshot[]>((resolve) => {
+      resolveWorkspaces = resolve;
+    });
+    const client = {
+      listCodeRepos: vi.fn(async () => []),
+      listCodeWorkspaces: vi.fn(() => listed),
+      getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+      listCodeHarnessModels: vi.fn(async (kind: string) => ({
+        kind,
+        models: [],
+      })),
+    };
+
+    const refresh = useCodeCatalogStore.getState().refresh(client as never);
+    useCodeCatalogStore.getState().replaceWorkspace(pending.id, created);
+    resolveWorkspaces([]);
+    await refresh;
+
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([created]);
   });
 });

@@ -253,22 +253,38 @@ export async function archiveWorkspaceWithConfirm(options: {
   client: Pick<ApiClient, "archiveCodeWorkspace">;
   workspaceId: string;
   confirm: (options: ConfirmOptions) => Promise<boolean>;
+  onOptimisticChange?: (archived: boolean) => void;
 }): Promise<CodeWorkspaceSnapshot | null> {
+  options.onOptimisticChange?.(true);
   try {
     return await options.client.archiveCodeWorkspace(
       options.workspaceId,
       false,
     );
   } catch (error) {
-    if (!archiveForceKind(error)) throw error;
+    if (!archiveForceKind(error)) {
+      options.onOptimisticChange?.(false);
+      throw error;
+    }
     const forced = await options.confirm({
       title: "Discard leftover work?",
       description: `${error instanceof Error ? error.message : String(error)} Commit and push from the review sidebar, or discard.`,
       confirmLabel: "Discard and archive",
       destructive: true,
     });
-    if (!forced) return null;
-    return await options.client.archiveCodeWorkspace(options.workspaceId, true);
+    if (!forced) {
+      options.onOptimisticChange?.(false);
+      return null;
+    }
+    try {
+      return await options.client.archiveCodeWorkspace(
+        options.workspaceId,
+        true,
+      );
+    } catch (forceError) {
+      options.onOptimisticChange?.(false);
+      throw forceError;
+    }
   }
 }
 
@@ -313,11 +329,23 @@ export function useWorkspaceCardCommands(): {
   }
 
   async function runArchive(workspace: CodeWorkspaceSnapshot) {
+    const onOptimisticChange = (archived: boolean) => {
+      upsertWorkspace(
+        archived
+          ? {
+              ...workspace,
+              status: "archived",
+              archived_at: new Date().toISOString(),
+            }
+          : workspace,
+      );
+    };
     try {
       const archived = await archiveWorkspaceWithConfirm({
         client,
         workspaceId: workspace.id,
         confirm,
+        onOptimisticChange,
       });
       if (!archived) return;
       await afterArchive(archived);
@@ -341,9 +369,16 @@ export function useWorkspaceCardCommands(): {
       destructive: true,
     });
     if (!ok) return;
+    const optimistic = {
+      ...workspace,
+      status: "archived" as const,
+      archived_at: new Date().toISOString(),
+    };
+    upsertWorkspace(optimistic);
     try {
       await afterArchive(await client.archiveCodeWorkspace(workspace.id, true));
     } catch (error) {
+      upsertWorkspace(workspace);
       toast.error(friendlyErrorMessage(error, "Could not archive"));
     }
   }

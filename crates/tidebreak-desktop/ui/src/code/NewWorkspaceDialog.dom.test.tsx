@@ -18,7 +18,10 @@ import type {
   HarnessDoctorEntry,
   HarnessKind,
 } from "../api/types";
-import { useCodeCatalogStore } from "./CodeCatalogStore";
+import {
+  OPTIMISTIC_WORKSPACE_ID_PREFIX,
+  useCodeCatalogStore,
+} from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
@@ -165,13 +168,127 @@ function app(client: Partial<AppContextValue["client"]>): AppContextValue {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe("NewWorkspaceDialog", () => {
+  it("closes and lists the workspace before creation finishes", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const creation = deferred<CodeWorkspaceSnapshot>();
+    const created = workspace(
+      "ws-created",
+      "repo-new",
+      "2026-08-24T12:00:00.000Z",
+    );
+    const onOpenChange = vi.fn();
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(() => creation.promise),
+          createCodeSession: vi.fn(async () =>
+            session("ws-created", "claude_code", "2026-08-24T12:00:00.000Z"),
+          ),
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={onOpenChange} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(router.state.location.pathname).toBe("/code");
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(`^${OPTIMISTIC_WORKSPACE_ID_PREFIX}`),
+        status: "creating",
+        title: "New workspace",
+      }),
+    ]);
+
+    creation.resolve(created);
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-created"),
+    );
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([created]);
+  });
+
+  it("removes a failed create and retries the captured request", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const created = workspace(
+      "ws-retried",
+      "repo-new",
+      "2026-08-24T12:00:00.000Z",
+    );
+    const createCodeWorkspace = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("base ref moved"))
+      .mockResolvedValueOnce(created);
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          createCodeSession: vi.fn(async () =>
+            session("ws-retried", "claude_code", "2026-08-24T12:00:00.000Z"),
+          ),
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "keep this request" },
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledOnce());
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([]);
+    const toastOptions = toastError.mock.calls[0]?.[1] as {
+      action: { onClick: () => void };
+    };
+    toastOptions.action.onClick();
+
+    await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalledTimes(2));
+    expect(createCodeWorkspace).toHaveBeenLastCalledWith({
+      repo_id: "repo-new",
+      title: undefined,
+      base_ref: "main",
+    });
+    await waitFor(() =>
+      expect(useCodeCatalogStore.getState().workspaces).toEqual([created]),
+    );
+  });
+
   it("keeps remembered models keyed by harness", () => {
     useCodeUiStore.getState().rememberCreate({
       repoId: "repo-new",

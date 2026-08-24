@@ -10,6 +10,7 @@ import {
   FileCode2,
   GitBranch,
   GitPullRequest,
+  LoaderCircle,
   Radar,
   RotateCcw,
   Search,
@@ -128,6 +129,7 @@ export function WorkspaceCard({
   const title = digest?.title ?? workspace.title;
   const pr = digest?.pr_state ?? workspace.pr;
   const archived = isPutAway(workspace);
+  const creating = workspace.status === "creating";
   const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
   const watchActive = childSessions.some(
     (child) =>
@@ -171,12 +173,15 @@ export function WorkspaceCard({
                   session: digest,
                   pr,
                   terminalOpen,
+                  workspaceStatus: workspace.status,
                 })}
                 aria-current={active ? "page" : undefined}
+                disabled={creating}
                 className={cn(
                   "flex w-full cursor-pointer flex-col gap-0.5 rounded-xl px-2.5 py-2 text-left",
                   FOCUS_RING_INSET,
                   HOVER_TINT,
+                  creating && "cursor-wait",
                 )}
                 onClick={onOpen}
               >
@@ -192,6 +197,14 @@ export function WorkspaceCard({
                     {pr && <PrGlyph pr={pr} />}
                     {terminalOpen && (
                       <SquareTerminal className="size-3 text-muted-foreground" />
+                    )}
+                    {creating && (
+                      <LoaderCircle
+                        className={cn(
+                          "size-3 animate-spin",
+                          STATUS_MARK.pending,
+                        )}
+                      />
                     )}
                     {digest?.attention.state.type === "needs_you" &&
                       digest.attention.state.source === "structured" && (
@@ -604,6 +617,19 @@ function WorkspaceActivityLine({
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
 }) {
+  if (workspace.status === "creating") {
+    return (
+      <div
+        className={cn(
+          "flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-xs",
+          STATUS_TEXT.pending,
+        )}
+      >
+        <LoaderCircle className="size-3 shrink-0 animate-spin" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">Creating workspace</span>
+      </div>
+    );
+  }
   const railDigest = digest && isSessionRowWorthy(digest) ? digest : undefined;
   if (!railDigest) return null;
 

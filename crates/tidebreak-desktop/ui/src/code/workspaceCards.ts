@@ -3,6 +3,7 @@ import type {
   CodeRepoSnapshot,
   CodeSessionDigest,
   CodeWorkspaceSnapshot,
+  CodeWorkspaceStatus,
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
 import { STATUS_CHIP, STATUS_MARK, type StatusTone } from "./statusTone";
@@ -375,8 +376,10 @@ export function workspaceCardLabel(input: {
   session?: CodeSessionDigest;
   pr?: { number: number; state: string; draft?: boolean };
   terminalOpen?: boolean;
+  workspaceStatus?: CodeWorkspaceStatus;
 }): string {
   const parts = [input.title];
+  if (input.workspaceStatus === "creating") parts.push("Creating workspace");
   if (input.attention && input.attention.state.type !== "working") {
     parts.push(attentionLabel(input.attention));
   }
@@ -387,7 +390,8 @@ export function workspaceCardLabel(input: {
     parts.push(`Pull request #${input.pr.number} ${prToneLabel(input.pr)}`);
   }
   if (input.terminalOpen) parts.push("Terminal open");
-  parts.push(input.repoName, input.branchName);
+  parts.push(input.repoName);
+  if (input.branchName) parts.push(input.branchName);
   return parts.join(" · ");
 }
 

@@ -57,6 +57,23 @@ type Story = StoryObj<typeof meta>;
 
 export const Idle: Story = {};
 
+/** A create appears in the rail while the worktree and first session start. */
+export const Creating: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      id: "optimistic-workspace:storybook",
+      title: "New workspace",
+      branch_name: "",
+      worktree_path: "",
+      status: "creating",
+      created_at: "2026-08-24T12:00:00.000Z",
+    },
+    visibleMeta: { repoChip: true, branch: false },
+    commands: [],
+  },
+};
+
 /** A green pull request with the hover detail held open for visual review. */
 export const HoverPullRequestReady: Story = {
   args: {
