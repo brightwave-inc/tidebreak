@@ -213,6 +213,16 @@ function codeEventSocket(
   return socket;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeClient() {
   return {
     getCodeWorkspace: vi.fn(async () => WORKSPACE),
@@ -1141,6 +1151,34 @@ describe("CodeWorkspacePage", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("hides the workspace before archive finishes and rolls back a failure", async () => {
+    const client = makeClient();
+    const archive =
+      deferred<Awaited<ReturnType<typeof client.archiveCodeWorkspace>>>();
+    client.archiveCodeWorkspace.mockImplementation(() => archive.promise);
+    const { router } = await mountWorkspace(client);
+    await screen.findByRole("heading", { name: /Fix login/ });
+
+    act(() => useCodeUiStore.getState().requestArchiveWorkspace());
+
+    expect(router.state.location.pathname).toBe("/code/w/ws-1");
+    expect(
+      useCodeCatalogStore
+        .getState()
+        .workspaces.find((workspace) => workspace.id === "ws-1")?.status,
+    ).toBe("archived");
+
+    archive.reject(new Error("worktree is busy"));
+    await waitFor(() =>
+      expect(
+        useCodeCatalogStore
+          .getState()
+          .workspaces.find((workspace) => workspace.id === "ws-1")?.status,
+      ).toBe("active"),
+    );
+    expect(toast.error).toHaveBeenCalledWith("worktree is busy");
   });
 
   it("drafts the Create PR request into the composer for local changes", async () => {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
   Check,
@@ -39,7 +39,10 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { shouldSubmitComposerKey } from "../Composer";
 import { PermissionModeMenu } from "../PermissionModeMenu";
 import { usesCommandModifier } from "@/ShellShortcuts";
-import { useCodeCatalogStore } from "./CodeCatalogStore";
+import {
+  OPTIMISTIC_WORKSPACE_ID_PREFIX,
+  useCodeCatalogStore,
+} from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { HarnessModelMenu } from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
@@ -128,6 +131,19 @@ function recentHarness(
 /** Pickers a chord can open; one open at a time, chords toggle. */
 type PickerId = "repo" | "engine" | "model" | "mode" | "base" | "name";
 
+type CreateAttempt = {
+  repoId: string;
+  title: string;
+  baseRef: string;
+  startingPrompt: string;
+  harness: HarnessKind;
+  permissionMode: PermissionMode;
+  model: string | undefined;
+  modelsByHarness: Partial<Record<HarnessKind, string>>;
+  createMore: boolean;
+  originPath: string;
+};
+
 export function NewWorkspaceDialog({
   open,
   onOpenChange,
@@ -140,10 +156,19 @@ export function NewWorkspaceDialog({
   defaultRepoId?: string;
 }) {
   const navigate = useNavigate();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
   const { client, models, defaultModelKey } = useApp();
   const doctor = useCodeCatalogStore((state) => state.doctor);
   const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
+  const replaceWorkspace = useCodeCatalogStore(
+    (state) => state.replaceWorkspace,
+  );
+  const removeWorkspace = useCodeCatalogStore((state) => state.removeWorkspace);
   const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
@@ -158,7 +183,6 @@ export function NewWorkspaceDialog({
   const [permissionMode, setPermissionMode] = useState<PermissionMode | null>(
     null,
   );
-  const [creating, setCreating] = useState(false);
   const [createMore, setCreateMore] = useState(false);
   const [modelsByHarness, setModelsByHarness] = useState<
     Partial<Record<HarnessKind, string>>
@@ -169,6 +193,8 @@ export function NewWorkspaceDialog({
   const openPickerNow = useRef<PickerId | null>(null);
   openPickerNow.current = openPicker;
   const promptInput = useRef<HTMLTextAreaElement>(null);
+  const createLocked = useRef(false);
+  const retryAttempt = useRef<CreateAttempt | null>(null);
   const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
 
   const allHarnesses = doctor?.harnesses ?? [];
@@ -188,19 +214,28 @@ export function NewWorkspaceDialog({
 
   useEffect(() => {
     if (!open) return;
+    createLocked.current = false;
+    const retry = retryAttempt.current;
+    retryAttempt.current = null;
     const { workspaces: known } = useCodeCatalogStore.getState();
     const nextRepo =
-      defaultRepoId ?? recentRepoId(repos, known, lastCreate?.repoId);
+      retry?.repoId ??
+      defaultRepoId ??
+      recentRepoId(repos, known, lastCreate?.repoId);
     setRepoId(nextRepo);
-    setStartingPrompt("");
-    setTitle("");
+    setStartingPrompt(retry?.startingPrompt ?? "");
+    setTitle(retry?.title ?? "");
     setBaseRef(
-      repos.find((repo) => repo.id === nextRepo)?.default_base_ref ?? "",
+      retry?.baseRef ??
+        repos.find((repo) => repo.id === nextRepo)?.default_base_ref ??
+        "",
     );
-    setPickedHarness(null);
-    setPermissionMode(null);
-    setCreateMore(false);
-    setModelsByHarness({ ...lastCreate?.modelsByHarness });
+    setPickedHarness(retry?.harness ?? null);
+    setPermissionMode(retry?.permissionMode ?? null);
+    setCreateMore(retry?.createMore ?? false);
+    setModelsByHarness(
+      retry?.modelsByHarness ?? { ...lastCreate?.modelsByHarness },
+    );
     setModelOptions([]);
     setModelLoading(false);
     setOpenPicker(null);
@@ -239,9 +274,9 @@ export function NewWorkspaceDialog({
   // would sit on the same npm install with nothing but a spinner. The install
   // note under the pills says what the wait is, and any engine already on
   // disk is one pick away.
-  const canCreate =
-    Boolean(repoId && selectedRepo && selectedHarness && installed) &&
-    !creating;
+  const canCreate = Boolean(
+    repoId && selectedRepo && selectedHarness && installed,
+  );
   const modeNote =
     postedMode === "auto" &&
     selectedHarness &&
@@ -354,94 +389,162 @@ export function NewWorkspaceDialog({
     setOpenPicker(id);
   }
 
-  async function create() {
-    if (!canCreate) return;
-    setCreating(true);
-    try {
-      let workspace: CodeWorkspaceSnapshot;
-      try {
-        workspace = await client.createCodeWorkspace({
-          repo_id: repoId,
-          title: title.trim() || undefined,
-          base_ref: baseRef.trim() || undefined,
-        });
-      } catch (error) {
-        toast.error(
-          friendlyErrorMessage(error, "Could not create the workspace"),
-        );
-        return;
-      }
-      upsertWorkspace(workspace);
-      const prompt = startingPrompt.trim();
-      try {
-        const gateway = gatewayCodeModels(models, harness, defaultModelKey);
-        const native =
-          requiresHarnessModelIds(harness) || gateway.length === 0
-            ? await ensureHarnessModels(client, harness)
-            : [];
-        const listed = preferredCodeModels(harness, native, gateway);
-        const posted =
-          model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
-        const session = await client.createCodeSession(workspace.id, {
-          harness,
-          permission_mode: postedMode,
-          model: posted,
-        });
-        rememberSession(session);
-        rememberCreate({
-          repoId,
-          harness,
-          model: posted,
-          modelsByHarness,
-          permissionMode: postedMode,
-        });
-        if (prompt) {
-          try {
-            await client.submitCodeTurn(session.id, prompt);
-          } catch (error) {
-            // Never drop typed words: the workspace composer holds them.
-            useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
-            toast.error(
-              `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
-            );
-          }
-        }
-      } catch (error) {
-        // No session to send to; the workspace composer holds the text and
-        // start-session on the workspace page picks it up.
-        if (prompt) {
-          useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
-        }
-        toast.error(
-          `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
-        );
-      }
-      if (createMore) {
-        // Stay here on the same settings; only what named this task clears.
-        setStartingPrompt("");
-        setTitle("");
-        focusPrompt();
-        const workspaceId = workspace.id;
-        toast.success(`Started ${workspace.title}`, {
-          action: {
-            label: "Open",
-            onClick: () =>
-              void navigate({
-                to: "/code/w/$workspaceId",
-                params: { workspaceId },
-              }),
-          },
-        });
-        return;
-      }
-      onOpenChange(false);
-      await navigate({
-        to: "/code/w/$workspaceId",
-        params: { workspaceId: workspace.id },
+  function create() {
+    if (!canCreate || !selectedRepo || createLocked.current) return;
+    createLocked.current = true;
+    const attempt: CreateAttempt = {
+      repoId,
+      title,
+      baseRef,
+      startingPrompt,
+      harness,
+      permissionMode: postedMode,
+      model,
+      modelsByHarness: { ...modelsByHarness },
+      createMore,
+      originPath: pathnameRef.current,
+    };
+    if (createMore) {
+      setStartingPrompt("");
+      setTitle("");
+      focusPrompt();
+      queueMicrotask(() => {
+        createLocked.current = false;
       });
-    } finally {
-      setCreating(false);
+    } else {
+      onOpenChange(false);
     }
+    startCreateAttempt(attempt, selectedRepo);
+  }
+
+  function startCreateAttempt(
+    attempt: CreateAttempt,
+    selectedRepo?: CodeRepoSnapshot,
+  ) {
+    const repo =
+      selectedRepo ??
+      repos.find((candidate) => candidate.id === attempt.repoId);
+    if (!repo) {
+      toast.error("Could not create the workspace because its repo is gone");
+      return;
+    }
+    const pending: CodeWorkspaceSnapshot = {
+      id: `${OPTIMISTIC_WORKSPACE_ID_PREFIX}${crypto.randomUUID()}`,
+      repo_id: attempt.repoId,
+      title: attempt.title.trim() || "New workspace",
+      worktree_path: "",
+      branch_name: "",
+      base_ref: attempt.baseRef.trim() || repo.default_base_ref,
+      status: "creating",
+      created_at: new Date().toISOString(),
+    };
+    upsertWorkspace(pending);
+    void finishCreate(attempt, pending);
+  }
+
+  async function finishCreate(
+    attempt: CreateAttempt,
+    pending: CodeWorkspaceSnapshot,
+  ) {
+    let workspace: CodeWorkspaceSnapshot;
+    try {
+      workspace = await client.createCodeWorkspace({
+        repo_id: attempt.repoId,
+        title: attempt.title.trim() || undefined,
+        base_ref: attempt.baseRef.trim() || undefined,
+      });
+    } catch (error) {
+      removeWorkspace(pending.id);
+      retryAttempt.current = attempt;
+      toast.error(
+        friendlyErrorMessage(error, "Could not create the workspace"),
+        {
+          action: {
+            label: "Try again",
+            onClick: () => {
+              if (retryAttempt.current === attempt) retryAttempt.current = null;
+              startCreateAttempt(attempt);
+            },
+          },
+        },
+      );
+      return;
+    }
+    replaceWorkspace(pending.id, workspace);
+    const prompt = attempt.startingPrompt.trim();
+    try {
+      const gateway = gatewayCodeModels(
+        models,
+        attempt.harness,
+        defaultModelKey,
+      );
+      const native =
+        requiresHarnessModelIds(attempt.harness) || gateway.length === 0
+          ? await ensureHarnessModels(client, attempt.harness)
+          : [];
+      const listed = preferredCodeModels(attempt.harness, native, gateway);
+      const posted =
+        attempt.model ??
+        listed.find((option) => option.default)?.id ??
+        listed[0]?.id;
+      const session = await client.createCodeSession(workspace.id, {
+        harness: attempt.harness,
+        permission_mode: attempt.permissionMode,
+        model: posted,
+      });
+      rememberSession(session);
+      rememberCreate({
+        repoId: attempt.repoId,
+        harness: attempt.harness,
+        model: posted,
+        modelsByHarness: attempt.modelsByHarness,
+        permissionMode: attempt.permissionMode,
+      });
+      if (prompt) {
+        try {
+          await client.submitCodeTurn(session.id, prompt);
+        } catch (error) {
+          // Never drop typed words: the workspace composer holds them.
+          useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+          toast.error(
+            `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
+          );
+        }
+      }
+    } catch (error) {
+      // No session to send to; the workspace composer holds the text and
+      // start-session on the workspace page picks it up.
+      if (prompt) {
+        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+      }
+      toast.error(
+        `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
+      );
+    }
+    const workspaceId = workspace.id;
+    const workspacePath = `/code/w/${workspaceId}`;
+    if (
+      attempt.createMore ||
+      (pathnameRef.current !== attempt.originPath &&
+        pathnameRef.current !== workspacePath)
+    ) {
+      toast.success(`Started ${workspace.title}`, {
+        action: {
+          label: "Open",
+          onClick: () =>
+            void navigate({
+              to: "/code/w/$workspaceId",
+              params: { workspaceId },
+            }),
+        },
+      });
+      return;
+    }
+    if (pathnameRef.current === workspacePath) return;
+    await navigate({
+      to: "/code/w/$workspaceId",
+      params: { workspaceId: workspace.id },
+    });
   }
 
   function submit(event: FormEvent) {
@@ -461,11 +564,10 @@ export function NewWorkspaceDialog({
   const alt = (key: string) => (command ? `⌥${key}` : `Alt+${key}`);
 
   return (
-    <Dialog open={open} onOpenChange={creating ? undefined : onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="max-w-3xl gap-0 overflow-hidden p-0 sm:rounded-xl"
         withCloseButton={false}
-        aria-busy={creating}
         aria-describedby={undefined}
         onOpenAutoFocus={(event) => {
           // Prompt-centric: the message is where a create starts, so it is
@@ -488,7 +590,6 @@ export function NewWorkspaceDialog({
             }
             return;
           }
-          if (creating) return;
           // Every pill has a chord, so a create never needs the mouse. These
           // ride on `event.code`: on macOS an Option chord types an accented
           // character, and `key` would carry that instead of the letter.
@@ -526,7 +627,7 @@ export function NewWorkspaceDialog({
                     type="button"
                     variant="secondary"
                     className="h-8 max-w-64 gap-2 px-2.5"
-                    disabled={creating || repos.length === 0}
+                    disabled={repos.length === 0}
                     aria-label="Repo"
                   >
                     <FolderGit2 className="size-4 shrink-0 opacity-70" />
@@ -565,7 +666,6 @@ export function NewWorkspaceDialog({
                     type="button"
                     variant="ghost"
                     className="text-muted-foreground h-8 max-w-48 gap-1.5 px-2"
-                    disabled={creating}
                     aria-label="Workspace name"
                   >
                     <Ellipsis className="size-4 shrink-0" />
@@ -607,7 +707,7 @@ export function NewWorkspaceDialog({
                     type="button"
                     variant="ghost"
                     className="text-muted-foreground h-8 max-w-56 gap-1.5 px-2"
-                    disabled={creating || !selectedRepo}
+                    disabled={!selectedRepo}
                     aria-label="Base ref"
                   >
                     <GitBranch className="size-4 shrink-0" />
@@ -643,7 +743,6 @@ export function NewWorkspaceDialog({
             ref={promptInput}
             value={startingPrompt}
             onChange={(event) => setStartingPrompt(event.target.value)}
-            disabled={creating}
             aria-label="First message"
             placeholder="Describe the first task (optional)"
             className="placeholder:text-muted-foreground max-h-[45vh] min-h-36 w-full resize-none bg-transparent px-4 py-3 text-base outline-none"
@@ -669,7 +768,7 @@ export function NewWorkspaceDialog({
                     type="button"
                     variant="ghost"
                     className="h-8 min-w-0 max-w-48 gap-2 px-2"
-                    disabled={creating || allHarnesses.length === 0}
+                    disabled={allHarnesses.length === 0}
                     aria-label={`Harness: ${HARNESS_LABELS[harness]}`}
                   >
                     <HarnessIcon className="size-4 shrink-0" />
@@ -736,7 +835,6 @@ export function NewWorkspaceDialog({
                     value={model}
                     onChange={selectModel}
                     loading={modelLoading}
-                    disabled={creating}
                     {...pickerProps("model")}
                   />
                 </span>
@@ -747,7 +845,7 @@ export function NewWorkspaceDialog({
                 <PermissionModeMenu
                   scopeKey="code-create"
                   value={postedMode}
-                  disabled={creating || availableModes.length === 0}
+                  disabled={availableModes.length === 0}
                   availableModes={availableModes}
                   onChange={(mode) => setPermissionMode(mode)}
                   {...pickerProps("mode")}
@@ -760,13 +858,11 @@ export function NewWorkspaceDialog({
                 className={cn(
                   "flex h-8 shrink-0 cursor-pointer items-center gap-2 px-2 text-sm",
                   createMore ? "text-foreground" : "text-muted-foreground",
-                  creating && "cursor-not-allowed opacity-50",
                 )}
               >
                 <Switch
                   checked={createMore}
                   onCheckedChange={setCreateMore}
-                  disabled={creating}
                   aria-label="Create more"
                   className="h-5 w-9"
                   thumbClassName="size-4 data-[state=checked]:translate-x-4"
@@ -779,15 +875,13 @@ export function NewWorkspaceDialog({
               disabled={!canCreate}
               className="h-8 shrink-0"
             >
-              {creating ? "Creating…" : "Create"}
-              {!creating && (
-                <kbd
-                  className="font-sans text-2xs font-medium opacity-60"
-                  aria-hidden="true"
-                >
-                  ↩
-                </kbd>
-              )}
+              Create
+              <kbd
+                className="font-sans text-2xs font-medium opacity-60"
+                aria-hidden="true"
+              >
+                ↩
+              </kbd>
             </Button>
           </div>
         </form>

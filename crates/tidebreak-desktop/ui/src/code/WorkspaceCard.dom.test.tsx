@@ -81,6 +81,25 @@ describe("WorkspaceCard", () => {
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a non-interactive creating state", async () => {
+    const user = userEvent.setup();
+    const { onOpen } = renderCard({
+      workspace: {
+        status: "creating",
+        branch_name: "",
+        worktree_path: "",
+      },
+    });
+
+    const row = screen.getByRole("button", {
+      name: "Fix login · Creating workspace · app",
+    });
+    expect(row).toBeDisabled();
+    expect(screen.getByText("Creating workspace")).toBeInTheDocument();
+    await user.click(row);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it("keeps one menu: right-click carries every command", async () => {
     const user = userEvent.setup();
     const { onCommand } = renderCard({ pr });

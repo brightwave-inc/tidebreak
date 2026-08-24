@@ -244,6 +244,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
     null,
   );
+  const catalogWorkspace = catalog.workspaces.find(
+    (candidate) => candidate.id === workspaceId,
+  );
   const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
   /**
    * Every session the server knows about here, conversations and watches alike.
@@ -258,6 +261,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
     catalog.sessionsByWorkspace[workspaceId]?.id ?? null,
   );
+
+  // Optimistic catalog mutations also govern the open page. Archive can hide
+  // the rail card before filesystem cleanup finishes; reflecting that same
+  // snapshot here stops the composer from offering work against a checkout
+  // that is being removed. A failed request puts the original snapshot back.
+  useEffect(() => {
+    if (!catalogWorkspace) return;
+    setWorkspace((current) =>
+      current?.id === catalogWorkspace.id ? catalogWorkspace : current,
+    );
+  }, [catalogWorkspace]);
   /** True while the reader is filling in a new agent that has no session yet. */
   const [draftAgent, setDraftAgent] = useState(false);
   /**

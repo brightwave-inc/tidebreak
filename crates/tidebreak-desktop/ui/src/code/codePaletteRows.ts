@@ -129,6 +129,9 @@ export function workspacePaletteRows(input: {
   );
   return (
     input.workspaces
+      // A temporary create has no server route yet. The rail shows its
+      // progress, but the palette must not offer a jump to a local-only id.
+      .filter((workspace) => workspace.status !== "creating")
       // The one already on screen is not somewhere to go.
       .filter((workspace) => workspace.id !== input.activeWorkspaceId)
       .map((workspace) => {

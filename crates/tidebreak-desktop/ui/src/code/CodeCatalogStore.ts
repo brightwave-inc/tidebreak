@@ -74,8 +74,19 @@ type CodeCatalogStore = CodeCatalogState & {
   forgetWorkspaceSession: (workspaceId: string) => void;
   upsertRepo: (repo: CodeRepoSnapshot) => void;
   upsertWorkspace: (workspace: CodeWorkspaceSnapshot) => void;
+  replaceWorkspace: (
+    workspaceId: string,
+    workspace: CodeWorkspaceSnapshot,
+  ) => void;
+  removeWorkspace: (workspaceId: string) => void;
   reset: () => void;
 };
+
+export const OPTIMISTIC_WORKSPACE_ID_PREFIX = "optimistic-workspace:";
+
+export function isOptimisticWorkspace(workspace: CodeWorkspaceSnapshot) {
+  return workspace.id.startsWith(OPTIMISTIC_WORKSPACE_ID_PREFIX);
+}
 
 function loadHarnessModels(
   client: Pick<ApiClient, "listCodeHarnessModels">,
@@ -116,6 +127,9 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   error: null,
   refresh: (client) => {
     if (catalogRefresh) return catalogRefresh;
+    const workspaceIdsAtStart = new Set(
+      get().workspaces.map((workspace) => workspace.id),
+    );
     let request: Promise<void>;
     request = (async () => {
       try {
@@ -123,7 +137,25 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
           client.listCodeRepos(),
           client.listCodeWorkspaces(),
         ]);
-        set({ repos, workspaces, loaded: true, error: null });
+        const localCreates = get().workspaces.filter(
+          (workspace) =>
+            isOptimisticWorkspace(workspace) ||
+            !workspaceIdsAtStart.has(workspace.id),
+        );
+        const localCreateIds = new Set(
+          localCreates.map((workspace) => workspace.id),
+        );
+        set({
+          repos,
+          workspaces: [
+            ...workspaces.filter(
+              (workspace) => !localCreateIds.has(workspace.id),
+            ),
+            ...localCreates,
+          ],
+          loaded: true,
+          error: null,
+        });
       } catch (error) {
         set({
           loaded: true,
@@ -209,6 +241,32 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     const workspaces = current.slice();
     workspaces[index] = workspace;
     set({ workspaces });
+  },
+  replaceWorkspace: (workspaceId, workspace) => {
+    const current = get().workspaces;
+    const index = current.findIndex((item) => item.id === workspaceId);
+    if (index === -1) {
+      set({
+        workspaces: [
+          ...current.filter((item) => item.id !== workspace.id),
+          workspace,
+        ],
+      });
+      return;
+    }
+    const workspaces = current.filter(
+      (item) => item.id !== workspace.id || item.id === workspaceId,
+    );
+    const replacementIndex = workspaces.findIndex(
+      (item) => item.id === workspaceId,
+    );
+    workspaces[replacementIndex] = workspace;
+    set({ workspaces });
+  },
+  removeWorkspace: (workspaceId) => {
+    set({
+      workspaces: get().workspaces.filter((item) => item.id !== workspaceId),
+    });
   },
   reset: () => {
     catalogRefresh = null;
