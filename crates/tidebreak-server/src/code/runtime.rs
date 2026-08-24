@@ -126,7 +126,7 @@ pub(crate) enum SubmitTurnOutcome {
     /// The session was idle; the turn ran to a terminal event.
     Ran(Box<CodeTurn>),
     /// The session or its workspace was busy; the message parked as a
-    /// durable queue row (decision 65).
+    /// durable queue row (decision 69).
     Queued(Box<CodeQueuedTurn>),
     /// The durable trigger delivery behind this submit was already accepted
     /// by an earlier attempt; nothing new was written.
@@ -2194,7 +2194,7 @@ impl CodeRuntime {
         .await
     }
 
-    /// Park a message as a durable queue row (decision 65).
+    /// Park a message as a durable queue row (decision 69).
     ///
     /// The row id is minted here and becomes the promoted turn's id. The cap
     /// is checked before the insert so an overfull queue answers with a typed

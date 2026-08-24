@@ -538,7 +538,7 @@ describe("CodeWorkspacePage", () => {
     expect(pane).not.toBeNull();
     expect(view?.parentElement?.className).toMatch(/flex/);
     // The queue tray's slot sits between the transcript and the composer
-    // (decision 65); the composer stays next in the same column.
+    // (decision 69); the composer stays next in the same column.
     expect(view?.nextElementSibling?.nextElementSibling).toContainElement(
       screen.getByRole("button", { name: "Send message" }),
     );
