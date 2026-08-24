@@ -175,6 +175,7 @@ import {
   HARNESS_LABELS,
   LIFECYCLE_LABELS,
   preferredCodeModels,
+  requiresHarnessModelIds,
   sessionLifecycleTooltip,
 } from "./labels";
 
@@ -500,7 +501,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     try {
       const gateway = gatewayCodeModels(models, harness, defaultModelKey);
       const native =
-        harness === "opencode" || gateway.length === 0
+        requiresHarnessModelIds(harness) || gateway.length === 0
           ? await catalog.ensureHarnessModels(client, harness)
           : [];
       const listed = preferredCodeModels(harness, native, gateway);
@@ -1787,7 +1788,8 @@ function CodeSessionPane({
       defaultModelKey,
     );
     const listed =
-      session.harness_kind === "opencode" && cachedModels === undefined
+      requiresHarnessModelIds(session.harness_kind) &&
+      cachedModels === undefined
         ? []
         : preferredCodeModels(
             session.harness_kind,
@@ -2123,7 +2125,8 @@ function CodeSessionPane({
             model={model ?? undefined}
             modelOptions={modelOptions}
             modelLoading={
-              session.harness_kind === "opencode" && cachedModels === undefined
+              requiresHarnessModelIds(session.harness_kind) &&
+              cachedModels === undefined
             }
             promptScope={workspaceId}
             sessionId={session.id}

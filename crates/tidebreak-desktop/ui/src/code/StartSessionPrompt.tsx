@@ -19,6 +19,7 @@ import {
   gatewayCodeModels,
   harnessUnusableReason,
   preferredCodeModels,
+  requiresHarnessModelIds,
   type CodeModelOption,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
@@ -123,7 +124,8 @@ export function StartSessionPrompt({
       defaultModelKey,
     );
     const native = useCodeCatalogStore.getState().modelsByHarness[selectedKind];
-    const needsNative = selectedKind === "opencode" || gateway.length === 0;
+    const needsNative =
+      requiresHarnessModelIds(selectedKind) || gateway.length === 0;
     if (!needsNative) {
       apply(gateway);
       setModelLoading(false);

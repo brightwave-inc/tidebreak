@@ -44,6 +44,7 @@ import {
   gatewayCodeModels,
   harnessUnusableReason,
   preferredCodeModels,
+  requiresHarnessModelIds,
   PERMISSION_MODE_LABELS,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
@@ -249,7 +250,8 @@ export function NewWorkspaceDialog({
     };
     const gateway = gatewayCodeModels(models, harness, defaultModelKey);
     const native = useCodeCatalogStore.getState().modelsByHarness[harness];
-    const needsNative = harness === "opencode" || gateway.length === 0;
+    const needsNative =
+      requiresHarnessModelIds(harness) || gateway.length === 0;
     if (!needsNative) {
       apply(gateway);
       setModelLoading(false);
@@ -305,7 +307,7 @@ export function NewWorkspaceDialog({
       try {
         const gateway = gatewayCodeModels(models, harness, defaultModelKey);
         const native =
-          harness === "opencode" || gateway.length === 0
+          requiresHarnessModelIds(harness) || gateway.length === 0
             ? await ensureHarnessModels(client, harness)
             : [];
         const listed = preferredCodeModels(harness, native, gateway);

@@ -292,6 +292,74 @@ describe("StartSessionPrompt", () => {
     );
   });
 
+  it("posts Grok's gateway-qualified model id", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const efforts: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "grok" as const,
+        models: [
+          {
+            id: "model-gateway-model-gateway/grok-4.6",
+            label: "Grok 4.6",
+            default: true,
+            reasoning_efforts: efforts,
+            fast_mode: false,
+          },
+        ],
+        reasoning_efforts: efforts,
+      })),
+    };
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[
+            entry("grok", {
+              plan_mode: "unsupported",
+              structured_approvals: "unsupported",
+              auto_mode: "supported",
+              allow_mode: "supported",
+            }),
+          ]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+          client={client}
+          catalogModels={[
+            {
+              key: "model_gateway::grok-4.6",
+              id: "grok-4.6",
+              display_name: "Grok 4.6",
+              provider: "model_gateway",
+              vendor: "xai",
+              available: true,
+            } as never,
+          ]}
+          defaultModelKey="model_gateway::grok-4.6"
+        />,
+      ),
+    );
+
+    expect(client.listCodeHarnessModels).toHaveBeenCalledWith("grok");
+    expect(
+      await screen.findByRole("button", { name: "Model: Grok 4.6" }),
+    ).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "grok",
+      "allow",
+      "list the files",
+      "model-gateway-model-gateway/grok-4.6",
+    );
+  });
+
   it("keeps each harness model separate across switches", async () => {
     const user = userEvent.setup();
     const codex = deferred<{
