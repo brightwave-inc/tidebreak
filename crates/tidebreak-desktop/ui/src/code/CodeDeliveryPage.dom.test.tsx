@@ -183,6 +183,81 @@ describe("delivery pull request list", () => {
     );
   });
 
+  it("opens on your own open pull requests, drafts included", async () => {
+    const query = vi.fn(async (_body: unknown) => ({
+      capability: deliveryRepositoriesSnapshot.capability,
+      items: deliveryPullRequests,
+      errors: [],
+      fetched_at: "2026-08-20T15:20:00.000Z",
+    }));
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: query,
+    } as unknown as ApiClient);
+
+    expect(await screen.findByRole("button", { name: "Yours" })).toBeTruthy();
+    // `states: ["open"]` and nothing else: a draft is open on the wire, and
+    // neither the attention nor the ready gate may narrow the first screen.
+    await waitFor(() =>
+      expect(query.mock.calls.at(-1)?.[0]).toMatchObject({
+        authors: ["mara"],
+        states: ["open"],
+        attention_only: false,
+        ready_only: false,
+      }),
+    );
+  });
+
+  it("drops the viewer view when gh cannot report a login", async () => {
+    const query = vi.fn(async (_body: unknown) => ({
+      capability: deliveryRepositoriesSnapshot.capability,
+      items: deliveryPullRequests,
+      errors: [],
+      fetched_at: "2026-08-20T15:20:00.000Z",
+    }));
+    renderList({
+      ...storyClient(),
+      getCodeDeliveryRepositories: async () => ({
+        ...deliveryRepositoriesSnapshot,
+        capability: {
+          ...deliveryRepositoriesSnapshot.capability,
+          viewer_login: undefined,
+        },
+      }),
+      queryCodeDeliveryPullRequests: query,
+    } as unknown as ApiClient);
+
+    // "Yours" without a login would read as everybody's, so it goes and the
+    // attention view takes the default back.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Yours" })).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(query.mock.calls.at(-1)?.[0]).toMatchObject({
+        authors: [],
+        attention_only: true,
+      }),
+    );
+  });
+
+  it("names the author on every row, with a face beside it", async () => {
+    renderList();
+    const mara = await rowFor("Build the delivery center");
+    expect(within(mara).getByText("mara")).toBeInTheDocument();
+    // The avatar sits next to the login it belongs to, so it is decorative
+    // and carries no alt text — find it by source. These summaries have no
+    // avatar URL on the wire, which is the case that has to derive one.
+    expect(
+      mara.querySelector('img[src^="https://github.com/mara.png"]'),
+    ).not.toBeNull();
+
+    const devon = await rowFor("Make workspace deep links durable");
+    expect(within(devon).getByText("devon")).toBeInTheDocument();
+    expect(
+      devon.querySelector('img[src^="https://github.com/devon.png"]'),
+    ).not.toBeNull();
+  });
+
   it("filters by a picked author instead of a memorized login", async () => {
     const user = userEvent.setup();
     const query = vi.fn(async (_body: unknown) => ({
@@ -203,6 +278,9 @@ describe("delivery pull request list", () => {
     });
     renderList(client);
 
+    // Off the viewer view first: it already carries the signed-in login, and
+    // this is about picking somebody.
+    await user.click(await screen.findByRole("button", { name: "Open" }));
     await user.click(await screen.findByRole("button", { name: /Filters/ }));
     await user.click(await screen.findByRole("checkbox", { name: "mara" }));
     await waitFor(() =>

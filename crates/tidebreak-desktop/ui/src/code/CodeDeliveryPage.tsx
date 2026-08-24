@@ -106,11 +106,39 @@ import {
 import { arrangeStackLanes } from "./pullRequestStacks";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 
-const PR_BUILT_IN_VIEWS: readonly {
+type PrBuiltInView = {
   id: string;
   label: string;
+  /**
+   * Fill `authors` with the signed-in GitHub login. The login only arrives
+   * with the repository snapshot, so the view carries the intent and the
+   * page resolves it once `gh` reports who you are.
+   */
+  viewerAuthored?: boolean;
   filters: CodeDeliveryPrViewFilters;
-}[] = [
+};
+
+/**
+ * The first entry is the default view. Delivery opens on your own open work —
+ * drafts included, because `state` is still `open` on a draft — rather than on
+ * everyone's review queue.
+ */
+const PR_BUILT_IN_VIEWS: readonly PrBuiltInView[] = [
+  {
+    id: "mine",
+    label: "Yours",
+    viewerAuthored: true,
+    filters: {
+      search: "",
+      repositoryKeys: [],
+      states: ["open"],
+      reviewStates: [],
+      checkStates: [],
+      authors: [],
+      attentionOnly: false,
+      readyOnly: false,
+    },
+  },
   {
     id: "attention",
     label: "Needs attention",
@@ -331,21 +359,32 @@ function CodeDeliveryBody({
   >([]);
   const [repositoriesDialogOpen, setRepositoriesDialogOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
-  const [activeViewId, setActiveViewId] = useState(
-    surface === "pull_requests" ? "attention" : "failures",
+  // Who `gh` is signed in as. Undefined until the repository snapshot lands,
+  // and undefined for good against a `gh` too old to report it.
+  const viewerLogin = repositorySnapshot?.capability.viewer_login;
+  // A view that filters by "you" cannot mean anything without a login, so it
+  // leaves the row rather than quietly widening to everybody's pull requests.
+  // It stays put while the snapshot is still loading, because that is the
+  // default and the common answer is that a login exists.
+  const prViews = useMemo(
+    () =>
+      repositorySnapshot && !viewerLogin
+        ? PR_BUILT_IN_VIEWS.filter((view) => !view.viewerAuthored)
+        : PR_BUILT_IN_VIEWS,
+    [repositorySnapshot, viewerLogin],
   );
+  const builtInViews =
+    surface === "pull_requests" ? prViews : RUN_BUILT_IN_VIEWS;
+  const defaultViewId = builtInViews[0]!.id;
+  const [activeViewId, setActiveViewId] = useState(defaultViewId);
   const [prFilters, setPrFilters] = useState<CodeDeliveryPrViewFilters>(() =>
-    clonePrFilters(PR_BUILT_IN_VIEWS[0]!.filters),
+    builtInPrFilters(PR_BUILT_IN_VIEWS[0]!, viewerLogin),
   );
   const [runFilters, setRunFilters] = useState<CodeDeliveryRunViewFilters>(() =>
     cloneRunFilters(RUN_BUILT_IN_VIEWS[0]!.filters),
   );
 
   useEffect(() => {
-    const builtInViews =
-      surface === "pull_requests" ? PR_BUILT_IN_VIEWS : RUN_BUILT_IN_VIEWS;
-    const defaultViewId =
-      surface === "pull_requests" ? "attention" : "failures";
     const viewId = builtInViews.some((view) => view.id === search.view)
       ? search.view!
       : defaultViewId;
@@ -354,14 +393,36 @@ function CodeDeliveryBody({
       const view = PR_BUILT_IN_VIEWS.find(
         (candidate) => candidate.id === viewId,
       );
-      setPrFilters(clonePrFilters((view ?? PR_BUILT_IN_VIEWS[0]!).filters));
+      setPrFilters(
+        builtInPrFilters(view ?? PR_BUILT_IN_VIEWS[0]!, viewerLogin),
+      );
     } else {
       const view = RUN_BUILT_IN_VIEWS.find(
         (candidate) => candidate.id === viewId,
       );
       setRunFilters(cloneRunFilters((view ?? RUN_BUILT_IN_VIEWS[0]!).filters));
     }
-  }, [search.view, surface]);
+    // The login is read, not tracked: it lands after this effect has already
+    // seeded the filters, and rerunning here would throw away edits made in
+    // between. The effect below fills it in instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search.view, surface, defaultViewId]);
+
+  // The signed-in login arrives with the repository snapshot, a beat after the
+  // viewer view was applied. Fill the author in then, and only while the view
+  // is still the untouched one — anything the reader picked outranks it.
+  useEffect(() => {
+    if (surface !== "pull_requests" || !viewerLogin) return;
+    const view = PR_BUILT_IN_VIEWS.find(
+      (candidate) => candidate.id === activeViewId,
+    );
+    if (!view?.viewerAuthored) return;
+    setPrFilters((current) =>
+      current.authors.length === 0
+        ? { ...current, authors: [viewerLogin] }
+        : current,
+    );
+  }, [activeViewId, surface, viewerLogin]);
 
   const loadRepositories = async (force = false, notify = false) => {
     try {
@@ -422,7 +483,7 @@ function CodeDeliveryBody({
     setActiveViewId(id);
     if (surface === "pull_requests") {
       const view = PR_BUILT_IN_VIEWS.find((candidate) => candidate.id === id);
-      if (view) setPrFilters(clonePrFilters(view.filters));
+      if (view) setPrFilters(builtInPrFilters(view, viewerLogin));
     } else {
       const view = RUN_BUILT_IN_VIEWS.find((candidate) => candidate.id === id);
       if (view) setRunFilters(cloneRunFilters(view.filters));
@@ -500,13 +561,11 @@ function CodeDeliveryBody({
 
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border-subtle px-5 py-3">
         <div className="flex min-w-0 flex-wrap items-center gap-1 rounded-lg bg-muted/35 p-0.5">
-          {(surface === "pull_requests"
-            ? PR_BUILT_IN_VIEWS
-            : RUN_BUILT_IN_VIEWS
-          ).map((view) => (
+          {builtInViews.map((view) => (
             <button
               key={view.id}
               type="button"
+              aria-pressed={activeViewId === view.id}
               className={cn(
                 "h-7 cursor-pointer rounded-md px-2.5 text-xs font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground",
                 activeViewId === view.id &&
@@ -1556,6 +1615,25 @@ function PullRequestRow({
           ) : null}
         </span>
         <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          {item.author && (
+            // Leading the metadata line rather than taking a column: the
+            // avatars line up as their own strip down the list, and the table
+            // keeps the width it has.
+            <>
+              <AuthorAvatar
+                login={item.author}
+                url={item.author_avatar_url}
+                className="size-4"
+              />
+              {/* The login holds its width while the repository and branch
+                  give theirs up: a login truncated to one letter identifies
+                  nobody, and those two read fine clipped. */}
+              <span className="max-w-32 shrink-0 truncate">{item.author}</span>
+              <span className="shrink-0" aria-hidden>
+                ·
+              </span>
+            </>
+          )}
           <span className="truncate">{item.repository.name_with_owner}</span>
           <span className="tabular-nums">#{item.number}</span>
           <span className="truncate font-mono">{item.head_branch}</span>
@@ -2379,13 +2457,24 @@ function AuthorFilterOptions({
 }
 
 /** A login's face at list scale, with initials when there is no image. */
-function AuthorAvatar({ login, url }: { login: string; url?: string }) {
+function AuthorAvatar({
+  login,
+  url,
+  className,
+}: {
+  login: string;
+  url?: string;
+  className?: string;
+}) {
   const [failed, setFailed] = useState(false);
   const source = url ?? githubAvatarUrl(login);
   if (!source || failed) {
     return (
       <span
-        className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground"
+        className={cn(
+          "grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground",
+          className,
+        )}
         aria-hidden
       >
         {login.slice(0, 2)}
@@ -2396,7 +2485,7 @@ function AuthorAvatar({ login, url }: { login: string; url?: string }) {
     <img
       src={source}
       alt=""
-      className="size-5 shrink-0 rounded-full object-cover"
+      className={cn("size-5 shrink-0 rounded-full object-cover", className)}
       onError={() => setFailed(true)}
     />
   );
@@ -3173,6 +3262,20 @@ function clonePrFilters(
     checkStates: [...filters.checkStates],
     authors: [...filters.authors],
   };
+}
+
+/**
+ * A built-in view's filters, with the viewer view pointed at the signed-in
+ * login. Resolving to a plain `authors` entry is what keeps the author chip,
+ * the filter count, and a saved copy of the view all reading the same thing.
+ */
+function builtInPrFilters(
+  view: PrBuiltInView,
+  viewerLogin: string | undefined,
+): CodeDeliveryPrViewFilters {
+  const filters = clonePrFilters(view.filters);
+  if (view.viewerAuthored && viewerLogin) filters.authors = [viewerLogin];
+  return filters;
 }
 
 function cloneRunFilters(
