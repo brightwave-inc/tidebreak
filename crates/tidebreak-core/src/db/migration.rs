@@ -1360,7 +1360,7 @@ fn code_trigger_fire_outbox_indexes() -> Vec<IndexCreateStatement> {
     ]
 }
 
-/// Durable per-session queued follow-ups (decision 65).
+/// Durable per-session queued follow-ups (decision 69).
 ///
 /// Mirrors the chat `queued_turn` contract onto code sessions: a message
 /// accepted while the session or its workspace checkout is busy parks as a
