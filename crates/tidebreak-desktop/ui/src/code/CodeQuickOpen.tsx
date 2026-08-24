@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { fuzzyTokenScore, queryTokens } from "@/fuzzy";
 import { friendlyErrorMessage } from "@/lib/utils";
 
 const QUICK_OPEN_LIMIT = 5000;
@@ -214,7 +215,7 @@ export function rankQuickOpenPaths(
   paths: readonly string[],
   query: string,
 ): string[] {
-  const tokens = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const tokens = queryTokens(query);
   if (tokens.length === 0) return [...paths].sort(pathSort);
   const pathQuery = query.includes("/") || query.includes("\\");
   return paths
@@ -232,26 +233,6 @@ export function rankQuickOpenPaths(
         right.score - left.score || pathSort(left.path, right.path),
     )
     .map((entry) => entry.path);
-}
-
-function fuzzyTokenScore(target: string, token: string): number {
-  if (target === token) return 2000;
-  const contiguous = target.indexOf(token);
-  if (contiguous >= 0) {
-    return 1200 - contiguous * 8 - (target.length - token.length);
-  }
-  let cursor = 0;
-  let score = 0;
-  let previous = -2;
-  for (const char of token) {
-    const index = target.indexOf(char, cursor);
-    if (index < 0) return -1;
-    score += index === previous + 1 ? 24 : Math.max(2, 14 - index);
-    if (index === 0 || /[-_.]/.test(target[index - 1] ?? "")) score += 16;
-    previous = index;
-    cursor = index + 1;
-  }
-  return score - target.length;
 }
 
 function fileName(path: string): string {
