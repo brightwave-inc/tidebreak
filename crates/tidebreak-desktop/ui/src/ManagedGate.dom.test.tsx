@@ -541,6 +541,7 @@ describe("ManagedGate", () => {
     });
     mount(client);
     expect(await screen.findByText("the open product")).toBeInTheDocument();
+    await waitFor(() => expect(pairingNudge.fire).not.toBeNull());
 
     // No timer advance: the nudge alone must refetch and lower the gate.
     await act(async () => {

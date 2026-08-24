@@ -447,19 +447,16 @@ fn canonical_model_id(model: &str) -> Option<&'static str> {
     if model_matches(&model, "gpt-5.6-sol") || model_matches(&model, "gpt-5.6") {
         return Some("gpt-5.6-sol");
     }
-    for id in [
+    [
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "claude-fable-5",
         "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5",
-    ] {
-        if model_matches(&model, id) || model_has_dated_suffix(&model, id) {
-            return Some(id);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|&id| model_matches(&model, id) || model_has_dated_suffix(&model, id))
 }
 
 fn model_matches(value: &str, id: &str) -> bool {
