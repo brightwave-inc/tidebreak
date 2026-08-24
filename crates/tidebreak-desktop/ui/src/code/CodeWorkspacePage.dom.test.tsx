@@ -368,6 +368,12 @@ function makeClient() {
         user_input: message,
       },
     })),
+    setCodeSessionReasoningEffort: vi.fn(
+      async (_sessionId: string, reasoningEffort: "low" | "high" | null) => ({
+        ...SESSION,
+        reasoning_effort: reasoningEffort ?? undefined,
+      }),
+    ),
     getCodeWorkspaceDiff: vi.fn(async () => ({
       diff: "",
       truncated: false,
@@ -622,6 +628,73 @@ describe("CodeWorkspacePage", () => {
       expect(within(status).getByText("Monitoring")).toBeInTheDocument(),
     );
     expect(within(status).queryByText("Running")).not.toBeInTheDocument();
+  });
+
+  it("keeps a mid-turn reasoning change until the next idle submission", async () => {
+    const client = makeClient();
+    const runningSession: CodeSessionSnapshot = {
+      ...SESSION,
+      lifecycle: "running",
+      reasoning_effort: "low",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([runningSession]);
+    client.listCodeSessionTurns.mockResolvedValue([
+      {
+        ...TURN,
+        status: "running",
+        ended_at: undefined,
+      },
+    ] as never);
+    client.listCodeHarnessModels.mockResolvedValue({
+      kind: "claude_code",
+      models: [],
+      reasoning_efforts: ["low", "high"],
+    } as never);
+    let emitFrame: ((frame: SequencedCodeEventFrame) => void) | undefined;
+    client.openCodeEvents.mockImplementation((_sessionId, _after, onFrame) => {
+      emitFrame = onFrame;
+      return codeEventSocket(onFrame);
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Reasoning: Low" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "High" }));
+
+    expect(client.setCodeSessionReasoningEffort).not.toHaveBeenCalled();
+
+    // The completed-turn refresh still carries the stored low effort. The
+    // pending high choice must win when the settings effect syncs that row.
+    runningSession.lifecycle = "idle";
+    runningSession.fast_mode = true;
+    act(() => {
+      emitFrame?.({
+        seq: 1,
+        replayed: false,
+        event: { type: "turn_completed", usage: TURN.usage },
+      });
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Reasoning: High" }),
+    ).toBeInTheDocument();
+
+    const message = screen.getByRole("textbox", { name: "Message" });
+    await user.type(message, "use more reasoning");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        SESSION.id,
+        "use more reasoning",
+        undefined,
+        undefined,
+        "high",
+      ),
+    );
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("keeps the Codex session model selectable before its catalog loads", async () => {

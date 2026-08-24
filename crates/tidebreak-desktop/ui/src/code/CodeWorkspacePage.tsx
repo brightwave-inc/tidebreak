@@ -1833,15 +1833,24 @@ function CodeSessionPane({
     reasoningEffort: session.reasoning_effort ?? null,
     fastMode: session.fast_mode,
   });
+  const pendingReasoningEffortRef = useRef<{
+    value: ReasoningEffort | null;
+  } | null>(null);
 
   useEffect(() => {
     setModel(session.model ?? inferred);
   }, [inferred, session.model]);
 
   useEffect(() => {
+    // A refreshed row can still carry the stored effort while a mid-turn
+    // choice waits for its first submission. Keep that choice until an
+    // accepted submission clears it; changing sessions remounts this pane.
+    const pendingReasoningEffort = pendingReasoningEffortRef.current;
     setSettings({
       permissionMode: session.permission_mode,
-      reasoningEffort: session.reasoning_effort ?? null,
+      reasoningEffort: pendingReasoningEffort
+        ? pendingReasoningEffort.value
+        : (session.reasoning_effort ?? null),
       fastMode: session.fast_mode,
     });
   }, [
@@ -1887,6 +1896,7 @@ function CodeSessionPane({
     ? createPermissionModes(doctorEntry.caps)
     : ["plan", "ask", "auto", "allow"];
   const steeringSupported = doctorEntry?.caps.mid_turn_steering === "supported";
+  const turnRunning = busy || lifecycle === "running";
   const composerHistory = useMemo(
     () =>
       items
@@ -1959,6 +1969,7 @@ function CodeSessionPane({
     message: string,
     attachments?: readonly { blob_id: string; media_type: string }[],
   ) {
+    const pendingReasoningEffort = pendingReasoningEffortRef.current;
     // Sending is a deliberate return to the tail: whatever the reader was
     // reading, they now want to watch their own turn run.
     follow.armFollow();
@@ -1968,13 +1979,26 @@ function CodeSessionPane({
     // A queued outcome needs no state here — the tray polls the durable queue
     // and shows the row.
     return submitAcceptedTurn(store.getState().update, () =>
-      client.submitCodeTurn(
-        session.id,
-        message,
-        model ?? undefined,
-        attachments,
-      ),
-    );
+      pendingReasoningEffort
+        ? client.submitCodeTurn(
+            session.id,
+            message,
+            model ?? undefined,
+            attachments,
+            pendingReasoningEffort.value,
+          )
+        : client.submitCodeTurn(
+            session.id,
+            message,
+            model ?? undefined,
+            attachments,
+          ),
+    ).then((outcome) => {
+      if (pendingReasoningEffortRef.current === pendingReasoningEffort) {
+        pendingReasoningEffortRef.current = null;
+      }
+      return outcome;
+    });
   }
 
   async function changePermissionMode(mode: PermissionMode) {
@@ -1985,9 +2009,12 @@ function CodeSessionPane({
         session.id,
         mode,
       );
+      const pendingReasoningEffort = pendingReasoningEffortRef.current;
       setSettings({
         permissionMode: updated.permission_mode,
-        reasoningEffort: updated.reasoning_effort ?? null,
+        reasoningEffort: pendingReasoningEffort
+          ? pendingReasoningEffort.value
+          : (updated.reasoning_effort ?? null),
         fastMode: updated.fast_mode,
       });
     } catch (err) {
@@ -1999,6 +2026,13 @@ function CodeSessionPane({
   async function changeReasoningEffort(effort: ReasoningEffort | null) {
     const previous = settings.reasoningEffort;
     setSettings((current) => ({ ...current, reasoningEffort: effort }));
+    // A running turn keeps the effort it started with. The selected level
+    // rides on the next submission, where the server also makes it sticky.
+    if (turnRunning) {
+      pendingReasoningEffortRef.current = { value: effort };
+      return;
+    }
+    pendingReasoningEffortRef.current = null;
     try {
       const updated = await client.setCodeSessionReasoningEffort(
         session.id,
@@ -2020,9 +2054,12 @@ function CodeSessionPane({
     setSettings((current) => ({ ...current, fastMode }));
     try {
       const updated = await client.setCodeSessionFastMode(session.id, fastMode);
+      const pendingReasoningEffort = pendingReasoningEffortRef.current;
       setSettings({
         permissionMode: updated.permission_mode,
-        reasoningEffort: updated.reasoning_effort ?? null,
+        reasoningEffort: pendingReasoningEffort
+          ? pendingReasoningEffort.value
+          : (updated.reasoning_effort ?? null),
         fastMode: updated.fast_mode,
       });
     } catch (err) {
@@ -2110,12 +2147,12 @@ function CodeSessionPane({
           <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)]">
             <QueueTray
               queue={sessionQueue}
-              active={busy || lifecycle === "running"}
+              active={turnRunning}
               onStop={interrupt}
             />
           </div>
           <CodeComposer
-            running={busy || lifecycle === "running"}
+            running={turnRunning}
             disabled={disabled}
             permissionMode={settings.permissionMode}
             availableModes={availableModes}
