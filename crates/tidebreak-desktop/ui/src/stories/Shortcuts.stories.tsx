@@ -12,7 +12,7 @@ import { ShortcutsList } from "@/ShortcutsDialog";
  * story is opened.
  */
 const meta = {
-  title: "Foundations/Keyboard shortcuts",
+  title: "Navigation/Keyboard shortcuts",
   component: ShortcutsList,
   args: { command: true },
   decorators: [
