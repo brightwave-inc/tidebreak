@@ -41,9 +41,7 @@ use super::ci_logs;
 use super::clone::CloneJobs;
 use super::delivery::DeliveryCache;
 use super::fork;
-use super::gh::{
-    self, ActionOutcome, CommitOutcome, GhError, PrDigestCache, PushOutcome, WorkspaceGitStatus,
-};
+use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, WorkspaceGitStatus};
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
@@ -176,7 +174,9 @@ pub(crate) struct CodeRuntime {
     /// A worker takes the workspace's lock for the length of a turn, so a
     /// sibling's turn starts after this one ends. See record 55.
     worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
-    pr_cache: PrDigestCache,
+    /// Workspaces whose digest was requested recently, with the owner each
+    /// belongs to: the hot tier the refresher walks (decision 66).
+    hot_prs: Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>,
     /// Paces and parks every conditional GitHub read (decision 66).
     host_gate: super::pr_fetch::HostGate,
     /// Base-branch rules, cached per branch: whether a merge queue runs
@@ -201,6 +201,8 @@ pub(crate) struct CodeRuntime {
     trigger_started: AtomicBool,
     reconcile_sweep: Mutex<Option<super::reconcile::ReconcileSweepGuard>>,
     reconcile_started: AtomicBool,
+    pr_refresh_sweep: Mutex<Option<super::pr_refresh::PrRefreshGuard>>,
+    pr_refresh_started: AtomicBool,
     /// Workspaces with a background naming call in flight.
     ///
     /// One call per workspace at a time; a second trigger is dropped rather
@@ -218,6 +220,11 @@ pub(crate) struct CodeRuntime {
 /// How long one base branch's rules answer stands before the next read.
 /// Rules change on the order of releases, not pushes.
 const BRANCH_RULES_TTL: Duration = Duration::from_secs(3600);
+
+/// How long one digest request keeps a workspace on the hot refresh tier
+/// (decision 66). The UI asks again while a workspace stays open, so the
+/// window only needs to outlive its poll spacing with room to spare.
+const HOT_WINDOW: Duration = Duration::from_secs(120);
 
 /// One cached branch-rules answer. `rules: None` records a host that has no
 /// rules endpoint, so a known 404 is not re-read every refresh.
@@ -281,7 +288,7 @@ impl CodeRuntime {
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
-            pr_cache: PrDigestCache::default(),
+            hot_prs: Mutex::new(HashMap::new()),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
@@ -299,6 +306,8 @@ impl CodeRuntime {
             trigger_started: AtomicBool::new(false),
             reconcile_sweep: Mutex::new(None),
             reconcile_started: AtomicBool::new(false),
+            pr_refresh_sweep: Mutex::new(None),
+            pr_refresh_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
         }
@@ -350,6 +359,7 @@ impl CodeRuntime {
             runtime.ensure_watch_sweep();
             runtime.ensure_trigger_sweep();
             runtime.ensure_reconcile_sweep();
+            runtime.ensure_pr_refresh_sweep();
             actions
         })
     }
@@ -398,7 +408,7 @@ impl CodeRuntime {
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
-            pr_cache: PrDigestCache::default(),
+            hot_prs: Mutex::new(HashMap::new()),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
@@ -416,6 +426,8 @@ impl CodeRuntime {
             trigger_started: AtomicBool::new(false),
             reconcile_sweep: Mutex::new(None),
             reconcile_started: AtomicBool::new(false),
+            pr_refresh_sweep: Mutex::new(None),
+            pr_refresh_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
         }
@@ -1330,10 +1342,7 @@ impl CodeRuntime {
         let outcome = gh::push_branch(&worktree, &workspace.branch_name, credential.as_ref())
             .await
             .map_err(map_gh)?;
-        // The digest cached before the push describes the old head. Drop it
-        // and the delivery lists so the next reader sees checks pending on
-        // the new head rather than the pre-push snapshot (decision 66).
-        self.pr_cache.invalidate(id);
+        // The delivery lists hold the pre-push row.
         self.delivery_cache.invalidate();
         // Best-effort contributed fact (decision 62): a user push to a branch
         // that is a pull request's head is the same act the detector mints
@@ -1378,6 +1387,11 @@ impl CodeRuntime {
                 .await;
             }
         }
+        // A push dirties the row: refresh it now (decision 66), so the next
+        // reader sees checks pending on the new head rather than the
+        // pre-push snapshot. The fetcher's checks read is keyed to the new
+        // head by construction.
+        self.refresh_workspace_pr_row(owner, id).await;
         Ok(outcome)
     }
 
@@ -1487,6 +1501,10 @@ impl CodeRuntime {
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         let mut workspace = self.get_workspace(owner, id).await?;
+        // Being asked is the attention signal (decision 66): the request
+        // path reads local git plus the stored row, and the hot refresher
+        // this mark feeds is what keeps the row current while anyone reads.
+        self.mark_workspace_pr_hot(owner, workspace.id);
         let gh_path = self.gh_search_path_owned();
         let mut status = gh::workspace_git_status(
             std::path::Path::new(&workspace.worktree_path),
@@ -1498,35 +1516,14 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
-        // The digest comes through the conditional fetcher (decision 66):
-        // the fact row's ETags ride along, an unchanged answer is a free 304
-        // served from the row, and a changed one writes through to every
-        // holder. A failed fetch leaves the persisted digest standing.
-        if status.gh_found && status.gh_authenticated == Some(true) {
-            if let Some(cached) = self.pr_cache.get(workspace.id) {
-                status.pr = Some(cached);
-            } else if let Some(binary) = gh::authenticated_gh_binary(gh_path.as_deref()).await {
-                if let Some(digest) = self
-                    .fetched_workspace_digest(owner, &workspace, &binary)
-                    .await
-                {
-                    self.pr_cache.put(workspace.id, digest.clone());
-                    status.pr = Some(digest);
-                }
-            }
-        }
         // On a hosted machine the digest comes from the forge REST API with
-        // a borrowed credential (decision 65) — there is no `gh` here to
-        // refresh it. Cache-aware exactly like the `gh` path, borrowing only
-        // on a miss; failures leave the persisted digest and the next read
-        // asks again.
+        // a borrowed credential (decision 65) — there is no `gh` here for
+        // the hot refresher to drive, so this read stays in the request
+        // path. Failures leave the persisted digest and the next read asks
+        // again.
         if self.git_credentials().is_some() {
             let worktree = std::path::Path::new(&workspace.worktree_path);
-            if let Some(cached) = self.pr_cache.get(workspace.id) {
-                status.pr = Some(cached);
-            } else if let Ok(Some((target, credential))) =
-                self.forge_rest_context(owner, worktree).await
-            {
+            if let Ok(Some((target, credential))) = self.forge_rest_context(owner, worktree).await {
                 let api_base = self.forge_api_base_for(&target.host);
                 if let Ok(Some(digest)) = super::forge_rest::pull_request_digest(
                     &api_base,
@@ -1536,7 +1533,6 @@ impl CodeRuntime {
                 )
                 .await
                 {
-                    self.pr_cache.put(workspace.id, digest.clone());
                     status.pr = Some(digest);
                 }
             }
@@ -1576,15 +1572,68 @@ impl CodeRuntime {
         Ok(status)
     }
 
-    /// Force a fresh host read: drop the digest cache entry, then take the
-    /// normal status path.
+    /// Force a fresh host read now — the user asked, or a mutation just
+    /// moved the pull request — then answer with the refreshed row.
     pub(crate) async fn refresh_workspace_pr(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        self.pr_cache.invalidate(id);
+        self.refresh_workspace_pr_row(owner, id).await;
         self.workspace_pr(owner, id).await
+    }
+
+    /// One conditional refresh of the workspace's pull-request row: fetch,
+    /// write the row (which fans real change out to every other holder),
+    /// and take the new digest as this workspace's column. Quiet on every
+    /// failure — the caller's row keeps whatever it had, and the next tick
+    /// or sweep corrects.
+    pub(crate) async fn refresh_workspace_pr_row(&self, owner: &OwnerId, id: WorkspaceId) {
+        let Ok(mut workspace) = self.get_workspace(owner, id).await else {
+            return;
+        };
+        if workspace.status != CodeWorkspaceStatus::Active {
+            return;
+        }
+        let gh_path = self.gh_search_path_owned();
+        let Some(binary) = gh::authenticated_gh_binary(gh_path.as_deref()).await else {
+            return;
+        };
+        let Some(digest) = self
+            .fetched_workspace_digest(owner, &workspace, &binary)
+            .await
+        else {
+            return;
+        };
+        if workspace.pr.as_ref() != Some(&digest) {
+            workspace.pr = Some(digest);
+            let _ = self.save_workspace(&workspace).await;
+        }
+    }
+
+    /// Keep this workspace on the hot refresh tier for [`HOT_WINDOW`].
+    fn mark_workspace_pr_hot(&self, owner: &OwnerId, id: WorkspaceId) {
+        let mut hot = self.hot_prs.lock().expect("hot prs");
+        hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
+        hot.insert(id, (owner.clone(), Instant::now()));
+    }
+
+    /// The workspaces the hot refresher walks this tick.
+    pub(super) fn hot_pull_request_workspaces(&self) -> Vec<(OwnerId, WorkspaceId)> {
+        let mut hot = self.hot_prs.lock().expect("hot prs");
+        hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
+        hot.iter()
+            .map(|(id, (owner, _))| (owner.clone(), *id))
+            .collect()
+    }
+
+    /// Start the hot pull-request refresher once (decision 66).
+    pub(super) fn ensure_pr_refresh_sweep(self: &Arc<Self>) {
+        if self.pr_refresh_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let guard = super::pr_refresh::PrRefreshGuard::spawn(Arc::downgrade(self));
+        *self.pr_refresh_sweep.lock().expect("pr refresh sweep") = Some(guard);
     }
 
     /// The repository identity a workspace's pull request lives on: the
@@ -2002,10 +2051,6 @@ impl CodeRuntime {
             if !holds || workspace.pr.as_ref() == Some(digest) {
                 continue;
             }
-            // The cache takes the same snapshot the column does, so this
-            // workspace's next read serves it rather than a stale entry that
-            // would write the old digest back.
-            self.pr_cache.put(workspace.id, digest.clone());
             workspace.pr = Some(digest.clone());
             if let Err(err) = self.save_workspace(&workspace).await {
                 tracing::warn!(
@@ -2075,18 +2120,16 @@ impl CodeRuntime {
         let gh_path = self.gh_search_path_owned();
         gh::merge_pull_request(
             std::path::Path::new(&workspace.worktree_path),
-            workspace.id,
             method,
             auto,
-            &self.pr_cache,
             gh_path.as_deref(),
         )
         .await
         .map_err(map_gh)?;
-        // The merge helper already dropped this workspace's digest cache
-        // entry; the delivery lists hold the pre-merge row (decision 66).
+        // A merge dirties the row (decision 66); the delivery lists hold the
+        // pre-merge row.
         self.delivery_cache.invalidate();
-        self.workspace_pr(owner, id).await
+        self.refresh_workspace_pr(owner, id).await
     }
 
     /// Take the workspace's pull request out of draft and return a fresh
@@ -2102,14 +2145,12 @@ impl CodeRuntime {
         let gh_path = self.gh_search_path_owned();
         gh::mark_workspace_pull_request_ready(
             std::path::Path::new(&workspace.worktree_path),
-            workspace.id,
-            &self.pr_cache,
             gh_path.as_deref(),
         )
         .await
         .map_err(map_gh)?;
         self.delivery_cache.invalidate();
-        self.workspace_pr(owner, id).await
+        self.refresh_workspace_pr(owner, id).await
     }
 
     pub(crate) async fn create_workspace_pr(
@@ -2131,13 +2172,11 @@ impl CodeRuntime {
                 let api_base = self.forge_api_base_for(&target.host);
                 let (digest, fact) = gh::create_pull_request_rest(
                     &worktree,
-                    workspace.id,
                     &workspace.title,
                     &workspace.branch_name,
                     &workspace.base_ref,
                     title.as_deref(),
                     body.as_deref(),
-                    &self.pr_cache,
                     &api_base,
                     &target,
                     &credential,
@@ -2150,13 +2189,11 @@ impl CodeRuntime {
                 let gh_path = self.gh_search_path_owned();
                 let digest = gh::create_pull_request(
                     &worktree,
-                    workspace.id,
                     &workspace.title,
                     &workspace.branch_name,
                     &workspace.base_ref,
                     title.as_deref(),
                     body.as_deref(),
-                    &self.pr_cache,
                     gh_path.as_deref(),
                 )
                 .await
@@ -2210,7 +2247,10 @@ impl CodeRuntime {
                 .await;
             }
         }
-        self.workspace_pr(owner, id).await
+        // Creation dirties the row (decision 66): the response carries the
+        // fetched digest — checks pending on the fresh pull request — not
+        // the light creation stub.
+        self.refresh_workspace_pr(owner, id).await
     }
 
     pub(crate) async fn run_workspace_action(
