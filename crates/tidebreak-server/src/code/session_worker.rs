@@ -1513,6 +1513,7 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
         Err(WorkerError::SteeringUnavailable(_)) => "steering_unavailable",
         Err(WorkerError::SteeringRejected(_)) => "steering_rejected",
         Err(WorkerError::RelaunchRequired(_)) => "relaunch_required",
+        Err(WorkerError::QueuedTurnStale) => "queued_turn_stale",
         Err(WorkerError::Failed(_)) => "error",
         Err(WorkerError::TriggerDeliveryAccepted) => "trigger_delivery_accepted",
         Err(WorkerError::WorktreeBusy) => "worktree_busy",
