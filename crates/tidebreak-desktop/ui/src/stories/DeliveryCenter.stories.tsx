@@ -513,8 +513,10 @@ export const PullRequestCommentOrdering: Story = {
 };
 
 /**
- * Admin merge stays behind the overflow and a confirmation: it bypasses the
- * branch protection that is otherwise disabling the plain merge button.
+ * Admin merge stays behind the overflow and an inline confirmation: it
+ * bypasses the branch protection that is otherwise disabling the plain merge
+ * button. Inline rather than a dialog — the sheet is already a modal, and a
+ * second stacked modal shares its dismiss layer.
  */
 export const PullRequestAdminMerge: Story = {
   play: async ({ canvasElement }) => {
@@ -533,7 +535,7 @@ export const PullRequestAdminMerge: Story = {
       }),
     );
     await expect(
-      await body.findByText("Merge, bypassing branch protection?"),
+      await body.findByText(/skips any reviews and checks/),
     ).toBeVisible();
     await userEvent.click(
       await body.findByRole("button", { name: "Admin merge" }),

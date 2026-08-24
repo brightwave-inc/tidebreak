@@ -33,7 +33,6 @@ import type {
 } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useConfirm } from "@/components/ConfirmDialog";
 import {
   Dialog,
   DialogOverlay,
@@ -184,7 +183,11 @@ export function PullRequestDetailSheet({
   const [commentOrder, setCommentOrder] =
     useState<PullRequestCommentOrder>("newest");
   const [draftComment, setDraftComment] = useState("");
-  const { confirm, dialog: confirmDialog } = useConfirm();
+  // Inline rather than a dialog: the sheet is already a modal, and a second
+  // Radix modal stacked on it shares the dismiss layer and the body
+  // pointer-events lock — the class of bug #2537 hit with a dialog over a
+  // dialog. The confirmation renders inside the actions card instead.
+  const [confirmingAdminMerge, setConfirmingAdminMerge] = useState(false);
   const generation = useRef(0);
   const activeTarget = useRef(summary.id);
   const mounted = useRef(true);
@@ -230,6 +233,7 @@ export function PullRequestDetailSheet({
     setTab("conversation");
     setCommentOrder("newest");
     setDraftComment("");
+    setConfirmingAdminMerge(false);
     if (initialDetail?.summary.id === summary.id) {
       setDetail(initialDetail);
       setLoading(false);
@@ -299,13 +303,7 @@ export function PullRequestDetailSheet({
 
   const adminMerge = async () => {
     if (!current.head_sha) return;
-    const ok = await confirm({
-      title: "Merge, bypassing branch protection?",
-      description: `Admin merge lands pull request #${current.number} immediately and skips any reviews and checks the branch still requires. GitHub records the bypass under your account.`,
-      confirmLabel: "Admin merge",
-      destructive: true,
-    });
-    if (!ok) return;
+    setConfirmingAdminMerge(false);
     await runAction("admin-merge", {
       type: "merge",
       method: mergeMethod,
@@ -429,7 +427,10 @@ export function PullRequestDetailSheet({
                   onMergeMethodChange={setMergeMethod}
                   workflowRunIds={workflowRunIds}
                   onRun={(name, action) => void runAction(name, action)}
-                  onAdminMerge={() => void adminMerge()}
+                  confirmingAdminMerge={confirmingAdminMerge}
+                  onAdminMergeRequest={() => setConfirmingAdminMerge(true)}
+                  onAdminMergeCancel={() => setConfirmingAdminMerge(false)}
+                  onAdminMergeConfirm={() => void adminMerge()}
                 />
                 <PrDescription body={detail.body} />
                 <PrConversation
@@ -459,7 +460,6 @@ export function PullRequestDetailSheet({
           </>
         ) : null}
       </div>
-      {confirmDialog}
     </DetailSheet>
   );
 }
@@ -768,7 +768,10 @@ function PrActions({
   onMergeMethodChange,
   workflowRunIds,
   onRun,
-  onAdminMerge,
+  confirmingAdminMerge,
+  onAdminMergeRequest,
+  onAdminMergeCancel,
+  onAdminMergeConfirm,
 }: {
   detail: CodeDeliveryPullRequestDetail;
   summary: CodeDeliveryPullRequestSummary;
@@ -777,7 +780,10 @@ function PrActions({
   onMergeMethodChange: (method: MergeMethod) => void;
   workflowRunIds: number[];
   onRun: (name: string, action: CodeDeliveryPullRequestAction) => void;
-  onAdminMerge: () => void;
+  confirmingAdminMerge: boolean;
+  onAdminMergeRequest: () => void;
+  onAdminMergeCancel: () => void;
+  onAdminMergeConfirm: () => void;
 }) {
   const blocked = mergeBlockedReason(summary);
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;
@@ -915,7 +921,7 @@ function PrActions({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {canAdminMerge && (
-                <DropdownMenuItem onSelect={onAdminMerge}>
+                <DropdownMenuItem onSelect={onAdminMergeRequest}>
                   <ShieldAlert />
                   Admin merge (bypass protections)…
                 </DropdownMenuItem>
@@ -933,6 +939,39 @@ function PrActions({
           </DropdownMenu>
         )}
       </div>
+      {confirmingAdminMerge && canAdminMerge && (
+        <div className="mt-2.5 flex flex-col gap-2 rounded-md border border-critical-border bg-critical-background/40 p-2.5">
+          <p className="flex items-start gap-1.5 text-xs text-critical-foreground-muted">
+            <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+            Admin merge lands this pull request now and skips any reviews and
+            checks the branch still requires. GitHub records the bypass under
+            your account.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="xs"
+              variant="destructive"
+              disabled={Boolean(busy)}
+              onClick={onAdminMergeConfirm}
+            >
+              {busy === "admin-merge" && (
+                <LoaderCircle className="animate-spin" />
+              )}
+              Admin merge
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              disabled={Boolean(busy)}
+              onClick={onAdminMergeCancel}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
       {blocked && detail.can_merge && (
         <p className="mt-2.5 flex items-start gap-1.5 border-t border-border-subtle pt-2.5 text-xs text-warning-foreground">
           <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
