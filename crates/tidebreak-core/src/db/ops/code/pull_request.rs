@@ -8,12 +8,13 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 
 use crate::code::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
-    CodePullRequestRelation, CodePullRequestState, WorkspaceId,
+    CodePullRequestLiveState, CodePullRequestRelation, CodePullRequestState, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -53,6 +54,9 @@ pub async fn save_pull_request_fact(
         closed_at: Set(fact.closed_at),
         first_seen_at: Set(fact.first_seen_at),
         last_seen_at: Set(fact.last_seen_at),
+        // The live tier (decision 66) is written by its own setter and never
+        // by a snapshot upsert, so a confirmation cannot blank it.
+        ..Default::default()
     })
     .on_conflict(
         OnConflict::columns([
@@ -115,6 +119,56 @@ pub async fn get_pull_request_fact(
         return Ok(None);
     };
     Ok(Some(fact_from_row(row)?))
+}
+
+/// Write the live tier onto one observed pull request (decision 66).
+///
+/// Returns the row id and whether any live field actually moved —
+/// `observed_at` alone never counts, so callers broadcast real change and
+/// nothing else. `Ok(None)` when no fact row exists for the identity: the
+/// live tier decorates decision-62 observations, it never mints them.
+pub async fn set_pull_request_live_state(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    number: u64,
+    live: &CodePullRequestLiveState,
+) -> Result<Option<(CodePullRequestId, bool)>> {
+    let number = i64::try_from(number)
+        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
+    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
+        return Ok(None);
+    };
+    let checks_json = match &live.checks {
+        Some(checks) => Some(serde_json::to_string(checks).map_err(|err| {
+            AgentError::Store(format!(
+                "pull request {} live checks are unwritable: {err}",
+                row.id
+            ))
+        })?),
+        None => None,
+    };
+    let changed = row.checks_summary != live.checks_summary
+        || row.checks != checks_json
+        || row.review_decision != live.review_decision
+        || row.mergeable != live.mergeable
+        || row.merge_state_status != live.merge_state_status
+        || row.auto_merge_enabled != live.auto_merge_enabled
+        || row.in_merge_queue != live.in_merge_queue;
+    let id = CodePullRequestId(row.id);
+    let mut model: entities::code_pull_request::ActiveModel = row.into();
+    model.checks_summary = Set(live.checks_summary.clone());
+    model.checks = Set(checks_json);
+    model.review_decision = Set(live.review_decision.clone());
+    model.mergeable = Set(live.mergeable.clone());
+    model.merge_state_status = Set(live.merge_state_status.clone());
+    model.auto_merge_enabled = Set(live.auto_merge_enabled);
+    model.in_merge_queue = Set(live.in_merge_queue);
+    model.live_observed_at = Set(Some(live.observed_at));
+    model.update(&store.conn).await.map_err(store_err)?;
+    Ok(Some((id, changed)))
 }
 
 /// Every observed pull request on one repository identity.
@@ -358,6 +412,27 @@ fn fact_from_row(row: entities::code_pull_request::Model) -> Result<CodePullRequ
     })?;
     let number = u64::try_from(row.number)
         .map_err(|_| AgentError::Store(format!("pull request {} number is negative", row.id)))?;
+    let live = match row.live_observed_at {
+        Some(observed_at) => Some(CodePullRequestLiveState {
+            checks_summary: row.checks_summary,
+            checks: match row.checks.as_deref() {
+                Some(raw) => Some(serde_json::from_str(raw).map_err(|err| {
+                    AgentError::Store(format!(
+                        "pull request {} live checks are unreadable: {err}",
+                        row.id
+                    ))
+                })?),
+                None => None,
+            },
+            review_decision: row.review_decision,
+            mergeable: row.mergeable,
+            merge_state_status: row.merge_state_status,
+            auto_merge_enabled: row.auto_merge_enabled,
+            in_merge_queue: row.in_merge_queue,
+            observed_at,
+        }),
+        None => None,
+    };
     Ok(CodePullRequestFact {
         id: CodePullRequestId(row.id),
         owner: OwnerId::new(&row.owner)?,
@@ -379,6 +454,7 @@ fn fact_from_row(row: entities::code_pull_request::Model) -> Result<CodePullRequ
         closed_at: row.closed_at,
         first_seen_at: row.first_seen_at,
         last_seen_at: row.last_seen_at,
+        live,
     })
 }
 

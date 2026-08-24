@@ -22,7 +22,8 @@ use tidebreak_core::{
     CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
     CodeTriggerId, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat,
-    FenceReason, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId, WorkspaceId,
+    FenceReason, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, ReasoningEffort, RepoId,
+    WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -1529,6 +1530,12 @@ impl CodeRuntime {
         if status.pr != workspace.pr {
             workspace.pr = status.pr.clone();
             self.save_workspace(&workspace).await?;
+            // A digest that moved is a fresh host observation: write it onto
+            // the fact row's live tier and fan the change out (decision 66).
+            if let Some(digest) = &status.pr {
+                self.record_pull_request_live_state(owner, workspace.id, digest)
+                    .await;
+            }
         }
         Ok(status)
     }
@@ -1592,6 +1599,84 @@ impl CodeRuntime {
                 }
             }
         });
+    }
+
+    /// Write a freshly observed digest onto its decision-62 fact row and fan
+    /// real change out (decision 66): every other live workspace holding the
+    /// same pull request takes the digest as a write-through copy — column
+    /// and digest cache both — and broadcasts, so one host read updates
+    /// every surface without a second one. Best-effort: a missing fact row
+    /// or a store failure leaves the sweeps to correct.
+    pub(crate) async fn record_pull_request_live_state(
+        &self,
+        owner: &OwnerId,
+        source: WorkspaceId,
+        digest: &PullRequestDigest,
+    ) {
+        let Some(url) = digest.url.as_deref() else {
+            return;
+        };
+        let Some((host, repo_owner, repo_name, number)) =
+            super::pr_facts::pull_request_identity_from_url(url)
+        else {
+            return;
+        };
+        if number != digest.number {
+            return;
+        }
+        let live = tidebreak_core::CodePullRequestLiveState::from_digest(digest, Utc::now());
+        let changed = match tidebreak_core::db::code::set_pull_request_live_state(
+            &self.db,
+            owner,
+            &host,
+            &repo_owner,
+            &repo_name,
+            number,
+            &live,
+        )
+        .await
+        {
+            Ok(Some((_, changed))) => changed,
+            // No fact row yet: the detector or the reconcile sweep mints it,
+            // and the next digest change lands on it.
+            Ok(None) => return,
+            Err(err) => {
+                tracing::debug!(error = %err, "code-mode: live-tier write failed");
+                return;
+            }
+        };
+        if !changed {
+            return;
+        }
+        let workspaces = match list_workspaces(&self.db, owner, None).await {
+            Ok(workspaces) => workspaces,
+            Err(_) => return,
+        };
+        for mut workspace in workspaces {
+            if workspace.id == source || workspace.status != CodeWorkspaceStatus::Active {
+                continue;
+            }
+            let holds = workspace
+                .pr
+                .as_ref()
+                .and_then(|pr| pr.url.as_deref())
+                .is_some_and(|value| value.eq_ignore_ascii_case(url));
+            if !holds || workspace.pr.as_ref() == Some(digest) {
+                continue;
+            }
+            // The cache takes the same snapshot the column does, so this
+            // workspace's next read serves it rather than a stale entry that
+            // would write the old digest back.
+            self.pr_cache.put(workspace.id, digest.clone());
+            workspace.pr = Some(digest.clone());
+            if let Err(err) = self.save_workspace(&workspace).await {
+                tracing::warn!(
+                    workspace = %workspace.id,
+                    error = %err.message(),
+                    "code-mode: pull-request write-through failed"
+                );
+            }
+        }
     }
 
     pub(crate) async fn workspace_pr_comments(

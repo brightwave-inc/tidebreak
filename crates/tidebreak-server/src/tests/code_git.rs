@@ -1055,3 +1055,160 @@ exit 3
         .unwrap();
     assert_eq!(fresh["pr"]["head_sha"], "bbbbbbbb");
 }
+
+/// One host read updates every workspace holding the pull request
+/// (decision 66): a digest change lands on the fact row's live tier, and the
+/// other holder takes the same snapshot — column and digest cache — with no
+/// second GitHub read.
+#[tokio::test]
+async fn a_digest_change_writes_through_to_every_holder_of_the_pull_request() {
+    use tidebreak_core::db::code::{get_pull_request_fact, save_pull_request_fact};
+    use tidebreak_core::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
+
+    let (router, token, runtime, dir) = code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (repo_body, workspace_a) =
+        register_and_workspace(&client, addr, &token, &repo, "holder a").await;
+    let a = json_id(&workspace_a).to_owned();
+    let second = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "holder b",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::CREATED);
+    let workspace_b: serde_json::Value = second.json().await.unwrap();
+    let b = json_id(&workspace_b).to_owned();
+
+    // The decision-62 fact row the live tier decorates.
+    let owner = tidebreak_core::OwnerId::local();
+    let now = chrono::Utc::now();
+    save_pull_request_fact(
+        &runtime.db,
+        &CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: owner.clone(),
+            host: "github.com".into(),
+            repo_owner: "example".into(),
+            repo_name: "demo".into(),
+            number: 12,
+            url: "https://github.com/example/demo/pull/12".into(),
+            title: "demo".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+            head_sha: Some("aaaaaaaa".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let shim_dir = tempfile::TempDir::new().unwrap();
+    let answer = shim_dir.path().join("view.json");
+    std::fs::write(
+        &answer,
+        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"aaaaaaaa"}"#,
+    )
+    .unwrap();
+    write_executable(
+        &shim_dir.path().join("gh"),
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  cat {answer}
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = checks ]; then
+  printf 'lint\tpass\t1s\thttps://example.test/lint\n'
+  exit 0
+fi
+exit 3
+"#,
+            answer = answer.display()
+        ),
+    );
+    runtime.set_gh_search_path(Some(shim_dir.path().display().to_string()));
+
+    // Both workspaces observe the first snapshot.
+    for id in [&a, &b] {
+        let status = client
+            .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(status["pr"]["head_sha"], "aaaaaaaa");
+    }
+
+    // GitHub moves, and only workspace A reads it.
+    std::fs::write(
+        &answer,
+        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"bbbbbbbb","mergeStateStatus":"BLOCKED"}"#,
+    )
+    .unwrap();
+    let refreshed = client
+        .post(format!("http://{addr}/code/workspaces/{a}/pr/refresh"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(refreshed["pr"]["head_sha"], "bbbbbbbb");
+
+    // Workspace B's row took the same snapshot without its own host read...
+    let listed = client
+        .get(format!("http://{addr}/code/workspaces/{b}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(listed["pr"]["head_sha"], "bbbbbbbb");
+
+    // ...its next digest read serves that copy rather than a stale cache
+    // entry that would write the old head back...
+    let status_b = client
+        .get(format!("http://{addr}/code/workspaces/{b}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(status_b["pr"]["head_sha"], "bbbbbbbb");
+
+    // ...and the fact row carries the live tier.
+    let fact = get_pull_request_fact(&runtime.db, &owner, "github.com", "example", "demo", 12)
+        .await
+        .unwrap()
+        .unwrap();
+    let live = fact.live.expect("the digest read writes the live tier");
+    assert_eq!(live.merge_state_status.as_deref(), Some("blocked"));
+}

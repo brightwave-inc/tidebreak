@@ -680,7 +680,30 @@ fn fact_from_gh_value(
         closed_at: timestamp(value, "closedAt"),
         first_seen_at: now,
         last_seen_at: now,
+        live: None,
     })
+}
+
+/// Parse `(host, repo_owner, repo_name, number)` out of a pull request's own
+/// web URL. The URL is the one repository-qualified field a digest carries,
+/// which makes it the join key between a digest read and the decision-62
+/// fact row (decision 66). `None` for anything that is not the plain
+/// `https://host/owner/name/pull/N` shape GitHub and GHES use — another
+/// forge simply does not join.
+pub(crate) fn pull_request_identity_from_url(url: &str) -> Option<(String, String, String, u64)> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let mut parts = rest.trim_end_matches('/').split('/');
+    let host = parts.next()?;
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    let marker = parts.next()?;
+    let number: u64 = parts.next()?.parse().ok()?;
+    if host.is_empty() || owner.is_empty() || name.is_empty() || marker != "pull" || number == 0 {
+        return None;
+    }
+    Some((host.to_owned(), owner.to_owned(), name.to_owned(), number))
 }
 
 fn timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {

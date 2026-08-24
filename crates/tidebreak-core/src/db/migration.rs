@@ -49,7 +49,95 @@ impl MigratorTrait for Migrator {
             Box::new(CodePullRequestFacts),
             Box::new(TriggerFactConditions),
             Box::new(CodeQueuedTurns),
+            Box::new(CodePullRequestLiveTier),
         ]
+    }
+}
+
+/// The live tier on pull-request facts (decision 66).
+///
+/// `code_pull_request` gains the volatile fields a digest read observes:
+/// check rollup, review decision, mergeability, merge state, auto-merge
+/// arming, queue membership, and when a read last wrote them. All nullable:
+/// a row no live read has touched simply has no tier.
+struct CodePullRequestLiveTier;
+
+impl MigrationName for CodePullRequestLiveTier {
+    fn name(&self) -> &str {
+        "m20260824_000012_code_pull_request_live_tier"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodePullRequestLiveTier {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // SQLite accepts one ADD COLUMN per ALTER, so each live column is
+        // its own guarded statement.
+        for (name, column) in [
+            ("checks_summary", idens::CodePullRequest::ChecksSummary),
+            ("checks", idens::CodePullRequest::Checks),
+            ("review_decision", idens::CodePullRequest::ReviewDecision),
+            ("mergeable", idens::CodePullRequest::Mergeable),
+            (
+                "merge_state_status",
+                idens::CodePullRequest::MergeStateStatus,
+            ),
+        ] {
+            if manager.has_column("code_pull_request", name).await? {
+                continue;
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodePullRequest::Table)
+                        .add_column(ColumnDef::new(column).text())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        for (name, column) in [
+            (
+                "auto_merge_enabled",
+                idens::CodePullRequest::AutoMergeEnabled,
+            ),
+            ("in_merge_queue", idens::CodePullRequest::InMergeQueue),
+        ] {
+            if manager.has_column("code_pull_request", name).await? {
+                continue;
+            }
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodePullRequest::Table)
+                        .add_column(ColumnDef::new(column).boolean())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        if !manager
+            .has_column("code_pull_request", "live_observed_at")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodePullRequest::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodePullRequest::LiveObservedAt)
+                                .timestamp_with_time_zone(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: the columns belong to `code_pull_request`,
+        // whose own migration's `down` drops the table outright, and
+        // nullable columns cost a rolled-back database nothing.
+        Ok(())
     }
 }
 
@@ -1518,6 +1606,7 @@ mod tests {
                 "m20260822_000009_code_pull_request_facts",
                 "m20260823_000010_trigger_fact_conditions",
                 "m20260824_000011_code_queued_turns",
+                "m20260824_000012_code_pull_request_live_tier",
             ]
         );
         assert!(db

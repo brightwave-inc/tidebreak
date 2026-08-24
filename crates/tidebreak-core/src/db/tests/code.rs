@@ -2476,12 +2476,13 @@ async fn trigger_attention_acceptance_is_atomic_and_global() {
 async fn pull_request_facts_upsert_claim_and_promote() {
     use crate::code::{
         CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,
-        CodePullRequestId, CodePullRequestRelation, CodePullRequestState,
+        CodePullRequestId, CodePullRequestLiveState, CodePullRequestRelation, CodePullRequestState,
+        PullRequestCheck, PullRequestCheckBucket,
     };
     use crate::db::code::{
         count_attributed_prs_for_workspace, get_pull_request_fact, insert_pull_request_attribution,
         list_attributed_facts_for_workspace, list_fact_repo_identities,
-        promote_attribution_to_authored, save_pull_request_fact,
+        promote_attribution_to_authored, save_pull_request_fact, set_pull_request_live_state,
     };
 
     let (_dir, store) = temp_store().await;
@@ -2515,6 +2516,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         closed_at: None,
         first_seen_at: first_seen,
         last_seen_at: first_seen,
+        live: None,
     };
     let id = save_pull_request_fact(&store, &fact).await.unwrap();
 
@@ -2544,6 +2546,61 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     assert_eq!(stored.head_sha.as_deref(), Some("bbb222"));
     assert_eq!(stored.first_seen_at, first_seen);
     assert_eq!(stored.last_seen_at, later);
+
+    // The live tier (decision 66): the first write reports change, an
+    // identical write does not, and a snapshot upsert never blanks it.
+    let live = CodePullRequestLiveState {
+        checks_summary: Some("8 passing, 1 pending, 0 failing".into()),
+        checks: Some(vec![PullRequestCheck {
+            name: "ci".into(),
+            bucket: PullRequestCheckBucket::Pending,
+            detail: None,
+            url: None,
+        }]),
+        review_decision: Some("review_required".into()),
+        mergeable: Some("mergeable".into()),
+        merge_state_status: Some("blocked".into()),
+        auto_merge_enabled: Some(true),
+        in_merge_queue: Some(false),
+        observed_at: later,
+    };
+    let (live_id, changed) =
+        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(live_id, id);
+    assert!(changed);
+    let (_, changed_again) =
+        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(!changed_again, "observed_at alone is not change");
+    let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored_live = stored.live.as_ref().unwrap();
+    assert_eq!(stored_live.merge_state_status.as_deref(), Some("blocked"));
+    assert_eq!(stored_live.checks.as_ref().unwrap().len(), 1);
+    assert_eq!(stored_live.auto_merge_enabled, Some(true));
+    save_pull_request_fact(&store, &refreshed).await.unwrap();
+    let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored.live.is_some(),
+        "a snapshot upsert must not blank the live tier"
+    );
+    // The tier decorates observations; it never mints a row.
+    assert!(
+        set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 999, &live)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Claim once: the second claim reports the row already exists and the
     // stored relation is untouched.
