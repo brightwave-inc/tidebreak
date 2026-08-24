@@ -1052,6 +1052,16 @@ pub struct CodeDeliveryPullRequestSummary {
     #[ts(optional)]
     pub merge_state_status: Option<String>,
     pub auto_merge_enabled: bool,
+    /// True when the last reliable host observation placed the pull request
+    /// in its merge queue. Absent when the list read cannot answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub in_merge_queue: Option<bool>,
+    /// Issue comments visible from the list read. Review and inline comments
+    /// remain detail-only, so an absent count means unknown rather than zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub comment_count: Option<u64>,
     pub checks: Vec<CodeDeliveryCheck>,
     pub attention_reasons: Vec<CodeDeliveryPrAttentionReason>,
     pub ready_to_merge: bool,

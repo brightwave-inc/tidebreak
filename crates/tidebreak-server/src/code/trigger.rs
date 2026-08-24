@@ -1240,6 +1240,8 @@ mod tests {
             mergeable: Some("mergeable".to_owned()),
             merge_state_status: Some("clean".to_owned()),
             auto_merge_enabled: false,
+            in_merge_queue: None,
+            comment_count: None,
             checks: Vec::new(),
             attention_reasons: Vec::new(),
             ready_to_merge: true,

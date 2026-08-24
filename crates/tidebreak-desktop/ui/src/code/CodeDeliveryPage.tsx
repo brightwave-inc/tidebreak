@@ -3,7 +3,6 @@ import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArchiveRestore,
-  Check,
   CircleAlert,
   CornerDownRight,
   ExternalLink,
@@ -11,6 +10,7 @@ import {
   GitBranch,
   GitPullRequest,
   LoaderCircle,
+  MessageSquare,
   Pin,
   PinOff,
   RefreshCw,
@@ -98,13 +98,18 @@ import {
   checkSummary,
   githubAvatarUrl,
   pullRequestLifecycle,
-  pullRequestReviewSummary,
-  pullRequestSettledAt,
-  PULL_REQUEST_LIFECYCLE_LABEL,
-  PULL_REQUEST_LIFECYCLE_TONE,
+  pullRequestListStatus,
+  type PullRequestListGroup,
 } from "./pullRequestPresentation";
-import { arrangeStackLanes } from "./pullRequestStacks";
-import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
+import { arrangeStackLanes, type StackedRow } from "./pullRequestStacks";
+import {
+  STATUS_DOT,
+  STATUS_MARK,
+  STATUS_TEXT,
+  type StatusTone,
+} from "./statusTone";
+
+type PullRequestGrouping = "attention" | "repository" | "none";
 
 type PrBuiltInView = {
   id: string;
@@ -359,6 +364,8 @@ function CodeDeliveryBody({
   >([]);
   const [repositoriesDialogOpen, setRepositoriesDialogOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [pullRequestGrouping, setPullRequestGrouping] =
+    useState<PullRequestGrouping>("attention");
   // Who `gh` is signed in as. Undefined until the repository snapshot lands,
   // and undefined for good against a `gh` too old to report it.
   const viewerLogin = repositorySnapshot?.capability.viewer_login;
@@ -635,6 +642,28 @@ function CodeDeliveryBody({
           />
         )}
 
+        {surface === "pull_requests" && (
+          <Select
+            value={pullRequestGrouping}
+            onValueChange={(value) =>
+              setPullRequestGrouping(value as PullRequestGrouping)
+            }
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-40"
+              aria-label="Group pull requests"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="attention">Group: attention</SelectItem>
+              <SelectItem value="repository">Group: repository</SelectItem>
+              <SelectItem value="none">No grouping</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+
         <Button
           type="button"
           size="sm"
@@ -666,6 +695,7 @@ function CodeDeliveryBody({
           repositoryError={repositoryError}
           onRetryRepositories={() => void loadRepositories(true, true)}
           filters={prFilters}
+          grouping={pullRequestGrouping}
           target={
             routeRepository && search.pr
               ? { repository: routeRepository, number: search.pr }
@@ -760,6 +790,7 @@ function PullRequestsSurface({
   repositoryError,
   onRetryRepositories,
   filters,
+  grouping,
   target,
 }: {
   repositories: CodeGitHubRepositoryRef[];
@@ -769,6 +800,7 @@ function PullRequestsSurface({
   repositoryError: string | null;
   onRetryRepositories: () => void;
   filters: CodeDeliveryPrViewFilters;
+  grouping: PullRequestGrouping;
   target?: CodeDeliveryPullRequestTarget;
 }) {
   const { client } = useApp();
@@ -1001,6 +1033,7 @@ function PullRequestsSurface({
           <>
             <PullRequestList
               items={items}
+              grouping={grouping}
               selectedId={selectedId}
               onSelect={selectItem}
               scrollRef={scrollRef}
@@ -1412,8 +1445,9 @@ function PendingDetailSheet({
 }
 
 const PR_ROW_HEIGHT = 62;
+const PR_GROUP_HEIGHT = 38;
 const RUN_ROW_HEIGHT = 62;
-const PR_GRID = "grid-cols-[minmax(260px,1fr)_150px_120px_110px]";
+const PR_GRID = "grid-cols-[minmax(280px,1fr)_150px_110px_105px_95px]";
 const RUN_GRID = "grid-cols-[minmax(260px,1fr)_150px_140px_110px]";
 
 /**
@@ -1439,7 +1473,7 @@ function VirtualRows<T extends { id: string }>({
 }: {
   items: readonly T[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
-  estimateSize: number;
+  estimateSize: number | ((item: T) => number);
   children: (item: T) => React.ReactNode;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -1468,8 +1502,15 @@ function VirtualRows<T extends { id: string }>({
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => estimateSize,
-    overscan: 8,
+    estimateSize: (index) => {
+      const item = items[index];
+      if (typeof estimateSize === "number") return estimateSize;
+      return item ? estimateSize(item) : 0;
+    },
+    // Group headers add several short virtual rows. Keep enough surrounding
+    // rows mounted that a compact list remains fully searchable and a fast
+    // wheel gesture never reveals an empty gap.
+    overscan: 16,
     scrollMargin,
     getItemKey: (index) => items[index]?.id ?? index,
   });
@@ -1502,22 +1543,91 @@ function VirtualRows<T extends { id: string }>({
   );
 }
 
+type PullRequestListItem =
+  | {
+      id: string;
+      kind: "group";
+      label: string;
+      description: string;
+      tone: StatusTone;
+      count: number;
+    }
+  | {
+      id: string;
+      kind: "pull_request";
+      row: StackedRow;
+      showRepository: boolean;
+    };
+
+const PULL_REQUEST_GROUP_ORDER: readonly PullRequestListGroup[] = [
+  "attention",
+  "ready",
+  "waiting",
+  "handed_off",
+  "draft",
+  "done",
+];
+
+const PULL_REQUEST_GROUP_RANK = new Map(
+  PULL_REQUEST_GROUP_ORDER.map((group, index) => [group, index]),
+);
+
+const PULL_REQUEST_GROUP_META: Record<
+  PullRequestListGroup,
+  { label: string; description: string; tone: StatusTone }
+> = {
+  attention: {
+    label: "Needs your attention",
+    description:
+      "Failed checks, requested changes, conflicts, or stale branches",
+    tone: "critical",
+  },
+  ready: {
+    label: "Ready to merge",
+    description: "Green and waiting for you",
+    tone: "ready",
+  },
+  waiting: {
+    label: "Waiting",
+    description: "Checks or reviews are still moving",
+    tone: "pending",
+  },
+  handed_off: {
+    label: "Handed off",
+    description: "Auto-merge is armed or GitHub has queued the merge",
+    tone: "pending",
+  },
+  draft: {
+    label: "Drafts",
+    description: "Not ready for review",
+    tone: "neutral",
+  },
+  done: {
+    label: "Done",
+    description: "Merged or closed",
+    tone: "merged",
+  },
+};
+
 function PullRequestList({
   items,
+  grouping,
   selectedId,
   onSelect,
   scrollRef,
 }: {
   items: CodeDeliveryPullRequestSummary[];
+  grouping: PullRequestGrouping;
   selectedId: string | null;
   onSelect: (id: string) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  // Stack lanes: children follow their parent, indented; a parent outside
-  // the loaded rows leaves the child at depth 0 with a "stacked on" chip.
-  const rows = useMemo(() => arrangeStackLanes(items), [items]);
+  const rows = useMemo(
+    () => groupedPullRequestRows(items, grouping),
+    [grouping, items],
+  );
   return (
-    <div role="list" aria-label="Pull requests" className="min-w-[760px]">
+    <div role="list" aria-label="Pull requests" className="min-w-[900px]">
       <div
         className={cn(
           "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur",
@@ -1527,23 +1637,179 @@ function PullRequestList({
         <span>Pull request</span>
         <span>Status</span>
         <span>Checks</span>
+        <span>Comments</span>
         <span className="text-right">Updated</span>
       </div>
       <VirtualRows
         items={rows}
         scrollRef={scrollRef}
-        estimateSize={PR_ROW_HEIGHT}
+        estimateSize={(item) =>
+          item.kind === "group" ? PR_GROUP_HEIGHT : PR_ROW_HEIGHT
+        }
       >
-        {(row) => (
-          <PullRequestRow
-            item={row.item}
-            depth={row.depth}
-            stackedOn={row.stackedOn}
-            active={selectedId === row.item.id}
-            onSelect={() => onSelect(row.item.id)}
-          />
-        )}
+        {(entry) =>
+          entry.kind === "group" ? (
+            <PullRequestGroupHeader {...entry} />
+          ) : (
+            <PullRequestRow
+              item={entry.row.item}
+              depth={entry.row.depth}
+              stackedOn={entry.row.stackedOn}
+              showRepository={entry.showRepository}
+              active={selectedId === entry.row.item.id}
+              onSelect={() => onSelect(entry.row.item.id)}
+            />
+          )
+        }
       </VirtualRows>
+    </div>
+  );
+}
+
+function groupedPullRequestRows(
+  items: readonly CodeDeliveryPullRequestSummary[],
+  grouping: PullRequestGrouping,
+): PullRequestListItem[] {
+  if (grouping === "none") {
+    return arrangeStackLanes(items).map((row) => ({
+      id: row.id,
+      kind: "pull_request",
+      row,
+      showRepository: true,
+    }));
+  }
+
+  if (grouping === "repository") {
+    const repositories = new Map<
+      string,
+      { label: string; items: CodeDeliveryPullRequestSummary[] }
+    >();
+    for (const item of items) {
+      const key = codeDeliveryRepositoryKey(item.repository);
+      const group = repositories.get(key) ?? {
+        label: item.repository.name_with_owner,
+        items: [],
+      };
+      group.items.push(item);
+      repositories.set(key, group);
+    }
+    return [...repositories.entries()].flatMap(([key, group]) => {
+      const attention = group.items.filter(
+        (item) => pullRequestListStatus(item).group === "attention",
+      ).length;
+      return pullRequestGroupRows({
+        key: `repository:${key}`,
+        label: group.label,
+        description:
+          attention > 0
+            ? `${attention} ${attention === 1 ? "pull request needs" : "pull requests need"} attention`
+            : "No pull requests need attention",
+        tone: attention > 0 ? "critical" : "neutral",
+        rows: arrangeStackLanes(group.items),
+        showRepository: false,
+      });
+    });
+  }
+
+  const groups = new Map<PullRequestListGroup, StackedRow[]>();
+  for (const lane of pullRequestStackLanes(items)) {
+    const group = lane.reduce<PullRequestListGroup>((mostUrgent, row) => {
+      const candidate = pullRequestListStatus(row.item).group;
+      return (PULL_REQUEST_GROUP_RANK.get(candidate) ??
+        Number.MAX_SAFE_INTEGER) <
+        (PULL_REQUEST_GROUP_RANK.get(mostUrgent) ?? Number.MAX_SAFE_INTEGER)
+        ? candidate
+        : mostUrgent;
+    }, "done");
+    const grouped = groups.get(group) ?? [];
+    grouped.push(...lane);
+    groups.set(group, grouped);
+  }
+  return PULL_REQUEST_GROUP_ORDER.flatMap((group) => {
+    const grouped = groups.get(group);
+    if (!grouped?.length) return [];
+    const meta = PULL_REQUEST_GROUP_META[group];
+    return pullRequestGroupRows({
+      key: `attention:${group}`,
+      ...meta,
+      rows: grouped,
+      showRepository: true,
+    });
+  });
+}
+
+/** Keep a stack in one attention group so its indentation still explains it. */
+function pullRequestStackLanes(
+  items: readonly CodeDeliveryPullRequestSummary[],
+): StackedRow[][] {
+  const lanes: StackedRow[][] = [];
+  for (const row of arrangeStackLanes(items)) {
+    if (row.depth === 0 || lanes.length === 0) lanes.push([row]);
+    else lanes[lanes.length - 1]!.push(row);
+  }
+  return lanes;
+}
+
+function pullRequestGroupRows({
+  key,
+  label,
+  description,
+  tone,
+  rows,
+  showRepository,
+}: {
+  key: string;
+  label: string;
+  description: string;
+  tone: StatusTone;
+  rows: readonly StackedRow[];
+  showRepository: boolean;
+}): PullRequestListItem[] {
+  return [
+    {
+      id: `group:${key}`,
+      kind: "group",
+      label,
+      description,
+      tone,
+      count: rows.length,
+    },
+    ...rows.map(
+      (row): PullRequestListItem => ({
+        id: row.id,
+        kind: "pull_request",
+        row,
+        showRepository,
+      }),
+    ),
+  ];
+}
+
+function PullRequestGroupHeader({
+  label,
+  description,
+  tone,
+  count,
+}: {
+  label: string;
+  description: string;
+  tone: StatusTone;
+  count: number;
+}) {
+  return (
+    <div
+      data-pull-request-group={label}
+      className="flex items-center gap-2 border-b border-border-subtle bg-muted/20 px-5 py-2.5 text-xs"
+    >
+      <span
+        className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[tone])}
+        aria-hidden
+      />
+      <span className="font-semibold text-foreground">{label}</span>
+      <span className="truncate text-muted-foreground">{description}</span>
+      <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+        {count}
+      </span>
     </div>
   );
 }
@@ -1552,25 +1818,28 @@ function PullRequestRow({
   item,
   depth,
   stackedOn,
+  showRepository,
   active,
   onSelect,
 }: {
   item: CodeDeliveryPullRequestSummary;
   depth: number;
   stackedOn?: number;
+  showRepository: boolean;
   active: boolean;
   onSelect: () => void;
 }) {
   const lifecycle = pullRequestLifecycle(item);
-  const review = pullRequestReviewSummary(item);
+  const status = pullRequestListStatus(item);
   const checks = checkSummary(checkCounts(item.checks));
-  const settledAt = pullRequestSettledAt(item);
+  const comments = item.comment_count;
   return (
     <button
       type="button"
       role="listitem"
       data-active={active || undefined}
       data-depth={depth}
+      data-status-group={status.group}
       className={cn(
         "grid w-full cursor-pointer gap-4 border-b border-border-subtle px-5 py-3 text-left transition-colors hover:bg-muted/35 data-[active]:bg-muted/55",
         PR_GRID,
@@ -1590,29 +1859,10 @@ function PullRequestRow({
           )}
           <PrLifecycleIcon
             lifecycle={lifecycle}
-            className={cn(
-              "size-4",
-              STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
-            )}
+            className={cn("size-4", STATUS_MARK[status.tone])}
           />
-          <span className="sr-only">
-            {PULL_REQUEST_LIFECYCLE_LABEL[lifecycle]}:
-          </span>
+          <span className="sr-only">{status.label}:</span>
           <span className="truncate text-sm font-medium">{item.title}</span>
-          {item.attention_reasons.length > 0 ? (
-            <CircleAlert
-              className={cn("size-3.5 shrink-0", STATUS_MARK.critical)}
-              aria-label="Needs attention"
-            />
-          ) : item.ready_to_merge ? (
-            // Tidebreak's own signal, not GitHub's: reviewed, green, and
-            // nothing left blocking the merge. The lifecycle icon cannot
-            // carry it, because a ready pull request is still just open.
-            <Check
-              className={cn("size-3.5 shrink-0", STATUS_MARK.ready)}
-              aria-label="Ready to merge"
-            />
-          ) : null}
         </span>
         <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
           {item.author && (
@@ -1634,7 +1884,9 @@ function PullRequestRow({
               </span>
             </>
           )}
-          <span className="truncate">{item.repository.name_with_owner}</span>
+          {showRepository && (
+            <span className="truncate">{item.repository.name_with_owner}</span>
+          )}
           <span className="tabular-nums">#{item.number}</span>
           <span className="truncate font-mono">{item.head_branch}</span>
           {stackedOn !== undefined && (
@@ -1650,18 +1902,23 @@ function PullRequestRow({
         </span>
       </span>
       <span className="flex items-center">
-        <span
-          className={cn("text-xs", STATUS_TEXT[review.tone])}
-          title={
-            settledAt ? `${review.label} ${relativeTime(settledAt)}` : undefined
-          }
-        >
-          {review.label}
+        <span className={cn("text-xs font-medium", STATUS_TEXT[status.tone])}>
+          {status.label}
         </span>
       </span>
       <span className="flex items-center">
         <span className={cn("text-xs", STATUS_TEXT[checks.tone])}>
           {checks.label}
+        </span>
+      </span>
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <MessageSquare className="size-3.5 shrink-0" />
+        <span className="tabular-nums">
+          {comments === undefined
+            ? "Unknown"
+            : comments === 0
+              ? "None"
+              : `${comments} ${comments === 1 ? "comment" : "comments"}`}
         </span>
       </span>
       <span className="flex items-center justify-end text-xs text-muted-foreground">

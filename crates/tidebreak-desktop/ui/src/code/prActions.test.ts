@@ -157,6 +157,13 @@ describe("prWorkflowStatus", () => {
     expect(
       prWorkflowStatus({ ...digest, review_decision: undefined }).state,
     ).toBe("blocked");
+    expect(
+      prWorkflowStatus({
+        ...digest,
+        mergeable: "mergeable",
+        merge_state_status: "clean",
+      }).state,
+    ).toBe("ready");
   });
 
   it("keeps incomplete host data in a checking state", () => {

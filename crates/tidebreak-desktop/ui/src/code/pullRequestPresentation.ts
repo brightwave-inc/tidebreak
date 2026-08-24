@@ -97,6 +97,125 @@ export function pullRequestReviewSummary(
   }
 }
 
+export type PullRequestListGroup =
+  | "attention"
+  | "ready"
+  | "waiting"
+  | "handed_off"
+  | "draft"
+  | "done";
+
+export type PullRequestListStatus = {
+  label: string;
+  tone: StatusTone;
+  group: PullRequestListGroup;
+};
+
+/**
+ * The row-level answer to "who owns the next move?".
+ *
+ * Queue membership outranks stale check data because GitHub has accepted the
+ * pull request for merging. Auto-merge only counts as handed off when nothing
+ * still needs the reader; a conflict or failed check brings it back to the
+ * attention group.
+ */
+export function pullRequestListStatus(
+  item: Pick<
+    CodeDeliveryPullRequestSummary,
+    | "state"
+    | "draft"
+    | "review_decision"
+    | "auto_merge_enabled"
+    | "in_merge_queue"
+    | "checks"
+    | "attention_reasons"
+    | "ready_to_merge"
+  > &
+    Partial<Pick<CodeDeliveryPullRequestSummary, "merged_at" | "closed_at">>,
+): PullRequestListStatus {
+  const lifecycle = pullRequestLifecycle(item);
+  if (lifecycle === "merged") {
+    return { label: "Merged", tone: "merged", group: "done" };
+  }
+  if (lifecycle === "closed") {
+    return { label: "Closed", tone: "neutral", group: "done" };
+  }
+  if (lifecycle === "draft") {
+    return { label: "Draft", tone: "neutral", group: "draft" };
+  }
+  if (item.in_merge_queue === true) {
+    return {
+      label: "In merge queue",
+      tone: "pending",
+      group: "handed_off",
+    };
+  }
+
+  const reasons = new Set(item.attention_reasons);
+  if (reasons.has("changes_requested")) {
+    return {
+      label: "Changes requested",
+      tone: "critical",
+      group: "attention",
+    };
+  }
+  if (reasons.has("conflicts")) {
+    return {
+      label: "Resolve conflicts",
+      tone: "critical",
+      group: "attention",
+    };
+  }
+  if (reasons.has("checks_failed")) {
+    return {
+      label: "Checks failed",
+      tone: "critical",
+      group: "attention",
+    };
+  }
+  if (reasons.has("behind")) {
+    return {
+      label: "Update branch",
+      tone: "warning",
+      group: "attention",
+    };
+  }
+  if (reasons.has("blocked")) {
+    return {
+      label: "Merge blocked",
+      tone: "warning",
+      group: "attention",
+    };
+  }
+
+  if (item.auto_merge_enabled) {
+    return {
+      label: "Auto-merge armed",
+      tone: "pending",
+      group: "handed_off",
+    };
+  }
+  if (item.ready_to_merge) {
+    return { label: "Ready to merge", tone: "ready", group: "ready" };
+  }
+
+  const counts = checkCounts(item.checks);
+  if (counts.pending > 0) {
+    return { label: "Checks running", tone: "pending", group: "waiting" };
+  }
+  if (item.review_decision === "changes_requested") {
+    return {
+      label: "Changes requested",
+      tone: "critical",
+      group: "attention",
+    };
+  }
+  if (item.review_decision === "review_required") {
+    return { label: "Review pending", tone: "warning", group: "waiting" };
+  }
+  return { label: "Checking status", tone: "neutral", group: "waiting" };
+}
+
 export type CheckCounts = {
   total: number;
   passed: number;
@@ -150,7 +269,12 @@ export function checkSummary(counts: CheckCounts): {
 export function mergeBlockedReason(
   item: Pick<
     CodeDeliveryPullRequestSummary,
-    "state" | "draft" | "mergeable" | "merge_state_status" | "checks"
+    | "state"
+    | "draft"
+    | "mergeable"
+    | "merge_state_status"
+    | "review_decision"
+    | "checks"
   > &
     Partial<Pick<CodeDeliveryPullRequestSummary, "merged_at" | "closed_at">>,
 ): string | null {
@@ -164,11 +288,23 @@ export function mergeBlockedReason(
   if (item.merge_state_status === "behind") {
     return "Update the branch from its base first.";
   }
-  if (item.merge_state_status === "blocked") {
-    return "A required review or check is still blocking the merge.";
-  }
   const counts = checkCounts(item.checks);
-  if (counts.failed > 0) return "Required checks are failing.";
+  if (counts.pending > 0) {
+    return counts.pending === 1
+      ? "Wait for the running check before merging."
+      : `Wait for ${counts.pending} running checks before merging.`;
+  }
+  if (counts.failed > 0) {
+    return counts.failed === 1
+      ? "Fix the failing check before merging."
+      : `Fix the ${counts.failed} failing checks before merging.`;
+  }
+  if (item.review_decision === "changes_requested") {
+    return "Address the requested changes before merging.";
+  }
+  if (item.merge_state_status === "blocked") {
+    return "GitHub is still blocking this merge.";
+  }
   return null;
 }
 

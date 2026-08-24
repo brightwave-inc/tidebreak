@@ -1026,7 +1026,7 @@ refresh: boolean, };
 /**
  * Pull request row shared by the overview and notification monitor.
  */
-export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, 
+export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, in_merge_queue?: boolean, comment_count?: number, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>,
 /**
  * The open pull request this one is stacked on: its base branch is that
  * pull request's head branch in the same repository (decision 62).

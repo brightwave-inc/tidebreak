@@ -60,8 +60,8 @@ const GITHUB_DETAIL_PAGE_SIZE: usize = 100;
 /// unlucky repository would otherwise blank a whole column.
 const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(700);
 
-const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels";
-const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,statusCheckRollup";
+const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments";
+const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments,statusCheckRollup";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PullRequestRemotePlan {
@@ -2064,6 +2064,14 @@ fn parse_pull_request(
     let review_decision = normalized_optional(value, "reviewDecision");
     let mergeable = normalized_optional(value, "mergeable");
     let merge_state_status = normalized_optional(value, "mergeStateStatus");
+    let auto_merge_enabled = value
+        .get("autoMergeRequest")
+        .is_some_and(|request| !request.is_null());
+    let in_merge_queue = (merge_state_status.as_deref() == Some("queued")).then_some(true);
+    let comment_count = value
+        .get("comments")
+        .and_then(Value::as_array)
+        .and_then(|comments| u64::try_from(comments.len()).ok());
     let merged_at = datetime_field(value, "mergedAt");
     let closed_at = datetime_field(value, "closedAt");
     // `gh` reports MERGED as its own state, but a host that only reports
@@ -2091,6 +2099,8 @@ fn parse_pull_request(
     );
     let ready_to_merge = state == "open"
         && !draft
+        && !auto_merge_enabled
+        && in_merge_queue != Some(true)
         && checks_loaded
         && attention_reasons.is_empty()
         && !checks
@@ -2120,9 +2130,9 @@ fn parse_pull_request(
         review_decision,
         mergeable,
         merge_state_status,
-        auto_merge_enabled: value
-            .get("autoMergeRequest")
-            .is_some_and(|request| !request.is_null()),
+        auto_merge_enabled,
+        in_merge_queue,
+        comment_count,
         checks,
         attention_reasons,
         ready_to_merge,
@@ -2140,9 +2150,9 @@ fn parse_check(value: &Value) -> Option<CodeDeliveryCheck> {
     let name = text_field(value, "name")
         .or_else(|| text_field(value, "context"))
         .or_else(|| text_field(value, "workflowName"))?;
-    let token = text_field(value, "conclusion")
-        .or_else(|| text_field(value, "state"))
-        .or_else(|| text_field(value, "status"))
+    let token = normalized_optional(value, "conclusion")
+        .or_else(|| normalized_optional(value, "state"))
+        .or_else(|| normalized_optional(value, "status"))
         .unwrap_or_else(|| "pending".into())
         .to_ascii_lowercase();
     let bucket = match token.as_str() {
@@ -2554,7 +2564,7 @@ pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> Pull
         base_branch: Some(item.base_branch.clone()),
         head_sha: item.head_sha.clone(),
         auto_merge_enabled: Some(item.auto_merge_enabled),
-        in_merge_queue: None,
+        in_merge_queue: item.in_merge_queue,
     }
 }
 
@@ -2607,8 +2617,26 @@ async fn persist_and_augment_pull_request_facts(
             .iter()
             .map(|fact| (fact.number, fact.id))
             .collect();
+        let known_queue: HashMap<u64, bool> = repo_facts
+            .iter()
+            .filter_map(|fact| {
+                fact.live
+                    .as_ref()?
+                    .in_merge_queue
+                    .map(|queued| (fact.number, queued))
+            })
+            .collect();
         for &index in indices {
-            let item = &items[index];
+            let item = &mut items[index];
+            if item.in_merge_queue.is_none() {
+                item.in_merge_queue = known_queue.get(&item.number).copied();
+            }
+            if item.in_merge_queue == Some(true) {
+                // Once GitHub owns the next move, stale check failures should
+                // not keep the pull request in the reader's attention queue.
+                item.attention_reasons.clear();
+                item.ready_to_merge = false;
+            }
             let exact_workspaces: Vec<WorkspaceId> = item
                 .workspace_links
                 .iter()
@@ -2777,7 +2805,9 @@ fn pull_request_matches(
             return false;
         }
     }
-    if query.attention_only && item.attention_reasons.is_empty() {
+    if query.attention_only
+        && (item.attention_reasons.is_empty() || item.in_merge_queue == Some(true))
+    {
         return false;
     }
     if query.ready_only && !item.ready_to_merge {
@@ -3629,6 +3659,20 @@ mod tests {
             vec![10, 11]
         );
         assert!(result.message.contains("one workflow run failed"));
+    }
+
+    #[test]
+    fn an_empty_check_conclusion_defers_to_its_live_status() {
+        let parsed = parse_check(&serde_json::json!({
+            "name": "Build preview image",
+            "conclusion": "",
+            "status": "IN_PROGRESS",
+            "detailsUrl": "https://github.com/example/app/actions/runs/42"
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.bucket, PullRequestCheckBucket::Pending);
+        assert_eq!(parsed.detail.as_deref(), Some("in_progress"));
     }
 
     #[test]
