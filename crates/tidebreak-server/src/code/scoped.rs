@@ -571,6 +571,26 @@ impl ScopedCode {
         self.runtime.list_session_turns(&self.owner, id).await
     }
 
+    pub(crate) async fn list_turn_metrics(
+        &self,
+    ) -> Result<Vec<tidebreak_core::db::code::CodeTurnMetric>, ServerError> {
+        self.runtime.list_turn_metrics(&self.owner).await
+    }
+
+    pub(crate) async fn list_pull_request_facts(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodePullRequestFact>, ServerError> {
+        self.runtime.list_pull_request_facts(&self.owner).await
+    }
+
+    pub(crate) async fn list_pull_request_attributions(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodePullRequestAttribution>, ServerError> {
+        self.runtime
+            .list_pull_request_attributions(&self.owner)
+            .await
+    }
+
     pub(crate) async fn fork_transcript(
         &self,
         id: CodeSessionId,

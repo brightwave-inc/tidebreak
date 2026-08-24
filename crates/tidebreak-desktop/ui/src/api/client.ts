@@ -111,6 +111,8 @@ import {
   type CodeForkTranscript,
   type CodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot,
+  type CodeAnalyticsRange,
+  type CodeAnalyticsSnapshot,
   type CodeSubscriptionUsage,
   type CodeDeliveryActionResult,
   type CodeDeliveryPullRequestActionBody,
@@ -152,6 +154,7 @@ import {
   parseCodeForkTranscript,
   parseCodeCloneJob,
   parseCodeHarnessInstall,
+  parseCodeAnalytics,
   parseCodeRepo,
   parseCodeSession,
   parseCodeSessionList,
@@ -2154,6 +2157,22 @@ export class ApiClient {
         await this.json("/code/usage", { headers: this.headers() }),
       ),
       "subscription usage",
+    );
+  }
+
+  async getCodeAnalytics(
+    range: CodeAnalyticsRange,
+    repoId?: string,
+  ): Promise<CodeAnalyticsSnapshot> {
+    const query = new URLSearchParams({ range });
+    if (repoId) query.set("repo_id", repoId);
+    return requireParsed(
+      parseCodeAnalytics(
+        await this.json(`/code/analytics?${query.toString()}`, {
+          headers: this.headers(),
+        }),
+      ),
+      "code analytics",
     );
   }
 

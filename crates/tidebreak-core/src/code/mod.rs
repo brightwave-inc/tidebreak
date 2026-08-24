@@ -1044,6 +1044,17 @@ pub struct CodeTurn {
     pub ordinal: i64,
     /// Turn status.
     pub status: CodeTurnStatus,
+    /// Engine model selected when this turn started.
+    ///
+    /// A session may change models between turns, so analytics cannot recover
+    /// this from the session row later. Older rows from before this snapshot
+    /// was added leave it unset rather than assigning today's session model to
+    /// historical usage.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Whether this turn started in the engine's fast service tier.
+    #[serde(default)]
+    pub fast_mode: bool,
     /// User input, inline when small enough.
     pub user_input: String,
     /// Blob id when the input was spilled, unused in this layer.

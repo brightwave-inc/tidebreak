@@ -166,6 +166,9 @@ describe("CodeSidebar", () => {
       screen.getByRole("button", { name: "New workspace" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("button", { name: "Analytics" }),
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole("button", { name: "Delivery" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Archive" })).toBeInTheDocument();

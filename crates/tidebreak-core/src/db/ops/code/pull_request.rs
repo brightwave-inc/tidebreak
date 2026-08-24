@@ -258,6 +258,22 @@ pub async fn list_pull_request_facts_for_repo(
         .collect()
 }
 
+/// Every pull request observed for one owner, newest first.
+pub async fn list_pull_request_facts(
+    store: &DbStore,
+    owner: &OwnerId,
+) -> Result<Vec<CodePullRequestFact>> {
+    entities::code_pull_request::Entity::find()
+        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
+        .order_by_desc(entities::code_pull_request::Column::UpdatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(fact_from_row)
+        .collect()
+}
+
 /// Every distinct repository identity holding at least one fact row.
 ///
 /// The reconcile sweep reads this to keep cross-repo facts fresh: a
@@ -441,6 +457,22 @@ pub async fn list_attributions_for_pull_requests(
     entities::code_pull_request_attribution::Entity::find()
         .filter(entities::code_pull_request_attribution::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_pull_request_attribution::Column::PullRequestId.is_in(raw))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(attribution_from_row)
+        .collect()
+}
+
+/// Every pull-request attribution that belongs to one owner.
+pub async fn list_pull_request_attributions(
+    store: &DbStore,
+    owner: &OwnerId,
+) -> Result<Vec<CodePullRequestAttribution>> {
+    entities::code_pull_request_attribution::Entity::find()
+        .filter(entities::code_pull_request_attribution::Column::Owner.eq(owner.as_str()))
+        .order_by_desc(entities::code_pull_request_attribution::Column::CreatedAt)
         .all(&store.conn)
         .await
         .map_err(store_err)?

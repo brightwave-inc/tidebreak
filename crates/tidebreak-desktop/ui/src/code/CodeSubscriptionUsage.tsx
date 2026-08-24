@@ -1,14 +1,6 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ComponentType,
-} from "react";
+import { useMemo, useState, type ComponentType } from "react";
 import { Gauge, RefreshCw } from "lucide-react";
 
-import { useApp } from "@/AppContext";
 import {
   Popover,
   PopoverContent,
@@ -24,8 +16,7 @@ import type {
   CodeSubscriptionUsageWindow,
 } from "../api/types";
 import { FOCUS_RING } from "./interactive";
-
-const REFRESH_INTERVAL_MS = 60_000;
+import { useCodeSubscriptionUsage } from "./useCodeSubscriptionUsage";
 
 /**
  * The code rail's subscription-quota surface.
@@ -36,34 +27,8 @@ const REFRESH_INTERVAL_MS = 60_000;
  * the reader's own accounts.
  */
 export function CodeSubscriptionUsage() {
-  const { client } = useApp();
-  const [report, setReport] = useState<CodeSubscriptionUsage | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [showShared, setShowShared] = useState(false);
-  const refreshInFlight = useRef(false);
-
-  const refresh = useCallback(async () => {
-    if (refreshInFlight.current) return;
-    refreshInFlight.current = true;
-    setRefreshing(true);
-    try {
-      const next = await client.getCodeSubscriptionUsage();
-      setReport(next);
-      setError(null);
-    } catch {
-      setError("Usage could not be refreshed.");
-    } finally {
-      refreshInFlight.current = false;
-      setRefreshing(false);
-    }
-  }, [client]);
-
-  useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+  const { report, refreshing, error, refresh } = useCodeSubscriptionUsage();
 
   const summary = useMemo(() => usageSummary(report), [report]);
 

@@ -3554,6 +3554,27 @@ impl CodeRuntime {
         Ok(list_turns(&self.db, owner, session_id).await?)
     }
 
+    pub(crate) async fn list_turn_metrics(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<tidebreak_core::db::code::CodeTurnMetric>, ServerError> {
+        Ok(tidebreak_core::db::code::list_turn_metrics(&self.db, owner).await?)
+    }
+
+    pub(crate) async fn list_pull_request_facts(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<tidebreak_core::CodePullRequestFact>, ServerError> {
+        Ok(tidebreak_core::db::code::list_pull_request_facts(&self.db, owner).await?)
+    }
+
+    pub(crate) async fn list_pull_request_attributions(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<tidebreak_core::CodePullRequestAttribution>, ServerError> {
+        Ok(tidebreak_core::db::code::list_pull_request_attributions(&self.db, owner).await?)
+    }
+
     pub(crate) async fn session_debug(
         &self,
         owner: &OwnerId,

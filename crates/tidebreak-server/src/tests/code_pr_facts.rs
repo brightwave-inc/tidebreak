@@ -171,6 +171,8 @@ async fn seeded(
             session_id: session.id,
             ordinal: 1,
             status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
             user_input: "ship it".into(),
             user_input_blob_id: None,
             attachments: Vec::new(),

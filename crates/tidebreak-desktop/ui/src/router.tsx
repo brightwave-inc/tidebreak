@@ -22,6 +22,7 @@ import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
 import { CodeHome } from "./code/CodeHome";
+import { CodeAnalyticsPage } from "./code/CodeAnalyticsPage";
 import { CodeArchivePage } from "./code/CodeArchivePage";
 import {
   CodeDeliveryPage,
@@ -205,6 +206,12 @@ const codeWorkspaceRoute = createRoute({
   component: CodeWorkspaceRouteComponent,
 });
 
+const codeAnalyticsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/analytics",
+  component: CodeAnalyticsPage,
+});
+
 const codeDeliveryPullRequestsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/delivery/pull-requests",
@@ -349,6 +356,7 @@ export const routeTree = rootRoute.addChildren([
   projectChatRoute,
   codeRoute,
   codeWorkspaceRoute,
+  codeAnalyticsRoute,
   codeDeliveryPullRequestsRoute,
   codeDeliveryRunsRoute,
   codeArchiveRoute,

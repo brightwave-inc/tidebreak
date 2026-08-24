@@ -811,6 +811,7 @@ pub fn app(state: AppState) -> Router {
                 .delete(routes::code::delete_repo),
         )
         .route("/code/harnesses", get(routes::code::list_harnesses))
+        .route("/code/analytics", get(routes::code::analytics))
         .route("/code/usage", get(routes::code::subscription_usage))
         .route(
             "/code/delivery/repositories",

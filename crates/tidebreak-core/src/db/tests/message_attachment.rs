@@ -797,6 +797,8 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             session_id,
             ordinal: 1,
             status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
             user_input: "look".into(),
             user_input_blob_id: None,
             attachments: vec![ImageRef {

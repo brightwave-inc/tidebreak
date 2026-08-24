@@ -1,6 +1,13 @@
 import { useEffect } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, Bell, FolderPlus, GitPullRequest, Plus } from "lucide-react";
+import {
+  Archive,
+  BarChart3,
+  Bell,
+  FolderPlus,
+  GitPullRequest,
+  Plus,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
@@ -364,11 +371,18 @@ function CodeUtilityLinks({
   onNavigate: (
     to:
       | "/code/delivery/pull-requests"
+      | "/code/analytics"
       | "/code/archive"
       | "/code/notifications",
   ) => void;
 }) {
   const links = [
+    {
+      label: "Analytics",
+      to: "/code/analytics" as const,
+      active: pathname === "/code/analytics",
+      icon: BarChart3,
+    },
     {
       label: "Delivery",
       to: "/code/delivery/pull-requests" as const,

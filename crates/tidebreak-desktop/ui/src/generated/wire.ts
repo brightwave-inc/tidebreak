@@ -809,6 +809,46 @@ export type CitationLocator = { "kind": "document" } | { "kind": "page", page: n
 export type CodeActionSnapshot = { name: string, success: boolean, exit_code?: number, stdout: string, stderr: string, timed_out: boolean, };
 
 /**
+ * One UTC day in an analytics trend.
+ */
+export type CodeAnalyticsDay = { date: string, sessions: number, turns: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
+
+/**
+ * Metrics attributed to one code harness.
+ */
+export type CodeAnalyticsHarness = { harness_kind: HarnessKind, sessions: number, turns: number, total_tokens: number, estimated_cost_microusd: number, };
+
+/**
+ * Metrics attributed to one model and service tier.
+ */
+export type CodeAnalyticsModel = { model_id?: string, harness_kind: HarnessKind, fast_mode: boolean, sessions: number, turns: number, total_tokens: number, estimated_cost_microusd: number, priced: boolean, };
+
+/**
+ * How much of the report has a known local price.
+ */
+export type CodeAnalyticsPricingCoverage = { priced_turns: number, unpriced_turns: number, priced_tokens: number, unpriced_tokens: number, prices_as_of: string, };
+
+/**
+ * Time window for the code analytics report.
+ */
+export type CodeAnalyticsRange = "7d" | "30d" | "90d" | "all";
+
+/**
+ * Metrics attributed to one registered repository.
+ */
+export type CodeAnalyticsRepository = { repo_id: RepoId, name: string, sessions: number, turns: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
+
+/**
+ * Owner-scoped code activity and local cost estimates.
+ */
+export type CodeAnalyticsSnapshot = { range: CodeAnalyticsRange, from?: string, through: string, repo_id?: RepoId, totals: CodeAnalyticsTotals, daily: Array<CodeAnalyticsDay>, repositories: Array<CodeAnalyticsRepository>, models: Array<CodeAnalyticsModel>, harnesses: Array<CodeAnalyticsHarness>, pricing: CodeAnalyticsPricingCoverage, };
+
+/**
+ * Totals for one analytics window.
+ */
+export type CodeAnalyticsTotals = { sessions: number, turns: number, completed_turns: number, failed_turns: number, interrupted_turns: number, running_turns: number, input_tokens: number, output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
+
+/**
  * `approve` or `deny`.
  */
 export type CodeApprovalDecision = "approve" | "deny";

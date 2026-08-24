@@ -913,6 +913,8 @@ pub(crate) enum CodeTurn {
     SessionId,
     Ordinal,
     Status,
+    Model,
+    FastMode,
     UserInput,
     UserInputBlobId,
     CheckpointRef,

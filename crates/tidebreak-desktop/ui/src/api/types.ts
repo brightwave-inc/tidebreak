@@ -135,6 +135,14 @@ import {
   type AttentionSource as WireAttentionSource,
   type AttentionState as WireAttentionState,
   type CapLevel as WireCapLevel,
+  type CodeAnalyticsDay as WireCodeAnalyticsDay,
+  type CodeAnalyticsHarness as WireCodeAnalyticsHarness,
+  type CodeAnalyticsModel as WireCodeAnalyticsModel,
+  type CodeAnalyticsPricingCoverage as WireCodeAnalyticsPricingCoverage,
+  type CodeAnalyticsRange as WireCodeAnalyticsRange,
+  type CodeAnalyticsRepository as WireCodeAnalyticsRepository,
+  type CodeAnalyticsSnapshot as WireCodeAnalyticsSnapshot,
+  type CodeAnalyticsTotals as WireCodeAnalyticsTotals,
   type CodeApprovalSnapshot as WireCodeApprovalSnapshot,
   type CodeApprovalState as WireCodeApprovalState,
   type CodeEvent as WireCodeEvent,
@@ -1112,6 +1120,16 @@ export type FileDownloadProgress = {
 /** A registered local git repository. */
 export type CodeRepoSnapshot = WireCodeRepoSnapshot;
 export type RepoId = WireRepoId;
+
+/** Local code activity and cost estimates. */
+export type CodeAnalyticsSnapshot = WireCodeAnalyticsSnapshot;
+export type CodeAnalyticsRange = WireCodeAnalyticsRange;
+export type CodeAnalyticsTotals = WireCodeAnalyticsTotals;
+export type CodeAnalyticsDay = WireCodeAnalyticsDay;
+export type CodeAnalyticsRepository = WireCodeAnalyticsRepository;
+export type CodeAnalyticsModel = WireCodeAnalyticsModel;
+export type CodeAnalyticsHarness = WireCodeAnalyticsHarness;
+export type CodeAnalyticsPricingCoverage = WireCodeAnalyticsPricingCoverage;
 
 /** GitHub-only install-wide delivery contracts. */
 export type CodeGitHubCapability = WireCodeGitHubCapability;

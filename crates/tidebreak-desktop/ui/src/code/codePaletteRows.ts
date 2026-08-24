@@ -1,5 +1,6 @@
 import {
   Archive,
+  BarChart3,
   Bell,
   FileText,
   GitPullRequest,
@@ -229,6 +230,14 @@ export function codeNavigationPaletteRows(input: {
       icon: Plus,
       shortcut: "code-new-workspace",
       onSelect: input.onNewWorkspace,
+    },
+    {
+      id: "navigate:analytics",
+      section: "navigate",
+      label: "Analytics",
+      keywords: "usage tokens cost sessions models repositories",
+      icon: BarChart3,
+      onSelect: () => input.navigate("/code/analytics"),
     },
     {
       id: "navigate:pull-requests",
