@@ -12,10 +12,10 @@ use tokio::sync::oneshot;
 use tidebreak_core::db::code::{
     arm_trigger, delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo,
     get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
-    insert_workspace, list_approvals, list_events, list_repos, list_repos_all_owners,
-    list_sessions, list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo,
-    list_turns, list_workspaces, mark_repo_removed, save_approval, save_repo, save_session,
-    save_workspace, update_trigger_enabled, MAX_REPLAY_EVENTS,
+    insert_workspace, list_approvals, list_events, list_repos, list_sessions,
+    list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo, list_turns,
+    list_workspaces, mark_repo_removed, save_approval, save_repo, save_session, save_workspace,
+    update_trigger_enabled, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -35,7 +35,7 @@ use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, record_session_baseline,
-    resolve_diff_range, sweep_orphaned_refs, ChangedFile, CheckpointError, DiffBounds,
+    resolve_diff_range, ChangedFile, CheckpointError, DiffBounds,
 };
 use super::ci_logs;
 use super::clone::CloneJobs;
@@ -526,12 +526,9 @@ impl CodeRuntime {
         let actions = recovery::recover_running_sessions(&self.db, &self.bus)
             .await
             .map_err(ServerError::from)?;
-        if let Err(error) = self.sweep_orphaned_checkpoints().await {
-            tracing::warn!(
-                "code-mode: checkpoint ref sweep failed: {}",
-                error.message()
-            );
-        }
+        // Do not sweep repository-wide checkpoint refs here. Another
+        // Tidebreak profile can manage the same repository from a separate
+        // database, so this process cannot identify global orphans safely.
         // Recovery only mutates rows. Re-attach a worker for every session
         // that is still usable so submit_turn is not stuck after a restart.
         // Concurrently: each attach launches an engine child, so a serial pass
@@ -1066,15 +1063,6 @@ impl CodeRuntime {
             tracing::warn!(
                 workspace = %workspace.id,
                 "code-mode: could not delete checkpoint refs on archive: {error}"
-            );
-        }
-        if let Err(error) = self
-            .sweep_repo_checkpoint_refs(owner, std::path::Path::new(&repo.root_path), repo.id)
-            .await
-        {
-            tracing::warn!(
-                "code-mode: checkpoint ref sweep failed: {}",
-                error.message()
             );
         }
         workspace.status = CodeWorkspaceStatus::Archived;
@@ -3748,36 +3736,6 @@ impl CodeRuntime {
             .await
             .map_err(map_checkpoint)?;
         Ok((produced.diff, produced.truncated, produced.stat, turn))
-    }
-
-    async fn sweep_orphaned_checkpoints(&self) -> Result<(), ServerError> {
-        for repo in list_repos_all_owners(&self.db).await? {
-            self.sweep_repo_checkpoint_refs(
-                &repo.owner,
-                std::path::Path::new(&repo.root_path),
-                repo.id,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    async fn sweep_repo_checkpoint_refs(
-        &self,
-        owner: &OwnerId,
-        repo_root: &std::path::Path,
-        repo_id: RepoId,
-    ) -> Result<(), ServerError> {
-        let live: Vec<WorkspaceId> = list_workspaces(&self.db, owner, Some(repo_id))
-            .await?
-            .into_iter()
-            .filter(|workspace| workspace.status != CodeWorkspaceStatus::Archived)
-            .map(|workspace| workspace.id)
-            .collect();
-        sweep_orphaned_refs(repo_root, &live)
-            .await
-            .map(|_| ())
-            .map_err(map_checkpoint)
     }
 
     async fn refuse_running_sessions(

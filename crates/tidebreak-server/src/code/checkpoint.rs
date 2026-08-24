@@ -58,9 +58,8 @@ const REF_PREFIX: &str = "refs/tidebreak/checkpoints";
 ///
 /// Numbering the baseline keeps it in the same ref path as the session's
 /// checkpoints, so [`previous_checkpoint_oid`] resolves `ordinal - 1` for
-/// turn 1 the way it does for every later turn, and both
-/// [`delete_workspace_refs`] and [`sweep_orphaned_refs`] reap it by prefix
-/// along with the rest of the workspace's refs.
+/// turn 1 the way it does for every later turn, and
+/// [`delete_workspace_refs`] reaps it by prefix with the workspace's refs.
 const BASELINE_ORDINAL: i64 = 0;
 
 /// Byte and file-count caps for a produced diff or file list.
@@ -136,8 +135,7 @@ impl CheckpointError {
 /// Keyed on the session as well as the workspace. Ordinals come from
 /// `next_turn_ordinal`, which counts per session, so two sessions sharing a
 /// workspace both reach turn 1. The workspace stays first in the path so
-/// [`delete_workspace_refs`] and [`sweep_orphaned_refs`] keep matching by
-/// prefix.
+/// [`delete_workspace_refs`] can match every session by prefix.
 pub(crate) fn checkpoint_ref(
     workspace_id: WorkspaceId,
     session_id: CodeSessionId,
@@ -598,27 +596,6 @@ pub(crate) async fn delete_workspace_refs(
     Ok(removed)
 }
 
-/// Drop checkpoint refs whose workspace is no longer live (crash / leftover).
-pub(crate) async fn sweep_orphaned_refs(
-    repo_root: &Path,
-    live_workspace_ids: &[WorkspaceId],
-) -> Result<usize, CheckpointError> {
-    let live: std::collections::HashSet<String> =
-        live_workspace_ids.iter().map(ToString::to_string).collect();
-    let refs = list_checkpoint_refs(repo_root).await?;
-    let mut removed = 0usize;
-    for r#ref in refs {
-        let Some(workspace) = workspace_id_from_ref(&r#ref) else {
-            continue;
-        };
-        if !live.contains(&workspace) {
-            delete_ref(repo_root, &r#ref).await?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
 pub(crate) async fn list_checkpoint_refs(repo_root: &Path) -> Result<Vec<String>, CheckpointError> {
     let out = git_text(
         repo_root,
@@ -713,27 +690,34 @@ async fn previous_checkpoint_oid(
         return Ok(None);
     }
     let previous_ref = checkpoint_ref(workspace.id, turn.session_id, turn.ordinal - 1);
-    if let Ok(oid) = git_text(
-        worktree,
-        &["rev-parse", "--verify", &previous_ref],
-        GIT_TIMEOUT,
-    )
-    .await
-    {
-        if !oid.is_empty() {
-            return Ok(Some(oid));
-        }
+    if let Some(oid) = resolve_checkpoint_oid(worktree, &previous_ref).await {
+        return Ok(Some(oid));
     }
-    // The ref is gone: fall back to the last turn row that still names a
-    // checkpoint. Turn 1 has no earlier turn, so it lands on the base ref.
+    // A cleanup or older build may have removed one ref while its database row
+    // remains. Walk earlier rows, but only return a ref Git can still resolve.
     let turns = list_turns(db, &workspace.owner, turn.session_id)
         .await
         .map_err(|err| CheckpointError::internal(err.to_string()))?;
-    Ok(turns
-        .into_iter()
-        .rev()
-        .find(|candidate| candidate.ordinal < turn.ordinal && candidate.checkpoint_ref.is_some())
-        .and_then(|candidate| candidate.checkpoint_ref))
+    for candidate in turns.into_iter().rev() {
+        if candidate.ordinal >= turn.ordinal {
+            continue;
+        }
+        let Some(r#ref) = candidate.checkpoint_ref else {
+            continue;
+        };
+        if let Some(oid) = resolve_checkpoint_oid(worktree, &r#ref).await {
+            return Ok(Some(oid));
+        }
+    }
+    let baseline = session_baseline_ref(workspace.id, turn.session_id);
+    Ok(resolve_checkpoint_oid(worktree, &baseline).await)
+}
+
+async fn resolve_checkpoint_oid(worktree: &Path, r#ref: &str) -> Option<String> {
+    git_text(worktree, &["rev-parse", "--verify", r#ref], GIT_TIMEOUT)
+        .await
+        .ok()
+        .filter(|oid| !oid.is_empty())
 }
 
 async fn collect_changes(
@@ -890,16 +874,6 @@ fn truncate_bytes(raw: &[u8], max: usize) -> (String, bool) {
         end -= 1;
     }
     (text[..end].to_owned(), true)
-}
-
-fn workspace_id_from_ref(r#ref: &str) -> Option<String> {
-    let rest = r#ref.strip_prefix(&format!("{REF_PREFIX}/"))?;
-    let (workspace, _ordinal) = rest.split_once('/')?;
-    if workspace.is_empty() {
-        None
-    } else {
-        Some(workspace.to_owned())
-    }
 }
 
 async fn delete_ref(repo_root: &Path, r#ref: &str) -> Result<(), CheckpointError> {
@@ -1363,7 +1337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_removes_workspace_refs_and_sweep_drops_orphans() {
+    async fn archive_removes_only_the_target_workspaces_refs() {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "gone");
         let live = ws();
@@ -1400,9 +1374,11 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(listed[0].contains(&live.to_string()));
 
-        let swept = sweep_orphaned_refs(&repo, &[]).await.unwrap();
-        assert_eq!(swept, 1);
-        assert!(list_checkpoint_refs(&repo).await.unwrap().is_empty());
+        assert_eq!(
+            list_checkpoint_refs(&repo).await.unwrap().len(),
+            1,
+            "another workspace's refs must survive"
+        );
     }
 
     /// Two sessions share a workspace and both reach turn 1, because
@@ -2025,6 +2001,57 @@ mod tests {
             oid_of(&tree, &format!("{first_ref}^")).await,
             oid_of(&tree, &baseline).await,
             "turn 1 parents off the baseline"
+        );
+    }
+
+    /// A missing hidden ref must not poison every later turn. The database row
+    /// can outlive the ref after cleanup, so the next checkpoint resumes from
+    /// the session baseline and includes the edits that lost their checkpoint.
+    #[tokio::test]
+    async fn a_missing_previous_checkpoint_falls_back_to_the_session_baseline() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "missing-previous");
+        let (db, bus, session) = seed_session(&repo, &tree).await;
+        let baseline = record_session_baseline(&tree, session.workspace_id, session.id)
+            .await
+            .unwrap();
+
+        std::fs::write(tree.join("one.txt"), "one\n").unwrap();
+        let mut first = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut first).await;
+        let first_ref = first.checkpoint_ref.clone().unwrap();
+        delete_ref(&repo, &first_ref).await.unwrap();
+
+        std::fs::write(tree.join("two.txt"), "two\n").unwrap();
+        let mut second = seed_turn(&db, &session, 2, CodeTurnStatus::Completed).await;
+        after_turn_ended(&db, &bus, &session, &mut second).await;
+        let second_ref = second
+            .checkpoint_ref
+            .clone()
+            .expect("turn 2 still records a checkpoint");
+
+        assert_eq!(
+            oid_of(&tree, &format!("{second_ref}^")).await,
+            oid_of(&tree, &baseline).await,
+            "the surviving baseline restarts the checkpoint chain"
+        );
+        assert_eq!(
+            second.diffstat.as_ref().map(|stat| stat.files),
+            Some(2),
+            "the recovered checkpoint includes both turns' live edits"
+        );
+        assert!(
+            recorded_events(&db, &session)
+                .await
+                .iter()
+                .all(|event| !matches!(
+                    event,
+                    CodeEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Warning,
+                        ..
+                    }
+                )),
+            "a stale row must not produce another checkpoint warning"
         );
     }
 

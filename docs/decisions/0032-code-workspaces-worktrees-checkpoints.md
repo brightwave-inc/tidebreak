@@ -127,9 +127,10 @@ Tidebreak becomes a git citizen: it must behave well when the user's git
 config is unusual, when `git` is old, and when a repo is large. Version and
 capability checks happen at repo registration, not mid-session.
 
-Hidden refs accumulate; archive cleans a workspace's refs, and a periodic
-sweep covers refs orphaned by crashes. Checkpoint commits share the repo's
-object store, so their cost is incremental.
+Archive cleans a workspace's refs. Refs orphaned by crashes may remain because
+separate Tidebreak profiles can share one repository, and one profile cannot
+safely decide that another profile's ref is unused. Checkpoint commits share
+the repository's object store, so their cost is incremental.
 
 The data-dir worktree location makes "where is my code?" a product question;
 the workspace UI must surface the path prominently (open in editor / reveal /
