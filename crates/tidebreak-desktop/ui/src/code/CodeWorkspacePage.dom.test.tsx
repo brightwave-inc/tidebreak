@@ -545,7 +545,9 @@ describe("CodeWorkspacePage", () => {
 
     const seam = await screen.findByRole("group", { name: "Turn finished" });
     expect(seam).toHaveTextContent("2m 14s");
-    expect(seam).toHaveTextContent("2 files +42 −7");
+    expect(
+      within(seam).getByLabelText("2 files, 42 additions, 7 deletions"),
+    ).toBeInTheDocument();
     expect(seam).not.toHaveTextContent("in /");
     expect(
       screen.getByRole("button", { name: /Context: 9,500 tokens used/ }),
