@@ -909,6 +909,10 @@ impl CodeRuntime {
                 return Err(map_worktree(err));
             }
         }
+        // Before the setup script, which may itself commit: from here on,
+        // anything this workspace commits should already carry the right
+        // name.
+        self.name_workspace_author(owner, &path).await;
         match run_setup_script(&path, repo.setup_script.as_deref()).await {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
@@ -1306,6 +1310,40 @@ impl CodeRuntime {
             }
         }
         Ok(outcome)
+    }
+
+    /// Name the caller on this workspace's commits (decision 65), on a
+    /// machine that lends gateway git identities and only when the gateway
+    /// states the caller's own account acts.
+    ///
+    /// Best-effort by design: a caller who has not connected, a bot-attributed
+    /// deployment, and a machine with its own credentials all leave the
+    /// checkout exactly as it is, and the commit path reports its own
+    /// failures. An identity the gateway states without a commit email is
+    /// incomplete and configures nothing — half an identity would be worse
+    /// than the checkout's own.
+    async fn name_workspace_author(&self, owner: &OwnerId, worktree: &std::path::Path) {
+        let Some(lender) = self.git_credentials() else {
+            return;
+        };
+        let Ok(identity) = lender.git_forge_identity(owner).await else {
+            return;
+        };
+        let crate::obo_gateway::GitForgeAttribution::Person {
+            login,
+            display_name,
+            commit_email,
+        } = identity.attribution
+        else {
+            return;
+        };
+        let Some(email) = commit_email else {
+            return;
+        };
+        let name = display_name.unwrap_or(login);
+        if let Err(error) = gh::configure_workspace_identity(worktree, &name, &email).await {
+            tracing::debug!(error, "the workspace git identity was not configured");
+        }
     }
 
     /// Borrow a repository-scoped forge credential for one git operation in

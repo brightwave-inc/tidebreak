@@ -96,6 +96,21 @@ fn write_executable(path: &std::path::Path, body: &str) {
     std::fs::set_permissions(path, perms).unwrap();
 }
 
+fn run_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?} failed in {}",
+        cwd.display()
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 fn json_id(value: &serde_json::Value) -> &str {
     value["id"].as_str().expect("id is a string")
 }
@@ -610,4 +625,69 @@ async fn a_hosted_git_card_names_the_person_once_connected() {
     let body: serde_json::Value = status.json().await.unwrap();
     assert_eq!(body["pushes_as"], "mira-chen", "{body}");
     assert_eq!(body["pushes_as_self"], true, "{body}");
+}
+
+/// Decision 65: a workspace on a machine whose gateway names the caller
+/// commits as that person — author and committer both, scoped to the
+/// worktree so the shared clone keeps its own configuration.
+#[tokio::test]
+async fn a_hosted_workspace_commits_as_the_person() {
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, _runtime, dir) =
+        code_app_with(Some(lender as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "person commit").await;
+    let id = json_id(&workspace);
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    std::fs::write(path.join("named.txt"), "line\n").unwrap();
+    let committed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(committed.status(), reqwest::StatusCode::OK);
+
+    let signature = run_stdout(&path, &["git", "log", "-1", "--format=%an <%ae>|%cn <%ce>"]);
+    let expected = "Mira Chen <8675309+mira-chen@users.noreply.github.com>";
+    assert_eq!(signature, format!("{expected}|{expected}"));
+    // The identity is the worktree's alone: the registered clone still
+    // answers with its own configuration.
+    assert_eq!(run_stdout(&repo, &["git", "config", "user.name"]), "Dev");
+}
+
+/// Machines that lend nothing — and hosted machines whose forge still
+/// attributes to the App — leave the checkout's own identity untouched.
+#[tokio::test]
+async fn a_workspace_without_a_person_identity_keeps_the_checkouts_own() {
+    for lender in [
+        None,
+        Some(Arc::new(FakeLender::offering("acme-ship[bot]")) as Arc<dyn GitCredentialLender>),
+    ] {
+        let (router, token, _runtime, dir) = code_app_with(lender).await;
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let repo = init_paired_repo(dir.path());
+        let (_repo, workspace) =
+            register_and_workspace(&client, addr, &token, &repo, "own identity").await;
+        let id = json_id(&workspace);
+        let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+        std::fs::write(path.join("plain.txt"), "line\n").unwrap();
+        let committed = client
+            .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(committed.status(), reqwest::StatusCode::OK);
+        let signature = run_stdout(&path, &["git", "log", "-1", "--format=%an <%ae>"]);
+        assert_eq!(signature, "Dev <dev@example.com>");
+    }
 }

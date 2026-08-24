@@ -190,6 +190,39 @@ pub(crate) struct PushOutcome {
     pub remote: String,
 }
 
+/// Names `name <email>` as this workspace's git author and committer
+/// (decision 65).
+///
+/// `extensions.worktreeConfig` is enabled first so the identity lands in the
+/// worktree's own configuration: sibling workspaces of the same clone can
+/// belong to callers with other identities, and the shared repository
+/// configuration must never name any one of them.
+pub(crate) async fn configure_workspace_identity(
+    worktree: &Path,
+    name: &str,
+    email: &str,
+) -> Result<(), String> {
+    git(
+        worktree,
+        &["config", "extensions.worktreeConfig", "true"],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    git(
+        worktree,
+        &["config", "--worktree", "user.name", name],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    git(
+        worktree,
+        &["config", "--worktree", "user.email", email],
+        GIT_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Live git + `gh` observation for the workspace PR card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceGitStatus {
