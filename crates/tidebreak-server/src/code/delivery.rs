@@ -62,23 +62,32 @@ const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(700);
 const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels";
 const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,statusCheckRollup";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PullRequestRemotePlan {
     state: &'static str,
     fields: &'static str,
     checks_loaded: bool,
+    /// The one author to ask GitHub for, when the query names exactly one.
+    ///
+    /// `gh pr list` caps at 100 rows per repository. Filtering an unscoped
+    /// page down to one author afterwards silently loses that author's older
+    /// pull requests in a busy repository — which is exactly what the default
+    /// "Yours" view asks for. Pushing the login into the remote read keeps the
+    /// cap on the rows the reader wanted.
+    author: Option<String>,
 }
 
 impl PullRequestRemotePlan {
-    fn cache_scope(self) -> String {
+    fn cache_scope(&self) -> String {
         format!(
-            "{}:{}",
+            "{}:{}:{}",
             self.state,
             if self.checks_loaded {
                 "checks"
             } else {
                 "summary"
-            }
+            },
+            self.author.as_deref().unwrap_or("*")
         )
     }
 }
@@ -682,6 +691,7 @@ pub(crate) async fn query_pull_requests(
                 .clone()
                 .expect("authenticated gh has a binary");
             let workspace_index = workspace_index(runtime, owner, force_refresh).await?;
+            let remote_plan = &remote_plan;
             let results = stream::iter(targets.clone())
                 .map(|target| {
                     let binary = binary.clone();
@@ -1919,14 +1929,14 @@ async fn fetch_pull_requests(
     binary: &Path,
     target: &CodeGitHubRepositoryTarget,
     workspaces: &[WorkspaceIndexEntry],
-    plan: PullRequestRemotePlan,
+    plan: &PullRequestRemotePlan,
     force_refresh: bool,
 ) -> Result<Vec<CodeDeliveryPullRequestSummary>, String> {
     let repository =
         resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
     let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
     let limit = MAX_REMOTE_ITEMS_PER_REPO.to_string();
-    let args = [
+    let mut args = vec![
         "pr",
         "list",
         "--repo",
@@ -1938,6 +1948,10 @@ async fn fetch_pull_requests(
         "--json",
         plan.fields,
     ];
+    if let Some(author) = plan.author.as_deref() {
+        args.push("--author");
+        args.push(author);
+    }
     let raw =
         with_transient_retry(|| gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)).await?;
     let value: Value = serde_json::from_str(&raw)
@@ -1964,6 +1978,13 @@ fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequest
         "all"
     };
     let checks_loaded = state == "open" || !query.check_states.is_empty();
+    // Only a single author pushes down: `gh pr list` takes one `--author`,
+    // while the query's list is a union. Several authors still page the
+    // unscoped read and match locally.
+    let author = match query.authors.as_slice() {
+        [only] if !only.trim().is_empty() => Some(only.trim().to_owned()),
+        _ => None,
+    };
     PullRequestRemotePlan {
         state,
         fields: if checks_loaded {
@@ -1972,6 +1993,7 @@ fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequest
             PR_LIST_FIELDS
         },
         checks_loaded,
+        author,
     }
 }
 
@@ -3429,6 +3451,28 @@ mod tests {
         assert_eq!(run_remote_scope(&runs), ("deployments", false, true));
         runs.kinds.clear();
         assert_eq!(run_remote_scope(&runs), ("all", true, true));
+    }
+
+    /// The default Delivery view is one author's open pull requests. Asking
+    /// GitHub for everyone's and narrowing afterwards would spend the 100-row
+    /// per-repository cap on other people's work, so a lone author reaches the
+    /// remote read — and takes its own cache scope, because the rows it comes
+    /// back with are not the unscoped aggregate.
+    #[test]
+    fn a_single_author_reaches_the_remote_read() {
+        let mut query = pull_request_query();
+        query.states = vec!["open".into()];
+        let everyone = pull_request_remote_plan(&query);
+        assert_eq!(everyone.author, None);
+
+        query.authors = vec![" mara ".into()];
+        let mine = pull_request_remote_plan(&query);
+        assert_eq!(mine.author.as_deref(), Some("mara"));
+        assert_ne!(mine.cache_scope(), everyone.cache_scope());
+
+        // A union of authors is not something `gh pr list` can express.
+        query.authors = vec!["mara".into(), "devon".into()];
+        assert_eq!(pull_request_remote_plan(&query).author, None);
     }
 
     #[test]

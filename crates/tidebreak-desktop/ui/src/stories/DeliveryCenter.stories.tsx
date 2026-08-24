@@ -50,6 +50,7 @@ type DeliveryScenario =
   | "pull-requests-empty"
   | "pull-requests-stacked"
   | "pull-requests-partial"
+  | "pull-requests-no-viewer"
   | "github-unavailable"
   | "runs"
   | "archive"
@@ -59,6 +60,25 @@ type DeliveryScenario =
 
 function pending<T>(): Promise<T> {
   return new Promise(() => {});
+}
+
+/**
+ * A socket that opens and then says nothing.
+ *
+ * The rail subscribes to code updates on mount, so every Delivery story needs
+ * one. Without it the page renders its error boundary instead of the list.
+ */
+function idleSocket(): WebSocket {
+  const socket = {
+    onopen: null as WebSocket["onopen"],
+    onclose: null as WebSocket["onclose"],
+    onerror: null as WebSocket["onerror"],
+    close() {},
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as WebSocket;
+  queueMicrotask(() => socket.onopen?.(new Event("open")));
+  return socket;
 }
 
 function prActionMessage(action: CodeDeliveryPullRequestAction): string {
@@ -89,6 +109,16 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     errors: [],
     fetched_at: "2026-08-20T15:20:00.000Z",
   };
+  // Signed in, but `gh` never said who: the old `gh auth status` has no
+  // `--json`, so the login is missing while everything else works.
+  const viewerlessRepositories: CodeDeliveryRepositoriesSnapshot = {
+    ...deliveryRepositoriesSnapshot,
+    capability: {
+      found: true,
+      authenticated: true,
+      remediation: "",
+    },
+  };
   const workspaces =
     scenario === "archive-empty"
       ? deliveryWorkspaces.filter(
@@ -97,6 +127,7 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
       : deliveryWorkspaces;
 
   return {
+    openCodeUpdates: () => idleSocket(),
     listCodeRepos: async () => [deliveryCodeRepo],
     listCodeWorkspaces: async () => workspaces,
     getHarnessDoctor: async () => harnessDoctor,
@@ -135,7 +166,9 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     getCodeDeliveryRepositories: async () =>
       scenario === "github-unavailable"
         ? unavailableRepositories
-        : deliveryRepositoriesSnapshot,
+        : scenario === "pull-requests-no-viewer"
+          ? viewerlessRepositories
+          : deliveryRepositoriesSnapshot,
     resolveCodeDeliveryRepositories: async () => deliveryRepositoriesSnapshot,
     queryCodeDeliveryPullRequests: async () => {
       if (scenario === "pull-requests-loading") {
@@ -700,6 +733,34 @@ export const BlockedMergePullRequestDetail: Story = {
     await expect(
       await body.findByRole("button", { name: "Merge" }),
     ).toBeDisabled();
+  },
+};
+
+/**
+ * The default view: your own open pull requests, drafts included. The author
+ * comes from the login `gh` is signed in as, so "Yours" needs no typing.
+ */
+export const PullRequestsYours: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("button", { name: "Yours", pressed: true }),
+    ).toBeVisible();
+  },
+};
+
+/**
+ * No login to filter on, so "Yours" is not offered and Delivery opens on the
+ * attention view instead of quietly showing everybody's pull requests.
+ */
+export const PullRequestsWithoutViewerLogin: Story = {
+  args: { scenario: "pull-requests-no-viewer" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("button", { name: "Needs attention" }),
+    ).toBeVisible();
+    await expect(canvas.queryByRole("button", { name: "Yours" })).toBeNull();
   },
 };
 
