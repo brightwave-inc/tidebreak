@@ -1561,7 +1561,7 @@ subagents?: Array<CodeSubagentSummary>,
  * Where this session stands, in a sentence, derived from the newest
  * turn that carries one.
  */
-recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, };
+recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" };
 
 /**
  * Token accounting for one turn.

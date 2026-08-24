@@ -13,9 +13,13 @@ import {
   trackedCodeDeliveryRepositories,
   useCodeDeliveryStore,
 } from "./CodeDeliveryStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
-const ACTIVE_POLL_MS = 30_000;
-const VISIBLE_POLL_MS = 2 * 60_000;
+// Freshness rides the `delivery` nudge on the updates socket (decision 66):
+// the server says when the pull-request store changed, and this monitor
+// re-reads then. The remaining timers are a safety net — run summaries have
+// no store yet, and a dropped socket must not silence notifications.
+const SAFETY_POLL_MS = 5 * 60_000;
 const HIDDEN_POLL_MS = 10 * 60_000;
 const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
 const MAX_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -36,10 +40,16 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
   const wakeRef = useRef<(() => void) | null>(null);
+  const deliveryRevision = useCodeUpdatesStore(
+    (state) => state.deliveryRevision,
+  );
 
   useEffect(() => {
+    // A nudge while hidden waits for the hidden-window poll; visibility
+    // returning schedules its own immediate pass.
+    if (document.hidden) return;
     wakeRef.current?.();
-  }, [pathname]);
+  }, [pathname, deliveryRevision]);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,13 +60,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
 
     const interval = () => {
       if (document.hidden) return HIDDEN_POLL_MS;
-      if (
-        pathnameRef.current.startsWith("/code/delivery/") ||
-        pathnameRef.current === "/code/notifications"
-      ) {
-        return ACTIVE_POLL_MS;
-      }
-      return VISIBLE_POLL_MS;
+      return SAFETY_POLL_MS;
     };
 
     const schedule = (delay = interval()) => {

@@ -58,6 +58,12 @@ export type CodeUpdatesState = {
    */
   harnessInstalls: Partial<Record<HarnessKind, CodeHarnessInstallSnapshot>>;
   viewedWorkspaceId: string | null;
+  /**
+   * Bumped on each `delivery` notice: the pull-request store changed
+   * (decision 66). Delivery surfaces re-read their queries when this moves
+   * instead of running their own poll timers.
+   */
+  deliveryRevision: number;
 };
 
 export type CodeUpdatesAction =
@@ -65,6 +71,7 @@ export type CodeUpdatesAction =
   | { type: "digest"; digest: CodeSessionDigest }
   | { type: "clone_progress"; job: CodeCloneJobSnapshot }
   | { type: "harness_install"; install: CodeHarnessInstallSnapshot }
+  | { type: "delivery" }
   | { type: "view"; workspaceId: string | null }
   | { type: "reset" };
 
@@ -74,6 +81,7 @@ const EMPTY: CodeUpdatesState = {
   cloneJobs: {},
   harnessInstalls: {},
   viewedWorkspaceId: null,
+  deliveryRevision: 0,
 };
 
 export function reduceCodeUpdates(
@@ -136,6 +144,8 @@ export function reduceCodeUpdates(
           [action.install.kind]: action.install,
         },
       };
+    case "delivery":
+      return { ...state, deliveryRevision: state.deliveryRevision + 1 };
     case "view":
       return { ...state, viewedWorkspaceId: action.workspaceId };
     case "reset":
@@ -353,6 +363,9 @@ export function noticeToAction(
         ...(notice.error !== undefined ? { error: notice.error } : {}),
       },
     };
+  }
+  if (notice.type === "delivery") {
+    return { type: "delivery" };
   }
   return null;
 }
