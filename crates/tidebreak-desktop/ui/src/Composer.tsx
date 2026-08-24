@@ -5,12 +5,14 @@ import {
   type KeyboardEvent,
   type ReactNode,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import {
   ArrowUpRight,
+  ChevronDown,
   FileText,
   FolderOpen,
   Image as ImageIcon,
@@ -74,6 +76,11 @@ import {
   type ImageAttachment,
 } from "./ImageAttachments";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -402,6 +409,11 @@ export function Composer({
   steerPending,
   steerStatus,
 }: ComposerProps) {
+  const contextTriggerId = useId();
+  const contextLabelId = `${contextTriggerId}-label`;
+  const contextCountId = `${contextTriggerId}-count`;
+  const contextSummaryId = `${contextTriggerId}-summary`;
+  const contextDisclosureId = `${contextTriggerId}-disclosure`;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const latestResetKeyRef = useRef(resetKey);
   latestResetKeyRef.current = resetKey;
@@ -473,6 +485,33 @@ export function Composer({
 
   const invokedSkills = slash?.invoked ?? [];
   const folderChips = folders ? composerFolderChips(folders) : [];
+  const contextItemCount =
+    (images?.items.length ?? 0) +
+    (files?.items.length ?? 0) +
+    (workspaceFiles?.items.length ?? 0) +
+    folderChips.length +
+    invokedSkills.length;
+  const contextSummary = [
+    contextCountLabel(images?.items.length ?? 0, "image"),
+    contextCountLabel(files?.items.length ?? 0, "file"),
+    contextCountLabel(workspaceFiles?.items.length ?? 0, "workspace file"),
+    contextCountLabel(folderChips.length, "folder"),
+    contextCountLabel(invokedSkills.length, "skill"),
+  ]
+    .filter((label): label is string => label !== null)
+    .join(" · ");
+  const denseContext = contextItemCount > 3;
+  const [contextExpanded, setContextExpanded] = useState(!denseContext);
+  const previousContextItemCountRef = useRef(contextItemCount);
+  useEffect(() => {
+    const previousContextItemCount = previousContextItemCountRef.current;
+    if (previousContextItemCount <= 3 && contextItemCount > 3) {
+      setContextExpanded(false);
+    } else if (contextItemCount === 0) {
+      setContextExpanded(true);
+    }
+    previousContextItemCountRef.current = contextItemCount;
+  }, [contextItemCount]);
   const atSkillCap = invokedSkills.length >= MAX_INVOKED_SKILLS;
   /** What a pick can still reach, given what this message already carries. */
   const libraryOptions = availableSlashOptions(
@@ -939,78 +978,125 @@ export function Composer({
           Drop an image to attach it
         </div>
       )}
-      {images && images.items.length > 0 && (
-        <ul
-          className="m-0 flex list-none flex-wrap gap-2 p-0"
-          aria-label="Attached images"
+      {contextItemCount > 0 && (
+        <Collapsible
+          open={contextExpanded}
+          onOpenChange={setContextExpanded}
+          className="rounded-lg border border-border/60 bg-muted/20"
         >
-          {images.items.map((item) => (
-            <ImageAttachmentChip
-              key={item.id}
-              attachment={item}
-              onRemove={() => images.onRemove(item.id)}
-              onRetry={() => images.onRetry(item.id)}
-            />
-          ))}
-        </ul>
-      )}
-      {files && files.items.length > 0 && (
-        <ul
-          className="m-0 flex list-none flex-wrap gap-2 p-0"
-          aria-label="Attached files"
-        >
-          {files.items.map((file) => (
-            <FileAttachmentChip
-              key={file.documentId}
-              file={file}
-              onRemove={() => files.onRemove(file.documentId)}
-            />
-          ))}
-        </ul>
-      )}
-      {workspaceFiles && workspaceFiles.items.length > 0 && (
-        <ul
-          className="m-0 flex list-none flex-wrap gap-2 p-0"
-          aria-label="Attached workspace files"
-        >
-          {workspaceFiles.items.map((file) => (
-            <WorkspaceFileChip
-              key={file.path}
-              file={file}
-              onRemove={() => workspaceFiles.onRemove(file.path)}
-            />
-          ))}
-        </ul>
-      )}
-      {folderChips.length > 0 && folders && (
-        <ul
-          className="m-0 flex list-none flex-wrap gap-2 p-0"
-          aria-label="Attached folders"
-        >
-          {folderChips.map((folder) => (
-            <FolderAttachmentChip
-              key={folder.rootId}
-              folder={folder}
-              disabled={folders.working}
-              onRemove={() => void removeFolder(folder)}
-            />
-          ))}
-        </ul>
-      )}
-      {slash && invokedSkills.length > 0 && (
-        <ul
-          className="m-0 flex list-none flex-wrap gap-2 p-0"
-          aria-label="Invoked skills"
-        >
-          {invokedSkills.map((name) => (
-            <InvokedSkillChip
-              key={name}
-              option={skillOption(slash.options, name)}
-              name={name}
-              onRemove={() => slash.onRemove(name)}
-            />
-          ))}
-        </ul>
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              aria-labelledby={`${contextLabelId} ${contextCountId} ${contextSummaryId} ${contextDisclosureId}`}
+              className="flex min-h-9 w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+            >
+              <span id={contextLabelId} className="font-medium text-foreground">
+                Context
+              </span>
+              <span
+                id={contextCountId}
+                className="rounded-md bg-background px-1.5 py-0.5 tabular-nums ring-1 ring-inset ring-border/60"
+              >
+                {contextItemCount}
+              </span>
+              <span id={contextSummaryId} className="min-w-0 flex-1 truncate">
+                {contextSummary}
+              </span>
+              <span id={contextDisclosureId} className="sr-only">
+                {contextExpanded ? "Hide details" : "Show details"}
+              </span>
+              <ChevronDown
+                className={cn(
+                  "size-3.5 shrink-0 transition-transform",
+                  contextExpanded && "rotate-180",
+                )}
+                aria-hidden="true"
+              />
+            </button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div
+              className={cn(
+                "grid max-h-32 gap-2 overflow-y-auto p-2",
+                denseContext && "border-t border-border/60",
+              )}
+            >
+              {images && images.items.length > 0 && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Attached images"
+                >
+                  {images.items.map((item) => (
+                    <ImageAttachmentChip
+                      key={item.id}
+                      attachment={item}
+                      onRemove={() => images.onRemove(item.id)}
+                      onRetry={() => images.onRetry(item.id)}
+                    />
+                  ))}
+                </ul>
+              )}
+              {files && files.items.length > 0 && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Attached files"
+                >
+                  {files.items.map((file) => (
+                    <FileAttachmentChip
+                      key={file.documentId}
+                      file={file}
+                      onRemove={() => files.onRemove(file.documentId)}
+                    />
+                  ))}
+                </ul>
+              )}
+              {workspaceFiles && workspaceFiles.items.length > 0 && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Attached workspace files"
+                >
+                  {workspaceFiles.items.map((file) => (
+                    <WorkspaceFileChip
+                      key={file.path}
+                      file={file}
+                      onRemove={() => workspaceFiles.onRemove(file.path)}
+                    />
+                  ))}
+                </ul>
+              )}
+              {folderChips.length > 0 && folders && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Attached folders"
+                >
+                  {folderChips.map((folder) => (
+                    <FolderAttachmentChip
+                      key={folder.rootId}
+                      folder={folder}
+                      disabled={folders.working}
+                      onRemove={() => void removeFolder(folder)}
+                    />
+                  ))}
+                </ul>
+              )}
+              {slash && invokedSkills.length > 0 && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Invoked skills"
+                >
+                  {invokedSkills.map((name) => (
+                    <InvokedSkillChip
+                      key={name}
+                      option={skillOption(slash.options, name)}
+                      name={name}
+                      onRemove={() => slash.onRemove(name)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
       )}
       {panelQuery !== null && slash && (
         <PluginsPanel
@@ -1122,8 +1208,8 @@ export function Composer({
           void submit();
         }}
       />
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex grow items-center gap-2">
+      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <ComposerToolsMenu
             disabled={inputDisabled}
             attachFiles={
@@ -1154,7 +1240,7 @@ export function Composer({
           {fastModeToggle}
           {effortMenu}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center justify-end gap-2">
           {/* The permission mode sits with the send cluster: it is what the
               next turn will be allowed to do, not another way to prepare it. */}
           {permissionMenu}
@@ -1507,6 +1593,11 @@ function formatBytes(bytes: number): string {
   if (bytes < 1_024) return `${bytes} B`;
   if (bytes < 1_024 * 1_024) return `${Math.ceil(bytes / 1_024)} KB`;
   return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
+}
+
+function contextCountLabel(count: number, label: string): string | null {
+  if (count === 0) return null;
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
 /**

@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
+import { CircleAlert, CircleCheck, CircleMinus } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
 
@@ -23,15 +24,15 @@ export function SettingsPanel({
   children: ReactNode;
 }) {
   return (
-    <div className="h-full min-h-0 overflow-y-auto" aria-busy={busy}>
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8 md:px-10">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+    <div className="settings-panel" aria-busy={busy}>
+      <div className="settings-panel-inner">
+        <header className="settings-panel-header">
+          <h1 className="settings-panel-title">{title}</h1>
           {description && (
-            <p className="text-sm text-muted-foreground">{description}</p>
+            <p className="settings-panel-description">{description}</p>
           )}
-        </div>
-        {children}
+        </header>
+        <div className="settings-panel-content">{children}</div>
       </div>
     </div>
   );
@@ -53,10 +54,10 @@ export function SettingsField({
   children: ReactNode;
 }) {
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="font-medium">{label}</span>
+    <label className="settings-field">
+      <span className="settings-field-label">{label}</span>
       {children}
-      {hint && <span className="text-sm text-muted-foreground">{hint}</span>}
+      {hint && <span className="settings-field-hint">{hint}</span>}
     </label>
   );
 }
@@ -75,17 +76,27 @@ export function SettingsSection({
   description?: string;
   children: ReactNode;
 }) {
+  const headingId = useId();
+  const hasHeading = Boolean(title || description);
   return (
-    <section className="flex flex-col gap-3">
-      {(title || description) && (
-        <div className="flex flex-col gap-0.5">
-          {title && <h2 className="text-sm font-medium">{title}</h2>}
-          {description && (
-            <p className="text-sm text-muted-foreground">{description}</p>
+    <section
+      className="settings-section"
+      data-has-heading={hasHeading || undefined}
+      aria-labelledby={title ? headingId : undefined}
+    >
+      {hasHeading && (
+        <header className="settings-section-header">
+          {title && (
+            <h2 id={headingId} className="settings-section-title">
+              {title}
+            </h2>
           )}
-        </div>
+          {description && (
+            <p className="settings-section-description">{description}</p>
+          )}
+        </header>
       )}
-      <Card className="gap-4 rounded-md border bg-transparent p-4 ring-0">
+      <Card className="settings-section-card gap-4 rounded-none bg-transparent p-0 ring-0">
         {children}
       </Card>
     </section>
@@ -107,10 +118,19 @@ export function SettingsStatus({
   label: string;
   description: ReactNode;
 }) {
+  const Icon =
+    tone === "ready"
+      ? CircleCheck
+      : tone === "not-configured"
+        ? CircleAlert
+        : CircleMinus;
   return (
     <div className={`settings-status is-${tone}`} role="status">
-      <strong>{label}</strong>
-      <span>{description}</span>
+      <Icon className="settings-status-icon" aria-hidden="true" />
+      <span className="settings-status-copy">
+        <strong>{label}</strong>
+        <span>{description}</span>
+      </span>
     </div>
   );
 }

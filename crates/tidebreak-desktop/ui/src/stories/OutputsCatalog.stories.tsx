@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 
 import type { DeliverablesCatalog, DeliverableSummary } from "@/deliverables";
 import { OutputsView, type OutputsApis } from "@/outputs/OutputsView";
@@ -69,7 +69,7 @@ const meta = {
   parameters: { layout: "fullscreen" },
   decorators: [
     (Story) => (
-      <div className="h-screen min-h-0 bg-page-background text-foreground">
+      <div className="flex h-screen min-h-0 bg-page-background text-foreground">
         <Story />
       </div>
     ),
@@ -85,7 +85,22 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const DenseCatalog: Story = {};
+export const DenseCatalog: Story = {
+  play: async ({ canvasElement }) => {
+    const grid = canvasElement.querySelector(".ag-root-wrapper");
+    if (!(grid instanceof HTMLElement)) {
+      throw new Error("The outputs grid did not mount.");
+    }
+    await waitFor(() => {
+      expect(grid.getBoundingClientRect().height).toBeGreaterThan(300);
+    });
+    await expect(
+      within(canvasElement).getByRole("button", {
+        name: "Open Board update.md",
+      }),
+    ).toBeVisible();
+  },
+};
 
 export const Loading: Story = {
   args: { apis: loadingApis },

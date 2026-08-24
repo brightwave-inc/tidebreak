@@ -61,11 +61,12 @@ export function WorkspaceHeader({
   return (
     <header
       className={cn(
-        "workspace-header flex min-h-14 min-w-0 shrink-0 items-center gap-3 border-b border-border-subtle bg-background/95 px-3.5 backdrop-blur-sm",
+        "workspace-header flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-border-subtle bg-background/95 px-2.5 py-1.5 backdrop-blur-sm min-[1100px]:flex-nowrap min-[1100px]:gap-3 min-[1100px]:px-3.5 min-[1100px]:py-0",
         className,
       )}
+      data-testid="workspace-header"
     >
-      <div className="min-w-0 flex-1 py-2">
+      <div className="min-w-0 flex-1 py-1 min-[1100px]:py-2">
         {loading ? (
           <div
             data-testid="workspace-header-skeleton"
@@ -104,16 +105,10 @@ export function WorkspaceHeader({
       </div>
 
       <div
-        className="flex min-w-0 shrink items-center gap-1.5"
+        className="flex shrink-0 items-center gap-1 min-[1100px]:gap-1.5"
         data-testid="workspace-header-utilities"
       >
-        {workflow}
-        {sessionStatus && (
-          <div className="hidden shrink-0 items-center gap-1 lg:flex">
-            {sessionStatus}
-          </div>
-        )}
-        <div className="mx-0.5 hidden h-4 w-px bg-border-subtle sm:block" />
+        <div className="mx-0.5 hidden h-4 w-px bg-border-subtle min-[1100px]:block" />
         <WithTooltip
           label={
             terminalOpen
@@ -154,6 +149,27 @@ export function WorkspaceHeader({
         </WithTooltip>
         {overflowAction}
       </div>
+
+      {(workflow || sessionStatus) && (
+        <div
+          className="flex w-full min-w-0 items-center gap-1.5 pb-0.5 min-[1100px]:w-auto min-[1100px]:pb-0"
+          data-testid="workspace-header-status"
+          role="group"
+          aria-label="Workspace status and workflow"
+        >
+          {workflow}
+          {sessionStatus && (
+            <div
+              className={cn(
+                "flex min-w-0 shrink-0 items-center gap-1",
+                workflow && "ml-auto min-[1100px]:ml-0",
+              )}
+            >
+              {sessionStatus}
+            </div>
+          )}
+        </div>
+      )}
     </header>
   );
 }

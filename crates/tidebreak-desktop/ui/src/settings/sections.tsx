@@ -188,6 +188,7 @@ export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
   label: string;
+  group: SettingsSectionGroupId;
   icon: ComponentType<{ size?: number; className?: string }>;
   iconClass: string;
   Component: FunctionComponent;
@@ -200,6 +201,15 @@ export type SettingsSectionDef = {
   managedHidden?: boolean;
 };
 
+export const SETTINGS_SECTION_GROUPS = [
+  { id: "models", label: "Models & agents" },
+  { id: "capabilities", label: "Capabilities" },
+  { id: "application", label: "Application" },
+] as const;
+
+export type SettingsSectionGroupId =
+  (typeof SETTINGS_SECTION_GROUPS)[number]["id"];
+
 /**
  * The sections, in the order the rail lists them. The first is where a bare
  * `/settings` redirects, so it is the section a reader lands on by default.
@@ -208,6 +218,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "providers",
     label: "Providers",
+    group: "models",
     icon: KeyRound,
     iconClass: "text-icon-amber",
     Component: ProvidersSection,
@@ -217,6 +228,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "gateway",
     label: "Model Gateway",
+    group: "models",
     icon: Waypoints,
     iconClass: "text-icon-cyan",
     Component: GatewaySection,
@@ -224,6 +236,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "models",
     label: "Models",
+    group: "models",
     icon: Cpu,
     iconClass: "text-icon-violet",
     Component: ModelsSection,
@@ -234,6 +247,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "context",
     label: "Context",
+    group: "models",
     icon: Gauge,
     iconClass: "text-icon-blue",
     Component: CompactionSection,
@@ -241,6 +255,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "agents",
     label: "Agents",
+    group: "models",
     icon: Bot,
     iconClass: "text-icon-violet",
     Component: AgentsSection,
@@ -248,6 +263,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "voice-transcription",
     label: "Voice input",
+    group: "capabilities",
     icon: Mic,
     iconClass: "text-icon-rose",
     Component: VoiceTranscriptionSection,
@@ -255,6 +271,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "web-search",
     label: "Web search",
+    group: "capabilities",
     icon: Globe,
     iconClass: "text-icon-cyan",
     Component: WebSearchSection,
@@ -262,6 +279,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "code-execution",
     label: "Code execution",
+    group: "capabilities",
     icon: SquareTerminal,
     iconClass: "text-icon-green",
     Component: ExecSection,
@@ -269,6 +287,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "coding-harnesses",
     label: "Coding harnesses",
+    group: "capabilities",
     icon: Terminal,
     iconClass: "text-icon-amber",
     Component: CodingHarnessesSection,
@@ -276,6 +295,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "connected-apps",
     label: "Connected apps",
+    group: "capabilities",
     icon: Blocks,
     iconClass: "text-icon-blue",
     Component: ConnectedAppsSection,
@@ -283,6 +303,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "permissions",
     label: "Permissions",
+    group: "application",
     icon: ShieldCheck,
     iconClass: "text-icon-green",
     Component: PermissionsSection,
@@ -290,6 +311,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "appearance",
     label: "Appearance",
+    group: "application",
     icon: Palette,
     iconClass: "text-icon-rose",
     Component: AppearanceSection,
@@ -297,6 +319,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     path: "updates",
     label: "Updates",
+    group: "application",
     icon: RefreshCw,
     iconClass: "text-icon-green",
     Component: UpdatesSection,
@@ -318,6 +341,14 @@ export function settingsSectionsFor(managed: boolean): SettingsSectionDef[] {
   return SETTINGS_SECTIONS.filter(
     (section) => !(managed && section.managedHidden),
   );
+}
+
+export function settingsSectionGroupsFor(managed: boolean) {
+  const sections = settingsSectionsFor(managed);
+  return SETTINGS_SECTION_GROUPS.map((group) => ({
+    ...group,
+    sections: sections.filter((section) => section.group === group.id),
+  })).filter((group) => group.sections.length > 0);
 }
 
 export function defaultSettingsPathFor(managed: boolean): string {

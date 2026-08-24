@@ -1603,6 +1603,258 @@ body {
 
   /* ---------- Appearance ---------- */
 
+  .settings-route-frame {
+    display: flex;
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .settings-main {
+    background: var(--background);
+  }
+
+  .settings-sidebar-header {
+    height: auto;
+    min-height: 3.75rem;
+    padding: 0.5rem;
+  }
+
+  .settings-back-button {
+    height: auto;
+    min-height: 2.75rem;
+    padding: 0.375rem 0.5rem;
+    color: var(--foreground);
+  }
+
+  .settings-back-button:hover {
+    background: var(--accent);
+  }
+
+  .settings-back-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.05rem;
+    line-height: 1.15;
+  }
+
+  .settings-back-title {
+    overflow: hidden;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+  }
+
+  .settings-back-label {
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+  }
+
+  .settings-sidebar-content {
+    min-height: 0;
+    scrollbar-gutter: stable;
+  }
+
+  .settings-sidebar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .settings-sidebar-group + .settings-sidebar-group {
+    margin-top: 0.75rem;
+  }
+
+  .settings-sidebar-group-title {
+    padding: 0.25rem 0.5rem;
+    color: var(--foreground-subtle);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  .settings-sidebar-group-items {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+
+  .settings-sidebar-item {
+    position: relative;
+    color: var(--muted-foreground);
+  }
+
+  .settings-sidebar-item:hover {
+    color: var(--foreground);
+  }
+
+  .settings-sidebar-item[data-active] {
+    color: var(--foreground);
+    background: color-mix(in oklch, var(--primary) 9%, var(--muted));
+    font-weight: 600;
+  }
+
+  .settings-sidebar-item[data-active]::before {
+    content: "";
+    position: absolute;
+    top: 0.45rem;
+    bottom: 0.45rem;
+    left: 0.2rem;
+    width: 2px;
+    border-radius: 999px;
+    background: var(--primary);
+  }
+
+  .settings-panel {
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .settings-panel-inner {
+    display: flex;
+    width: 100%;
+    max-width: 62rem;
+    min-width: 0;
+    margin-inline: auto;
+    flex-direction: column;
+    gap: 2rem;
+    padding: 2.5rem clamp(2rem, 4vw, 3rem) 3.5rem;
+  }
+
+  .settings-panel-header {
+    display: flex;
+    min-width: 0;
+    max-width: 46rem;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .settings-panel-title {
+    margin: 0;
+    color: var(--foreground);
+    font-size: 1.625rem;
+    font-weight: 650;
+    letter-spacing: -0.035em;
+    line-height: 1.15;
+    text-wrap: balance;
+  }
+
+  .settings-panel-description {
+    max-width: 68ch;
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.875rem;
+    line-height: 1.55;
+    text-wrap: pretty;
+  }
+
+  .settings-panel-content {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .settings-section {
+    display: grid;
+    min-width: 0;
+    gap: 0.875rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .settings-panel-content > .settings-section:first-child {
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .settings-section-header {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .settings-section-title {
+    margin: 0;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1.35;
+    text-wrap: balance;
+  }
+
+  .settings-section-description {
+    max-width: 60ch;
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  .settings-section-card {
+    min-width: 0;
+  }
+
+  .settings-field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .settings-field-label {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .settings-field-hint {
+    max-width: 65ch;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    text-wrap: pretty;
+  }
+
+  @media (min-width: 960px) {
+    .settings-section[data-has-heading] {
+      grid-template-columns: minmax(10rem, 12rem) minmax(0, 1fr);
+      column-gap: 2rem;
+      align-items: start;
+    }
+  }
+
+  @media (max-width: 800px) {
+    .settings-sidebar[data-sidebar="expanded"] {
+      width: 13rem !important;
+      min-width: 13rem !important;
+      flex-basis: 13rem !important;
+    }
+
+    .settings-panel-inner {
+      gap: 1.5rem;
+      padding: 1.25rem 1.25rem 2rem;
+    }
+
+    .settings-panel-title {
+      font-size: 1.4rem;
+    }
+
+    .settings-panel-content {
+      gap: 1rem;
+    }
+
+    .settings-section {
+      padding-top: 1rem;
+    }
+  }
+
   .theme-options {
     display: flex;
     flex-wrap: wrap;
@@ -1611,26 +1863,54 @@ body {
 
   .settings-status {
     display: grid;
-    gap: 0.18rem;
-    padding: 0.65rem 0.7rem;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.625rem;
+    align-items: start;
+    padding: 0.75rem;
     border: 1px solid var(--line);
     border-radius: 8px;
     color: var(--muted-foreground);
-    background: var(--page-background);
-    font-size: 0.82rem;
+    background: color-mix(in oklch, var(--page-background) 72%, transparent);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .settings-status-icon {
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0.1rem;
+  }
+
+  .settings-status-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.125rem;
   }
 
   .settings-status strong {
     color: var(--ink);
-    font-size: 0.84rem;
+    font-size: 0.8125rem;
   }
 
   .settings-status.is-ready {
     border-color: color-mix(in srgb, var(--success) 55%, var(--line));
   }
 
+  .settings-status.is-ready .settings-status-icon {
+    color: var(--success);
+  }
+
   .settings-status.is-not-configured {
     border-color: color-mix(in srgb, var(--destructive) 30%, var(--line));
+  }
+
+  .settings-status.is-not-configured .settings-status-icon {
+    color: var(--destructive);
+  }
+
+  .settings-status.is-disabled .settings-status-icon {
+    color: var(--muted-foreground);
   }
 
   /* ---------- Boot screen ---------- */
