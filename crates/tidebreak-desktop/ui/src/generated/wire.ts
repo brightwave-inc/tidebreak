@@ -3470,12 +3470,14 @@ head_sha?: string,
 auto_merge_enabled?: boolean, in_merge_queue?: boolean, };
 
 /**
- * A follow-up parked while the session is already running a turn.
+ * One durable queued follow-up: a message parked while the session or its
+ * workspace checkout was busy, promoted FIFO once the session is free.
  *
- * No turn id: the row is created when the worker promotes this slot.
- * `position` is 1-based in the single-slot queue.
+ * `id` names the row for edits and retraction, and is the turn id the
+ * promoted turn is inserted under. `position` is 0-based and dense within
+ * the session.
  */
-export type QueuedCodeTurn = { session_id: CodeSessionId, message: string, position: number, };
+export type QueuedCodeTurn = { id: CodeTurnId, session_id: CodeSessionId, message: string, position: number, created_at: string, updated_at: string, };
 
 /**
  * The id is the client-generated turn id promotion will accept under, so an

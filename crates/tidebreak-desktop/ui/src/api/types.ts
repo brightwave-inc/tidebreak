@@ -1165,7 +1165,7 @@ export type AttentionSource = WireAttentionSource;
 
 /** One user→engine cycle. */
 export type CodeTurnSnapshot = WireCodeTurnSnapshot;
-/** A follow-up parked while the session is busy; it has no turn row yet. */
+/** A queued follow-up row; its id becomes the promoted turn's id. */
 export type QueuedCodeTurn = WireQueuedCodeTurn;
 export type CodeTurnId = WireCodeTurnId;
 export type CodeTurnStatus = WireCodeTurnStatus;

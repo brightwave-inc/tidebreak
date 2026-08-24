@@ -78,7 +78,14 @@ afterEach(() => {
 
 const QUEUED = {
   kind: "queued" as const,
-  queued: { session_id: "sess-1", message: "and run the tests", position: 1 },
+  queued: {
+    id: "q-1",
+    session_id: "sess-1",
+    message: "and run the tests",
+    position: 0,
+    created_at: "2026-08-24T00:00:00Z",
+    updated_at: "2026-08-24T00:00:00Z",
+  },
 };
 
 describe("CodeComposer", () => {
@@ -314,39 +321,8 @@ describe("CodeComposer", () => {
     await waitFor(() =>
       expect(onSend).toHaveBeenCalledWith("and run the tests"),
     );
+    // The composer clears; the queue tray, not a pill, shows the parked row.
     expect(box).toHaveValue("");
-    expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
-  });
-
-  it("clears the queued pill when the next turn begins", async () => {
-    const onSend = vi.fn().mockResolvedValue(QUEUED);
-    const { rerender } = renderComposer(
-      <CodeComposer
-        running
-        permissionMode="ask"
-        lastTurnBeganId="t1"
-        onSend={onSend}
-        onInterrupt={vi.fn()}
-      />,
-    );
-
-    const box = screen.getByRole("textbox", { name: "Message" });
-    fireEvent.change(box, { target: { value: "and run the tests" } });
-    fireEvent.keyDown(box, { key: "Enter" });
-    expect(await screen.findByText("1 follow-up queued")).toBeInTheDocument();
-
-    rerender(
-      <AppContextProvider value={app()}>
-        <CodeComposer
-          running
-          permissionMode="ask"
-          lastTurnBeganId="t2"
-          onSend={onSend}
-          onInterrupt={vi.fn()}
-        />
-      </AppContextProvider>,
-    );
-    expect(screen.queryByText("1 follow-up queued")).toBeNull();
   });
 
   it("steers mid-turn when the harness supports it", async () => {
@@ -430,7 +406,6 @@ describe("CodeComposer", () => {
     );
     expect(onSend).not.toHaveBeenCalled();
     expect(box).toHaveValue("and run the tests");
-    expect(screen.queryByText("1 follow-up queued")).toBeNull();
   });
 
   it("submits free-typed slash text verbatim when the engine lists no commands", async () => {
@@ -456,7 +431,7 @@ describe("CodeComposer", () => {
     const onSend = vi
       .fn()
       .mockRejectedValue(
-        new HttpError(409, "409: a follow-up is already queued", "queue_full"),
+        new HttpError(409, "409: the session queue is full", "queue_full"),
       );
     renderComposer(
       <CodeComposer
@@ -476,7 +451,7 @@ describe("CodeComposer", () => {
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "A follow-up is already queued. Wait for it to run, or interrupt this turn.",
+      "The queue is full. Delete a queued message or wait for one to run.",
     );
     expect(box).toHaveValue("and push it");
   });

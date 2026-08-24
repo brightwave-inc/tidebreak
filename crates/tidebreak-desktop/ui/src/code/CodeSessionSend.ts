@@ -10,8 +10,8 @@ import type { CodeTurnSubmission } from "./parsers";
  * the hydrate key.
  *
  * A queued follow-up has no turn row yet, so there is nothing to key an item
- * on. Its bubble arrives when the worker promotes the slot and the session's
- * `turn_started` event pulls the snapshot in.
+ * on. Its bubble arrives when the worker promotes the queued row and the
+ * session's `turn_started` event pulls the snapshot in.
  */
 export async function submitAcceptedTurn(
   update: (change: (session: CodeSessionState) => CodeSessionState) => void,

@@ -537,7 +537,9 @@ describe("CodeWorkspacePage", () => {
     const pane = view?.closest(".chat-pane");
     expect(pane).not.toBeNull();
     expect(view?.parentElement?.className).toMatch(/flex/);
-    expect(view?.nextElementSibling).toContainElement(
+    // The queue tray's slot sits between the transcript and the composer
+    // (decision 65); the composer stays next in the same column.
+    expect(view?.nextElementSibling?.nextElementSibling).toContainElement(
       screen.getByRole("button", { name: "Send message" }),
     );
 

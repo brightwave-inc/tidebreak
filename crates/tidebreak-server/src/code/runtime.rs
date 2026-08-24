@@ -19,10 +19,10 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
-    CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId,
-    CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat, FenceReason,
-    HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId, WorkspaceId,
+    CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId,
+    CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
+    CodeTriggerId, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat,
+    FenceReason, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -46,7 +46,7 @@ use super::gh::{
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, journal_event, queue_follow_up, spawn_session_worker, AttachmentStore,
+    attach_engine, journal_event, spawn_session_worker, wake_queue, AttachmentStore,
     TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
@@ -125,8 +125,12 @@ pub(crate) struct RepoRegistration {
 pub(crate) enum SubmitTurnOutcome {
     /// The session was idle; the turn ran to a terminal event.
     Ran(Box<CodeTurn>),
-    /// The session was running; the message occupies the single follow-up slot.
-    Queued,
+    /// The session or its workspace was busy; the message parked as a
+    /// durable queue row (decision 65).
+    Queued(Box<CodeQueuedTurn>),
+    /// The durable trigger delivery behind this submit was already accepted
+    /// by an earlier attempt; nothing new was written.
+    AlreadyDelivered,
 }
 
 /// Shared code-mode services for the process.
@@ -1900,7 +1904,7 @@ impl CodeRuntime {
             )
             .await?
             {
-                return Ok(SubmitTurnOutcome::Queued);
+                return Ok(SubmitTurnOutcome::AlreadyDelivered);
             }
         }
         let mut session = self.get_session(owner, id).await?;
@@ -1958,19 +1962,27 @@ impl CodeRuntime {
         if let Some(reason) = self.workspace_fence_reason(owner, &session).await? {
             return Err(ServerError::conflict_kind("workspace_fenced", reason));
         }
-        // Queue-default (0009): a send while a turn is in flight parks one
-        // follow-up. This does not consult mid_turn_steering — that cap
-        // gates the separate /steer route only.
+        // Queue-default (0009, 0065): a send while a turn is in flight parks
+        // as a durable queue row. This does not consult mid_turn_steering —
+        // that cap gates the separate /steer route only. A backlog parks the
+        // send even with no open turn: rows ahead of this message must run
+        // first (FIFO), and the worker may already be holding the head while
+        // it waits on a sibling's worktree turn.
         let in_flight = session.lifecycle == CodeSessionLifecycle::Running
             || get_open_turn(&self.db, owner, id).await?.is_some();
-        if in_flight {
+        let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, id)
+            .await?
+            .is_empty();
+        if in_flight || backlog {
             if !queue_if_busy {
                 return Err(ServerError::conflict_kind(
                     "trigger_turn_busy",
                     "the trigger turn was not accepted because the session became busy",
                 ));
             }
-            return self.park_follow_up(&handle, &session, message, attachments);
+            return self
+                .park_follow_up(owner, &handle, &session, message, attachments)
+                .await;
         }
         let (reply, rx) = oneshot::channel();
         handle
@@ -2003,10 +2015,12 @@ impl CodeRuntime {
                         "the trigger turn was not accepted because the workspace became busy",
                     ));
                 }
-                return self.park_follow_up(&handle, &session, message, attachments);
+                return self
+                    .park_follow_up(owner, &handle, &session, message, attachments)
+                    .await;
             }
             Err(WorkerError::TriggerDeliveryAccepted) => {
-                return Ok(SubmitTurnOutcome::Queued);
+                return Ok(SubmitTurnOutcome::AlreadyDelivered);
             }
             Err(err) => return Err(map_worker(err)),
         };
@@ -2038,27 +2052,127 @@ impl CodeRuntime {
         .await
     }
 
-    /// Park a message in the session's single follow-up slot (record 9).
-    fn park_follow_up(
+    /// Park a message as a durable queue row (decision 65).
+    ///
+    /// The row id is minted here and becomes the promoted turn's id. The cap
+    /// is checked before the insert so an overfull queue answers with a typed
+    /// conflict rather than a store error; the store re-checks under the
+    /// session write lock, so a racing pair can overshoot by at most one row.
+    async fn park_follow_up(
         &self,
+        owner: &OwnerId,
         handle: &WorkerHandle,
         session: &CodeSession,
         message: String,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
-        if !queue_follow_up(
-            handle,
-            message,
-            session.model.clone(),
-            session.reasoning_effort,
-            attachments,
-        ) {
+        let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+            .await
+            .map_err(ServerError::from)?;
+        if queued.len() >= CodeQueuedTurn::MAX_PER_SESSION {
             return Err(ServerError::conflict_kind(
                 "queue_full",
-                "a follow-up is already queued on this session",
+                format!(
+                    "this session may queue at most {} messages",
+                    CodeQueuedTurn::MAX_PER_SESSION
+                ),
             ));
         }
-        Ok(SubmitTurnOutcome::Queued)
+        let now = chrono::Utc::now();
+        let row = tidebreak_core::db::code::enqueue_queued_turn(
+            &self.db,
+            owner,
+            &CodeQueuedTurn {
+                id: CodeTurnId::new(),
+                session_id: session.id,
+                message,
+                attachments,
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .map_err(ServerError::from)?;
+        wake_queue(handle);
+        Ok(SubmitTurnOutcome::Queued(Box::new(row)))
+    }
+
+    /// The session's queued messages plus whether promotion is paused.
+    pub(crate) async fn list_queued_turns(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+    ) -> Result<(Vec<CodeQueuedTurn>, bool), ServerError> {
+        let _ = self.get_session(owner, id).await?;
+        let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, id).await?;
+        let paused = tidebreak_core::db::code::queue_paused(&self.db, id).await?;
+        Ok((queued, paused))
+    }
+
+    /// Edit or reorder one queued message. `None` when the row is gone.
+    pub(crate) async fn update_queued_turn(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        queued_id: CodeTurnId,
+        message: Option<&str>,
+        position: Option<i32>,
+    ) -> Result<Option<CodeQueuedTurn>, ServerError> {
+        let _ = self.get_session(owner, id).await?;
+        Ok(tidebreak_core::db::code::update_queued_turn(
+            &self.db, owner, id, queued_id, message, position,
+        )
+        .await?)
+    }
+
+    /// Retract one queued message. `false` when the row is gone.
+    pub(crate) async fn delete_queued_turn(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        queued_id: CodeTurnId,
+    ) -> Result<bool, ServerError> {
+        let _ = self.get_session(owner, id).await?;
+        Ok(tidebreak_core::db::code::delete_queued_turn(&self.db, owner, id, queued_id).await?)
+    }
+
+    /// Pause or release the session's queue. A release wakes the worker so a
+    /// waiting head starts without a new send.
+    pub(crate) async fn set_queue_paused(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+        paused: bool,
+    ) -> Result<(), ServerError> {
+        let _ = self.get_session(owner, id).await?;
+        tidebreak_core::db::code::set_queue_paused(&self.db, id, paused).await?;
+        if !paused {
+            self.wake_session_queue(id);
+        }
+        Ok(())
+    }
+
+    /// Clear the session's queue pause so the worker's next drain starts the
+    /// head row. The tray composes send-now client-side exactly as chat does:
+    /// pause, move the row first, stop the live turn, then this.
+    pub(crate) async fn send_queued_now(
+        &self,
+        owner: &OwnerId,
+        id: CodeSessionId,
+    ) -> Result<(), ServerError> {
+        let _ = self.get_session(owner, id).await?;
+        tidebreak_core::db::code::set_queue_paused(&self.db, id, false).await?;
+        self.wake_session_queue(id);
+        Ok(())
+    }
+
+    /// Nudge a live worker to re-read its queue. A session with no worker has
+    /// nothing to wake; its next spawn drains the queue first thing.
+    fn wake_session_queue(&self, id: CodeSessionId) {
+        if let Ok(handle) = self.require_worker(id) {
+            wake_queue(&handle);
+        }
     }
 
     /// Why this session's workspace is closed to turns, if it is.
@@ -2731,6 +2845,17 @@ impl CodeRuntime {
             current.spawn_epoch,
         )
         .await;
+        // Nothing will ever promote an ended session's queued rows; retract
+        // them so the queue does not read as pending work forever.
+        if let Err(error) =
+            tidebreak_core::db::code::delete_session_queued_turns(&self.db, owner, current.id).await
+        {
+            tracing::warn!(
+                session = %current.id,
+                error = %error,
+                "could not clear the ended session's queued turns"
+            );
+        }
         Ok(())
     }
 
@@ -3576,6 +3701,11 @@ fn map_worker(err: WorkerError) -> ServerError {
             ServerError::conflict_kind("relaunch_required", message)
         }
         WorkerError::Failed(message) => ServerError::internal(message),
+        // Only the drain loop drives promoted queue rows, and it re-reads on
+        // staleness. A caller seeing this took a path that does not exist.
+        WorkerError::QueuedTurnStale => {
+            ServerError::internal("the queued turn changed before it could start".to_owned())
+        }
         WorkerError::TriggerDeliveryAccepted => ServerError::conflict_kind(
             "trigger_delivery_accepted",
             "trigger delivery was already accepted",

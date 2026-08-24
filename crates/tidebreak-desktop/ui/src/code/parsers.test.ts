@@ -331,9 +331,12 @@ describe("parseCodeTurnSubmission", () => {
     // server is holding, and the retry it invites double-sends.
     expect(parseCodeTurnSubmission(TURN)).toEqual({ kind: "ran", turn: TURN });
     const queued = {
+      id: "q-1",
       session_id: "sess-1",
       message: "and run the tests",
-      position: 1,
+      position: 0,
+      created_at: "2026-08-24T00:00:00Z",
+      updated_at: "2026-08-24T00:00:00Z",
     };
     expect(parseCodeTurnSubmission(queued)).toEqual({ kind: "queued", queued });
     expect(parseCodeTurnSubmission({ session_id: "sess-1" })).toBeNull();

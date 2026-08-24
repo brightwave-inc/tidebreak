@@ -42,6 +42,7 @@ import {
   type ModelVisibility,
   type NetworkPolicy,
   type PendingFolderAccessRequest,
+  type QueuedCodeTurn,
   type QueuedTurn,
   type PendingOutputWritebackRequest,
   type PendingPlanApproval,
@@ -157,6 +158,7 @@ import {
   parseCodeTurnList,
   parseCodeTurnSubmission,
   type CodeTurnSubmission,
+  parseQueuedCodeTurn,
   parseCodeAction,
   parseCodeCommit,
   parseCodePush,
@@ -2489,6 +2491,74 @@ export class ApiClient {
         method: "POST",
         headers: this.headers(),
       },
+    );
+  }
+
+  /** The session's queued messages, FIFO, plus whether promotion is paused. */
+  async listCodeQueuedTurns(
+    sessionId: string,
+  ): Promise<{ queued: QueuedCodeTurn[]; paused: boolean }> {
+    const snapshot = await this.json<{ queued: unknown[]; paused: boolean }>(
+      `/code/sessions/${encodeURIComponent(sessionId)}/queued`,
+      { headers: this.headers() },
+    );
+    return {
+      queued: snapshot.queued.map((row) =>
+        requireParsed(parseQueuedCodeTurn(row), "queued code turn"),
+      ),
+      paused: snapshot.paused === true,
+    };
+  }
+
+  async patchCodeQueuedTurn(
+    sessionId: string,
+    queuedId: string,
+    update: { message?: string; position?: number },
+  ): Promise<QueuedCodeTurn> {
+    return requireParsed(
+      parseQueuedCodeTurn(
+        await this.json(
+          `/code/sessions/${encodeURIComponent(sessionId)}/queued/${encodeURIComponent(queuedId)}`,
+          {
+            method: "PATCH",
+            headers: this.headers(true),
+            body: JSON.stringify(update),
+          },
+        ),
+      ),
+      "queued code turn",
+    );
+  }
+
+  async deleteCodeQueuedTurn(
+    sessionId: string,
+    queuedId: string,
+  ): Promise<void> {
+    await this.json<unknown>(
+      `/code/sessions/${encodeURIComponent(sessionId)}/queued/${encodeURIComponent(queuedId)}`,
+      { method: "DELETE", headers: this.headers() },
+      204,
+    );
+  }
+
+  async putCodeQueuePaused(sessionId: string, paused: boolean): Promise<void> {
+    await this.json<unknown>(
+      `/code/sessions/${encodeURIComponent(sessionId)}/queue-paused`,
+      {
+        method: "PUT",
+        headers: this.headers(true),
+        body: JSON.stringify({ paused }),
+      },
+      204,
+    );
+  }
+
+  /** Release a paused queue so the worker starts the head row. */
+  async sendCodeQueuedNow(sessionId: string): Promise<void> {
+    await this.json<unknown>(
+      `/code/sessions/${encodeURIComponent(sessionId)}/queued/send-now`,
+      { method: "POST", headers: this.headers() },
+      204,
     );
   }
 

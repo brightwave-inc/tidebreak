@@ -24,15 +24,16 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
-    accept_trigger_turn_delivery, append_event, bump_spawn_epoch, get_open_turn, get_session,
-    get_session_all_owners, insert_approval, insert_turn, next_turn_ordinal, save_session,
+    accept_trigger_turn_delivery, append_event, bump_spawn_epoch, delete_queued_turn,
+    get_open_turn, get_session, get_session_all_owners, insert_approval, insert_turn,
+    next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
     save_turn, set_session_subagents, CodeJournalError,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
-    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId,
-    CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId, PermissionMode,
+    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
+    CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
+    CodeTurnId, CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId, PermissionMode,
     ReasoningEffort, ToolOutcome,
 };
 use tidebreak_harness::{
@@ -93,6 +94,11 @@ pub(crate) enum WorkerError {
     /// The engine fixes its posture at launch, so the caller relaunches.
     #[error("{0}")]
     RelaunchRequired(String),
+    /// A queued row was edited, reordered, or retracted after the worker
+    /// snapshotted it. Never reaches a caller: the drain loop re-reads the
+    /// head and tries again.
+    #[error("the queued turn changed before it could start")]
+    QueuedTurnStale,
     #[error("{0}")]
     Failed(String),
     #[error("trigger delivery was already accepted")]
@@ -115,21 +121,20 @@ pub(crate) struct WorkerHandle {
 
 /// How a worker gets its next turn, and when it may start one.
 ///
-/// `pending` and `wake` are this session's own single follow-up slot
-/// (record 9). `worktree` is shared with every other session in the
-/// workspace, and holding it is what keeps two agents from editing one
-/// checkout at the same time (record 55).
+/// Queued follow-ups are durable `code_queued_turn` rows the worker drains
+/// FIFO (decision 65); `wake` is how an enqueue, a resume, or a send-now
+/// tells the worker to look again. `worktree` is shared with every other
+/// session in the workspace, and holding it is what keeps two agents from
+/// editing one checkout at the same time (record 55).
 #[derive(Clone)]
 pub(crate) struct TurnQueue {
-    pending: Arc<std::sync::Mutex<Option<QueuedFollowUp>>>,
-    wake: Arc<Notify>,
+    pub(crate) wake: Arc<Notify>,
     worktree: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TurnQueue {
     fn new(worktree: Arc<tokio::sync::Mutex<()>>) -> Self {
         Self {
-            pending: Arc::new(std::sync::Mutex::new(None)),
             wake: Arc::new(Notify::new()),
             worktree,
         }
@@ -181,6 +186,10 @@ pub(crate) struct QueuedFollowUp {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub attachments: Vec<tidebreak_core::ImageRef>,
     pub trigger_delivery: Option<TriggerDeliveryClaim>,
+    /// The durable queue row this turn promotes, when the message came from
+    /// the queue rather than a live send. The turn is inserted under the
+    /// row's id, in the transaction that deletes the row.
+    pub queued_row: Option<Box<CodeQueuedTurn>>,
 }
 
 pub(crate) struct LiveSink {
@@ -493,27 +502,11 @@ pub(crate) fn spawn_session_worker(
     }
 }
 
-/// Park one follow-up. Returns `false` when the single slot is already taken.
-pub(crate) fn queue_follow_up(
-    handle: &WorkerHandle,
-    message: String,
-    model: Option<String>,
-    reasoning_effort: Option<ReasoningEffort>,
-    attachments: Vec<tidebreak_core::ImageRef>,
-) -> bool {
-    let mut pending = handle.queue.pending.lock().expect("code turn queue");
-    if pending.is_some() {
-        return false;
-    }
-    *pending = Some(QueuedFollowUp {
-        message,
-        model,
-        reasoning_effort,
-        attachments,
-        trigger_delivery: None,
-    });
+/// Tell the worker the durable queue changed: a row landed, the pause
+/// cleared, or send-now reordered the head. The worker re-reads the queue at
+/// its next drain.
+pub(crate) fn wake_queue(handle: &WorkerHandle) {
     handle.queue.wake.notify_one();
-    true
 }
 
 async fn run_worker(
@@ -569,6 +562,7 @@ async fn run_worker(
                             reasoning_effort,
                             attachments,
                             trigger_delivery,
+                            queued_row: None,
                         },
                     )
                     .await;
@@ -681,7 +675,9 @@ async fn await_worktree_turn<'a>(
             guard = worktree_turn.lock() => return Some(guard),
             command = commands.recv() => match command {
                 // Stopping something that has not started needs no engine
-                // call: dropping the turn here is the stop.
+                // call: declining to start is the stop. A queued row is not
+                // consumed by this — it stays in the durable queue, and the
+                // next wake reconsiders it.
                 Some(WorkerCommand::Interrupt { reply }) => {
                     let _ = reply.send(Ok(()));
                     return None;
@@ -804,6 +800,16 @@ async fn set_permission_mode(
     }
 }
 
+/// Run every promotable queued row, oldest first (decision 65).
+///
+/// Each round snapshots the durable FIFO head and drives it as a turn;
+/// [`promote_queued_turn`] deletes the row and inserts the turn together, so
+/// an edit, reorder, or retraction that lands after the snapshot surfaces as
+/// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings
+/// resolve at promotion: the turn runs under the session's model and effort
+/// as they are now, not as they were at enqueue — same contract as the chat
+/// queue. A pause holds the whole drain; the resume, the next enqueue, or
+/// send-now wakes the worker again.
 async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
@@ -813,9 +819,40 @@ async fn drain_queued(
     commands: &mut mpsc::Receiver<WorkerCommand>,
 ) {
     loop {
-        let next = queue.pending.lock().expect("code turn queue").take();
-        let Some(follow_up) = next else {
-            break;
+        if session_was_ended(&sink.db, session).await {
+            return;
+        }
+        match queue_paused(&sink.db, session.id).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    session = %session.id,
+                    error = %error,
+                    "could not read the queue pause state"
+                );
+                return;
+            }
+        }
+        let head = match queued_turn_head(&sink.db, &session.owner, session.id).await {
+            Ok(Some(head)) => head,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    session = %session.id,
+                    error = %error,
+                    "could not read the queued turns"
+                );
+                return;
+            }
+        };
+        let follow_up = QueuedFollowUp {
+            message: head.message.clone(),
+            model: session.model.clone(),
+            reasoning_effort: session.reasoning_effort,
+            attachments: head.attachments.clone(),
+            trigger_delivery: None,
+            queued_row: Some(Box::new(head.clone())),
         };
         let result = drive_turn(
             session,
@@ -830,35 +867,59 @@ async fn drain_queued(
             follow_up,
         )
         .await;
-        if let Err(WorkerError::Failed(detail)) = result {
-            warn!(
-                session = %session.id,
-                error = %detail,
-                "a queued code turn could not start"
-            );
-            let _ = persist_and_publish(
-                &sink.db,
-                &sink.bus,
-                &session.owner,
-                session.id,
-                session.spawn_epoch,
-                CodeEvent::HarnessNotice {
-                    level: HarnessNoticeLevel::Error,
-                    message: format!("The queued turn could not start: {detail}"),
-                },
-            )
-            .await;
-            if session.lifecycle != CodeSessionLifecycle::Fenced {
-                super::attention::replace_attention(
-                    session,
-                    Attention::needs_you(
-                        "the queued turn could not start",
-                        AttentionSource::Lifecycle,
-                    ),
-                    false,
+        match result {
+            Ok(_) => {}
+            // The row moved beneath the snapshot; the next read is current.
+            Err(WorkerError::QueuedTurnStale) => {}
+            Err(WorkerError::Failed(detail)) => {
+                warn!(
+                    session = %session.id,
+                    error = %detail,
+                    "a queued code turn could not start"
                 );
-                let _ = super::attention::persist_session(&sink.db, &sink.bus, session).await;
+                // Drop the row rather than retry it: the failure is almost
+                // always the row's own (a dead attachment blob), and a retry
+                // loop would burn the worker. The promote transaction already
+                // removed it when the failure came later; this covers the
+                // earlier failures. Chat drops unpromotable rows the same way.
+                if let Err(error) =
+                    delete_queued_turn(&sink.db, &session.owner, session.id, head.id).await
+                {
+                    warn!(
+                        session = %session.id,
+                        error = %error,
+                        "could not drop the failed queued turn"
+                    );
+                    return;
+                }
+                let _ = persist_and_publish(
+                    &sink.db,
+                    &sink.bus,
+                    &session.owner,
+                    session.id,
+                    session.spawn_epoch,
+                    CodeEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Error,
+                        message: format!("The queued turn could not start: {detail}"),
+                    },
+                )
+                .await;
+                if session.lifecycle != CodeSessionLifecycle::Fenced {
+                    super::attention::replace_attention(
+                        session,
+                        Attention::needs_you(
+                            "the queued turn could not start",
+                            AttentionSource::Lifecycle,
+                        ),
+                        false,
+                    );
+                    let _ = super::attention::persist_session(&sink.db, &sink.bus, session).await;
+                }
             }
+            // Stopped before it started, the session ended, or the engine
+            // needs a relaunch. The rows stay put — retracting them is the
+            // reader's call, and the next wake retries.
+            Err(_) => return,
         }
     }
 }
@@ -929,6 +990,7 @@ async fn drive_turn_inner(
         reasoning_effort,
         attachments,
         trigger_delivery,
+        queued_row,
     }: QueuedFollowUp,
 ) -> Result<CodeTurn, WorkerError> {
     let db = &sink.db;
@@ -983,7 +1045,12 @@ async fn drive_turn_inner(
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
     let mut turn = CodeTurn {
-        id: CodeTurnId::new(),
+        // A promoted queue row already carries the turn's id: inserting under
+        // it is what lets the row deletion and the turn insertion commit as
+        // one write (decision 65).
+        id: queued_row
+            .as_ref()
+            .map_or_else(CodeTurnId::new, |row| row.id),
         session_id: session.id,
         ordinal,
         status: CodeTurnStatus::Running,
@@ -1038,6 +1105,16 @@ async fn drive_turn_inner(
         .map_err(|err| WorkerError::Failed(err.to_string()))?
         {
             return Err(WorkerError::TriggerDeliveryAccepted);
+        }
+    } else if let Some(row) = queued_row {
+        // Deletes the row and inserts the turn together; `false` means the
+        // row was edited, reordered, or retracted after the drain snapshot,
+        // and nothing was written.
+        if !promote_queued_turn(db, &session.owner, &row, &turn)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+        {
+            return Err(WorkerError::QueuedTurnStale);
         }
     } else {
         insert_turn(db, &session.owner, &turn)

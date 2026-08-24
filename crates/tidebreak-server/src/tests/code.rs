@@ -1327,6 +1327,7 @@ async fn wait_for_open_turn(runtime: &CodeRuntime, session_id: CodeSessionId) ->
 async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     // Claude Code advertises mid_turn_steering: Unknown. Queue-default must
     // still accept the follow-up; it must not 409 as if this were a steer.
+    // The delay keeps the first turn open across the queue CRUD below.
     let (router, token, runtime, dir) = code_app_with(
         ScriptedAdapter::new(vec![
             HarnessEvent::TurnStarted,
@@ -1337,7 +1338,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
                 usage: Default::default(),
             },
         ])
-        .with_delay(Duration::from_millis(40))
+        .with_delay(Duration::from_millis(80))
         .with_steering(CapLevel::Unknown),
     )
     .await;
@@ -1412,22 +1413,69 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     );
     let follow_body: serde_json::Value = follow.json().await.unwrap();
     assert_eq!(follow_body["message"], "follow-up");
-    assert_eq!(follow_body["position"], 1);
+    assert_eq!(follow_body["position"], 0);
     assert!(
-        follow_body.get("id").is_none() && follow_body.get("status").is_none(),
-        "queued follow-up must not mint a fake turn id: {follow_body}"
+        follow_body.get("status").is_none(),
+        "a queue receipt is a row, not a turn: {follow_body}"
     );
+    let follow_id = follow_body["id"]
+        .as_str()
+        .expect("a queued row is addressable")
+        .to_owned();
 
-    let overflow = client
+    // Depth is no longer one (decision 65): a second mid-turn send parks
+    // behind the first instead of refusing with queue_full.
+    let second = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "too many" }))
+        .json(&serde_json::json!({ "message": "second follow-up" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(overflow.status(), reqwest::StatusCode::CONFLICT);
-    let overflow_body: serde_json::Value = overflow.json().await.unwrap();
-    assert_eq!(overflow_body["kind"], "queue_full");
+    assert_eq!(second.status(), reqwest::StatusCode::ACCEPTED);
+    let second_body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(second_body["position"], 1);
+    let second_id = second_body["id"].as_str().unwrap().to_owned();
+
+    // The queue is durable and addressable while the live turn runs: list,
+    // edit, and retract are real routes, exactly as on a chat.
+    let listed: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}/queued"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["paused"], false);
+    let rows = listed["queued"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"].as_str().unwrap(), follow_id);
+
+    let edited: serde_json::Value = client
+        .patch(format!(
+            "http://{addr}/code/sessions/{session_id}/queued/{second_id}"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "second follow-up, edited" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(edited["message"], "second follow-up, edited");
+
+    let removed = client
+        .delete(format!(
+            "http://{addr}/code/sessions/{session_id}/queued/{second_id}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), reqwest::StatusCode::NO_CONTENT);
 
     assert_eq!(first.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
 
@@ -1451,6 +1499,11 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
                     turns[1].started_at >= first_end,
                     "queued turn must start after the live turn ends"
                 );
+                assert_eq!(
+                    turns[1].id.to_string(),
+                    follow_id,
+                    "the queue row's id is the promoted turn's id"
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1458,6 +1511,16 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
     })
     .await
     .expect("queued follow-up did not run after the current turn completed");
+
+    // The retracted second row must never have become a turn.
+    let turns = tidebreak_core::db::code::list_turns(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        parsed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turns.len(), 2, "a retracted queued message must not run");
 }
 
 #[tokio::test]
@@ -2399,6 +2462,22 @@ async fn interrupting_a_queued_turn_stops_it_before_it_reaches_the_worktree() {
         turns.is_empty(),
         "a stopped queued turn must never reach the worktree: {turns:?}"
     );
+    // Stop declines to start the turn; it does not delete the message. The
+    // row stays in the durable queue, where the tray can retract or release
+    // it (decision 65).
+    let rows = tidebreak_core::db::code::list_queued_turns(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        second_parsed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the stopped message must stay queued, not vanish"
+    );
+    assert_eq!(rows[0].message, "queued");
 }
 
 #[tokio::test]

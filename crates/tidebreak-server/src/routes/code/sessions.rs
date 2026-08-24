@@ -12,9 +12,10 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::types::{
-    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuedCodeTurn,
-    SequencedCodeEventFrame, SetAttentionBody, SetFastModeBody, SetPermissionModeBody,
-    SetReasoningEffortBody, SteerBody, SubmitTurnBody,
+    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuePausedBody,
+    QueuedCodeTurn, QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame,
+    SetAttentionBody, SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody,
+    SubmitTurnBody,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
@@ -88,16 +89,88 @@ pub async fn submit_turn(
         SubmitTurnOutcome::Ran(turn) => {
             Ok((StatusCode::ACCEPTED, Json(CodeTurnSnapshot::from(*turn))).into_response())
         }
-        SubmitTurnOutcome::Queued => Ok((
-            StatusCode::ACCEPTED,
-            Json(QueuedCodeTurn {
-                session_id: id,
-                message,
-                position: 1,
-            }),
-        )
-            .into_response()),
+        SubmitTurnOutcome::Queued(row) => {
+            Ok((StatusCode::ACCEPTED, Json(QueuedCodeTurn::from(*row))).into_response())
+        }
+        // Trigger submits never come through this route; the enum is shared
+        // with the trigger sweep, which is the only caller that can see this.
+        SubmitTurnOutcome::AlreadyDelivered => Err(ServerError::internal(
+            "a user turn reported a trigger delivery outcome",
+        )),
     }
+}
+
+/// `GET /code/sessions/{id}/queued` — the session's queued messages, FIFO,
+/// plus whether promotion is paused.
+pub async fn list_queued_turns(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+) -> Result<Json<QueuedCodeTurnsSnapshot>, ServerError> {
+    let (queued, paused) = code.list_queued_turns(id).await?;
+    Ok(Json(QueuedCodeTurnsSnapshot {
+        queued: queued.into_iter().map(QueuedCodeTurn::from).collect(),
+        paused,
+    }))
+}
+
+/// `PATCH /code/sessions/{id}/queued/{queued_id}` — edit or reorder one
+/// queued message.
+pub async fn patch_queued_turn(
+    code: ScopedCode,
+    Path((id, queued_id)): Path<(CodeSessionId, tidebreak_core::CodeTurnId)>,
+    Json(body): Json<QueuedCodeTurnUpdate>,
+) -> Result<Json<QueuedCodeTurn>, ServerError> {
+    if let Some(message) = body.message.as_deref() {
+        if message.trim().is_empty() || message.contains('\0') {
+            return Err(ServerError::bad_request(
+                "message must be non-empty and contain no NUL characters",
+            ));
+        }
+    }
+    let updated = code
+        .update_queued_turn(id, queued_id, body.message.as_deref(), body.position)
+        .await?
+        .ok_or_else(|| ServerError::not_found(format!("queued turn {queued_id} not found")))?;
+    Ok(Json(QueuedCodeTurn::from(updated)))
+}
+
+/// `DELETE /code/sessions/{id}/queued/{queued_id}` — retract one queued
+/// message.
+pub async fn delete_queued_turn(
+    code: ScopedCode,
+    Path((id, queued_id)): Path<(CodeSessionId, tidebreak_core::CodeTurnId)>,
+) -> Result<StatusCode, ServerError> {
+    if code.delete_queued_turn(id, queued_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ServerError::not_found(format!(
+            "queued turn {queued_id} not found"
+        )))
+    }
+}
+
+/// `PUT /code/sessions/{id}/queue-paused` — pause or release promotion for
+/// this session; queued rows stay put while paused.
+pub async fn put_queue_paused(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+    Json(body): Json<QueuePausedBody>,
+) -> Result<StatusCode, ServerError> {
+    code.set_queue_paused(id, body.paused).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /code/sessions/{id}/queued/send-now` — clear this session's pause
+/// and wake the worker so the head row starts.
+///
+/// The tray composes the full gesture client-side exactly as chat's does:
+/// pause, move the row first, stop the live turn, then this.
+pub async fn post_queue_send_now(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+) -> Result<StatusCode, ServerError> {
+    code.send_queued_now(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /code/sessions/{id}/fork` — write this session's handoff into

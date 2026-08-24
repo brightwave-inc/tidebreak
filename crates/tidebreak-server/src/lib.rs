@@ -953,6 +953,23 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::submit_turn).get(routes::code::list_session_turns),
         )
         .route(
+            "/code/sessions/{id}/queued",
+            get(routes::code::list_queued_turns),
+        )
+        .route(
+            "/code/sessions/{id}/queued/{queued_id}",
+            axum::routing::patch(routes::code::patch_queued_turn)
+                .delete(routes::code::delete_queued_turn),
+        )
+        .route(
+            "/code/sessions/{id}/queue-paused",
+            axum::routing::put(routes::code::put_queue_paused),
+        )
+        .route(
+            "/code/sessions/{id}/queued/send-now",
+            post(routes::code::post_queue_send_now),
+        )
+        .route(
             "/code/sessions/{id}/attachments/images/{blob_id}",
             get(routes::code::get_session_image),
         )
