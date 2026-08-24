@@ -209,14 +209,24 @@ it.each([
     true,
   ],
   [
-    "a blocked requirement",
+    "a required review approval",
     {
       ...OPEN_PR,
       mergeable: "mergeable",
       merge_state_status: "blocked",
       review_decision: "review_required",
     },
-    "A review or repository requirement is still blocking a direct merge.",
+    "The pull request needs a review approval before merging directly.",
+    true,
+  ],
+  [
+    "a blocked repository requirement",
+    {
+      ...OPEN_PR,
+      mergeable: "mergeable",
+      merge_state_status: "blocked",
+    },
+    "A repository requirement is still blocking a direct merge.",
     true,
   ],
   [

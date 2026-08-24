@@ -1308,6 +1308,11 @@ impl CodeRuntime {
         let outcome = gh::push_branch(&worktree, &workspace.branch_name, credential.as_ref())
             .await
             .map_err(map_gh)?;
+        // The digest cached before the push describes the old head. Drop it
+        // and the delivery lists so the next reader sees checks pending on
+        // the new head rather than the pre-push snapshot (decision 66).
+        self.pr_cache.invalidate(id);
+        self.delivery_cache.invalidate();
         // Best-effort contributed fact (decision 62): a user push to a branch
         // that is a pull request's head is the same act the detector mints
         // for. Failures are silent; the reconcile sweep corrects. On a hosted
@@ -1539,6 +1544,56 @@ impl CodeRuntime {
         self.workspace_pr(owner, id).await
     }
 
+    /// After a pull-request state change on the delivery surface, make every
+    /// live workspace holding that pull request read fresh: drop each one's
+    /// digest cache entry and take the normal status path, which persists
+    /// the digest and broadcasts the change (decision 66). Matching is by
+    /// the digest's own URL, so a same-numbered pull request in another
+    /// repository stays untouched. Detached and best-effort: the action's
+    /// response never waits on it, and a failed re-read leaves the next
+    /// sweep to correct.
+    pub(crate) fn refresh_workspaces_for_pull_request(
+        self: &Arc<Self>,
+        owner: &OwnerId,
+        pull_request_url: &str,
+    ) {
+        let runtime = Arc::clone(self);
+        let owner = owner.clone();
+        let url = pull_request_url.to_owned();
+        tokio::spawn(async move {
+            let workspaces = match list_workspaces(&runtime.db, &owner, None).await {
+                Ok(workspaces) => workspaces,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "code-mode: could not list workspaces after a delivery action"
+                    );
+                    return;
+                }
+            };
+            for workspace in workspaces {
+                if workspace.status != CodeWorkspaceStatus::Active {
+                    continue;
+                }
+                let holds = workspace
+                    .pr
+                    .as_ref()
+                    .and_then(|pr| pr.url.as_deref())
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&url));
+                if !holds {
+                    continue;
+                }
+                if let Err(err) = runtime.refresh_workspace_pr(&owner, workspace.id).await {
+                    tracing::warn!(
+                        workspace = %workspace.id,
+                        error = %err.message(),
+                        "code-mode: workspace digest refresh after a delivery action failed"
+                    );
+                }
+            }
+        });
+    }
+
     pub(crate) async fn workspace_pr_comments(
         &self,
         owner: &OwnerId,
@@ -1605,6 +1660,9 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
+        // The merge helper already dropped this workspace's digest cache
+        // entry; the delivery lists hold the pre-merge row (decision 66).
+        self.delivery_cache.invalidate();
         self.workspace_pr(owner, id).await
     }
 
@@ -1627,6 +1685,7 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
+        self.delivery_cache.invalidate();
         self.workspace_pr(owner, id).await
     }
 
@@ -1682,6 +1741,7 @@ impl CodeRuntime {
                 (digest, None)
             }
         };
+        self.delivery_cache.invalidate();
         let created_number = digest.number;
         workspace.pr = Some(digest);
         self.save_workspace(&workspace).await?;

@@ -186,6 +186,42 @@ describe("workspaceWorkflowModel", () => {
     expect(model.secondary).not.toContain("merge");
   });
 
+  it("shows the pending count while blocked, then names the approval", () => {
+    // The decision-66 screenshot: GitHub says blocked whenever required
+    // checks are still running, so the header shows the pending count; once
+    // the checks are green, the missing review approval is named in those
+    // words instead of a lifelong "Blocked".
+    const running = workspaceWorkflowModel({
+      ...CLEAN,
+      pr: pr({
+        url: "https://github.com/acme/app/pull/41",
+        merge_state_status: "blocked",
+        review_decision: "review_required",
+        auto_merge_enabled: true,
+        checks: [
+          { name: "ci / rust", bucket: "pending" },
+          { name: "ci / ui", bucket: "pending" },
+          { name: "lint", bucket: "pass" },
+        ],
+      }),
+    });
+    expect(running.stage).toBe("pending");
+    expect(running.summary).toBe("#41 · 2 pending");
+
+    const green = workspaceWorkflowModel({
+      ...CLEAN,
+      pr: pr({
+        url: "https://github.com/acme/app/pull/41",
+        merge_state_status: "blocked",
+        review_decision: "review_required",
+        checks: [{ name: "ci / rust", bucket: "pass" }],
+      }),
+    });
+    expect(green.stage).toBe("needs_approval");
+    expect(green.summary).toBe("#41 · Needs approval");
+    expect(green.primary).toBe("open_pr");
+  });
+
   it("lets a loaded no-PR snapshot clear a stale fallback", () => {
     const model = workspaceWorkflowModel(
       CLEAN,

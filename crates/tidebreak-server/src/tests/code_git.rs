@@ -932,3 +932,126 @@ async fn a_hosted_pull_request_create_fails_closed_with_the_gateway_refusal() {
     assert_eq!(kind, "git_forge_refused");
     assert!(message.contains("connect your GitHub account"), "{message}");
 }
+
+/// The moments after a push are when the reader most wants "checks pending
+/// on the new head", and the digest cache used to keep serving the pre-push
+/// snapshot for its whole TTL (decision 66).
+#[tokio::test]
+async fn a_push_drops_the_cached_pull_request_digest() {
+    let (router, token, runtime, dir) = code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "digest freshness").await;
+    let id = json_id(&workspace);
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    // A gh shim that answers `pr view` from a file, so the test moves
+    // GitHub's state without waiting out any cache.
+    let shim_dir = tempfile::TempDir::new().unwrap();
+    let answer = shim_dir.path().join("view.json");
+    std::fs::write(
+        &answer,
+        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"aaaaaaaa"}"#,
+    )
+    .unwrap();
+    write_executable(
+        &shim_dir.path().join("gh"),
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  cat {answer}
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = checks ]; then
+  printf 'lint\tpass\t1s\thttps://example.test/lint\n'
+  exit 0
+fi
+exit 3
+"#,
+            answer = answer.display()
+        ),
+    );
+    runtime.set_gh_search_path(Some(shim_dir.path().display().to_string()));
+
+    std::fs::write(path.join("extra.txt"), "one\n").unwrap();
+    let committed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(committed.status(), reqwest::StatusCode::OK);
+    let pushed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/push"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pushed.status(), reqwest::StatusCode::OK);
+
+    let first = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(first["pr"]["head_sha"], "aaaaaaaa");
+
+    // GitHub's answer moves, as it does when new commits land on the head.
+    std::fs::write(
+        &answer,
+        r#"{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefOid":"bbbbbbbb"}"#,
+    )
+    .unwrap();
+
+    // Within the TTL the cache still serves the old head...
+    let cached = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(cached["pr"]["head_sha"], "aaaaaaaa");
+
+    // ...and a push drops it, so the next read carries the new head.
+    std::fs::write(path.join("extra.txt"), "two\n").unwrap();
+    let committed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(committed.status(), reqwest::StatusCode::OK);
+    let pushed = client
+        .post(format!("http://{addr}/code/workspaces/{id}/git/push"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pushed.status(), reqwest::StatusCode::OK);
+
+    let fresh = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(fresh["pr"]["head_sha"], "bbbbbbbb");
+}

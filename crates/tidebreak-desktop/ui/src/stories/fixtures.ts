@@ -225,13 +225,26 @@ export const blockedWatchPrGit: CodeWorkspacePrSnapshot = {
   ...openPrGit,
   pr: {
     ...openPrGit.pr!,
+    checks_summary: "9 passing, 0 pending, 0 failing",
     review_decision: "review_required",
   },
   watch: {
     ...watchBase,
     state: "blocked",
-    detail: "a review or repository requirement is outstanding",
+    detail: "the pull request needs a review approval",
     cycles: 1,
+  },
+};
+
+/** Checks are green and GitHub still wants a review approval (decision 66). */
+export const needsApprovalPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  pr: {
+    ...openPrGit.pr!,
+    checks_summary: "9 passing, 0 pending, 0 failing",
+    review_decision: "review_required",
+    mergeable: "mergeable",
+    merge_state_status: "blocked",
   },
 };
 

@@ -127,6 +127,38 @@ describe("prWorkflowStatus", () => {
     );
   });
 
+  it("ranks pending checks above the blocked merge state", () => {
+    // The motivating mismatch (decision 66): GitHub reports the merge state
+    // as blocked while required checks run, and ranking blocked above
+    // pending made every open pull request read "Blocked" for its whole
+    // life. The reader wants the pending count, auto-merge armed or not.
+    const digest = pr({
+      merge_state_status: "blocked",
+      review_decision: "review_required",
+      auto_merge_enabled: true,
+      checks: [
+        { name: "ci / rust", bucket: "pass" },
+        { name: "ci / ui", bucket: "pending" },
+        { name: "ci / release", bucket: "pending" },
+      ],
+    });
+    expect(prWorkflowStatus(digest).state).toBe("pending");
+  });
+
+  it("names a required review approval once checks are green", () => {
+    const digest = pr({
+      merge_state_status: "blocked",
+      review_decision: "review_required",
+      checks: [{ name: "ci / rust", bucket: "pass" }],
+    });
+    expect(prWorkflowStatus(digest).state).toBe("needs_approval");
+    // Without the review requirement the same merge state stays a generic
+    // block.
+    expect(
+      prWorkflowStatus({ ...digest, review_decision: undefined }).state,
+    ).toBe("blocked");
+  });
+
   it("keeps incomplete host data in a checking state", () => {
     expect(prWorkflowStatus(pr({})).state).toBe("checking");
     expect(
