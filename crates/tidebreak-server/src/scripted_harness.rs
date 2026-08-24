@@ -96,6 +96,13 @@ pub(crate) struct ScriptedAdapter {
     /// an attachment travelled rather than that it was accepted.
     inputs: Arc<std::sync::Mutex<Vec<ScriptedTurnInput>>>,
     child_pid: Option<i64>,
+    /// Whether the child outlives its turn, the way the session-long engines
+    /// do. Off by default, so the worker's idle park timer (decision 0064)
+    /// stays disarmed in every test that does not opt in.
+    session_long_child: bool,
+    /// How many times a session of this adapter was parked, shared with the
+    /// sessions so a test can observe the worker's idle reclaim.
+    parks: Arc<AtomicU64>,
     unrecognized_per_turn: u64,
     silent_interrupt: bool,
     lost_resume: Option<String>,
@@ -127,6 +134,8 @@ impl ScriptedAdapter {
             modes: Arc::new(std::sync::Mutex::new(Vec::new())),
             inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
             child_pid: None,
+            session_long_child: false,
+            parks: Arc::new(AtomicU64::new(0)),
             unrecognized_per_turn: 0,
             silent_interrupt: false,
             lost_resume: None,
@@ -258,6 +267,18 @@ impl ScriptedAdapter {
         self
     }
 
+    /// Keep the child pid across turns, the way session-long engines do, so
+    /// the worker's idle park timer (decision 0064) arms for this adapter.
+    pub(crate) fn with_session_long_child(mut self) -> Self {
+        self.session_long_child = true;
+        self
+    }
+
+    /// How many times a session of this adapter has been parked.
+    pub(crate) fn park_count(&self) -> u64 {
+        self.parks.load(Ordering::SeqCst)
+    }
+
     /// Model an engine that asks for an approval and then stops waiting for
     /// one, the way Claude Code's own 60-second permission-prompt timeout
     /// does: the script plays straight past the request.
@@ -339,6 +360,8 @@ impl HarnessAdapter for ScriptedAdapter {
             steering_delay: self.steering_delay,
             steering_rejection: self.steering_rejection.clone(),
             child_pid: self.child_pid,
+            session_long_child: self.session_long_child,
+            parks: self.parks.clone(),
             silent_interrupt: self.silent_interrupt,
             pid: ChildPid::new(),
             lost_resume: self.lost_resume.clone(),
@@ -364,6 +387,10 @@ struct ScriptedSession {
     steering_delay: Duration,
     steering_rejection: Option<String>,
     child_pid: Option<i64>,
+    /// Whether the pid survives the turn (a session-long child).
+    session_long_child: bool,
+    /// Park calls observed, shared with the adapter.
+    parks: Arc<AtomicU64>,
     silent_interrupt: bool,
     pid: ChildPid,
     lost_resume: Option<String>,
@@ -467,11 +494,15 @@ impl HarnessSession for ScriptedSession {
         self.unrecognized
             .fetch_add(self.unrecognized_per_turn, Ordering::SeqCst);
         // A per-turn child exists only while the turn runs; publish it the way
-        // a real one does so the worker records the pid mid-turn.
+        // a real one does so the worker records the pid mid-turn. A
+        // session-long child keeps its pid, which is what arms the worker's
+        // idle park timer (decision 0064).
         self.pid
             .set(self.child_pid.map(|pid| pid as u32).filter(|pid| *pid != 0));
         let outcome = self.play_script().await;
-        self.pid.clear();
+        if !self.session_long_child {
+            self.pid.clear();
+        }
         Ok(outcome)
     }
 
@@ -531,6 +562,14 @@ impl HarnessSession for ScriptedSession {
 
     fn unrecognized_events(&self) -> u64 {
         self.unrecognized.load(Ordering::SeqCst)
+    }
+
+    /// Record the park and drop the pid, the observable half of what a real
+    /// adapter's park does (decision 0064).
+    async fn park(&self) -> Result<(), HarnessError> {
+        self.parks.fetch_add(1, Ordering::SeqCst);
+        self.pid.clear();
+        Ok(())
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {

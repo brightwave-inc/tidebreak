@@ -247,6 +247,12 @@ Process models the trait absorbs:
   [`0038`](decisions/0038-auto-is-a-declared-capability.md)); capabilities
   honestly `Unsupported` or `Unknown` where its surface does not carry them.
 
+Session-long children spawn lazily on the first turn, and an idle session's
+child is parked — stopped, then respawned and resumed by the next turn
+([`0064`](decisions/0064-idle-engine-children-are-parked.md)). Resident
+engine processes therefore track sessions doing work, not sessions that
+exist.
+
 All children are pipe-based `tokio::process` with `kill_on_drop`, the
 user's environment minus Tidebreak internals
 ([`0034`](decisions/0034-harness-discovery-credentials.md)), and bounded

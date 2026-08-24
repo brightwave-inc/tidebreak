@@ -32,13 +32,16 @@ const OPENCODE_CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
 /// MCP server name used in the OpenCode config for the browser tool bridge.
 const BROWSER_MCP_SERVER: &str = "tb-browser";
 
-/// Live opencode session: one `serve` child for the session lifetime.
+/// Live opencode session: one `serve` child, spawned on the first turn and
+/// replaced whenever a turn finds it parked or dead (decision 0064).
 pub struct OpencodeSession {
     spec: SessionSpec,
     resume_ref: Mutex<Option<String>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
     child_pid: AtomicU32,
-    base_url: String,
+    /// Loopback base of the current child. Each spawn binds a fresh port, so
+    /// this is per-child state; empty until the first spawn.
+    base_url: Mutex<String>,
     client: reqwest::Client,
     parser: Mutex<OpencodeStreamParser>,
     events: AsyncMutex<Option<mpsc::UnboundedReceiver<String>>>,
@@ -52,11 +55,15 @@ impl OpencodeSession {
             resume_ref: Mutex::new(resume_ref),
             child: AsyncMutex::new(None),
             child_pid: AtomicU32::new(0),
-            base_url: String::new(),
+            base_url: Mutex::new(String::new()),
             client: reqwest::Client::new(),
             parser: Mutex::new(OpencodeStreamParser::new()),
             events: AsyncMutex::new(None),
         }
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url.lock().expect("opencode base url").clone()
     }
 }
 
@@ -354,59 +361,85 @@ fn pick_loopback_port() -> Result<u16, HarnessError> {
     Ok(listener.local_addr()?.port())
 }
 
-/// Spawn the serve child, wait for `/global/health`, create or resume a session.
-pub(super) async fn attach(spec: SessionSpec) -> Result<OpencodeSession, HarnessError> {
-    let mut session = OpencodeSession::new(spec);
-    let port = pick_loopback_port()?;
-
-    let plan = compose_serve_plan(
-        &session.spec.binary,
-        &session.spec.extra_argv,
-        &session.spec.worktree,
-        &session.spec.env,
-        &session.spec.extra_env,
-        port,
-        session.spec.browser.as_ref(),
-    )?;
-    let mut command = Command::new(&plan.argv[0]);
-    command
-        .args(&plan.argv[1..])
-        .current_dir(&plan.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_child_env_tokio(
-        &mut command,
-        session.spec.env.iter().cloned(),
-        &plan.env,
-        session.spec.browser.as_ref(),
-    );
-    let mut child = spawn_process_tree(&mut command)?;
-    let stdout = child
-        .take_stdout()
-        .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
-    let stderr = child
-        .take_stderr()
-        .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-    if let Some(pid) = child.id() {
-        session.child_pid.store(pid, Ordering::SeqCst);
-    }
-    *session.child.lock().await = Some(child);
-    tokio::spawn(async move {
-        let _ = drain_capped(stdout, MAX_STDERR_BYTES).await;
-    });
-    tokio::spawn(async move {
-        let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
-    });
-
-    session.base_url = format!("http://127.0.0.1:{port}");
-    session.wait_until_healthy().await?;
-    session.subscribe_events().await?;
-    session.open_or_resume_session().await?;
-    Ok(session)
-}
-
 impl OpencodeSession {
+    /// A live child, spawned and bootstrapped if there is none (decision
+    /// 0064).
+    ///
+    /// The fast path is a running child: nothing to do. Otherwise a parked or
+    /// dead child is replaced — spawn, `/global/health`, event subscription,
+    /// session create-or-resume — before the turn's own request goes out. The
+    /// child slot is held across the whole ensure, so two callers cannot race
+    /// two spawns.
+    pub(super) async fn ensure_child(&self) -> Result<(), HarnessError> {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+            *slot = None;
+            self.child_pid.store(0, Ordering::SeqCst);
+        }
+        let port = pick_loopback_port()?;
+        let plan = compose_serve_plan(
+            &self.spec.binary,
+            &self.spec.extra_argv,
+            &self.spec.worktree,
+            &self.spec.env,
+            &self.spec.extra_env,
+            port,
+            self.spec.browser.as_ref(),
+        )?;
+        let mut command = Command::new(&plan.argv[0]);
+        command
+            .args(&plan.argv[1..])
+            .current_dir(&plan.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        apply_child_env_tokio(
+            &mut command,
+            self.spec.env.iter().cloned(),
+            &plan.env,
+            self.spec.browser.as_ref(),
+        );
+        let mut child = spawn_process_tree(&mut command)?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
+        if let Some(pid) = child.id() {
+            self.child_pid.store(pid, Ordering::SeqCst);
+        }
+        *slot = Some(child);
+        tokio::spawn(async move {
+            let _ = drain_capped(stdout, MAX_STDERR_BYTES).await;
+        });
+        tokio::spawn(async move {
+            let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
+        });
+
+        *self.base_url.lock().expect("opencode base url") = format!("http://127.0.0.1:{port}");
+        let ready = async {
+            self.wait_until_healthy().await?;
+            self.subscribe_events().await?;
+            self.open_or_resume_session().await
+        };
+        if let Err(err) = ready.await {
+            // Leave nothing half-attached: the next ensure starts clean, and
+            // a fenced session does not keep a wedged server alive until it
+            // is reaped.
+            if let Some(mut child) = slot.take() {
+                let _ = child.terminate().await;
+            }
+            self.child_pid.store(0, Ordering::SeqCst);
+            *self.events.lock().await = None;
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn directory_query(&self) -> [(String, String); 1] {
         [(
             "directory".into(),
@@ -416,7 +449,7 @@ impl OpencodeSession {
 
     async fn wait_until_healthy(&self) -> Result<(), HarnessError> {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
-        let url = format!("{}/global/health", self.base_url);
+        let url = format!("{}/global/health", self.base_url());
         loop {
             if tokio::time::Instant::now() > deadline {
                 return Err(HarnessError::Other(
@@ -433,7 +466,7 @@ impl OpencodeSession {
     }
 
     async fn subscribe_events(&self) -> Result<(), HarnessError> {
-        let url = format!("{}/event", self.base_url);
+        let url = format!("{}/event", self.base_url());
         let response = self
             .client
             .get(&url)
@@ -476,7 +509,7 @@ impl OpencodeSession {
         let resume = self.resume_ref.lock().expect("opencode resume").clone();
         if let Some(resume) = resume {
             let path = format!("/session/{resume}");
-            let url = format!("{}{path}", self.base_url);
+            let url = format!("{}{path}", self.base_url());
             let query = self.directory_query();
             let (status, body) = self
                 .http("GET", &path, &url, None, Some(query.as_slice()))
@@ -497,7 +530,7 @@ impl OpencodeSession {
             return Ok(());
         }
         let path = "/session";
-        let url = format!("{}{path}", self.base_url);
+        let url = format!("{}{path}", self.base_url());
         let body = session_create_body(self.spec.permission_mode, self.spec.model.as_deref());
         let query = self.directory_query();
         let (status, parsed) = self
@@ -644,12 +677,13 @@ impl OpencodeSession {
 #[async_trait]
 impl HarnessSession for OpencodeSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        self.ensure_child().await?;
         let session_id = self.resume_ref.lock().expect("opencode resume").clone();
         let Some(session_id) = session_id else {
             return Err(HarnessError::Other("session has no resume ref".into()));
         };
         let path = format!("/session/{session_id}/prompt_async");
-        let url = format!("{}{path}", self.base_url);
+        let url = format!("{}{path}", self.base_url());
         let body = json!({
             "parts": [{ "type": "text", "text": input.text }]
         });
@@ -673,7 +707,7 @@ impl HarnessSession for OpencodeSession {
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
         let path = format!("/permission/{}/reply", approval.call_id);
-        let url = format!("{}{path}", self.base_url);
+        let url = format!("{}{path}", self.base_url());
         let body = match &decision {
             ApprovalDecision::Approve => json!({ "reply": "once" }),
             ApprovalDecision::Deny { feedback } => {
@@ -696,10 +730,15 @@ impl HarnessSession for OpencodeSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
+        if self.child_pid.load(Ordering::SeqCst) == 0 {
+            // No child means nothing is running: a stop aimed at a parked
+            // session must not cost it anything (decision 0064).
+            return Ok(());
+        }
         let session_id = self.resume_ref.lock().expect("opencode resume").clone();
         if let Some(session_id) = session_id {
             let path = format!("/session/{session_id}/abort");
-            let url = format!("{}{path}", self.base_url);
+            let url = format!("{}{path}", self.base_url());
             let query = self.directory_query();
             let result = self
                 .http("POST", &path, &url, None, Some(query.as_slice()))
@@ -734,6 +773,19 @@ impl HarnessSession for OpencodeSession {
         // One long-lived parser per session, so its own count is already
         // cumulative.
         self.parser.lock().expect("opencode parser").unrecognized()
+    }
+
+    /// Terminate the idle serve child (decision 0064). The engine session
+    /// stays on disk under the worktree's storage, and the next turn's ensure
+    /// respawns a server and reopens it.
+    async fn park(&self) -> Result<(), HarnessError> {
+        let mut slot = self.child.lock().await;
+        self.child_pid.store(0, Ordering::SeqCst);
+        *self.events.lock().await = None;
+        if let Some(mut child) = slot.take() {
+            let _ = child.terminate().await;
+        }
+        Ok(())
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
@@ -806,6 +858,42 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Discard;
+
+    #[async_trait]
+    impl crate::HarnessEventSink for Discard {
+        async fn emit(&self, _event: HarnessEvent) {}
+    }
+
+    fn unit_session() -> OpencodeSession {
+        OpencodeSession::new(SessionSpec {
+            worktree: std::path::PathBuf::from("."),
+            allowed_read_roots: Vec::new(),
+            permission_mode: PermissionMode::Auto,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            env: Vec::new(),
+            approval: None,
+            binary: std::path::PathBuf::from("opencode"),
+            sink: std::sync::Arc::new(Discard),
+            browser: None,
+        })
+    }
+
+    /// Decision 0064: parking and stopping a session with no child must be
+    /// free — no error, no spawn, nothing to clean up.
+    #[tokio::test]
+    async fn park_and_interrupt_without_a_child_are_no_ops() {
+        let session = unit_session();
+        session.park().await.unwrap();
+        session.interrupt().await.unwrap();
+        assert_eq!(session.child_pid(), None);
+    }
 
     #[test]
     fn serve_plan_is_clean() {
