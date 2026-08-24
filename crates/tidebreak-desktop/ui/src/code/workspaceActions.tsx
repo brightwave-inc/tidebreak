@@ -254,14 +254,6 @@ export async function archiveWorkspaceWithConfirm(options: {
   workspaceId: string;
   confirm: (options: ConfirmOptions) => Promise<boolean>;
 }): Promise<CodeWorkspaceSnapshot | null> {
-  const ok = await options.confirm({
-    title: "Archive this workspace?",
-    description:
-      "The worktree is removed. Commit, push, or create a pull request from the review sidebar first if you want to keep the work.",
-    confirmLabel: "Archive",
-    destructive: true,
-  });
-  if (!ok) return null;
   try {
     return await options.client.archiveCodeWorkspace(
       options.workspaceId,
