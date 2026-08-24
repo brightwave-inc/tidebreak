@@ -24,7 +24,8 @@ use tidebreak_core::db::code::{get_session, get_workspace, set_workspace_title_i
 use tidebreak_core::{CodeSessionId, CodeWorkspaceStatus, OwnerId, Result, WorkspaceId};
 
 use crate::chat_titling::{
-    derive_title_with_retries, head, MAX_TITLE_SOURCE_MESSAGE_BYTES, TITLE_TARGET_CHARS,
+    derive_text_with_retries, head, TitleProposal, MAX_TITLE_SOURCE_MESSAGE_BYTES,
+    TITLE_TARGET_CHARS,
 };
 use crate::state::AppState;
 
@@ -140,7 +141,7 @@ async fn derive_workspace_title(
         return Ok(Outcome::NotApplicable);
     };
     let provider = state.resolver.resolve_for(Some(owner)).await;
-    let title = derive_title_with_retries(
+    let title = derive_text_with_retries::<TitleProposal>(
         provider.as_ref(),
         &utility,
         &system_prompt(),

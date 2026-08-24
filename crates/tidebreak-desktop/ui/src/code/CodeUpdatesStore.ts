@@ -325,6 +325,7 @@ export function noticeToAction(
         ...(notice.subagents !== undefined
           ? { subagents: notice.subagents }
           : {}),
+        ...(notice.recap !== undefined ? { recap: notice.recap } : {}),
       },
     };
   }

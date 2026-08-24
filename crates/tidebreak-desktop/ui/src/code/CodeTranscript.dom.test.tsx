@@ -657,4 +657,27 @@ describe("CodeTranscript", () => {
       screen.getByText("Now check what identity we store for the child."),
     ).toBeInTheDocument();
   });
+  it("shows the session recap on the newest turn boundary only", () => {
+    const boundary = (id: string, turnId: string): CodeTranscriptItem => ({
+      kind: "turn_boundary",
+      id,
+      turnId,
+      status: "completed",
+      durationMs: 4_000,
+      usage: USAGE,
+      error: null,
+      diffstat: null,
+    });
+    const recap = "Retry test passes. Next: fold the backoff into refresh.";
+    render(
+      <CodeTranscript
+        items={[boundary("b1", "t1"), boundary("b2", "t2")]}
+        recap={recap}
+      />,
+    );
+
+    // One copy, not one per turn: the line describes where the session stands,
+    // so an older boundary carrying it would be stale the moment it rendered.
+    expect(screen.getAllByText(recap)).toHaveLength(1);
+  });
 });

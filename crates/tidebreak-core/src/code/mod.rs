@@ -996,6 +996,11 @@ pub struct CodeTurn {
     /// Token usage as reported by the engine.
     pub usage: Option<CodeUsage>,
     /// Asynchronous narrative; never blocks lifecycle.
+    ///
+    /// Derived after the turn ends and written only by
+    /// [`crate::db::code::set_turn_narrative`]. `save_turn` deliberately leaves
+    /// the column alone, because its callers hold a snapshot taken before this
+    /// existed.
     pub narrative: Option<String>,
     /// Start time.
     pub started_at: chrono::DateTime<chrono::Utc>,

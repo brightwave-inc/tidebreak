@@ -206,6 +206,9 @@ pub(crate) struct LiveSink {
     /// read-modify-writes the row per event. Persisted through the targeted
     /// [`set_session_subagents`] write on each boundary.
     subagents: std::sync::Mutex<Vec<CodeSubagentSummary>>,
+    /// Derives the turn's recap once it completes. `None` in headless
+    /// deployments and tests that install none, which simply have no recaps.
+    recap: Option<Arc<dyn super::recap::TurnRecap>>,
 }
 
 impl LiveSink {
@@ -410,7 +413,14 @@ impl HarnessEventSink for LiveSink {
             CodeEvent::ToolCompleted { call_id, .. } => Some(call_id.clone()),
             _ => None,
         };
-        match persist_and_publish(
+        // A completed turn is the moment its recap has everything it needs and
+        // the reader has most likely stopped watching. Started below rather
+        // than here, so a journal write that was dropped never produces a line
+        // describing a turn the database does not agree finished.
+        let completed_turn = matches!(code_event, CodeEvent::TurnCompleted { .. })
+            .then_some(turn_id)
+            .flatten();
+        let journaled = match persist_and_publish(
             &self.db,
             &self.bus,
             &self.owner,
@@ -420,17 +430,19 @@ impl HarnessEventSink for LiveSink {
         )
         .await
         {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(CodeJournalError::StaleSpawnEpoch { .. }) => {
                 warn!(
                     session = %self.session_id,
                     "dropping event from a superseded code-session worker"
                 );
+                false
             }
             Err(err) => {
                 warn!(session = %self.session_id, error = %err, "failed to journal engine event");
+                false
             }
-        }
+        };
         if let Some(call_id) = completed_call {
             super::approval_sweep::abandon_for_call(
                 &self.db,
@@ -441,6 +453,10 @@ impl HarnessEventSink for LiveSink {
                 &call_id,
             )
             .await;
+        }
+        if let (true, Some(turn_id), Some(recap)) = (journaled, completed_turn, self.recap.as_ref())
+        {
+            recap.spawn(self.owner.clone(), self.session_id, turn_id);
         }
     }
 }
@@ -1625,6 +1641,7 @@ pub(crate) fn sink_for(
     turn_id: Option<CodeTurnId>,
     subagents: Vec<CodeSubagentSummary>,
     gh_search_path: Option<String>,
+    recap: Option<Arc<dyn super::recap::TurnRecap>>,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
         db,
@@ -1636,6 +1653,7 @@ pub(crate) fn sink_for(
         gh_search_path,
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
+        recap,
     })
 }
 
@@ -2141,6 +2159,7 @@ mod tests {
             1,
             None,
             Vec::new(),
+            None,
             None,
         );
         (directory, store, sink, session_id)

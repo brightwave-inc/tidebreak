@@ -1879,6 +1879,21 @@ async fn bind_inner(
         state.approvals.clone(),
     )
     .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone());
+    // Installed rather than constructed with the runtime: a recap runs on the
+    // utility role, and the model handles that resolve it belong to the app
+    // state the runtime is built before. See `code::recap`.
+    code.install_recap(Arc::new(
+        code::recap::TurnRecapper::new(
+            code.db.clone(),
+            code.bus.clone(),
+            state.store.clone(),
+            state.resolver.clone(),
+            state.secrets.clone(),
+            state.provisioned_policy.clone(),
+            state.os_policy.clone(),
+        )
+        .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone()),
+    ));
     let blob_orphan_auditor = blob_orphan_auditor::BlobOrphanAuditor::new(
         state.store.clone(),
         state.config.data_dir.join("blobs"),

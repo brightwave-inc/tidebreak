@@ -1370,7 +1370,13 @@ watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
  * Harness subagents on this session, present only when any were
  * observed (decision 52).
  */
-subagents?: Array<CodeSubagentSummary>, };
+subagents?: Array<CodeSubagentSummary>, 
+/**
+ * Where this session stands, in a sentence, derived from the newest turn
+ * that carries one. Absent until a turn has been recapped, and on
+ * machines with no utility model to derive one.
+ */
+recap?: string, };
 
 /**
  * Identifies one durable conversation with an external agent engine.
@@ -1526,7 +1532,12 @@ watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
  * Harness subagents on this session, present only when any were
  * observed (decision 52).
  */
-subagents?: Array<CodeSubagentSummary>, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, };
+subagents?: Array<CodeSubagentSummary>, 
+/**
+ * Where this session stands, in a sentence, derived from the newest
+ * turn that carries one.
+ */
+recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, };
 
 /**
  * Token accounting for one turn.
