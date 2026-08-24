@@ -1359,8 +1359,8 @@ impl CodeRuntime {
         .await
         .map_err(map_gh)?;
         // On a hosted machine, say whose identity a push would act as
-        // (decision 63) — only for a checkout the machine would actually
-        // lend the App's identity to, so the sentence is never wider than
+        // (decisions 63 and 65) — only for a checkout the machine would
+        // actually lend an identity to, so the sentence is never wider than
         // the lending. Probed per caller and held fresh by the lender; a
         // refusal simply leaves the field empty — the push itself reports
         // refusals with their reasons.
@@ -1368,7 +1368,15 @@ impl CodeRuntime {
             let worktree = std::path::Path::new(&workspace.worktree_path);
             if forge_lending_target(worktree).await.is_some() {
                 if let Ok(identity) = lender.git_forge_identity(owner).await {
-                    status.pushes_as = Some(identity.bot_login.unwrap_or(identity.app_name));
+                    match identity.attribution {
+                        crate::obo_gateway::GitForgeAttribution::Person { login, .. } => {
+                            status.pushes_as = Some(login);
+                            status.pushes_as_self = Some(true);
+                        }
+                        crate::obo_gateway::GitForgeAttribution::Bot { bot_login } => {
+                            status.pushes_as = Some(bot_login.unwrap_or(identity.app_name));
+                        }
+                    }
                 }
             }
         }

@@ -8,6 +8,7 @@ import {
   cleanGit,
   dirtyGit,
   hostedAppGit,
+  hostedPersonGit,
   openPrGit,
   readyForPrGit,
   unpushedGit,
@@ -77,6 +78,14 @@ export const Unpushed: Story = {
  */
 export const HostedPushesAsApp: Story = {
   args: { snapshot: hostedAppGit },
+};
+
+/**
+ * A hosted machine whose caller connected their own GitHub account at the
+ * gateway pushes as that person, and the card names them (decision 65).
+ */
+export const HostedPushesAsYou: Story = {
+  args: { snapshot: hostedPersonGit },
 };
 
 export const ReadyForPullRequest: Story = {

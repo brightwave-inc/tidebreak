@@ -519,6 +519,10 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
         .unwrap();
     let body: serde_json::Value = status.json().await.unwrap();
     assert_eq!(body["pushes_as"], "acme-ship[bot]", "{body}");
+    assert!(
+        body["pushes_as_self"].is_null(),
+        "the App's identity is never claimed as the caller's own: {body}"
+    );
 
     // A rewritten origin on a foreign host — the exact move an agent in the
     // workspace could make — is outside the lending: no identity is claimed
@@ -570,4 +574,40 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
     assert_eq!(kind, "git_forge_refused");
     assert!(message.contains("no git forge"), "{message}");
     assert_eq!(lender.minted(), vec!["acme/demo".to_owned()]);
+}
+
+/// Decision 65: once the caller's own account acts, the git card names them
+/// and states the identity is their own rather than the App's.
+#[tokio::test]
+async fn a_hosted_git_card_names_the_person_once_connected() {
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, _runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "person change").await;
+    let id = json_id(&workspace);
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    let status = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = status.json().await.unwrap();
+    assert_eq!(body["pushes_as"], "mira-chen", "{body}");
+    assert_eq!(body["pushes_as_self"], true, "{body}");
 }

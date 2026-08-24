@@ -223,6 +223,7 @@ fn pr_snapshot(
         gh_authenticated: status.gh_authenticated,
         remediation: status.remediation,
         pushes_as: status.pushes_as,
+        pushes_as_self: status.pushes_as_self,
         watch: watch.map(CodeWatchSnapshot::from),
     }
 }

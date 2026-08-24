@@ -299,7 +299,9 @@ export function PrCardView({
           <span className="text-foreground font-medium">
             {snapshot.pushes_as}
           </span>
-          , the deployment&apos;s GitHub App — not as your GitHub account.
+          {snapshot.pushes_as_self
+            ? " — your own GitHub account."
+            : ", the deployment's GitHub App — not as your GitHub account."}
         </p>
       )}
       {snapshot?.dirty ? (

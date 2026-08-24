@@ -317,3 +317,63 @@ describe("AddRepoPalette and a machine without a GitHub credential", () => {
     );
   });
 });
+
+describe("AddRepoPalette on a hosted machine that acts as the person", () => {
+  it("carries the person attribution sentence on the offered source", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: true,
+              remediation:
+                "Clones and pushes use your own GitHub account: work lands as mira-chen.",
+            },
+          ],
+          chooses_destination: true,
+        })),
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    const github = await screen.findByRole("option", {
+      name: /GitHub repository/,
+    });
+    fireEvent.click(github);
+    expect(await screen.findByTestId("gh-absent-hint")).toHaveTextContent(
+      /work lands as mira-chen/,
+    );
+  });
+
+  it("hides GitHub until the caller connects, and points at the gateway", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: false,
+              remediation:
+                "To use GitHub as yourself here, connect your GitHub account at the Model Gateway: https://gateway.example/account/apps",
+            },
+          ],
+          chooses_destination: true,
+        })),
+      } as never),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: /GitHub repository/ }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/connect your GitHub account at the Model Gateway/),
+    ).toBeInTheDocument();
+  });
+});

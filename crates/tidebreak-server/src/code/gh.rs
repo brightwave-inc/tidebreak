@@ -202,10 +202,14 @@ pub(crate) struct WorkspaceGitStatus {
     pub gh_found: bool,
     pub gh_authenticated: Option<bool>,
     pub remediation: String,
-    /// The identity a push from this machine acts as, when it is not the
-    /// caller: the deployment's GitHub App bot account (decision 63). `None`
-    /// on every machine where git speaks for whoever configured it.
+    /// The identity a push from this machine acts as, when git does not
+    /// speak for whoever configured it: the deployment's GitHub App bot
+    /// account (decision 63), or the caller's own login (decision 65).
+    /// `None` on every machine where git speaks for whoever configured it.
     pub pushes_as: Option<String>,
+    /// `Some(true)` when `pushes_as` is the caller's own account
+    /// (decision 65) rather than the deployment's App.
+    pub pushes_as_self: Option<bool>,
 }
 
 /// Outcome of one named quick action.
@@ -363,6 +367,7 @@ pub(crate) async fn workspace_git_status(
         // Decorated by the runtime, which knows whether this machine lends
         // gateway credentials; this module only observes local state.
         pushes_as: None,
+        pushes_as_self: None,
     })
 }
 
