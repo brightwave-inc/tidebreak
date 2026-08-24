@@ -178,6 +178,10 @@ pub(crate) struct CodeRuntime {
     pub(super) harness_installs: HarnessInstallJobs,
     #[cfg(test)]
     pub(crate) gh_search_path: Mutex<Option<String>>,
+    /// Forge REST base override, so tests point decision 65's reads at a
+    /// loopback fake while the lending gate still names github.com.
+    #[cfg(test)]
+    forge_api_base: Mutex<Option<String>>,
     stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
     stall_started: AtomicBool,
     watch_sweep: Mutex<Option<super::watch::WatchSweepGuard>>,
@@ -261,6 +265,8 @@ impl CodeRuntime {
             harness_installs: HarnessInstallJobs::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
+            #[cfg(test)]
+            forge_api_base: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
             watch_sweep: Mutex::new(None),
@@ -374,6 +380,8 @@ impl CodeRuntime {
             harness_installs: HarnessInstallJobs::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
+            #[cfg(test)]
+            forge_api_base: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
             watch_sweep: Mutex::new(None),
@@ -401,6 +409,23 @@ impl CodeRuntime {
     #[cfg(test)]
     pub(crate) fn set_gh_search_path(&self, path: Option<String>) {
         *self.gh_search_path.lock().expect("gh search path") = path;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_forge_api_base(&self, base: Option<String>) {
+        *self.forge_api_base.lock().expect("forge api base") = base;
+    }
+
+    /// The REST base decision 65's pull-request operations drive: the
+    /// forge's own, or a test override.
+    fn forge_api_base_for(&self, host: &str) -> String {
+        #[cfg(test)]
+        {
+            if let Some(base) = self.forge_api_base.lock().expect("forge api base").clone() {
+                return base;
+            }
+        }
+        super::forge_rest::default_api_base(host)
     }
 
     /// Return the installed browser adapter, if any.
@@ -1281,32 +1306,45 @@ impl CodeRuntime {
             .map_err(map_gh)?;
         // Best-effort contributed fact (decision 62): a user push to a branch
         // that is a pull request's head is the same act the detector mints
-        // for. Failures are silent; the reconcile sweep corrects.
-        let gh_path = self.gh_search_path_owned();
+        // for. Failures are silent; the reconcile sweep corrects. On a hosted
+        // machine the read rides the forge REST API with the same credential
+        // the push just used (decision 65) — one borrow, one operation.
         if let Ok(target) = super::delivery::repository_target_from_path(&worktree).await {
-            if let Ok(values) = gh::list_pull_requests_for_head_raw(
-                &target.host,
-                &target.owner,
-                &target.name,
-                &workspace.branch_name,
-                gh_path.as_deref(),
-            )
-            .await
-            {
-                if let Some(value) = values.first() {
-                    super::pr_facts::record_confirmed_fact(
-                        &self.db,
-                        owner,
-                        workspace.id,
-                        None,
-                        None,
-                        &target,
-                        value,
-                        tidebreak_core::CodePullRequestRelation::Contributed,
-                        tidebreak_core::CodePullRequestDiscovery::Command,
+            let values = match credential.as_ref() {
+                Some(credential) => super::forge_rest::list_pull_requests_for_head(
+                    &self.forge_api_base_for(&target.host),
+                    &target,
+                    credential,
+                    &workspace.branch_name,
+                )
+                .await
+                .ok(),
+                None => {
+                    let gh_path = self.gh_search_path_owned();
+                    gh::list_pull_requests_for_head_raw(
+                        &target.host,
+                        &target.owner,
+                        &target.name,
+                        &workspace.branch_name,
+                        gh_path.as_deref(),
                     )
-                    .await;
+                    .await
+                    .ok()
                 }
+            };
+            if let Some(value) = values.as_ref().and_then(|values| values.first()) {
+                super::pr_facts::record_confirmed_fact(
+                    &self.db,
+                    owner,
+                    workspace.id,
+                    None,
+                    None,
+                    &target,
+                    value,
+                    tidebreak_core::CodePullRequestRelation::Contributed,
+                    tidebreak_core::CodePullRequestDiscovery::Command,
+                )
+                .await;
             }
         }
         Ok(outcome)
@@ -1377,6 +1415,41 @@ impl CodeRuntime {
         }
     }
 
+    /// The REST context for a pull-request operation in `worktree`
+    /// (decision 65): the forge repository the checkout names plus one
+    /// borrowed credential. `Ok(None)` is every machine with its own
+    /// credentials and every checkout outside the lending gate — those keep
+    /// `gh` exactly as it is. A gateway refusal fails the operation with its
+    /// reason, exactly as a push does.
+    async fn forge_rest_context(
+        &self,
+        owner: &OwnerId,
+        worktree: &std::path::Path,
+    ) -> Result<
+        Option<(
+            crate::routes::code::CodeGitHubRepositoryTarget,
+            crate::obo_gateway::GitCredential,
+        )>,
+        ServerError,
+    > {
+        if self.git_credentials().is_none() {
+            return Ok(None);
+        }
+        let Some(target) = forge_lending_target(worktree).await else {
+            return Ok(None);
+        };
+        let credential = self
+            .borrow_git_credential(owner, worktree)
+            .await?
+            .ok_or_else(|| {
+                ServerError::unprocessable_kind(
+                    "git_forge_refused",
+                    "this checkout's origin is not a lendable forge repository",
+                )
+            })?;
+        Ok(Some((target, credential)))
+    }
+
     pub(crate) async fn workspace_pr(
         &self,
         owner: &OwnerId,
@@ -1396,6 +1469,32 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
+        // On a hosted machine the digest comes from the forge REST API with
+        // a borrowed credential (decision 65) — there is no `gh` here to
+        // refresh it. Cache-aware exactly like the `gh` path, borrowing only
+        // on a miss; failures leave the persisted digest and the next read
+        // asks again.
+        if self.git_credentials().is_some() {
+            let worktree = std::path::Path::new(&workspace.worktree_path);
+            if let Some(cached) = self.pr_cache.get(workspace.id) {
+                status.pr = Some(cached);
+            } else if let Ok(Some((target, credential))) =
+                self.forge_rest_context(owner, worktree).await
+            {
+                let api_base = self.forge_api_base_for(&target.host);
+                if let Ok(Some(digest)) = super::forge_rest::pull_request_digest(
+                    &api_base,
+                    &target,
+                    &credential,
+                    &workspace.branch_name,
+                )
+                .await
+                {
+                    self.pr_cache.put(workspace.id, digest.clone());
+                    status.pr = Some(digest);
+                }
+            }
+        }
         // On a hosted machine, say whose identity a push would act as
         // (decisions 63 and 65) — only for a checkout the machine would
         // actually lend an identity to, so the sentence is never wider than
@@ -1535,29 +1634,72 @@ impl CodeRuntime {
         body: Option<String>,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         let mut workspace = self.require_live_workspace(owner, id).await?;
-        let gh_path = self.gh_search_path_owned();
-        let digest = gh::create_pull_request(
-            std::path::Path::new(&workspace.worktree_path),
-            workspace.id,
-            &workspace.title,
-            &workspace.branch_name,
-            &workspace.base_ref,
-            title.as_deref(),
-            body.as_deref(),
-            &self.pr_cache,
-            gh_path.as_deref(),
-        )
-        .await
-        .map_err(map_gh)?;
+        let worktree = std::path::PathBuf::from(&workspace.worktree_path);
+        // On a hosted machine the pull request rides the forge REST API with
+        // a borrowed credential (decision 65) and lands as the caller; the
+        // authored fact comes straight from the creation answer, with no
+        // second host read. Everywhere else `gh` does exactly what it always
+        // has (decision 34), including its own best-effort fact read below.
+        let (digest, rest_fact) = match self.forge_rest_context(owner, &worktree).await? {
+            Some((target, credential)) => {
+                let api_base = self.forge_api_base_for(&target.host);
+                let (digest, fact) = gh::create_pull_request_rest(
+                    &worktree,
+                    workspace.id,
+                    &workspace.title,
+                    &workspace.branch_name,
+                    &workspace.base_ref,
+                    title.as_deref(),
+                    body.as_deref(),
+                    &self.pr_cache,
+                    &api_base,
+                    &target,
+                    &credential,
+                )
+                .await
+                .map_err(map_gh)?;
+                (digest, Some((target, fact)))
+            }
+            None => {
+                let gh_path = self.gh_search_path_owned();
+                let digest = gh::create_pull_request(
+                    &worktree,
+                    workspace.id,
+                    &workspace.title,
+                    &workspace.branch_name,
+                    &workspace.base_ref,
+                    title.as_deref(),
+                    body.as_deref(),
+                    &self.pr_cache,
+                    gh_path.as_deref(),
+                )
+                .await
+                .map_err(map_gh)?;
+                (digest, None)
+            }
+        };
         let created_number = digest.number;
         workspace.pr = Some(digest);
         self.save_workspace(&workspace).await?;
         // Best-effort authored fact (decision 62). The digest just came from
-        // the host, and the repository-qualified re-read gives the row full
-        // identity and timestamps. Failures are silent; the reconcile sweep
-        // corrects.
-        let worktree = std::path::PathBuf::from(&workspace.worktree_path);
-        if let Ok(target) = super::delivery::repository_target_from_path(&worktree).await {
+        // the host; the REST path already holds the full row, and the `gh`
+        // path re-reads it repository-qualified for full identity and
+        // timestamps. Failures are silent; the reconcile sweep corrects.
+        if let Some((target, fact)) = rest_fact {
+            super::pr_facts::record_confirmed_fact(
+                &self.db,
+                owner,
+                workspace.id,
+                None,
+                None,
+                &target,
+                &fact,
+                tidebreak_core::CodePullRequestRelation::Authored,
+                tidebreak_core::CodePullRequestDiscovery::Command,
+            )
+            .await;
+        } else if let Ok(target) = super::delivery::repository_target_from_path(&worktree).await {
+            let gh_path = self.gh_search_path_owned();
             if let Ok(value) = gh::view_pull_request_raw(
                 &target.host,
                 &target.owner,

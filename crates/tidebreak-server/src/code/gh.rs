@@ -495,6 +495,91 @@ pub(crate) async fn create_pull_request(
     Ok(digest)
 }
 
+/// [`create_pull_request`] over the forge REST API with a borrowed
+/// credential (decision 65), for machines without `gh`.
+///
+/// The title and body come from exactly the same generation as the `gh`
+/// path, the created pull request comes back beside the digest in the fact
+/// shape so the caller can persist the authored fact without a second host
+/// read, and the digest read after creation is best-effort exactly as it is
+/// with `gh` — a light digest from the creation answer serves until the next
+/// status read.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_pull_request_rest(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    title: &str,
+    branch: &str,
+    base_ref: &str,
+    requested_title: Option<&str>,
+    requested_body: Option<&str>,
+    cache: &PrDigestCache,
+    api_base: &str,
+    target: &crate::routes::code::CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+) -> Result<(PullRequestDigest, serde_json::Value), GhError> {
+    let inspect = inspect_git(worktree, base_ref, title).await?;
+    let pr_title = requested_title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| generate_pr_title(title, branch));
+    let pr_body = requested_body
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or(inspect.suggested_pr_body);
+    let base = gh_base_branch(base_ref);
+    let fact = super::forge_rest::create_pull_request(
+        api_base, target, credential, &pr_title, &pr_body, base, branch,
+    )
+    .await
+    .map_err(|reason| GhError::user(format!("the pull request was not created: {reason}")))?;
+    cache.invalidate(workspace_id);
+    if let Ok(Some(digest)) =
+        super::forge_rest::pull_request_digest(api_base, target, credential, branch).await
+    {
+        cache.put(workspace_id, digest.clone());
+        return Ok((digest, fact));
+    }
+    let number = fact.get("number").and_then(serde_json::Value::as_u64);
+    let digest = PullRequestDigest {
+        number: number.unwrap_or(0),
+        url: fact
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        state: "open".into(),
+        title: fact
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        checks_summary: None,
+        checks: None,
+        draft: fact.get("isDraft").and_then(serde_json::Value::as_bool),
+        merged: Some(false),
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: fact
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        base_branch: fact
+            .get("baseRefName")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        head_sha: fact
+            .get("headRefOid")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        auto_merge_enabled: None,
+        in_merge_queue: None,
+    };
+    cache.put(workspace_id, digest.clone());
+    Ok((digest, fact))
+}
+
 /// Merge strategy for the user-initiated merge operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MergeMethod {
