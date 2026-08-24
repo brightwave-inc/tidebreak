@@ -8,6 +8,7 @@ import type {
 } from "../api/types";
 import {
   codeDeliveryRepositoryKey,
+  mergeKnownAuthors,
   trackedCodeDeliveryRepositories,
   unreadCodeDeliveryNotifications,
   useCodeDeliveryStore,
@@ -219,5 +220,67 @@ describe("delivery notifications", () => {
       useCodeDeliveryStore.getState().ingestDeliveryPoll([], recent, NOW),
     ).toBe(506);
     expect(useCodeDeliveryStore.getState().notifications).toHaveLength(500);
+  });
+});
+
+describe("known delivery authors", () => {
+  it("dedupes logins case-insensitively and keeps the freshest avatar", () => {
+    const first = mergeKnownAuthors(
+      [],
+      [
+        { login: "mara", avatarUrl: "https://avatars.test/mara" },
+        { login: "devon" },
+      ],
+    );
+    expect(first.map((author) => author.login)).toEqual(["mara", "devon"]);
+
+    // A resighting under different casing is the same person: no duplicate
+    // row, the sighting moves to the front, and its avatar fills the gap.
+    const next = mergeKnownAuthors(first, [
+      { login: "Devon", avatarUrl: "https://avatars.test/devon" },
+    ]);
+    expect(next.map((author) => author.login)).toEqual(["Devon", "mara"]);
+    expect(next[0]!.avatarUrl).toBe("https://avatars.test/devon");
+    // A later sighting without an avatar must not erase a known one.
+    const kept = mergeKnownAuthors(next, [{ login: "devon" }]);
+    expect(kept[0]!.avatarUrl).toBe("https://avatars.test/devon");
+  });
+
+  it("bounds the pool and drops the oldest sighting past the cap", () => {
+    const crowd = Array.from({ length: 60 }, (_, index) => ({
+      login: `login-${index}`,
+    }));
+    const merged = mergeKnownAuthors([], crowd);
+    expect(merged).toHaveLength(50);
+    expect(merged[0]!.login).toBe("login-0");
+    expect(merged.some((author) => author.login === "login-59")).toBe(false);
+  });
+
+  it("harvests authors and actors from a completed poll and persists them", () => {
+    const repo = repository("brightwave-inc", "alpha", "repo-alpha");
+    useCodeDeliveryStore.getState().completeDeliveryPoll(
+      [
+        pullRequest(1, repo, {
+          author: "mara",
+          author_avatar_url: "https://avatars.test/mara",
+        }),
+      ],
+      [run(11, repo, { actor: "dependabot[bot]" })],
+      NOW,
+    );
+
+    expect(
+      useCodeDeliveryStore.getState().knownAuthors.map((a) => a.login),
+    ).toEqual(["mara", "dependabot[bot]"]);
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("tidebreak.code-delivery") ?? "{}",
+      ),
+    ).toMatchObject({
+      knownAuthors: [
+        { login: "mara", avatarUrl: "https://avatars.test/mara" },
+        { login: "dependabot[bot]" },
+      ],
+    });
   });
 });

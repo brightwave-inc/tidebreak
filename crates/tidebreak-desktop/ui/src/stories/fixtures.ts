@@ -922,6 +922,8 @@ const deliveryFiles: CodeDeliveryPullRequestFile[] = [
     status: "modified",
     additions: 184,
     deletions: 61,
+    // The second hunk carries lines far wider than the sheet: the diff view
+    // must scroll them with full-width line backgrounds, not clip them.
     patch: [
       "@@ -858,12 +858,18 @@ function PullRequestList({",
       "       <span>Pull request</span>",
@@ -929,6 +931,10 @@ const deliveryFiles: CodeDeliveryPullRequestFile[] = [
       "+      <span>Status</span>",
       "       <span>Checks</span>",
       '       <span className="text-right">Updated</span>',
+      "@@ -1020,6 +1026,8 @@ function PullRequestRow({",
+      "-  const summary = usePullRequestSummary(item, { includeChecks: true, includeReviewDecision: true, includeMergeState: true, includeWorkspaceLinks: true });",
+      "+  const summary = usePullRequestSummary(item, { includeChecks: true, includeReviewDecision: true, includeMergeState: true, includeWorkspaceLinks: true, includeAttentionReasons: true });",
+      "+  const checks = checkSummary(checkCounts(item.checks));",
     ].join("\n"),
   },
   {
@@ -1008,6 +1014,29 @@ export const deliveryPullRequestDetails: Record<
         body: "Keep repository failures visible without hiding usable results.",
         path: "src/code/CodeDeliveryPage.tsx",
         line: 702,
+      },
+      // A fenced, language-tagged block: the newest comment, and the one the
+      // syntax palette has to render readably inside a comment card.
+      {
+        kind: "review",
+        author: "mara",
+        created_at: "2026-08-20T15:26:00.000Z",
+        review_state: "commented",
+        url: "https://github.com/brightwave-inc/tidebreak/pull/2251#pullrequestreview-2",
+        body: [
+          "The lifecycle helper reads better as a lookup. Something like:",
+          "",
+          "```ts",
+          "const LIFECYCLE_BADGE_VARIANT: Record<PullRequestLifecycle, BadgeVariant> = {",
+          '  draft: "outline",',
+          '  open: "success",',
+          '  merged: "merged",',
+          '  closed: "critical",',
+          "};",
+          "```",
+          "",
+          "Not blocking. :rocket:",
+        ].join("\n"),
       },
     ],
     errors: [],
