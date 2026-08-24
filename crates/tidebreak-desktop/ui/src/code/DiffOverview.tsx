@@ -91,12 +91,12 @@ export function DiffOverview({
           <div className="flex items-baseline gap-1.5">
             <h2 className="text-sm font-medium">Changes</h2>
             {payload && (
-              <span className="text-muted-foreground font-mono text-[11px] tabular-nums">
+              <span className="text-muted-foreground font-mono text-xs tabular-nums">
                 {payload.files.length}
               </span>
             )}
           </div>
-          <p className="text-muted-foreground truncate font-mono text-[11px]">
+          <p className="text-muted-foreground truncate font-mono text-xs">
             {scopeCaption}
           </p>
         </div>
@@ -284,7 +284,7 @@ function ChangeDirectoryRow({
         />
         <DirectoryIcon className="size-3.5 shrink-0" aria-hidden />
         <span className="min-w-0 flex-1 truncate font-mono">{node.name}</span>
-        <span className="shrink-0 font-mono text-[10px] tabular-nums">
+        <span className="shrink-0 font-mono text-2xs tabular-nums">
           {node.count}
         </span>
       </button>
@@ -340,8 +340,8 @@ function ChangeFileRow({
         onClick={() => onOpenFile(file.path)}
       >
         <CodeFileIcon path={file.path} className={kind.className} />
-        <span className="min-w-0 flex-1 truncate text-[13px]">{node.name}</span>
-        <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] tabular-nums">
+        <span className="min-w-0 flex-1 truncate text-md">{node.name}</span>
+        <span className="flex shrink-0 items-center gap-1.5 font-mono text-2xs tabular-nums">
           {file.insertions > 0 && (
             <span className="text-success-foreground">+{file.insertions}</span>
           )}

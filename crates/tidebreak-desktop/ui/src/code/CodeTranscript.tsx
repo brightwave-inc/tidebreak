@@ -147,7 +147,7 @@ export function CodeTranscript({
       <div className="messages is-empty" ref={scrollRef} onScroll={onScroll}>
         <div className="flex max-w-sm flex-col items-center gap-1 text-center text-balance">
           <p className="text-sm font-medium">{title}</p>
-          <p className="text-muted-foreground text-[13.5px] leading-relaxed">
+          <p className="text-muted-foreground text-md leading-relaxed">
             {description}
           </p>
           {busy && (
@@ -501,7 +501,7 @@ const TranscriptItem = memo(function TranscriptItem({
           text={item.text}
           anchorId={item.id}
           trailing={
-            <p className="text-muted-foreground mt-1 text-[11px]">
+            <p className="text-muted-foreground mt-1 text-xs">
               Steered mid-turn
             </p>
           }
@@ -881,7 +881,7 @@ function StreamingTail({ text }: { text: string }) {
       // The group role is what makes the label reach assistive tech.
       role="group"
       aria-label="Output"
-      className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-[13.5px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+      className="text-muted-foreground max-h-[17.4em] overflow-hidden font-mono text-md break-words whitespace-pre-wrap [overflow-anchor:none]"
     >
       {tail}
     </pre>
@@ -1057,7 +1057,7 @@ function FileActivityRow({
   const { count, insertions, deletions } = fileActivityTotals(files);
   const noun = count === 1 ? "file" : "files";
   return (
-    <div className="text-muted-foreground max-w-prose text-[11px]">
+    <div className="text-muted-foreground max-w-prose text-xs">
       <button
         type="button"
         aria-expanded={open}

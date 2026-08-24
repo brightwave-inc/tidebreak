@@ -213,7 +213,7 @@ function CodeArchiveBody() {
             aria-label="Archived workspaces"
             className="min-w-[760px]"
           >
-            <div className="sticky top-0 z-10 grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur">
+            <div className="sticky top-0 z-10 grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur">
               <span>Workspace</span>
               <span>Repository</span>
               <span>Archived</span>

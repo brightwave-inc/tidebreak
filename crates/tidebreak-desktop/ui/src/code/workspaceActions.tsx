@@ -207,7 +207,7 @@ export function WorkspaceOverflowMenu({
               )}
               {context.worktreePath && (
                 <span
-                  className="text-muted-foreground truncate font-mono text-[10px]"
+                  className="text-muted-foreground truncate font-mono text-2xs"
                   title={context.worktreePath}
                 >
                   {context.worktreePath}

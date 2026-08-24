@@ -65,7 +65,7 @@ export function ToolOutputPreview({
           aria-label={label}
           className={
             bare
-              ? "text-muted-foreground overflow-x-auto pr-7 font-mono text-[13.5px] break-words whitespace-pre-wrap [overflow-anchor:none]"
+              ? "text-muted-foreground overflow-x-auto pr-7 font-mono text-md break-words whitespace-pre-wrap [overflow-anchor:none]"
               : "bg-muted text-muted-foreground overflow-x-auto rounded-md p-2 pr-9 font-mono text-xs break-words whitespace-pre-wrap"
           }
         >
@@ -86,7 +86,7 @@ export function ToolOutputPreview({
       {hiddenCount > 0 && (
         <button
           type="button"
-          className="text-muted-foreground hover:text-foreground ring-offset-background focus-visible:ring-ring cursor-pointer rounded-sm text-[11px] focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none motion-safe:transition-colors motion-safe:duration-[140ms] motion-safe:ease-out"
+          className="text-muted-foreground hover:text-foreground ring-offset-background focus-visible:ring-ring cursor-pointer rounded-sm text-xs focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none motion-safe:transition-colors motion-safe:duration-[140ms] motion-safe:ease-out"
           aria-expanded={expanded}
           aria-controls={bodyId}
           onClick={() => {

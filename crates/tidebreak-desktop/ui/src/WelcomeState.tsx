@@ -122,7 +122,7 @@ function PromptCard({
       <span className="min-w-0 flex-1 pt-0.5">
         <span className="block font-medium tracking-[-0.01em]">{label}</span>
         {description && (
-          <span className="mt-0.5 block text-[0.8rem] leading-5 font-normal text-muted-foreground">
+          <span className="mt-0.5 block text-xs leading-5 font-normal text-muted-foreground">
             {description}
           </span>
         )}

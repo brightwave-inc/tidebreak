@@ -140,7 +140,7 @@ export function PluginsPanel({
                     )}
                   </span>
                   {hint && (
-                    <span className="ml-auto shrink-0 pl-2 text-[0.68rem] whitespace-nowrap text-muted-foreground">
+                    <span className="ml-auto shrink-0 pl-2 text-2xs whitespace-nowrap text-muted-foreground">
                       {hint}
                     </span>
                   )}

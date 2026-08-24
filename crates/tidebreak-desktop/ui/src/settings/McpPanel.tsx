@@ -63,7 +63,7 @@ type Transport = "stdio" | "http" | "gateway";
 export function McpHealthChip({ health }: { health: McpHealth }) {
   const dot =
     health === "healthy"
-      ? "text-emerald-600 dark:text-emerald-400"
+      ? "text-success"
       : health === "degraded"
         ? "text-destructive"
         : "text-muted-foreground";
@@ -104,7 +104,7 @@ export function McpTierChip({ curated }: { curated: McpCuration | null }) {
     <span
       className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${
         tested
-          ? "border-emerald-600/40 text-emerald-700 dark:border-emerald-400/40 dark:text-emerald-400"
+          ? "border-success-border/40 text-success-foreground"
           : "text-muted-foreground"
       }`}
       title={

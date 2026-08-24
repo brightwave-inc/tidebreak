@@ -189,7 +189,7 @@ function CodeNotificationsBody() {
                 Notifications
               </h1>
               {unread > 0 && (
-                <span className="rounded-full bg-primary px-2 py-0.5 text-[11px] font-medium text-primary-foreground">
+                <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-primary-foreground">
                   {unread} unread
                 </span>
               )}
@@ -421,7 +421,7 @@ function NotificationRow({
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
           {notification.detail}
         </p>
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-xs text-muted-foreground">
           {relativeTime(notification.occurredAt)}
         </p>
       </button>

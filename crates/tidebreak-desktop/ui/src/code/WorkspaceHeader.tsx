@@ -78,13 +78,13 @@ export function WorkspaceHeader({
         ) : (
           <>
             <h1
-              className="truncate text-[13.5px] font-semibold tracking-[-0.01em]"
+              className="truncate text-md font-semibold tracking-[-0.01em]"
               title={tooltip || undefined}
             >
               {title}
             </h1>
             {(repoName || branchName) && (
-              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                 {repoName && <span className="shrink-0">{repoName}</span>}
                 {repoName && branchName && (
                   <span className="text-border" aria-hidden>

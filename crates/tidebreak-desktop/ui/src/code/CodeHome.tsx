@@ -213,7 +213,7 @@ export function CodeRepoEmptyState({ onAddRepo }: { onAddRepo: () => void }) {
         >
           Start with a repository
         </h1>
-        <p className="mt-4 max-w-lg text-[0.95rem] leading-6 text-muted-foreground text-pretty">
+        <p className="mt-4 max-w-lg text-md leading-6 text-muted-foreground text-pretty">
           Register a local checkout or clone one from a remote. Tidebreak uses
           it to create isolated workspaces for agent tasks.
         </p>
@@ -241,7 +241,7 @@ export function CodeRepoEmptyState({ onAddRepo }: { onAddRepo: () => void }) {
               <span className="block text-sm font-medium tracking-[-0.01em]">
                 {title}
               </span>
-              <span className="mt-0.5 block text-[0.8rem] leading-5 text-muted-foreground text-pretty">
+              <span className="mt-0.5 block text-xs leading-5 text-muted-foreground text-pretty">
                 {description}
               </span>
             </span>

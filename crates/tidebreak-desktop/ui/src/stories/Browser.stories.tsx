@@ -375,9 +375,7 @@ function DeveloperPage({ compact }: { compact: boolean }) {
           <span>Contracts</span>
           <span>Runs</span>
         </nav>
-        <span className="font-mono text-[10px] text-black/45">
-          localhost:4173
-        </span>
+        <span className="font-mono text-2xs text-black/45">localhost:4173</span>
       </header>
       <main
         className={cn(
@@ -385,7 +383,7 @@ function DeveloperPage({ compact }: { compact: boolean }) {
           compact && "py-10",
         )}
       >
-        <p className="font-mono text-[10px] tracking-[0.16em] text-[#7b5e36] uppercase">
+        <p className="font-mono text-2xs tracking-[0.16em] text-[#7b5e36] uppercase">
           deterministic browser fixture
         </p>
         <h1 className="mt-3 max-w-3xl text-[clamp(2rem,6vw,4.75rem)] font-semibold leading-[0.96] tracking-[-0.055em] text-balance">
@@ -406,7 +404,7 @@ function DeveloperPage({ compact }: { compact: boolean }) {
         {!compact && (
           <div className="mt-16 grid gap-px overflow-hidden rounded-xl border border-black/10 bg-black/10 sm:grid-cols-[1.25fr_0.75fr]">
             <section className="bg-[#f8f5ee] p-6 sm:p-8">
-              <p className="font-mono text-[10px] text-black/45">
+              <p className="font-mono text-2xs text-black/45">
                 latest snapshot
               </p>
               <p className="mt-8 text-3xl font-medium tracking-[-0.04em]">
@@ -418,9 +416,7 @@ function DeveloperPage({ compact }: { compact: boolean }) {
               </p>
             </section>
             <section className="bg-[#ded8cc] p-6 sm:p-8">
-              <p className="font-mono text-[10px] text-black/45">
-                document epoch
-              </p>
+              <p className="font-mono text-2xs text-black/45">document epoch</p>
               <p className="mt-8 font-mono text-3xl tracking-[-0.04em]">008</p>
               <p className="mt-2 text-sm leading-6 text-black/55">
                 Every navigation retires the old refs.

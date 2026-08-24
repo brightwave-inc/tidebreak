@@ -67,7 +67,7 @@ export function ModelToolCapabilityChip({ model }: { model: ModelInfo }) {
       side="top"
     >
       <span
-        className="text-muted-foreground border-border rounded-full border px-1.5 py-0.5 text-[0.65rem] leading-none"
+        className="text-muted-foreground border-border rounded-full border px-1.5 py-0.5 text-2xs leading-none"
         aria-label="Conversation only. Function tools are unsupported or cannot yet be continued safely in Tidebreak."
       >
         Conversation only
@@ -512,7 +512,7 @@ export function ModelMenu({
           {model.display_name}
         </span>
         {showProvider && (
-          <span className="text-muted-foreground shrink-0 text-[0.65rem]">
+          <span className="text-muted-foreground shrink-0 text-2xs">
             {providerLabel(model.provider)}
           </span>
         )}

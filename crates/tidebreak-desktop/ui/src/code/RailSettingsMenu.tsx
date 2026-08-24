@@ -62,7 +62,7 @@ export function RailSettingsMenu() {
         className="flex w-[22rem] max-w-[calc(100vw-24px)] flex-col gap-3 p-3"
       >
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium text-muted-foreground">
+          <span className="text-xs font-medium text-muted-foreground">
             Sort
           </span>
           <SegmentedControl
@@ -73,7 +73,7 @@ export function RailSettingsMenu() {
           />
         </div>
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium text-muted-foreground">
+          <span className="text-xs font-medium text-muted-foreground">
             Cards
           </span>
           <SegmentedControl
@@ -110,7 +110,7 @@ function PrefSwitch({
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between gap-3 text-[13px]">
+    <label className="flex cursor-pointer items-center justify-between gap-3 text-md">
       <span>{label}</span>
       <Switch
         checked={checked}

@@ -86,7 +86,7 @@ export function ContextUsageIndicator({
             <div className="truncate text-xs font-medium leading-tight">
               {modelName ?? "Context window"}
             </div>
-            <div className="shrink-0 font-mono text-[11px] tabular-nums opacity-80">
+            <div className="shrink-0 font-mono text-xs tabular-nums opacity-80">
               {metered ? (
                 <>
                   {percent}%<span className="mx-1 opacity-50">·</span>
@@ -115,13 +115,13 @@ export function ContextUsageIndicator({
               />
             </div>
           ) : (
-            <p className="text-[11px] leading-snug opacity-70">
+            <p className="text-xs leading-snug opacity-70">
               {resident === null
                 ? "This engine reports no context reading"
                 : "No published context window"}
             </p>
           )}
-          <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 border-t border-primary-foreground/15 pt-2 text-[11px] leading-relaxed">
+          <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 border-t border-primary-foreground/15 pt-2 text-xs leading-relaxed">
             <div className="col-span-2 grid grid-cols-subgrid">
               <dt className="opacity-70">Context</dt>
               <dd className="font-mono tabular-nums">
@@ -138,10 +138,10 @@ export function ContextUsageIndicator({
               {/* Labeled, because these are not the ring's numbers: they sum
                   every model call the turn made, and on a long turn they run
                   well past what the window ever held. */}
-              <p className="text-[10px] uppercase tracking-wide opacity-60">
+              <p className="text-2xs uppercase tracking-wide opacity-60">
                 Turn spend
               </p>
-              <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-[11px] leading-relaxed">
+              <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-0.5 text-xs leading-relaxed">
                 {parts.map((part) => (
                   <div
                     key={part.label}

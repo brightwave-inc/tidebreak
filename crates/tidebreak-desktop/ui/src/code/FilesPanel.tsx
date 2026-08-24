@@ -398,7 +398,7 @@ function SearchResults({
     >
       {groups.map((group) => (
         <section key={group.path} className="mb-2" aria-label={group.path}>
-          <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1.5 text-[11px]">
+          <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1.5 text-xs">
             <CodeFileIcon path={group.path} />
             <span
               className="min-w-0 flex-1 truncate font-mono"
@@ -423,10 +423,10 @@ function SearchResults({
                 aria-label={`${group.path}, line ${matched.line_number}`}
                 onClick={() => onOpenFile(group.path, matched.line_number)}
               >
-                <span className="text-muted-foreground w-7 shrink-0 text-right font-mono text-[10px] leading-5 tabular-nums">
+                <span className="text-muted-foreground w-7 shrink-0 text-right font-mono text-2xs leading-5 tabular-nums">
                   {matched.line_number}
                 </span>
-                <span className="min-w-0 flex-1 truncate font-mono text-[11px] leading-5">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs leading-5">
                   <LiteralMatch text={matched.line} query={query} />
                 </span>
               </button>
@@ -487,7 +487,7 @@ function ContentSearchEmpty({
       <button
         type="button"
         className={cn(
-          "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+          "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
           FOCUS_RING,
           HOVER_TINT,
         )}
@@ -537,7 +537,7 @@ function FilesEmpty({
       <button
         type="button"
         className={cn(
-          "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+          "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
           FOCUS_RING,
           HOVER_TINT,
         )}
@@ -608,7 +608,7 @@ function TreeRow({
       <div
         style={{ paddingLeft: treeIndentPx(depth) }}
         className={cn(
-          "ring-offset-background flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[12.5px]",
+          "ring-offset-background flex min-h-7 w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 text-left text-sm",
           "group-focus-visible/row:ring-ring group-focus-visible/row:ring-2 group-focus-visible/row:ring-offset-0",
           HOVER_TINT,
           current && "bg-muted/60",

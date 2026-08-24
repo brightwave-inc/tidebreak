@@ -202,7 +202,7 @@ export function AgentRunProgressStream({
       className={cn("flex flex-col gap-1.5", className)}
       aria-label="Progress"
     >
-      <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+      <p className="text-xs font-semibold uppercase tracking-[0.06em] text-muted-foreground">
         Progress
       </p>
       <ol className="flex flex-col gap-1.5 text-xs" role="list">

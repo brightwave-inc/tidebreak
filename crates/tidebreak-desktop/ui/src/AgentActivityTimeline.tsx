@@ -299,7 +299,7 @@ function ExecActivityCard({
           // is still running, an empty pane would read as a finished command
           // that said nothing.
           settled && (
-            <p className="text-muted-foreground px-0.5 text-[11px]">
+            <p className="text-muted-foreground px-0.5 text-xs">
               No output captured.
             </p>
           )

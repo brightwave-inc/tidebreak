@@ -2057,7 +2057,7 @@ function CodeSessionPane({
         {connectionState === "reconnecting" && (
           <p
             role="status"
-            className="text-info-foreground pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
+            className="text-info-foreground pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-xs [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
           >
             Reconnecting to the session…
           </p>
@@ -2312,9 +2312,7 @@ function SubagentContextBar({
             {label}
           </Badge>
         </div>
-        <p className="text-muted-foreground text-[11px]">
-          Read-only subagent view
-        </p>
+        <p className="text-muted-foreground text-xs">Read-only subagent view</p>
       </div>
       <Button type="button" variant="ghost" size="sm" onClick={onBack}>
         Back to main agent

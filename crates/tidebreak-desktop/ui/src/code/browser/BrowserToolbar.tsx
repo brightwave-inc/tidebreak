@@ -349,7 +349,7 @@ export function BrowserToolbar({
                       {entry.title || entry.url}
                     </span>
                     {entry.title && (
-                      <span className="block truncate text-[11px] text-muted-foreground">
+                      <span className="block truncate text-xs text-muted-foreground">
                         {entry.url}
                       </span>
                     )}
@@ -378,7 +378,7 @@ export function BrowserToolbar({
         <p
           id={addressErrorId}
           role="alert"
-          className="border-t border-critical-border/45 bg-critical-background/55 px-3 py-1 text-[11px] text-critical-foreground"
+          className="border-t border-critical-border/45 bg-critical-background/55 px-3 py-1 text-xs text-critical-foreground"
         >
           {addressError}
         </p>
@@ -450,7 +450,7 @@ function BrowserAgentAccessControl({
   if (access.paused) {
     return (
       <div
-        className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md border border-warning-border/70 bg-warning-background/72 px-1.5 text-[10px] font-medium text-warning-foreground"
+        className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md border border-warning-border/70 bg-warning-background/72 px-1.5 text-2xs font-medium text-warning-foreground"
         aria-label={`Agent paused before ${access.origin}`}
       >
         <Pause className="size-3 shrink-0" />
@@ -493,7 +493,7 @@ function BrowserAgentAccessControl({
         : `${originLabel} shared`;
     return (
       <div
-        className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md bg-success-background/65 px-1.5 text-[10px] font-medium text-success-foreground"
+        className="flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md bg-success-background/65 px-1.5 text-2xs font-medium text-success-foreground"
         aria-label={`Shared with agent: ${access.origin}`}
       >
         <ShieldCheck className="size-3 shrink-0" />
@@ -518,7 +518,7 @@ function BrowserAgentAccessControl({
       type="button"
       variant="outline"
       size={compact ? "icon-xs" : "xs"}
-      className="h-7 bg-background/72 text-[10px]"
+      className="h-7 bg-background/72 text-2xs"
       aria-label="Share with agent"
       onClick={onShare}
     >
@@ -590,7 +590,7 @@ function CompactAgentAccessControl({
             <Icon />
             <span className="min-w-0">
               <span className="block text-xs font-medium">{displayLabel}</span>
-              <span className="block truncate text-[11px] text-muted-foreground">
+              <span className="block truncate text-xs text-muted-foreground">
                 {originLabel}
               </span>
             </span>
@@ -669,7 +669,7 @@ export function BrowserAgentControlRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="font-medium text-foreground">{status}</span>
-        <span className="ml-2 hidden truncate text-[11px] opacity-80 sm:inline">
+        <span className="ml-2 hidden truncate text-xs opacity-80 sm:inline">
           {detail}
         </span>
       </span>

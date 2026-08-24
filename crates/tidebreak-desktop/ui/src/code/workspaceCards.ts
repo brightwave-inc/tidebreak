@@ -420,12 +420,12 @@ export function formatCompactAge(
 }
 
 const REPO_ACCENT_CLASSES = [
-  "bg-sky-500/80",
-  "bg-teal-500/80",
-  "bg-amber-500/80",
-  "bg-rose-500/80",
-  "bg-indigo-500/80",
-  "bg-lime-600/80",
+  "bg-icon-blue/80",
+  "bg-icon-cyan/80",
+  "bg-icon-amber/80",
+  "bg-icon-rose/80",
+  "bg-icon-violet/80",
+  "bg-icon-green/80",
 ] as const;
 
 /** Stable identity swatch for a repo chip. Not a status color. */

@@ -77,7 +77,7 @@ export function ComputerUseIndicator() {
               className={`size-2.5 shrink-0 rounded-full ${
                 snapshot.halted
                   ? "bg-muted-foreground"
-                  : "bg-emerald-400 shadow-[0_0_0_4px_rgba(52,211,153,0.18)]"
+                  : "bg-live ring-4 ring-live/20"
               }`}
               aria-hidden="true"
             />
@@ -90,7 +90,7 @@ export function ComputerUseIndicator() {
                       snapshot.active?.bundleId ?? "",
                     )}`}
               </p>
-              <p className="text-muted-foreground text-[0.6875rem]">
+              <p className="text-muted-foreground text-2xs">
                 {snapshot.halted
                   ? "Resume only when you want the agent to continue."
                   : "You can stop before the next action."}

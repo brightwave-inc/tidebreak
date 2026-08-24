@@ -99,7 +99,7 @@ export function OptionListbox({
                 // the part that gives way. A hint carrying a hyphen would
                 // otherwise break across two lines the moment the list is
                 // narrow, while the label sat there un-truncated.
-                <span className="ml-auto shrink-0 pl-2 text-[0.68rem] whitespace-nowrap text-muted-foreground">
+                <span className="ml-auto shrink-0 pl-2 text-2xs whitespace-nowrap text-muted-foreground">
                   {row.hint}
                 </span>
               )}

@@ -270,7 +270,7 @@ function BackgroundAgentDetail({
         />
         {run.terminal_text && (
           <section className="mt-4 border-t pt-3.5">
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.06em] text-muted-foreground">
               Result
             </p>
             <div className="break-words text-foreground [&_.message-markdown]:text-sm">

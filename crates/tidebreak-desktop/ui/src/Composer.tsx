@@ -1366,7 +1366,7 @@ function InvokedSkillChip({
       >
         {label}
       </span>
-      <small className="text-[0.68rem]">Skill</small>
+      <small className="text-2xs">Skill</small>
       <button
         type="button"
         className="absolute right-1 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
@@ -1400,7 +1400,7 @@ function FolderAttachmentChip({
         >
           {folder.displayName}
         </strong>
-        <small className="text-[0.68rem]">
+        <small className="text-2xs">
           {folderAccessLabel(folderReach(folder.statements))}
         </small>
       </span>
@@ -1444,7 +1444,7 @@ function FileAttachmentChip({
             size — the transcript records what a document is, not how big it
             was. An unknown size is left unsaid rather than reported as zero. */}
         {file.byteLen > 0 && (
-          <small className="text-[0.68rem]">{formatBytes(file.byteLen)}</small>
+          <small className="text-2xs">{formatBytes(file.byteLen)}</small>
         )}
       </span>
       <button
@@ -1487,7 +1487,7 @@ function WorkspaceFileChip({
         >
           {name}
         </strong>
-        <small className="max-w-[14rem] truncate text-[0.68rem]">
+        <small className="max-w-[14rem] truncate text-2xs">
           {file.detail ?? folder}
         </small>
       </span>
@@ -1560,7 +1560,7 @@ function ImageAttachmentChip({
         {/* Only the outcome is announced. A live region on the percentage
             would read every tick of a bar that is already on screen. */}
         <small
-          className={cn("text-[0.68rem]", failed && "text-destructive")}
+          className={cn("text-2xs", failed && "text-destructive")}
           role={failed ? "alert" : uploading ? undefined : "status"}
         >
           {describeImageAttachment(attachment)}
@@ -1577,7 +1577,7 @@ function ImageAttachmentChip({
       {failed && (
         <button
           type="button"
-          className="shrink-0 rounded-full border border-border bg-background px-2 py-px text-[0.68rem] text-foreground"
+          className="shrink-0 rounded-full border border-border bg-background px-2 py-px text-2xs text-foreground"
           onClick={onRetry}
         >
           Try again

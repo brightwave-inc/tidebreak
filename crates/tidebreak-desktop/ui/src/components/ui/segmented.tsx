@@ -86,7 +86,7 @@ export function SegmentedControl<T extends string>({
             tabIndex={checked ? 0 : -1}
             data-state={checked ? "on" : "off"}
             className={cn(
-              "inline-flex min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-[5px] px-2 py-1 text-[12px] font-medium",
+              "inline-flex min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-[5px] px-2 py-1 text-sm font-medium",
               "ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none",
               "motion-safe:transition-colors motion-safe:duration-150 motion-safe:ease-out",
               checked
