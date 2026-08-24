@@ -256,9 +256,17 @@ describe("preferredCodeModels", () => {
     },
   ];
 
-  it("uses OpenCode's provider-qualified native ids", () => {
+  it("uses provider-qualified ids for engines that require their own listing", () => {
     expect(preferredCodeModels("opencode", native, gateway)).toEqual(native);
     expect(preferredCodeModels("opencode", [], gateway)).toEqual(gateway);
+    const grok = [
+      {
+        id: "model-gateway-model-gateway/grok-4.6",
+        label: "Grok 4.6",
+        source: "Grok CLI",
+      },
+    ];
+    expect(preferredCodeModels("grok", grok, gateway)).toEqual(grok);
   });
 
   it("keeps gateway rows for engines that accept their ids directly", () => {
