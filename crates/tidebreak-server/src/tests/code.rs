@@ -2491,7 +2491,10 @@ async fn interrupting_a_queued_turn_stops_it_before_it_reaches_the_worktree() {
     );
 
     // Send-now is the release: it clears the pause and wakes the worker, and
-    // the held message finally runs now that the checkout is free.
+    // the held message finally promotes now that the checkout is free. The
+    // turn row appearing is the proof — this fixture's engine takes two
+    // seconds per event, so waiting for completion would time the test on
+    // the script, not on the queue.
     let released = client
         .post(format!(
             "http://{addr}/code/sessions/{}/queued/send-now",
@@ -2511,10 +2514,7 @@ async fn interrupting_a_queued_turn_stops_it_before_it_reaches_the_worktree() {
             )
             .await
             .unwrap();
-            if turns
-                .iter()
-                .any(|turn| turn.user_input == "queued" && turn.ended_at.is_some())
-            {
+            if turns.iter().any(|turn| turn.user_input == "queued") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
