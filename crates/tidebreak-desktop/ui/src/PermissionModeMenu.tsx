@@ -103,12 +103,24 @@ export function PermissionModeMenu({
   value,
   disabled,
   onChange,
+  availableModes,
+  open: controlledOpen,
+  onOpenChange,
 }: {
   /** Identity of the chat or draft whose setting is being changed. */
   scopeKey: string;
   value: PermissionMode | null;
   disabled?: boolean;
   onChange: (mode: PermissionMode) => void | Promise<void>;
+  /**
+   * Modes the engine behind this surface honors. Absent means all of them —
+   * chat's server runs every mode. Rows outside the list stay visible and
+   * disabled, so what an engine cannot do is stated rather than missing.
+   */
+  availableModes?: readonly PermissionMode[];
+  /** Open the menu from outside — a surface's keyboard shortcut. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
@@ -162,24 +174,33 @@ export function PermissionModeMenu({
   const current = permissionModeOption(effective);
   const CurrentIcon = current.icon;
   const controlsDisabled = disabled || saving;
+  const unavailable = (mode: PermissionMode) =>
+    availableModes !== undefined && !availableModes.includes(mode);
   const guided = useGuidedMenu("permissions");
   return (
     <DropdownMenu
-      open={guided.open}
+      open={
+        controlledOpen !== undefined
+          ? controlledOpen || guided.open
+          : guided.open
+      }
       modal={guided.modal}
-      onOpenChange={guided.onOpenChange}
+      onOpenChange={(next) => {
+        guided.onOpenChange(next);
+        onOpenChange?.(next);
+      }}
     >
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
-          className="h-8 gap-1.5"
+          className="h-8 min-w-0 gap-1.5"
           disabled={controlsDisabled}
           aria-label={`Permissions: ${current.label}`}
           aria-busy={saving}
         >
-          <CurrentIcon className="size-4 text-foreground" />
-          {current.label}
-          <ChevronDown className="size-4 opacity-50" />
+          <CurrentIcon className="size-4 shrink-0 text-foreground" />
+          <span className="truncate">{current.label}</span>
+          <ChevronDown className="size-4 shrink-0 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -192,11 +213,12 @@ export function PermissionModeMenu({
         {PERMISSION_MODE_SCALE.map((option) => {
           const selected = current.value === option.value;
           const locked = overCeiling(option.value);
+          const unoffered = unavailable(option.value);
           const OptionIcon = option.icon;
           return (
             <DropdownMenuItem
               key={option.value}
-              disabled={controlsDisabled || locked}
+              disabled={controlsDisabled || locked || unoffered}
               onSelect={() => {
                 if (selected) return;
                 void selectMode(option.value);
@@ -227,7 +249,9 @@ export function PermissionModeMenu({
               <span className="text-muted-foreground pl-6 text-xs">
                 {locked
                   ? "Locked by your organization's policy."
-                  : option.description}
+                  : unoffered
+                    ? "This harness can't honor this mode."
+                    : option.description}
               </span>
             </DropdownMenuItem>
           );

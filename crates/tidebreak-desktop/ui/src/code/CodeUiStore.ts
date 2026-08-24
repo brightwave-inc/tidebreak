@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { HarnessKind } from "../api/types";
+import type { HarnessKind, PermissionMode } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import type { StatusTone } from "./statusTone";
 import type { WorkflowShortcut } from "./workspaceWorkflow";
@@ -47,6 +47,7 @@ export type CodeCreateDefaults = {
   repoId?: string;
   harness?: HarnessKind;
   modelsByHarness: Partial<Record<HarnessKind, string>>;
+  permissionMode?: PermissionMode;
 };
 
 /** What one successful create adds to the remembered defaults. */
@@ -56,6 +57,7 @@ export type CodeCreateSelection = {
   model?: string;
   /** Picks made before the final harness, kept for the next switch back. */
   modelsByHarness?: Partial<Record<HarnessKind, string>>;
+  permissionMode?: PermissionMode;
 };
 
 /** Inspector filter for one turn's files and diff. `label` is the ordinal, never the id. */
@@ -79,6 +81,13 @@ function readStoredCreateDefaults(): CodeCreateDefaults | null {
     const record = parsed as Record<string, unknown>;
     const text = (value: unknown) =>
       typeof value === "string" && value.length > 0 ? value : undefined;
+    const mode = (value: unknown): PermissionMode | undefined =>
+      value === "plan" ||
+      value === "ask" ||
+      value === "auto" ||
+      value === "allow"
+        ? value
+        : undefined;
     const harness = text(record.harness);
     const rememberedHarness = HARNESS_KINDS.includes(harness as HarnessKind)
       ? (harness as HarnessKind)
@@ -105,6 +114,7 @@ function readStoredCreateDefaults(): CodeCreateDefaults | null {
       repoId: text(record.repoId),
       harness: rememberedHarness,
       modelsByHarness,
+      permissionMode: mode(record.permissionMode),
     };
   } catch {
     return null;
@@ -459,6 +469,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
       repoId: selection.repoId,
       harness: selection.harness,
       modelsByHarness,
+      permissionMode: selection.permissionMode,
     };
     storeCreateDefaults(defaults);
     set({ lastCreate: defaults });
