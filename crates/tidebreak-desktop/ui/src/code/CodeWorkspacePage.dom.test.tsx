@@ -368,6 +368,12 @@ function makeClient() {
         user_input: message,
       },
     })),
+    setCodeSessionReasoningEffort: vi.fn(
+      async (_sessionId: string, reasoningEffort: "low" | "high" | null) => ({
+        ...SESSION,
+        reasoning_effort: reasoningEffort ?? undefined,
+      }),
+    ),
     getCodeWorkspaceDiff: vi.fn(async () => ({
       diff: "",
       truncated: false,
@@ -622,6 +628,65 @@ describe("CodeWorkspacePage", () => {
       expect(within(status).getByText("Monitoring")).toBeInTheDocument(),
     );
     expect(within(status).queryByText("Running")).not.toBeInTheDocument();
+  });
+
+  it("applies a mid-turn reasoning change to the next submission", async () => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([
+      {
+        ...SESSION,
+        lifecycle: "running",
+        reasoning_effort: "low",
+      },
+    ]);
+    client.listCodeSessionTurns.mockResolvedValue([
+      {
+        ...TURN,
+        status: "running",
+        ended_at: undefined,
+      },
+    ] as never);
+    client.listCodeHarnessModels.mockResolvedValue({
+      kind: "claude_code",
+      models: [],
+      reasoning_efforts: ["low", "high"],
+    } as never);
+    client.submitCodeTurn.mockResolvedValue({
+      kind: "queued",
+      queued: {
+        session_id: SESSION.id,
+        message: "use more reasoning",
+        position: 1,
+      },
+    } as never);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Reasoning: Low" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "High" }));
+
+    expect(client.setCodeSessionReasoningEffort).not.toHaveBeenCalled();
+
+    const message = screen.getByRole("textbox", { name: "Message" });
+    await user.type(message, "use more reasoning");
+    await user.click(
+      screen.getByRole("button", {
+        name: "Queue message for after this response",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        SESSION.id,
+        "use more reasoning",
+        undefined,
+        undefined,
+        "high",
+      ),
+    );
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("keeps the Codex session model selectable before its catalog loads", async () => {
