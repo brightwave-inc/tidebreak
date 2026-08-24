@@ -1,13 +1,17 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
+  Archive,
   Bot,
+  CheckCircle2,
   CircleAlert,
   CornerDownRight,
   ExternalLink,
   Eye,
   FileCode2,
+  GitBranch,
   GitPullRequest,
   Radar,
+  RotateCcw,
   Search,
   SquareTerminal,
   Wrench,
@@ -21,6 +25,11 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
 import type {
   CodeSessionDigest,
@@ -35,12 +44,16 @@ import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
 import { HARNESS_LABELS, LIFECYCLE_LABELS } from "./labels";
 import type { WorkspaceCommand } from "./workspaceActions";
 import {
+  checkSummary,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
 } from "./workspaceWorkflow";
+import { pullRequestReviewSummary } from "./pullRequestPresentation";
 import {
   digestStatusTone,
+  STATUS_CHIP,
+  STATUS_DOT,
   STATUS_MARK,
   STATUS_MOTION,
   STATUS_TEXT,
@@ -49,24 +62,27 @@ import {
 import {
   formatCompactAge,
   isSessionRowWorthy,
+  isPutAway,
   middleTruncate,
+  PR_CHIP_TONE_CLASSES,
   PR_ICON_TONE_CLASSES,
+  prStatusTone,
   prTone,
+  prToneLabel,
+  repoAccentClass,
   sessionRowLabel,
   watchRowLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
   type CardDensity,
-  isPutAway,
 } from "./workspaceCards";
 
 /**
  * One workspace in the rail.
  *
- * This is deliberately a row, not a miniature dashboard. The title opens the
- * conversation, live work nests beneath it, and Git / PR state sits in a
- * dedicated action line that is visible without hover. Right-click remains the
- * complete command path for less common workspace operations.
+ * The row keeps the triage read visible. The hover card restores the room that
+ * pull-request checks, review state, the full branch, and the next action need.
+ * Right-click remains the complete command path for less common operations.
  */
 export function WorkspaceCard({
   workspace,
@@ -80,6 +96,7 @@ export function WorkspaceCard({
   commands,
   childSessions = [],
   stackParent,
+  detailDefaultOpen = false,
   onOpen,
   onCommand,
   onOpenChildSession,
@@ -99,6 +116,8 @@ export function WorkspaceCard({
   childSessions?: CodeSessionDigest[];
   /** The sibling workspace this branch is stacked on (decision 62). */
   stackParent?: { id: string; title: string } | null;
+  /** Open the hover detail at mount time. Stories use this for visual review. */
+  detailDefaultOpen?: boolean;
   onOpen: () => void;
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onOpenChildSession?: (sessionId: string) => void;
@@ -109,6 +128,7 @@ export function WorkspaceCard({
   const title = digest?.title ?? workspace.title;
   const pr = digest?.pr_state ?? workspace.pr;
   const archived = isPutAway(workspace);
+  const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
   const watchActive = childSessions.some(
     (child) =>
       child.watch_state === "watching" ||
@@ -128,70 +148,107 @@ export function WorkspaceCard({
       )}
       data-active={active || undefined}
     >
-      <ContextMenu>
-        <ContextMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label={workspaceCardLabel({
-              title,
-              repoName,
-              branchName: workspace.branch_name,
-              attention: digest?.attention,
-              session: digest,
-              pr,
-              terminalOpen,
-            })}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "flex w-full cursor-pointer flex-col gap-0.5 rounded-xl px-2.5 py-2 text-left",
-              FOCUS_RING_INSET,
-              HOVER_TINT,
-            )}
-            onClick={onOpen}
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <AttentionBadge attention={digest?.attention} compact />
-              <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-5">
-                {title}
-              </span>
-              <span className="flex shrink-0 items-center gap-1.5" aria-hidden>
-                {pr && <PrGlyph pr={pr} />}
-                {terminalOpen && (
-                  <SquareTerminal className="size-3 text-muted-foreground" />
+      <ContextMenu
+        onOpenChange={(open) => {
+          if (open) setDetailOpen(false);
+        }}
+      >
+        <HoverCard
+          open={detailOpen}
+          onOpenChange={setDetailOpen}
+          openDelay={300}
+          closeDelay={120}
+        >
+          <ContextMenuTrigger asChild>
+            <HoverCardTrigger asChild>
+              <button
+                type="button"
+                aria-label={workspaceCardLabel({
+                  title,
+                  repoName,
+                  branchName: workspace.branch_name,
+                  attention: digest?.attention,
+                  session: digest,
+                  pr,
+                  terminalOpen,
+                })}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "flex w-full cursor-pointer flex-col gap-0.5 rounded-xl px-2.5 py-2 text-left",
+                  FOCUS_RING_INSET,
+                  HOVER_TINT,
                 )}
-                {digest?.attention.state.type === "needs_you" &&
-                  digest.attention.state.source === "structured" && (
-                    <CircleAlert
-                      className={cn("size-3", STATUS_MARK.critical)}
-                    />
-                  )}
-              </span>
-            </span>
-            {density === "detailed" &&
-              (visibleMeta.repoChip || visibleMeta.branch) && (
-                <span className="flex min-w-0 items-center gap-1.5 pl-5 text-[11px] text-muted-foreground">
-                  {visibleMeta.repoChip && (
-                    <span className="min-w-0 max-w-[46%] truncate">
-                      {repoName}
-                    </span>
-                  )}
-                  {visibleMeta.repoChip && visibleMeta.branch && (
-                    <span className="text-border" aria-hidden>
-                      /
-                    </span>
-                  )}
-                  {visibleMeta.branch && (
-                    <span
-                      className="min-w-0 flex-1 truncate font-mono"
-                      title={workspace.branch_name}
-                    >
-                      {middleTruncate(workspace.branch_name, 24)}
-                    </span>
-                  )}
+                onClick={onOpen}
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <AttentionBadge attention={digest?.attention} compact />
+                  <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-5">
+                    {title}
+                  </span>
+                  <span
+                    className="flex shrink-0 items-center gap-1.5"
+                    aria-hidden
+                  >
+                    {pr && <PrGlyph pr={pr} />}
+                    {terminalOpen && (
+                      <SquareTerminal className="size-3 text-muted-foreground" />
+                    )}
+                    {digest?.attention.state.type === "needs_you" &&
+                      digest.attention.state.source === "structured" && (
+                        <CircleAlert
+                          className={cn("size-3", STATUS_MARK.critical)}
+                        />
+                      )}
+                  </span>
                 </span>
-              )}
-          </button>
-        </ContextMenuTrigger>
+                {density === "detailed" &&
+                  (visibleMeta.repoChip || visibleMeta.branch) && (
+                    <span className="flex min-w-0 items-center gap-1.5 pl-5 text-[11px] text-muted-foreground">
+                      {visibleMeta.repoChip && (
+                        <span className="min-w-0 max-w-[46%] truncate">
+                          {repoName}
+                        </span>
+                      )}
+                      {visibleMeta.repoChip && visibleMeta.branch && (
+                        <span className="text-border" aria-hidden>
+                          /
+                        </span>
+                      )}
+                      {visibleMeta.branch && (
+                        <span
+                          className="min-w-0 flex-1 truncate font-mono"
+                          title={workspace.branch_name}
+                        >
+                          {middleTruncate(workspace.branch_name, 24)}
+                        </span>
+                      )}
+                    </span>
+                  )}
+              </button>
+            </HoverCardTrigger>
+          </ContextMenuTrigger>
+
+          <HoverCardContent
+            side="right"
+            align="start"
+            sideOffset={10}
+            className="w-[22rem] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-[0_18px_48px_color-mix(in_oklch,var(--foreground)_16%,transparent)]"
+          >
+            <WorkspaceDetailPanel
+              workspace={workspace}
+              digest={digest}
+              session={session}
+              repoName={repoName}
+              title={title}
+              pr={pr}
+              archived={archived}
+              watchActive={watchActive}
+              terminalOpen={terminalOpen}
+              onCommand={onCommand}
+              onWorkflowAction={onWorkflowAction}
+            />
+          </HoverCardContent>
+        </HoverCard>
 
         <ContextMenuContent>
           {commands.map((command) => (
@@ -205,16 +262,10 @@ export function WorkspaceCard({
       </ContextMenu>
 
       {density === "detailed" && (
-        <WorkspaceStateLine
+        <WorkspaceActivityLine
           workspace={workspace}
           digest={digest}
           session={session}
-          pr={pr}
-          archived={archived}
-          watchActive={watchActive}
-          terminalOpen={terminalOpen}
-          onCommand={onCommand}
-          onWorkflowAction={onWorkflowAction}
         />
       )}
 
@@ -270,10 +321,12 @@ const SUBAGENT_STATUS_TONES: Record<CodeSubagentStatus, StatusTone> = {
   failed: "critical",
 };
 
-function WorkspaceStateLine({
+function WorkspaceDetailPanel({
   workspace,
   digest,
   session,
+  repoName,
+  title,
   pr,
   archived,
   watchActive,
@@ -284,6 +337,8 @@ function WorkspaceStateLine({
   workspace: CodeWorkspaceSnapshot;
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
+  repoName: string;
+  title: string;
   pr: PullRequestDigest | undefined;
   archived: boolean;
   watchActive: boolean;
@@ -291,102 +346,252 @@ function WorkspaceStateLine({
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
-  if (archived) {
-    return (
-      <div className="flex items-center gap-2 px-2.5 pb-2 pl-7">
-        <span className="text-xs text-muted-foreground">Archived</span>
+  const activity = workspaceActivitySummary(digest, session, terminalOpen);
+  const stamp = archived
+    ? (workspace.archived_at ?? workspace.created_at)
+    : (session?.created_at ?? workspace.created_at);
+  const age = formatCompactAge(stamp);
+  const model = pr ? workspaceWorkflowModel(null, pr) : null;
+  const primary =
+    model?.primary && !(watchActive && model.primary !== "open_pr")
+      ? model.primary
+      : undefined;
+  const primaryLabel =
+    primary && model
+      ? workspaceWorkflowActionLabel(primary, model.stage)
+      : null;
+  const prTitle = pr?.title?.trim();
+  const showPrTitle = prTitle && prTitle !== title.trim();
+  const checkLabel = model?.checks?.total
+    ? checkSummary(model.checks)
+    : pr?.checks_summary?.trim() || null;
+  const checkTone: StatusTone = model?.checks?.failing
+    ? "critical"
+    : model?.checks?.pending
+      ? "pending"
+      : model?.checks?.passing
+        ? "ready"
+        : "neutral";
+  const review = pr
+    ? pullRequestReviewSummary({
+        state: pr.state,
+        draft: pr.draft ?? false,
+        review_decision: pr.review_decision,
+      })
+    : null;
+  const putAwayLabel =
+    workspace.status === "released" ? "Released" : "Archived";
+  const prCountLabel = workspacePrChipSummary(digest?.pr_count);
+
+  return (
+    <div data-testid="workspace-hover-card">
+      <div className="p-3.5">
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span
+            className={cn(
+              "size-1.5 shrink-0 rounded-[2px]",
+              repoAccentClass(workspace.repo_id),
+            )}
+            aria-hidden
+          />
+          <span className="shrink-0">{repoName}</span>
+          <span className="text-border" aria-hidden>
+            /
+          </span>
+          <span
+            className="min-w-0 flex-1 truncate font-mono"
+            title={workspace.branch_name}
+          >
+            {workspace.branch_name}
+          </span>
+          {archived ? (
+            <span
+              className={cn(
+                "shrink-0 rounded-md px-1.5 py-0.5",
+                STATUS_CHIP.neutral,
+              )}
+            >
+              {putAwayLabel}
+            </span>
+          ) : pr ? (
+            <span
+              className={cn(
+                "shrink-0 rounded-md px-1.5 py-0.5 font-medium",
+                PR_CHIP_TONE_CLASSES[prTone(pr)],
+              )}
+            >
+              {prToneLabel(pr)}
+            </span>
+          ) : null}
+        </div>
+
+        <p className="mt-2.5 text-[15px] font-semibold leading-5 text-pretty">
+          {title}
+        </p>
+        {showPrTitle && (
+          <p className="mt-1 text-xs leading-5 text-muted-foreground text-pretty">
+            {prTitle}
+          </p>
+        )}
+
+        {activity && (
+          <div
+            className={cn(
+              "mt-2 flex min-w-0 items-start gap-1.5 text-xs",
+              STATUS_TEXT[activity.tone],
+            )}
+          >
+            <span
+              className={cn(
+                "mt-1 size-1.5 shrink-0 rounded-full",
+                STATUS_DOT[activity.tone],
+                activity.tone === "running" && STATUS_MOTION.running,
+              )}
+              aria-hidden
+            />
+            <span className="min-w-0 leading-4">{activity.label}</span>
+          </div>
+        )}
+
+        {pr && model && (
+          <div className="mt-3 border-t border-border-subtle pt-3">
+            <div className="flex items-start gap-2">
+              <GitPullRequest
+                className={cn(
+                  "mt-0.5 size-3.5 shrink-0",
+                  PR_ICON_TONE_CLASSES[prTone(pr)],
+                )}
+                aria-hidden
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-xs font-medium tabular-nums">
+                    Pull request #{pr.number}
+                  </span>
+                  {prCountLabel && (
+                    <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground tabular-nums">
+                      {prCountLabel}
+                    </span>
+                  )}
+                  <span
+                    className={cn(
+                      "ml-auto shrink-0 text-[11px] font-medium",
+                      STATUS_TEXT[model.tone],
+                    )}
+                  >
+                    {model.summary.replace(/^#\d+\s*·\s*/, "")}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {model.detail}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-muted-foreground">
+              {checkLabel && (
+                <WorkspaceStatusFact
+                  icon={<CheckCircle2 />}
+                  label={checkLabel}
+                  tone={checkTone}
+                />
+              )}
+              {review && (
+                <WorkspaceStatusFact
+                  icon={<Eye />}
+                  label={review.label}
+                  tone={review.tone}
+                />
+              )}
+              {pr.base_branch && (
+                <WorkspaceStatusFact
+                  icon={<GitBranch />}
+                  label={`into ${pr.base_branch}`}
+                  tone="neutral"
+                />
+              )}
+            </div>
+
+            {primary &&
+              primary !== "open_pr" &&
+              primaryLabel &&
+              onWorkflowAction && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mt-3 h-7 bg-foreground px-2.5 text-[11px] text-background hover:bg-foreground/88 hover:text-background"
+                  title={model.detail}
+                  onClick={() => onWorkflowAction(primary)}
+                >
+                  {primaryLabel}
+                </Button>
+              )}
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 border-t border-border-subtle bg-muted/25 px-3 py-2">
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          className="ml-auto h-6 px-2 text-[11px]"
-          onClick={() => onCommand("restore")}
+          className="h-7 gap-1.5 px-2 text-[11px]"
+          onClick={() => onCommand(archived ? "restore" : "archive")}
         >
-          Restore
+          {archived ? (
+            <RotateCcw className="size-3" aria-hidden />
+          ) : (
+            <Archive className="size-3" aria-hidden />
+          )}
+          {archived ? "Restore" : "Archive"}
         </Button>
-      </div>
-    );
-  }
-
-  if (pr) {
-    const model = workspaceWorkflowModel(null, pr);
-    const primary =
-      model.primary && !(watchActive && model.primary !== "open_pr")
-        ? model.primary
-        : undefined;
-    const primaryLabel = primary
-      ? workspaceWorkflowActionLabel(primary, model.stage)
-      : null;
-    const stateLabel = model.summary.replace(/^#\d+\s*·\s*/, "");
-    const prCountLabel = workspacePrChipSummary(digest?.pr_count);
-
-    return (
-      <>
-        <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7">
-          <button
+        {pr && (
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             className={cn(
-              "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] font-medium hover:bg-muted",
-              STATUS_TEXT[model.tone],
-              FOCUS_RING_INSET,
-              HOVER_TINT,
+              "h-7 gap-1.5 px-2 text-[11px]",
+              STATUS_TEXT[prStatusTone(pr)],
             )}
-            aria-label={
-              prCountLabel
-                ? `Open pull request #${pr.number}, one of ${digest?.pr_count} this workspace worked on`
-                : `Open pull request #${pr.number}`
-            }
-            title={model.detail}
+            aria-label={`Open pull request #${pr.number}`}
             onClick={() => onCommand("open-pr")}
           >
-            <GitPullRequest className="size-3 shrink-0" aria-hidden />
-            <span className="shrink-0 tabular-nums">#{pr.number}</span>
-            <span className="min-w-0 truncate text-muted-foreground">
-              {stateLabel}
-            </span>
-            {prCountLabel && (
-              <span className="bg-muted text-muted-foreground shrink-0 rounded-full px-1.5 text-[10px] font-medium tabular-nums">
-                {prCountLabel}
-              </span>
-            )}
-            <ExternalLink
-              className="size-2.5 shrink-0 opacity-55"
-              aria-hidden
-            />
-          </button>
-          {primary &&
-            primary !== "open_pr" &&
-            primaryLabel &&
-            onWorkflowAction && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="ml-auto h-6 shrink-0 bg-foreground px-2 text-[11px] text-background hover:bg-foreground/88 hover:text-background"
-                title={model.detail}
-                onClick={() => onWorkflowAction(primary)}
-              >
-                {primaryLabel}
-              </Button>
-            )}
-        </div>
-        <WorkspaceActivityLine
-          workspace={workspace}
-          digest={digest}
-          session={session}
-          terminalOpen={terminalOpen}
-        />
-      </>
-    );
-  }
+            <GitPullRequest className="size-3" aria-hidden />
+            <span className="tabular-nums">#{pr.number}</span>
+            <ExternalLink className="size-2.5 opacity-55" aria-hidden />
+          </Button>
+        )}
+        {age && (
+          <span
+            className="ml-auto shrink-0 text-[11px] text-muted-foreground tabular-nums"
+            title={stamp}
+          >
+            {age === "now" ? "just now" : `${age} ago`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
+function WorkspaceStatusFact({
+  icon,
+  label,
+  tone,
+}: {
+  icon: ReactNode;
+  label: string;
+  tone: StatusTone;
+}) {
   return (
-    <WorkspaceActivityLine
-      workspace={workspace}
-      digest={digest}
-      session={session}
-      terminalOpen={terminalOpen}
-    />
+    <span className={cn("inline-flex items-center gap-1", STATUS_TEXT[tone])}>
+      <span className="[&_svg]:size-3 [&_svg]:shrink-0" aria-hidden>
+        {icon}
+      </span>
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -394,46 +599,26 @@ function WorkspaceActivityLine({
   workspace,
   digest,
   session,
-  terminalOpen,
 }: {
   workspace: CodeWorkspaceSnapshot;
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
-  terminalOpen: boolean;
 }) {
-  const needsYou =
-    digest?.attention.state.type === "needs_you"
-      ? digest.attention.state.prompt || "Needs you"
-      : null;
-  const worthyDigest =
-    digest && isSessionRowWorthy(digest) ? digest : undefined;
-  const statusLabel = needsYou
-    ? null
-    : worthyDigest
-      ? sessionRowLabel(worthyDigest)
-      : digest
-        ? LIFECYCLE_LABELS[digest.lifecycle]
-        : session
-          ? LIFECYCLE_LABELS[session.lifecycle]
-          : null;
-  const turnCount = digest?.turn_count;
-  const turnLabel =
-    !needsYou && turnCount !== undefined
-      ? `${turnCount} ${turnCount === 1 ? "turn" : "turns"}`
-      : null;
-  const sessionLine = [statusLabel, turnLabel].filter(Boolean).join(" · ");
+  const railDigest = digest && isSessionRowWorthy(digest) ? digest : undefined;
+  if (!railDigest) return null;
+
+  const activity = workspaceActivitySummary(railDigest, session, false);
   const HarnessIcon = session ? HARNESS_ICONS[session.harness_kind] : null;
   const stamp = session?.created_at ?? workspace.created_at;
   const age = formatCompactAge(stamp);
 
-  const terminalOnly = terminalOpen && !needsYou && !sessionLine;
-  if (!needsYou && !sessionLine && !terminalOnly) return null;
-  const ActivityIcon = digest ? sessionActivityIcon(digest) : null;
-  const running = digestStatusTone(digest) === "running";
+  if (!activity) return null;
+  const ActivityIcon = sessionActivityIcon(railDigest);
+  const running = activity.tone === "running";
 
   return (
     <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-[11px] text-muted-foreground">
-      {needsYou ? (
+      {activity.needsYou ? (
         <CircleAlert
           className={cn("size-3 shrink-0", STATUS_TEXT.critical)}
           aria-hidden
@@ -444,7 +629,7 @@ function WorkspaceActivityLine({
         <span title={HARNESS_LABELS[session.harness_kind]}>
           <HarnessIcon className="size-3 shrink-0" aria-hidden />
         </span>
-      ) : terminalOnly ? (
+      ) : activity.terminalOnly ? (
         <SquareTerminal className="size-3 shrink-0" aria-hidden />
       ) : ActivityIcon ? (
         <ActivityIcon
@@ -458,11 +643,11 @@ function WorkspaceActivityLine({
       <span
         className={cn(
           "min-w-0 flex-1 truncate",
-          needsYou && STATUS_TEXT.critical,
+          activity.needsYou && STATUS_TEXT.critical,
           running && STATUS_TEXT.running,
         )}
       >
-        {needsYou ?? (sessionLine || "Terminal open")}
+        {activity.label}
       </span>
       {age && (
         <span className="shrink-0 tabular-nums">
@@ -471,6 +656,55 @@ function WorkspaceActivityLine({
       )}
     </div>
   );
+}
+
+function workspaceActivitySummary(
+  digest: CodeSessionDigest | undefined,
+  session: CodeSessionSnapshot | undefined,
+  terminalOpen: boolean,
+): {
+  label: string;
+  tone: StatusTone;
+  needsYou: boolean;
+  terminalOnly: boolean;
+} | null {
+  const needsYou =
+    digest?.attention.state.type === "needs_you"
+      ? digest.attention.state.prompt || "Needs you"
+      : null;
+  if (needsYou) {
+    return {
+      label: needsYou,
+      tone: "critical",
+      needsYou: true,
+      terminalOnly: false,
+    };
+  }
+
+  const worthyDigest =
+    digest && isSessionRowWorthy(digest) ? digest : undefined;
+  const statusLabel = worthyDigest
+    ? sessionRowLabel(worthyDigest)
+    : digest
+      ? LIFECYCLE_LABELS[digest.lifecycle]
+      : session
+        ? LIFECYCLE_LABELS[session.lifecycle]
+        : null;
+  const turnCount = digest?.turn_count;
+  const turnLabel =
+    turnCount !== undefined
+      ? `${turnCount} ${turnCount === 1 ? "turn" : "turns"}`
+      : null;
+  const sessionLine = [statusLabel, turnLabel].filter(Boolean).join(" · ");
+  const terminalOnly = terminalOpen && !sessionLine;
+  if (!sessionLine && !terminalOnly) return null;
+
+  return {
+    label: sessionLine || "Terminal open",
+    tone: digestStatusTone(digest),
+    needsYou: false,
+    terminalOnly,
+  };
 }
 
 function sessionActivityIcon(digest: CodeSessionDigest) {

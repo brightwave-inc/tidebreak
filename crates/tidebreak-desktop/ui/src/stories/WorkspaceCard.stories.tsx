@@ -23,9 +23,8 @@ import {
 } from "./fixtures";
 
 /**
- * The rail's workspace row. Conversation state, pull-request status, and the
- * next workflow action stay visible without hover; right-click remains the
- * complete command path.
+ * The rail's workspace row. The row keeps the triage state visible. Hovering
+ * opens the full branch, pull-request checks, review state, and actions.
  */
 
 const meta = {
@@ -58,7 +57,118 @@ type Story = StoryObj<typeof meta>;
 
 export const Idle: Story = {};
 
-/** PR state and the next action remain visible directly in the rail. */
+/** A green pull request with the hover detail held open for visual review. */
+export const HoverPullRequestReady: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      pr: {
+        ...openPrDigest,
+        checks_summary: "9 passing",
+        review_decision: "approved",
+        mergeable: "mergeable",
+        merge_state_status: "clean",
+        head_branch: codeWorkspace.branch_name,
+        base_branch: "main",
+      },
+    },
+    digest: {
+      ...runningDigest,
+      pr_state: {
+        ...openPrDigest,
+        checks_summary: "9 passing",
+        review_decision: "approved",
+        mergeable: "mergeable",
+        merge_state_status: "clean",
+        head_branch: codeWorkspace.branch_name,
+        base_branch: "main",
+      },
+    },
+    session: codeSession,
+    commands: workspaceCommands({
+      hasPr: true,
+      archived: false,
+      hasSession: true,
+    }),
+    detailDefaultOpen: true,
+    onWorkflowAction: fn(),
+  },
+};
+
+/** Review and check blockers stay readable without opening the workspace. */
+export const HoverPullRequestBlocked: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      pr: {
+        ...openPrDigest,
+        checks_summary: "6 passing, 2 failing",
+        review_decision: "changes_requested",
+        mergeable: "mergeable",
+        merge_state_status: "blocked",
+        head_branch: codeWorkspace.branch_name,
+        base_branch: "main",
+      },
+    },
+    digest: {
+      ...doneDigest,
+      pr_state: {
+        ...openPrDigest,
+        checks_summary: "6 passing, 2 failing",
+        review_decision: "changes_requested",
+        mergeable: "mergeable",
+        merge_state_status: "blocked",
+        head_branch: codeWorkspace.branch_name,
+        base_branch: "main",
+      },
+    },
+    session: codeSession,
+    commands: workspaceCommands({
+      hasPr: true,
+      archived: false,
+      hasSession: true,
+    }),
+    detailDefaultOpen: true,
+    onWorkflowAction: fn(),
+  },
+};
+
+/** A structured question gets the same hover surface without PR filler. */
+export const HoverNeedsYou: Story = {
+  args: {
+    digest: needsYouDigest,
+    session: codeSession,
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+    detailDefaultOpen: true,
+  },
+};
+
+/** Compact rail rows still reveal the full workspace and PR detail. */
+export const HoverCompact: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      pr: {
+        ...openPrDigest,
+        checks_summary: "7 passing, 1 pending",
+        review_decision: "review_required",
+        mergeable: "unknown",
+        merge_state_status: "unknown",
+        head_branch: codeWorkspace.branch_name,
+        base_branch: "main",
+      },
+    },
+    density: "compact",
+    commands: workspaceCommands({ hasPr: true, archived: false }),
+    detailDefaultOpen: true,
+  },
+};
+
+/** The rail keeps the PR glyph and live activity without repeating PR detail. */
 export const PullRequestInRail: Story = {
   args: {
     workspace: { ...codeWorkspace, pr: openPrDigest },
@@ -101,11 +211,12 @@ export const SeveralPullRequests: Story = {
       archived: false,
       hasSession: true,
     }),
+    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };
 
-/** One click from the rail: an approved, green PR offers Merge. */
+/** The hover detail offers Merge for an approved, green pull request. */
 export const ReadyToMerge: Story = {
   args: {
     workspace: {
@@ -119,11 +230,12 @@ export const ReadyToMerge: Story = {
       },
     },
     commands: workspaceCommands({ hasPr: true, archived: false }),
+    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };
 
-/** A conflicting PR leads with Resolve conflicts, same as the header. */
+/** The hover detail leads a conflicting PR with Resolve conflicts. */
 export const Conflicts: Story = {
   args: {
     workspace: {
@@ -131,6 +243,7 @@ export const Conflicts: Story = {
       pr: { ...openPrDigest, mergeable: "conflicting" },
     },
     commands: workspaceCommands({ hasPr: true, archived: false }),
+    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };
@@ -271,11 +384,12 @@ export const TerminalOpen: Story = {
   args: { terminalOpen: true },
 };
 
-/** On the shelf: dimmed row with Restore kept in reach. */
+/** On the shelf: a dimmed row with Restore in the hover detail. */
 export const Archived: Story = {
   args: {
     workspace: archivedWorkspace,
     commands: workspaceCommands({ hasPr: false, archived: true }),
+    detailDefaultOpen: true,
   },
 };
 
