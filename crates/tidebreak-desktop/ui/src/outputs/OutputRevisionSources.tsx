@@ -50,7 +50,8 @@ export function OutputRevisionSources({
                   type="button"
                   title={source.label}
                   aria-label={source.label}
-                  className="inline-flex max-w-64 items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  className="inline-flex max-w-64 items-center gap-1.5 rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-default disabled:hover:bg-card disabled:hover:text-muted-foreground"
+                  disabled={!onOpenWeb}
                   onClick={() => onOpenWeb?.(source.url)}
                 >
                   <DomainFavicon url={source.url} className="size-3.5" />

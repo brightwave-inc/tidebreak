@@ -21,12 +21,14 @@ export function FileDownloadProgressIndicator({
   return (
     <div
       className={cn(
-        "flex h-64 items-center justify-center text-muted-foreground",
+        "flex h-64 items-center justify-center px-4 text-muted-foreground",
         className,
       )}
+      role="status"
+      aria-live="polite"
       {...props}
     >
-      <div className="flex flex-col items-center gap-3">
+      <div className="flex w-full max-w-64 flex-col items-center gap-3 text-center">
         <Loader2Icon className="size-6 animate-spin" />
         <div className="flex flex-col items-center gap-1">
           <p>Downloading document…</p>
@@ -40,7 +42,7 @@ export function FileDownloadProgressIndicator({
         <Progress
           value={percentage}
           aria-label="Download progress"
-          className="w-64"
+          className="w-full"
         />
       </div>
     </div>

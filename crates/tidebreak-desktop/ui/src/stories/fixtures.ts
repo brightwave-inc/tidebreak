@@ -299,6 +299,120 @@ export const codeWorkspace: CodeWorkspaceSnapshot = {
   created_at: "2026-08-20T09:00:00.000Z",
 };
 
+/** Repositories shared by the home, setup, and sidebar stories. */
+export const codeRepositories: CodeRepoSnapshot[] = [
+  {
+    id: "repo-tidebreak",
+    root_path: "/Users/sam/src/brightwave/tidebreak",
+    display_name: "tidebreak",
+    default_base_ref: "main",
+    branch_prefix: "thet",
+    quick_actions: [],
+    created_at: "2026-08-10T12:00:00.000Z",
+  },
+  {
+    id: "repo-model-gateway",
+    root_path: "/Users/sam/src/platform/model-gateway",
+    display_name: "model-gateway",
+    default_base_ref: "main",
+    branch_prefix: "thet",
+    quick_actions: [],
+    created_at: "2026-08-08T15:30:00.000Z",
+  },
+  {
+    id: "repo-design-system",
+    root_path:
+      "/Users/sam/src/brightwave/product-foundations/design-system-components",
+    display_name: "design-system-components",
+    default_base_ref: "main",
+    branch_prefix: "thet",
+    quick_actions: [],
+    created_at: "2026-08-03T10:15:00.000Z",
+  },
+];
+
+/** A realistic worktree for quick open and file-panel stories. */
+export const codeWorkspaceFilePaths = [
+  "README.md",
+  "crates/tidebreak-desktop/ui/src/code/CodeHome.tsx",
+  "crates/tidebreak-desktop/ui/src/code/CodeWorkspacePage.tsx",
+  "crates/tidebreak-desktop/ui/src/code/browser/CodeBrowserTab.tsx",
+  "crates/tidebreak-desktop/ui/src/stories/CodeWorkspacePage.stories.tsx",
+  "crates/tidebreak-desktop/ui/src/stories/fixtures.ts",
+  "docs/decisions/0062-pull-request-stacks.md",
+  "scripts/storybook.sh",
+] as const;
+
+/** A busy but readable rail for density and progressive-disclosure review. */
+export const codeSidebarWorkspaces: CodeWorkspaceSnapshot[] = [
+  {
+    ...codeWorkspace,
+    id: "ws-storybook-audit",
+    repo_id: "repo-tidebreak",
+    title: "Audit Storybook coverage",
+    branch_name: "thet/storybook-audit",
+    created_at: "2026-08-24T13:40:00.000Z",
+  },
+  {
+    ...codeWorkspace,
+    id: "ws-browser-recovery",
+    repo_id: "repo-tidebreak",
+    title: "Make browser recovery clear",
+    branch_name: "thet/browser-recovery",
+    created_at: "2026-08-24T12:20:00.000Z",
+    pr: {
+      number: 2314,
+      url: "https://github.com/brightwave-inc/tidebreak/pull/2314",
+      state: "open",
+      title: "Make browser recovery clear",
+      review_decision: "changes_requested",
+      checks_summary: "7 passing, 1 failing",
+    },
+  },
+  {
+    ...codeWorkspace,
+    id: "ws-delivery-density",
+    repo_id: "repo-tidebreak",
+    title: "Clarify delivery density",
+    branch_name: "thet/delivery-density",
+    created_at: "2026-08-24T11:05:00.000Z",
+    pr: {
+      number: 2311,
+      url: "https://github.com/brightwave-inc/tidebreak/pull/2311",
+      state: "open",
+      title: "Clarify delivery density",
+      review_decision: "approved",
+      mergeable: "mergeable",
+      merge_state_status: "clean",
+      checks_summary: "9 passing",
+    },
+  },
+  {
+    ...codeWorkspace,
+    id: "ws-provider-errors",
+    repo_id: "repo-model-gateway",
+    title: "Recover provider errors",
+    branch_name: "thet/provider-errors",
+    created_at: "2026-08-23T17:45:00.000Z",
+  },
+  {
+    ...codeWorkspace,
+    id: "ws-usage-progress",
+    repo_id: "repo-model-gateway",
+    title: "Show subscription progress",
+    branch_name: "thet/usage-progress",
+    created_at: "2026-08-23T16:10:00.000Z",
+  },
+  {
+    ...codeWorkspace,
+    id: "ws-token-rhythm",
+    repo_id: "repo-design-system",
+    title: "Tune dense panel rhythm",
+    branch_name: "thet/panel-rhythm",
+    created_at: "2026-08-22T14:30:00.000Z",
+  },
+];
+
 export const codeSession: CodeSessionSnapshot = {
   id: "sess-1",
   workspace_id: "ws-1",

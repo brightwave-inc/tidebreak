@@ -45,7 +45,23 @@ const preview: Preview = {
     },
     options: {
       storySort: {
-        order: ["Foundations", "Conversation", "Code"],
+        order: [
+          "Foundations",
+          "Shell",
+          "Navigation",
+          "Conversation",
+          "Composer",
+          "Chat",
+          "Code",
+          "Outputs",
+          "Documents",
+          "Sources",
+          "Attachments",
+          "Apps",
+          "Plugins",
+          "Settings",
+          "Modes",
+        ],
       },
     },
     viewport: {
@@ -54,9 +70,17 @@ const preview: Preview = {
           name: "Desktop canvas",
           styles: { width: "1280px", height: "800px" },
         },
+        wideDesktop: {
+          name: "Wide desktop",
+          styles: { width: "1440px", height: "900px" },
+        },
         conversation: {
           name: "Conversation pane",
           styles: { width: "760px", height: "800px" },
+        },
+        minimumWindow: {
+          name: "Minimum window (720 × 480)",
+          styles: { width: "720px", height: "480px" },
         },
         compact: {
           name: "Compact pane",

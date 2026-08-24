@@ -1424,7 +1424,7 @@ describe("file attachment chips", () => {
       </SourceNavProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "brief.pdf" }));
+    await user.click(screen.getByRole("button", { name: "Open brief.pdf" }));
     expect(openDocument).toHaveBeenCalledWith("document-1");
   });
 });

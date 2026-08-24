@@ -1,10 +1,16 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 
 import type { OutputRevisionSource } from "@/deliverables";
 import { OutputRevisionSources } from "@/outputs/OutputRevisionSources";
 
-function RevisionPanel({ sources }: { sources: OutputRevisionSource[] }) {
+function RevisionPanel({
+  sources,
+  navigation,
+}: {
+  sources: OutputRevisionSource[];
+  navigation: boolean;
+}) {
   return (
     <div className="flex h-80 flex-col overflow-hidden rounded-lg border bg-page-background">
       <div className="min-h-0 flex-1 overflow-auto p-6">
@@ -17,8 +23,8 @@ function RevisionPanel({ sources }: { sources: OutputRevisionSource[] }) {
       </div>
       <OutputRevisionSources
         sources={sources}
-        onOpenDocument={fn()}
-        onOpenWeb={fn()}
+        onOpenDocument={navigation ? fn() : undefined}
+        onOpenWeb={navigation ? fn() : undefined}
       />
     </div>
   );
@@ -42,7 +48,7 @@ const sourcedRevision: OutputRevisionSource[] = [
 const meta = {
   title: "Outputs/Revision sources",
   component: RevisionPanel,
-  args: { sources: sourcedRevision },
+  args: { sources: sourcedRevision, navigation: true },
   decorators: [
     (Story) => (
       <div className="mx-auto max-w-4xl p-8">
@@ -61,4 +67,13 @@ export const WithDocumentAndWebEvidence: Story = {};
 /** User edits and background-agent revisions do not borrow another turn's sources. */
 export const WithoutTurnEvidence: Story = {
   args: { sources: [] },
+};
+
+/** Sources remain legible when their original navigation boundary is unavailable. */
+export const NavigationUnavailable: Story = {
+  args: { navigation: false },
+  play: async ({ canvasElement }) => {
+    const buttons = within(canvasElement).getAllByRole("button");
+    await Promise.all(buttons.map((button) => expect(button).toBeDisabled()));
+  },
 };
