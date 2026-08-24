@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 
 import type { AppDetail, AppGrantState, AppSummary } from "@/api";
 import { AppDetailView } from "@/apps/AppDetailView";
@@ -203,7 +203,16 @@ export const Empty: Story = {
   args: { apis: appApis({ apps: [] }) },
 };
 
-export const DenseLibrary: Story = {};
+export const DenseLibrary: Story = {
+  play: async ({ canvasElement }) => {
+    const list = within(canvasElement).getByRole("list", { name: "Apps" });
+    await expect(list).toBeVisible();
+    expect(list.getBoundingClientRect().width).toBeLessThanOrEqual(800);
+    await expect(
+      within(canvasElement).getAllByText("Access allowed")[0],
+    ).toBeVisible();
+  },
+};
 
 export const LoadFailure: Story = {
   args: {

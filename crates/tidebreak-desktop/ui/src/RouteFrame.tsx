@@ -10,14 +10,22 @@ import type { ReactNode } from "react";
 export function RouteFrame({
   sidebar,
   children,
+  className,
+  mainClassName,
 }: {
   sidebar: ReactNode;
   children: ReactNode;
+  className?: string;
+  mainClassName?: string;
 }) {
-  return (
+  const frame = (
     <>
       {sidebar}
-      <div className="main">{children}</div>
+      <main className={`main${mainClassName ? ` ${mainClassName}` : ""}`}>
+        {children}
+      </main>
     </>
   );
+
+  return className ? <div className={className}>{frame}</div> : frame;
 }

@@ -879,6 +879,35 @@ function ChatViewStory({ scenario }: { scenario: StoryScenario }) {
   return <RouterProvider router={router as never} />;
 }
 
+async function expectBusyComposerControlsContained(canvasElement: HTMLElement) {
+  const canvas = within(canvasElement);
+  const input = await canvas.findByRole("textbox", { name: "Message" });
+  const composer = input.closest("form");
+  if (!composer) throw new Error("The message input has no composer form");
+  const queue = canvas.getByRole("button", {
+    name: "Queue message for after this response",
+  });
+  const stop = canvas.getByRole("button", { name: "Stop response" });
+  const viewport = canvasElement.ownerDocument.documentElement;
+
+  await expect(queue).toBeVisible();
+  await expect(stop).toBeVisible();
+
+  await waitFor(() => {
+    const composerRect = composer.getBoundingClientRect();
+    expect(composerRect.left).toBeGreaterThanOrEqual(0);
+    expect(composerRect.right).toBeLessThanOrEqual(viewport.clientWidth);
+    for (const control of [queue, stop]) {
+      const controlRect = control.getBoundingClientRect();
+      expect(controlRect.left).toBeGreaterThanOrEqual(composerRect.left);
+      expect(controlRect.right).toBeLessThanOrEqual(composerRect.right);
+      expect(controlRect.top).toBeGreaterThanOrEqual(composerRect.top);
+      expect(controlRect.bottom).toBeLessThanOrEqual(composerRect.bottom);
+    }
+    expect(composer.scrollWidth).toBeLessThanOrEqual(composer.clientWidth);
+  });
+}
+
 const meta = {
   title: "Conversation/ChatView",
   component: ChatViewStory,
@@ -1142,4 +1171,65 @@ export const CompactPressure: Story = {
     },
   },
   globals: { viewport: { value: "compact", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expectBusyComposerControlsContained(canvasElement);
+    await expect(
+      canvas.getByRole("button", {
+        name: /Context 4 1 image · 1 file · 1 folder · 1 skill Show details/i,
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+  },
+};
+
+export const MinimumWindowBusyContext: Story = {
+  args: {
+    scenario: {
+      id: "minimum-window-busy-context",
+      messages: streamingMessages,
+      draft:
+        "Keep the queued guidance and stop action visible while this response runs.",
+      busy: true,
+      activeTurnId: ACTIVE_TURN_ID,
+      lastSeq: 18,
+      queue: [queuedTurn],
+      attachments: {
+        images: [imageAttachment],
+        files: [
+          {
+            documentId: "minimum-window-document",
+            displayName: "conversation-review.pdf",
+            mediaType: "application/pdf",
+            byteLen: 482_000,
+          },
+        ],
+        skills: ["browser"],
+        folders: ["folder-research"],
+      },
+    },
+  },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const context = await canvas.findByRole("button", {
+      name: /Context 4 1 image · 1 file · 1 folder · 1 skill Show details/i,
+    });
+    await expect(context).toBeVisible();
+    await expect(context).toHaveAttribute("aria-expanded", "false");
+    await expectBusyComposerControlsContained(canvasElement);
+    await userEvent.click(context);
+    await expect(context).toHaveAttribute("aria-expanded", "true");
+    await expect(canvas.getByText("conversation-review.pdf")).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", {
+        name: /Context 4 1 image · 1 file · 1 folder · 1 skill Hide details/i,
+      }),
+    );
+    await expect(
+      canvas.getByRole("button", {
+        name: /Context 4 1 image · 1 file · 1 folder · 1 skill Show details/i,
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
+    context.blur();
+  },
 };

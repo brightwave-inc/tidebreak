@@ -524,6 +524,23 @@ describe("Composer", () => {
     expect(markup).toContain("800 × 600");
   });
 
+  it("collapses dense message context behind a readable summary", () => {
+    const markup = composerWithImages({
+      items: [
+        attached("a", "chart.png"),
+        attached("b", "layout.png"),
+        attached("c", "notes.png"),
+        attached("d", "results.png"),
+      ],
+    });
+
+    expect(markup).not.toContain('aria-label="Show 4 context items"');
+    expect(markup).toContain("Context");
+    expect(markup).toContain("4 images");
+    expect(markup).toContain("Show details");
+    expect(markup).not.toContain('aria-label="Remove chart.png"');
+  });
+
   it("says which model cannot read the attached image, and blocks the send", () => {
     const markup = composerWithImages({
       items: [

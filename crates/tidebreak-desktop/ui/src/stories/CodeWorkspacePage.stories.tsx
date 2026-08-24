@@ -816,7 +816,9 @@ function WorkspacePageStory({
 
   return (
     <div className="app-shell h-full min-h-0 w-full overflow-hidden">
-      <RouterProvider router={state.router as never} />
+      <div className="app-body">
+        <RouterProvider router={state.router as never} />
+      </div>
     </div>
   );
 }
@@ -1088,10 +1090,36 @@ export const Failure: Story = {
   args: { scenario: "failure", reviewOpen: false },
 };
 
+/** The minimum supported window keeps identity, status, and utilities distinct. */
+export const MinimumWindowBusy: Story = {
+  args: { scenario: "nested", reviewOpen: false, sidebarCollapsed: false },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const header = await canvas.findByTestId("workspace-header");
+    const status = within(header).getByRole("group", {
+      name: "Workspace status and workflow",
+    });
+    const utilities = within(header).getByTestId("workspace-header-utilities");
+    await expect(
+      within(status).getByTestId("workspace-workflow-control"),
+    ).toBeVisible();
+    await expect(
+      within(status).getByText(`#${pullRequest.number}`),
+    ).toBeVisible();
+    await expect(
+      within(utilities).getByRole("button", { name: "Terminal" }),
+    ).toBeVisible();
+    await expect(
+      within(utilities).getByRole("button", { name: "Review sidebar" }),
+    ).toBeVisible();
+  },
+};
+
 /** Compact panes collapse global navigation so the conversation remains usable. */
 export const CompactConversation: Story = {
   args: { sidebarCollapsed: true, reviewOpen: false },
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };
 
 /** The filtered context and transcript remain legible in the compact desktop pane. */
@@ -1102,5 +1130,5 @@ export const CompactSubagentTranscript: Story = {
     sidebarCollapsed: true,
     reviewOpen: false,
   },
-  parameters: { viewport: { defaultViewport: "compact" } },
+  globals: { viewport: { value: "compact", isRotated: false } },
 };

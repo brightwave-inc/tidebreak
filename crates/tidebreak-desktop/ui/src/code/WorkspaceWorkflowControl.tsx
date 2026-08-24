@@ -412,7 +412,7 @@ export function WorkspaceWorkflowControl({
     <>
       {confirmDialog}
       <div
-        className="border-border-subtle bg-page-background/70 flex min-w-0 max-w-[min(40vw,26rem)] shrink items-center overflow-hidden rounded-lg border shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]"
+        className="border-border-subtle bg-page-background/70 flex min-w-0 max-w-[min(40vw,26rem)] shrink items-center overflow-hidden rounded-lg border shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)] max-[1099px]:max-w-none max-[1099px]:flex-1"
         data-testid="workspace-workflow-control"
         data-stage={model.stage}
         data-tone={model.tone}
@@ -444,14 +444,14 @@ export function WorkspaceWorkflowControl({
               ) : null}
               {model.pr ? (
                 <span
-                  className="text-foreground-subtle max-[900px]:hidden"
+                  className="text-foreground-subtle max-[640px]:hidden"
                   aria-hidden
                 >
                   ·
                 </span>
               ) : null}
               <span
-                className="text-foreground-subtle min-w-0 truncate tabular-nums max-[900px]:hidden"
+                className="text-foreground-subtle min-w-0 truncate tabular-nums max-[640px]:hidden"
                 aria-live="polite"
               >
                 {statusLabel}

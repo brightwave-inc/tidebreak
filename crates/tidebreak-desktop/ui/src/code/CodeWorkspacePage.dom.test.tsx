@@ -614,11 +614,11 @@ describe("CodeWorkspacePage", () => {
       },
     });
 
-    const utilities = await screen.findByTestId("workspace-header-utilities");
+    const status = await screen.findByTestId("workspace-header-status");
     await waitFor(() =>
-      expect(within(utilities).getByText("Monitoring")).toBeInTheDocument(),
+      expect(within(status).getByText("Monitoring")).toBeInTheDocument(),
     );
-    expect(within(utilities).queryByText("Running")).not.toBeInTheDocument();
+    expect(within(status).queryByText("Running")).not.toBeInTheDocument();
   });
 
   it("keeps the Codex session model selectable before its catalog loads", async () => {
@@ -761,7 +761,7 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
-  it("puts compact PR status and quick commands inside the header utilities", async () => {
+  it("keeps workflow status separate from the header utility buttons", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
     client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
@@ -780,10 +780,18 @@ describe("CodeWorkspacePage", () => {
     await mountWorkspace(client);
 
     const control = await screen.findByTestId("workspace-workflow-control");
+    const status = screen.getByTestId("workspace-header-status");
     const utilities = screen.getByTestId("workspace-header-utilities");
     expect(control.closest("header")).not.toBeNull();
-    expect(control.parentElement).toBe(utilities);
-    expect(utilities.firstElementChild).toBe(control);
+    expect(control.parentElement).toBe(status);
+    expect(utilities).not.toContainElement(control);
+    expect(utilities.nextElementSibling).toBe(status);
+    expect(
+      within(utilities).getByRole("button", { name: "Terminal" }),
+    ).toBeInTheDocument();
+    expect(
+      within(utilities).getByRole("button", { name: "Review sidebar" }),
+    ).toBeInTheDocument();
     expect(control).toHaveTextContent("#41");
     expect(control).toHaveTextContent("Draft");
     expect(

@@ -29,6 +29,8 @@ export function SettingsRoute() {
 
   return (
     <RouteFrame
+      className="settings-route-frame"
+      mainClassName="settings-main"
       sidebar={
         <SettingsSidebar
           onBack={() => {
