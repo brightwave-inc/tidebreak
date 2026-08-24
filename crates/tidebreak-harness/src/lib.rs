@@ -569,6 +569,19 @@ pub trait HarnessSession: Send + Sync {
     /// must say so rather than inherit a silent zero (decision 0031).
     fn unrecognized_events(&self) -> u64;
 
+    /// Release the engine's processes while the session stays attachable, so
+    /// an idle session stops holding a runtime resident (decision 0064).
+    ///
+    /// Called only between turns. A later [`Self::run_turn`] must
+    /// transparently restore whatever this released — respawn and resume from
+    /// the session's ref — so a park is invisible apart from the wake turn's
+    /// spawn latency. Idempotent: parking a session with nothing running is a
+    /// no-op. The default does nothing, for engines with no between-turn
+    /// child to release.
+    async fn park(&self) -> Result<(), HarnessError> {
+        Ok(())
+    }
+
     /// Tear the session down.
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError>;
 }

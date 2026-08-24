@@ -35,7 +35,8 @@ const MAX_STDERR_BYTES: usize = 64 * 1_024;
 /// takes the latter.
 const FAST_SERVICE_TIER: &str = "priority";
 
-/// Live Codex session: one app-server child for the session lifetime.
+/// Live Codex session: one app-server child, spawned on the first turn and
+/// replaced whenever a turn finds it parked or dead (decision 0064).
 pub struct CodexSession {
     spec: SessionSpec,
     /// The session's current permission mode. `turn/start` re-postures a
@@ -43,8 +44,9 @@ pub struct CodexSession {
     /// rides out on the next turn rather than relaunching the child.
     permission_mode: Mutex<PermissionMode>,
     /// Whether the mode has moved since the last turn told the engine about
-    /// it. The first turn on a fresh thread does not need to: `thread/start`
-    /// already carried the posture.
+    /// it. [`Self::handshake`] settles it per child: a started thread was
+    /// just told its posture, while a resumed thread carries whatever it was
+    /// last told and gets a restatement on the next turn.
     posture_unsent: AtomicBool,
     resume_ref: Mutex<Option<String>>,
     /// Whether a turn has actually run on this thread. Codex only writes the
@@ -56,8 +58,8 @@ pub struct CodexSession {
     resume_lost: Mutex<Option<String>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
     child_pid: AtomicU32,
-    stdin: Option<Arc<AsyncMutex<ChildStdin>>>,
-    stdout: Option<Arc<AsyncMutex<StdoutReader>>>,
+    stdin: Mutex<Option<Arc<AsyncMutex<ChildStdin>>>>,
+    stdout: Mutex<Option<Arc<AsyncMutex<StdoutReader>>>>,
     parser: Arc<Mutex<CodexStreamParser>>,
     next_id: AtomicI64,
     control_state: Arc<Mutex<ControlState>>,
@@ -150,16 +152,16 @@ impl CodexSession {
         Self {
             spec,
             permission_mode: Mutex::new(permission_mode),
-            // A resumed thread carries whatever posture it was last told, so
-            // state the mode on the first turn rather than assume it holds.
+            // Settled per child by `handshake`; until one runs there is no
+            // engine to disagree with.
             posture_unsent: AtomicBool::new(resume_ref.is_some()),
             resume_ref: Mutex::new(resume_ref),
             thread_ran_a_turn: AtomicBool::new(false),
             resume_lost: Mutex::new(None),
             child: AsyncMutex::new(None),
             child_pid: AtomicU32::new(0),
-            stdin: None,
-            stdout: None,
+            stdin: Mutex::new(None),
+            stdout: Mutex::new(None),
             parser: Arc::new(Mutex::new(CodexStreamParser::new())),
             next_id: AtomicI64::new(1),
             control_state: Arc::new(Mutex::new(ControlState {
@@ -197,7 +199,7 @@ impl CodexSession {
     }
 
     async fn write_message(&self, message: &Value) -> Result<(), HarnessError> {
-        let Some(stdin) = &self.stdin else {
+        let Some(stdin) = self.stdin.lock().expect("codex stdin").clone() else {
             return Err(HarnessError::Other("engine child has no stdin".into()));
         };
         let mut line = serde_json::to_vec(message)
@@ -228,7 +230,7 @@ impl CodexSession {
     /// leaves the stream reader responsible for the acknowledgement and
     /// `UserSteered` event.
     async fn request_steer(&self, thread_id: String, text: String) -> Result<(), HarnessError> {
-        let Some(stdin) = self.stdin.clone() else {
+        let Some(stdin) = self.stdin.lock().expect("codex stdin").clone() else {
             return Err(HarnessError::SteeringRejected(
                 "the engine child has no stdin".into(),
             ));
@@ -541,91 +543,136 @@ pub(crate) fn turn_start_policy(mode: PermissionMode) -> (Value, &'static str) {
     (sandbox, approval)
 }
 
-/// Spawn the app-server child and complete initialize + thread/start|resume.
-pub(super) async fn attach(spec: SessionSpec) -> Result<CodexSession, HarnessError> {
-    let mut session = CodexSession::new(spec);
-    let plan = compose_app_server_plan(
-        &session.spec.binary,
-        &session.spec.extra_argv,
-        &session.spec.worktree,
-        &session.spec.extra_env,
-        session.spec.browser.as_ref(),
-    )?;
-    let mut command = Command::new(&plan.argv[0]);
-    command
-        .args(&plan.argv[1..])
-        .current_dir(&plan.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_child_env_tokio(
-        &mut command,
-        session.spec.env.iter().cloned(),
-        &plan.env,
-        session.spec.browser.as_ref(),
-    );
-    let mut child = spawn_process_tree(&mut command)?;
-    let stdin = child
-        .take_stdin()
-        .ok_or_else(|| HarnessError::Other("engine child has no stdin".into()))?;
-    let stdout = child
-        .take_stdout()
-        .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
-    let stderr = child
-        .take_stderr()
-        .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
-    session.stdin = Some(Arc::new(AsyncMutex::new(stdin)));
-    session.stdout = Some(Arc::new(AsyncMutex::new(StdoutReader {
-        stdout,
-        lines: StreamLineBuffer::new(),
-    })));
-    session
-        .child_pid
-        .store(child.id().unwrap_or(0), Ordering::SeqCst);
-    *session.child.lock().await = Some(child);
-    tokio::spawn(async move {
-        let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
-    });
+impl CodexSession {
+    /// A live child, spawned and handshaken if there is none (decision 0064).
+    ///
+    /// The fast path is a running child: nothing to do. Otherwise a parked or
+    /// dead child is replaced and the engine session resumed before the
+    /// turn's own request goes out. The child slot is held across the whole
+    /// ensure, so two callers cannot race two spawns.
+    pub(super) async fn ensure_child(&self) -> Result<(), HarnessError> {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+            // The process is gone; drop the handles that pointed at it.
+            *slot = None;
+            self.child_pid.store(0, Ordering::SeqCst);
+            *self.stdin.lock().expect("codex stdin") = None;
+            *self.stdout.lock().expect("codex stdout") = None;
+        }
+        let plan = compose_app_server_plan(
+            &self.spec.binary,
+            &self.spec.extra_argv,
+            &self.spec.worktree,
+            &self.spec.extra_env,
+            self.spec.browser.as_ref(),
+        )?;
+        let mut command = Command::new(&plan.argv[0]);
+        command
+            .args(&plan.argv[1..])
+            .current_dir(&plan.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        apply_child_env_tokio(
+            &mut command,
+            self.spec.env.iter().cloned(),
+            &plan.env,
+            self.spec.browser.as_ref(),
+        );
+        let mut child = spawn_process_tree(&mut command)?;
+        let stdin = child
+            .take_stdin()
+            .ok_or_else(|| HarnessError::Other("engine child has no stdin".into()))?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| HarnessError::Other("engine child has no stderr".into()))?;
+        *self.stdin.lock().expect("codex stdin") = Some(Arc::new(AsyncMutex::new(stdin)));
+        *self.stdout.lock().expect("codex stdout") =
+            Some(Arc::new(AsyncMutex::new(StdoutReader {
+                stdout,
+                lines: StreamLineBuffer::new(),
+            })));
+        self.child_pid
+            .store(child.id().unwrap_or(0), Ordering::SeqCst);
+        *slot = Some(child);
+        tokio::spawn(async move {
+            let _ = drain_capped(stderr, MAX_STDERR_BYTES).await;
+        });
+        if let Err(err) = self.handshake().await {
+            // Leave nothing half-attached: the next ensure starts clean, and
+            // a fenced session does not keep a wedged server alive until it
+            // is reaped.
+            if let Some(mut child) = slot.take() {
+                let _ = child.terminate().await;
+            }
+            self.child_pid.store(0, Ordering::SeqCst);
+            *self.stdin.lock().expect("codex stdin") = None;
+            *self.stdout.lock().expect("codex stdout") = None;
+            return Err(err);
+        }
+        Ok(())
+    }
 
-    let init_id = session
-        .request(
-            "initialize",
-            json!({
-                "clientInfo": { "name": "tidebreak-harness", "version": "0.0.0" },
-                "capabilities": { "experimentalApi": false }
-            }),
-        )
-        .await?;
-    session.read_until_rpc(init_id).await?;
-    session.notify("initialized", None).await?;
+    /// initialize + thread/start|resume on a freshly spawned child.
+    async fn handshake(&self) -> Result<(), HarnessError> {
+        let init_id = self
+            .request(
+                "initialize",
+                json!({
+                    "clientInfo": { "name": "tidebreak-harness", "version": "0.0.0" },
+                    "capabilities": { "experimentalApi": false }
+                }),
+            )
+            .await?;
+        self.read_until_rpc(init_id).await?;
+        self.notify("initialized", None).await?;
 
-    let (method, params) =
-        if let Some(resume) = session.resume_ref.lock().expect("codex resume").clone() {
+        // Resume only a thread the engine has actually written. A thread that
+        // ran no turn was never persisted (see `resume_ref`), so a respawn
+        // after parking one starts a clean thread rather than fencing the
+        // session on "thread not found".
+        let resume = if self.thread_ran_a_turn.load(Ordering::SeqCst) {
+            self.resume_ref.lock().expect("codex resume").clone()
+        } else {
+            self.spec.resume_ref.clone()
+        };
+        let (method, params) = if let Some(resume) = resume {
             ("thread/resume", json!({ "threadId": resume }))
         } else {
-            let (sandbox, approval) = thread_start_policy(session.permission_mode());
+            let (sandbox, approval) = thread_start_policy(self.permission_mode());
             let mut params = json!({
-                "cwd": session.spec.worktree,
+                "cwd": self.spec.worktree,
                 "approvalPolicy": approval,
                 "sandbox": sandbox,
             });
-            if let Some(model) = &session.spec.model {
+            if let Some(model) = &self.spec.model {
                 params["model"] = json!(model);
             }
             ("thread/start", params)
         };
-    let thread_req = session.request(method, params).await?;
-    session.read_until_rpc(thread_req).await?;
-    if let Some(detail) = session.lost_resume() {
-        // The stored thread is gone on the engine side. Every turn on this
-        // child would fail identically, so fail the launch with a reason the
-        // caller can act on instead of attaching a session that cannot run.
-        return Err(HarnessError::ResumeLost(detail));
+        let resumed = method == "thread/resume";
+        let thread_req = self.request(method, params).await?;
+        self.read_until_rpc(thread_req).await?;
+        if let Some(detail) = self.lost_resume() {
+            // The stored thread is gone on the engine side. Every turn on
+            // this child would fail identically, so report the lost resume
+            // for the caller to fence on instead of running a turn that
+            // cannot land.
+            return Err(HarnessError::ResumeLost(detail));
+        }
+        // A resumed thread carries whatever posture it was last told, so the
+        // next turn restates the mode rather than assume it holds. A started
+        // thread was just told its posture.
+        self.posture_unsent.store(resumed, Ordering::SeqCst);
+        Ok(())
     }
-    Ok(session)
-}
 
-impl CodexSession {
     async fn read_until_rpc(&self, rpc_id: i64) -> Result<(), HarnessError> {
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
         loop {
@@ -711,7 +758,7 @@ impl CodexSession {
     }
 
     async fn read_lines(&self) -> Result<Vec<String>, HarnessError> {
-        let Some(stdout) = &self.stdout else {
+        let Some(stdout) = self.stdout.lock().expect("codex stdout").clone() else {
             return Err(HarnessError::Other("engine child has no stdout".into()));
         };
         let mut reader = stdout.lock().await;
@@ -823,9 +870,7 @@ impl CodexSession {
 #[async_trait]
 impl HarnessSession for CodexSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
-        if self.child_pid.load(Ordering::SeqCst) == 0 {
-            return Err(HarnessError::Other("engine child is not running".into()));
-        }
+        self.ensure_child().await?;
         let Some(thread_id) = self.resume_ref.lock().expect("codex resume").clone() else {
             return Err(HarnessError::Other("thread has no resume ref".into()));
         };
@@ -956,6 +1001,11 @@ impl HarnessSession for CodexSession {
     }
 
     async fn interrupt(&self) -> Result<(), HarnessError> {
+        if self.child_pid.load(Ordering::SeqCst) == 0 {
+            // No child means nothing is running: a stop aimed at a parked
+            // session must not cost it anything (decision 0064).
+            return Ok(());
+        }
         let thread_id = self.resume_ref.lock().expect("codex resume").clone();
         let turn_id = self.active_control_turn_id();
         if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
@@ -1004,6 +1054,20 @@ impl HarnessSession for CodexSession {
         // One long-lived parser per session, so its own count is already
         // cumulative.
         self.parser.lock().expect("codex parser").unrecognized()
+    }
+
+    /// Terminate the idle server child (decision 0064). The thread stays
+    /// resumable, and the next turn's ensure re-runs the handshake on a
+    /// replacement.
+    async fn park(&self) -> Result<(), HarnessError> {
+        let mut slot = self.child.lock().await;
+        *self.stdin.lock().expect("codex stdin") = None;
+        *self.stdout.lock().expect("codex stdout") = None;
+        self.child_pid.store(0, Ordering::SeqCst);
+        if let Some(mut child) = slot.take() {
+            let _ = child.terminate().await;
+        }
+        Ok(())
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
@@ -1323,6 +1387,35 @@ while IFS= read -r line; do
 done
 "#;
 
+    /// The same stand-in, but its `thread/resume` succeeds — the engine still
+    /// holds the thread, as it does after a park (decision 0064).
+    #[cfg(unix)]
+    const FAKE_RESUMABLE_APP_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf 'initialize\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"userAgent":"fake/0.147.0"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf 'thread/start\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*)
+      printf 'thread/resume\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'turn/start\n' >>"$FAKE_CODEX_CALLS"
+      printf '{"id":%s,"result":{"turn":{"id":"TURN-1","status":"inProgress"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"completed"}}}\n'
+      ;;
+  esac
+done
+"#;
+
     #[cfg(unix)]
     const FAKE_STEERING_APP_SERVER: &str = r#"#!/bin/sh
 while IFS= read -r line; do
@@ -1481,9 +1574,21 @@ done
             .collect()
     }
 
-    /// The wedge from the app-server dying before its first turn: codex never
-    /// persisted the thread, so a thread id that has run no turn must not be
-    /// reported as a resume ref. The next attach then starts a clean thread.
+    #[cfg(unix)]
+    fn turn(text: &str) -> TurnInput {
+        TurnInput {
+            text: text.into(),
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            images: Vec::new(),
+        }
+    }
+
+    /// The wedge from the app-server dying before its first turn: codex
+    /// never persisted the thread, so a thread id that has run no turn must
+    /// not be reported as a resume ref. The next spawn then starts a clean
+    /// thread.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_thread_that_ran_no_turn_is_not_a_resume_ref() {
@@ -1491,29 +1596,31 @@ done
         let binary = dir.path().join("codex");
         write_fake_app_server(&binary);
 
-        let session = attach(spec_for(dir.path(), &binary, None)).await.unwrap();
-        assert_eq!(calls(dir.path()), ["initialize", "thread/start"]);
+        let session = CodexSession::new(spec_for(dir.path(), &binary, None));
+        assert!(
+            calls(dir.path()).is_empty(),
+            "nothing spawns before the first turn (decision 0064)"
+        );
+        assert_eq!(session.child_pid(), None);
         assert_eq!(
             session.resume_ref(),
             None,
             "a thread with no turns is not resumable and must not be persisted"
         );
 
-        session
-            .run_turn(TurnInput {
-                text: "first turn".into(),
-                model: None,
-                reasoning_effort: None,
-                fast_mode: false,
-                images: Vec::new(),
-            })
-            .await
-            .unwrap();
+        session.run_turn(turn("first turn")).await.unwrap();
+        assert_eq!(
+            calls(dir.path()),
+            ["initialize", "thread/start", "turn/start"],
+            "the first turn spawns, handshakes, and runs"
+        );
         assert_eq!(session.resume_ref().as_deref(), Some("THREAD-1"));
     }
 
     /// A resume ref the engine no longer knows is a lost resume, not a turn
     /// failure: the server fences on this rather than failing every turn.
+    /// With the child spawned on the first turn (decision 0064), that is
+    /// where the stored ref meets the engine.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_resume_ref_reports_a_lost_resume() {
@@ -1521,20 +1628,88 @@ done
         let binary = dir.path().join("codex");
         write_fake_app_server(&binary);
 
-        let attached = attach(spec_for(
+        let session = CodexSession::new(spec_for(
             dir.path(),
             &binary,
             Some("STALE-THREAD".to_owned()),
-        ))
-        .await;
-        let Err(err) = attached else {
-            panic!("attaching to an unknown thread must not succeed");
+        ));
+        let Err(err) = session.run_turn(turn("first turn")).await else {
+            panic!("a turn on an unknown thread must not succeed");
         };
         assert_eq!(calls(dir.path()), ["initialize", "thread/resume"]);
         let HarnessError::ResumeLost(detail) = err else {
             panic!("expected a lost resume, got {err}");
         };
         assert!(detail.contains("thread not found"), "detail: {detail}");
+        assert_eq!(
+            session.child_pid(),
+            None,
+            "a failed handshake leaves no half-attached child behind"
+        );
+    }
+
+    /// Decision 0064: a parked thread that has run resumes on a replacement
+    /// child, with `thread/resume` on the wire and the same thread id kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_parked_thread_is_resumed_on_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_app_server(&binary, FAKE_RESUMABLE_APP_SERVER);
+
+        let session = CodexSession::new(spec_for(dir.path(), &binary, None));
+        session.run_turn(turn("one")).await.unwrap();
+        let first_pid = session.child_pid().expect("the child outlives its turn");
+
+        session.park().await.unwrap();
+        assert_eq!(session.child_pid(), None, "the parked child is gone");
+
+        session.run_turn(turn("two")).await.unwrap();
+        assert_eq!(
+            calls(dir.path()),
+            [
+                "initialize",
+                "thread/start",
+                "turn/start",
+                "initialize",
+                "thread/resume",
+                "turn/start"
+            ],
+            "the wake respawns and resumes rather than starting a new thread"
+        );
+        let second_pid = session.child_pid().expect("the wake turn spawned a child");
+        assert_ne!(first_pid, second_pid, "a new process answered the wake");
+        assert_eq!(session.resume_ref().as_deref(), Some("THREAD-1"));
+    }
+
+    /// Codex never persisted a thread that ran no turn, so waking one must
+    /// start clean. Resuming it would fence the session on "thread not
+    /// found" — the fake's own answer catches a wrong ensure here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_parked_thread_that_never_ran_is_restarted_not_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_fake_app_server(&binary);
+
+        let session = CodexSession::new(spec_for(dir.path(), &binary, None));
+        session.ensure_child().await.unwrap();
+        session.park().await.unwrap();
+        session.ensure_child().await.unwrap();
+        assert_eq!(
+            calls(dir.path()),
+            ["initialize", "thread/start", "initialize", "thread/start"],
+            "an unwritten thread is restarted, never resumed"
+        );
+    }
+
+    /// A stop aimed at a parked session must not fail and must not spawn
+    /// anything (decision 0064).
+    #[tokio::test]
+    async fn an_interrupt_with_no_child_is_a_no_op() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        session.interrupt().await.unwrap();
+        assert_eq!(session.child_pid(), None);
     }
 
     #[test]
@@ -1840,7 +2015,7 @@ done
             "FAKE_CODEX_STEER".into(),
             dir.path().join("steer.json").to_string_lossy().into_owned(),
         ));
-        let session = Arc::new(attach(spec).await.unwrap());
+        let session = Arc::new(CodexSession::new(spec));
         let running = tokio::spawn({
             let session = Arc::clone(&session);
             async move {

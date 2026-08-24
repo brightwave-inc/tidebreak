@@ -18,7 +18,7 @@ use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::opencode::session::attach;
+use crate::opencode::session::OpencodeSession;
 use crate::probe::{observe_version, probe_shell, HostEnv};
 use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionSpec};
 
@@ -109,7 +109,9 @@ impl HarnessAdapter for OpencodeAdapter {
         if !spec.binary.is_absolute() {
             return Err(HarnessError::NotFound);
         }
-        Ok(Box::new(attach(spec).await?))
+        // The serve child spawns on the first turn, not here (decision 0064),
+        // so attaching a session costs no engine runtime.
+        Ok(Box::new(OpencodeSession::new(spec)))
     }
 }
 

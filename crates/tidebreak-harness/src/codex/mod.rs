@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::codex::session::attach;
+use crate::codex::session::CodexSession;
 use crate::probe::{observe_version, probe_shell, HostEnv};
 use crate::{
     filter_child_env, spawn_process_tree, HarnessAdapter, HarnessError, HarnessProbe,
@@ -114,7 +114,9 @@ impl HarnessAdapter for CodexAdapter {
         if !spec.binary.is_absolute() {
             return Err(HarnessError::NotFound);
         }
-        Ok(Box::new(attach(spec).await?))
+        // The app-server child spawns on the first turn, not here (decision
+        // 0064), so attaching a session costs no engine runtime.
+        Ok(Box::new(CodexSession::new(spec)))
     }
 }
 

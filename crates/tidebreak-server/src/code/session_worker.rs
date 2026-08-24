@@ -593,6 +593,13 @@ async fn run_worker(
                 }
                 None => break,
             },
+            // An idle engine child is cache, not an invariant (decision 0064).
+            // The timer only exists while the engine reports a live child, so
+            // a parked session — or an engine with no between-turn child —
+            // arms nothing.
+            _ = tokio::time::sleep(PARK_AFTER_IDLE), if engine.child_pid().is_some() => {
+                park_idle_engine(&mut session, engine.as_ref(), &sink).await;
+            }
         }
     }
     let _ = engine.shutdown().await;
@@ -608,6 +615,34 @@ enum ControlFlow {
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// How long a session sits between turns — no turn, no queued follow-up, no
+/// command — before its engine child is released (decision 0064). Sits well
+/// past the documented provider prompt-cache TTL, so a wake in practice pays
+/// spawn latency and not tokens a warm child would have saved.
+#[cfg(not(test))]
+const PARK_AFTER_IDLE: Duration = Duration::from_secs(15 * 60);
+#[cfg(test)]
+const PARK_AFTER_IDLE: Duration = Duration::from_millis(150);
+
+/// Release an idle engine child (decision 0064) and clear the row's pid so
+/// nothing reads the dead process as live. The next turn respawns and
+/// resumes. A park that fails keeps the child and simply retries on the next
+/// idle window.
+async fn park_idle_engine(session: &mut CodeSession, engine: &dyn HarnessSession, sink: &LiveSink) {
+    if let Err(error) = engine.park().await {
+        warn!(
+            session = %session.id,
+            error = %error,
+            "could not park the idle engine child"
+        );
+        return;
+    }
+    tracing::debug!(session = %session.id, "parked the idle engine child");
+    if session.child_pid.take().is_some() {
+        let _ = save_session(&sink.db, session).await;
+    }
+}
 
 /// Stop the engine's current turn, discarding the adapter's error: the turn
 /// is ending either way, and the outcome is what the worker journals.

@@ -775,6 +775,14 @@ impl HarnessSession for ClaudeSession {
         self.unrecognized.load(Ordering::SeqCst)
     }
 
+    /// Release the idle child (decision 0064). The next turn takes the
+    /// respawn path [`Self::ensure_channel`] already owns, so it resumes the
+    /// engine session exactly like a dead-child replacement.
+    async fn park(&self) -> Result<(), HarnessError> {
+        self.retire_channel().await;
+        Ok(())
+    }
+
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         let taken = self.channel.lock().await.take();
         if let Some(channel) = taken {
@@ -1708,6 +1716,51 @@ exit 0
                 .count(),
             2,
             "both turns completed"
+        );
+    }
+
+    /// Decision 0064: parking releases the idle child, and the wake turn
+    /// takes the same respawn-and-resume path a dead child does.
+    #[tokio::test]
+    async fn a_parked_child_is_respawned_and_resumed_on_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        let binary = write_engine(
+            dir.path(),
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> {argv_log}
+while IFS= read -r line; do
+  printf '{{"type":"system","subtype":"init","session_id":"sess-9","claude_code_version":"2.1.238"}}\n'
+  printf '{{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-9","usage":{{"input_tokens":1,"output_tokens":1}}}}\n'
+done
+"#,
+                argv_log = argv_log.display()
+            ),
+        );
+        let session = session_with(binary, dir.path(), Arc::new(Discard));
+
+        assert!(matches!(
+            session.run_turn(turn("one")).await.unwrap(),
+            TurnOutcome::Clean
+        ));
+        let parked_pid = session.child_pid().expect("the child outlives its turn");
+
+        session.park().await.unwrap();
+        assert_eq!(session.child_pid(), None, "the parked child is gone");
+
+        assert!(matches!(
+            session.run_turn(turn("two")).await.unwrap(),
+            TurnOutcome::Clean
+        ));
+        let woken_pid = session.child_pid().expect("the wake turn spawned a child");
+        assert_ne!(parked_pid, woken_pid, "a new process answered the wake");
+        let launches = read_lines(&argv_log);
+        assert_eq!(launches.len(), 2, "the wake respawns: {launches:?}");
+        assert!(
+            launches[1].contains("--resume sess-9"),
+            "the replacement resumes the session: {}",
+            launches[1]
         );
     }
 }

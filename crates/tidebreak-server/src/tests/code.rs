@@ -7330,3 +7330,93 @@ async fn trigger_mutations_require_the_repository_in_the_path() {
     assert_eq!(json_id(&rows[0]), trigger_id);
     assert_eq!(rows[0]["enabled"], true);
 }
+
+/// Decision 0064: a session-long engine child idle past the threshold is
+/// parked — the engine records the call, the row's pid clears — and the next
+/// turn simply runs again. Every other test runs per-turn scripted children,
+/// which keep the park timer disarmed.
+#[tokio::test]
+async fn an_idle_engine_child_is_parked_and_the_next_turn_still_runs() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_child_pid(4242)
+        .with_session_long_child();
+    let observer = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    let first = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "one" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::ACCEPTED);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while turn_statuses(&client, addr, &token, &session).await != ["completed"] {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first turn never completed");
+
+    // The park timer (150 ms under cfg(test)) fires once the worker sits
+    // idle, and the row's pid clears with it.
+    wait_until(|| observer.park_count() > 0).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = tidebreak_core::db::code::get_session(
+                &runtime.db,
+                &tidebreak_core::OwnerId::local(),
+                parsed,
+            )
+            .await
+            .unwrap()
+            .expect("the parked session row still exists");
+            if row.child_pid.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a parked child must leave no pid on the row");
+
+    // Parking is invisible to the caller: the next turn just runs.
+    let second = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "two" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::ACCEPTED);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while turn_statuses(&client, addr, &token, &session).await != ["completed", "completed"] {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the wake turn never completed");
+}
