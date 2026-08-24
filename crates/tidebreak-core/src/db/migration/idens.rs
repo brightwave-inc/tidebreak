@@ -844,6 +844,9 @@ pub(crate) enum CodePullRequest {
     AutoMergeEnabled,
     InMergeQueue,
     LiveObservedAt,
+    PullEtag,
+    ChecksEtag,
+    ReviewsEtag,
 }
 
 #[derive(DeriveIden)]

@@ -171,6 +171,71 @@ pub async fn set_pull_request_live_state(
     Ok(Some((id, changed)))
 }
 
+/// One observed pull request plus the transport hints the conditional
+/// fetcher sends back to the host (decision 66): the ETag each endpoint
+/// last answered with.
+#[derive(Debug, Clone)]
+pub struct PullRequestFetchState {
+    pub fact: CodePullRequestFact,
+    pub pull_etag: Option<String>,
+    pub checks_etag: Option<String>,
+    pub reviews_etag: Option<String>,
+}
+
+/// Load one observed pull request with its stored fetch ETags.
+pub async fn get_pull_request_fetch_state(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    number: u64,
+) -> Result<Option<PullRequestFetchState>> {
+    let number = i64::try_from(number)
+        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
+    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
+        return Ok(None);
+    };
+    let pull_etag = row.pull_etag.clone();
+    let checks_etag = row.checks_etag.clone();
+    let reviews_etag = row.reviews_etag.clone();
+    Ok(Some(PullRequestFetchState {
+        fact: fact_from_row(row)?,
+        pull_etag,
+        checks_etag,
+        reviews_etag,
+    }))
+}
+
+/// Store the ETags one fetch pass ended with (decision 66). The caller
+/// passes each endpoint's current value — the fresh ETag after a 200, the
+/// one it sent after a 304 — so the row always names what the host holds.
+/// `Ok(false)` when no fact row exists for the identity.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_pull_request_etags(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    number: u64,
+    pull_etag: Option<&str>,
+    checks_etag: Option<&str>,
+    reviews_etag: Option<&str>,
+) -> Result<bool> {
+    let number = i64::try_from(number)
+        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
+    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
+        return Ok(false);
+    };
+    let mut model: entities::code_pull_request::ActiveModel = row.into();
+    model.pull_etag = Set(pull_etag.map(ToOwned::to_owned));
+    model.checks_etag = Set(checks_etag.map(ToOwned::to_owned));
+    model.reviews_etag = Set(reviews_etag.map(ToOwned::to_owned));
+    model.update(&store.conn).await.map_err(store_err)?;
+    Ok(true)
+}
+
 /// Every observed pull request on one repository identity.
 pub async fn list_pull_request_facts_for_repo(
     store: &DbStore,
