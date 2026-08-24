@@ -217,11 +217,22 @@ function TurnDiffstat({
 }
 
 export function DiffstatBadge({ stat }: { stat: Diffstat }) {
+  const fileLabel = `${stat.files} file${stat.files === 1 ? "" : "s"}`;
+  const additionLabel = `${stat.insertions} addition${stat.insertions === 1 ? "" : "s"}`;
+  const deletionLabel = `${stat.deletions} deletion${stat.deletions === 1 ? "" : "s"}`;
   return (
-    <Badge variant="outline" size="sm" className="tabular-nums">
-      {stat.files} file{stat.files === 1 ? "" : "s"} +{stat.insertions} −
-      {stat.deletions}
-      {stat.truncated ? " · truncated" : ""}
+    <Badge
+      variant="outline"
+      size="sm"
+      className="bg-muted/35 gap-1.5 font-mono tabular-nums"
+      aria-label={`${fileLabel}, ${additionLabel}, ${deletionLabel}${stat.truncated ? ", truncated" : ""}`}
+    >
+      <span className="text-muted-foreground">{fileLabel}</span>
+      <span className="text-success-foreground">+{stat.insertions}</span>
+      <span className="text-critical-foreground">−{stat.deletions}</span>
+      {stat.truncated && (
+        <span className="text-warning-foreground">· truncated</span>
+      )}
     </Badge>
   );
 }

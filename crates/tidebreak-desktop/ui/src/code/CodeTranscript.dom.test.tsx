@@ -243,7 +243,9 @@ describe("CodeTranscript", () => {
     render(<CodeTranscript items={items} />);
     const seam = screen.getByRole("group", { name: "Turn finished" });
     expect(within(seam).getByText("· 2m 14s")).toBeInTheDocument();
-    expect(within(seam).getByText(/2 files \+42 −7/)).toBeInTheDocument();
+    expect(
+      within(seam).getByLabelText("2 files, 42 additions, 7 deletions"),
+    ).toBeInTheDocument();
     expect(within(seam).queryByText(/in \//)).not.toBeInTheDocument();
   });
 

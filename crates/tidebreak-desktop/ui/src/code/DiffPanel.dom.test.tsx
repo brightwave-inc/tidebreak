@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -73,6 +73,12 @@ describe("DiffPanel", () => {
         "This diff was truncated. Open a single file for the rest.",
       ),
     ).toBeInTheDocument();
+    const summary = screen.getByLabelText(
+      "1 file, 1 addition, 1 deletion, truncated",
+    );
+    expect(within(summary).getByText("· truncated")).toHaveClass(
+      "text-warning-foreground",
+    );
     expect(client.getCodeWorkspaceDiff).toHaveBeenCalledWith("ws-1", {
       turn: "turn-1",
       file: "src/lib.rs",

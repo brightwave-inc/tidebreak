@@ -14,6 +14,7 @@ type InspectorScenario =
   | "ready"
   | "merge-ready"
   | "multi-pr"
+  | "truncated"
   | "empty"
   | "loading"
   | "failure";
@@ -161,6 +162,12 @@ const changedFiles = {
   stat: { files: 6, insertions: 351, deletions: 462, truncated: false },
 };
 
+const truncatedChangedFiles = {
+  ...changedFiles,
+  truncated: true,
+  stat: { files: 82, insertions: 1920, deletions: 341, truncated: true },
+};
+
 const avatar = (initials: string, color: string) =>
   `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" rx="32" fill="${color}"/><text x="32" y="39" text-anchor="middle" font-family="system-ui" font-size="22" font-weight="700" fill="white">${initials}</text></svg>`)}`;
 
@@ -215,7 +222,9 @@ function inspectorClient(scenario: InspectorScenario): ApiClient {
                       truncated: false,
                     },
                   }
-                : changedFiles,
+                : scenario === "truncated"
+                  ? truncatedChangedFiles
+                  : changedFiles,
     getCodeWorkspacePr: async () => prSnapshot,
     getCodeWorkspacePullRequests: async () => ({
       items:
@@ -382,6 +391,10 @@ export const ChangesEmpty: Story = {
 
 export const ChangesFailure: Story = {
   args: { tab: "source", scenario: "failure" },
+};
+
+export const ChangesTruncated: Story = {
+  args: { tab: "source", scenario: "truncated" },
 };
 
 export const Empty: Story = {
