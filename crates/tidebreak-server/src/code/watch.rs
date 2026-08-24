@@ -117,20 +117,22 @@ pub(crate) fn assess(pr: &PullRequestDigest) -> WatchAssessment {
     if merge_state == "behind" {
         return WatchAssessment::Actionable(WatchReason::Behind);
     }
-    if merge_state == "blocked"
-        || merge_state == "unstable"
-        || pr.review_decision.as_deref().map(str::trim) == Some("review_required")
-    {
-        return WatchAssessment::NeedsUser("a review or repository requirement is outstanding");
-    }
-    if pr.auto_merge_enabled == Some(true) {
-        return WatchAssessment::Waiting;
-    }
+    // GitHub reports the merge state as blocked while required checks run
+    // (decision 66): running checks are a wait, not a park.
     let pending = checks
         .iter()
         .filter(|check| check.bucket == tidebreak_core::PullRequestCheckBucket::Pending)
         .count();
     if pending > 0 {
+        return WatchAssessment::Waiting;
+    }
+    if pr.review_decision.as_deref().map(str::trim) == Some("review_required") {
+        return WatchAssessment::NeedsUser("the pull request needs a review approval");
+    }
+    if merge_state == "blocked" || merge_state == "unstable" {
+        return WatchAssessment::NeedsUser("a repository requirement is outstanding");
+    }
+    if pr.auto_merge_enabled == Some(true) {
         return WatchAssessment::Waiting;
     }
     if mergeable == "mergeable" && merge_state == "clean" {
@@ -393,10 +395,12 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             )
             .await;
         }
-        // A fix turn (or its recovery) is still in flight; check back next
-        // sweep rather than hammering the host meanwhile.
-        CodeSessionLifecycle::Running => return Ok(()),
-        CodeSessionLifecycle::Created | CodeSessionLifecycle::Idle => {}
+        // A running fix turn no longer skips the sweep: the state read below
+        // still happens, and only the transitions that need an idle worktree
+        // hold (decision 66).
+        CodeSessionLifecycle::Running
+        | CodeSessionLifecycle::Created
+        | CodeSessionLifecycle::Idle => {}
     }
     let workspace = match runtime.get_workspace(&owner, watch.workspace_id).await {
         Ok(workspace) => workspace,
@@ -419,19 +423,22 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         )
         .await;
     }
-    // Another session's turn owns the worktree right now; wait. The turn lock
-    // in the worker is what actually serializes the checkout (record 55);
-    // skipping the cycle here avoids waking a harness that would only queue.
+    // A turn in flight — the watch's own fix turn or another session's —
+    // holds every transition below: submitting a fix turn would queue on the
+    // worktree the turn owns (record 55), and parking or finishing mid-turn
+    // would judge a head the turn is about to move. The state read still
+    // runs (decision 66): the pull requests being actively fixed are exactly
+    // the ones whose digest the reader is watching.
     let sessions = list_sessions_for_workspace(&runtime.db, &owner, watch.workspace_id).await?;
-    if sessions
+    let turn_in_flight = sessions
         .iter()
-        .any(|other| other.lifecycle == CodeSessionLifecycle::Running)
-    {
-        return Ok(());
-    }
+        .any(|other| other.lifecycle == CodeSessionLifecycle::Running);
     let status = runtime
         .refresh_workspace_pr(&owner, watch.workspace_id)
         .await?;
+    if turn_in_flight {
+        return Ok(());
+    }
     let Some(pr) = status.pr else {
         return park_watch(
             runtime.as_ref(),
@@ -753,6 +760,21 @@ mod tests {
         let mut pr = base_pr();
         pr.review_decision = Some("review_required".to_owned());
         assert!(matches!(assess(&pr), WatchAssessment::NeedsUser(_)));
+    }
+
+    #[test]
+    fn running_checks_wait_even_while_the_merge_state_is_blocked() {
+        // The decision-66 screenshot: GitHub says blocked whenever required
+        // checks are still running, so blocked plus a required review while
+        // checks run is a wait, not a park.
+        let mut pr = base_pr();
+        pr.merge_state_status = Some("blocked".to_owned());
+        pr.review_decision = Some("review_required".to_owned());
+        pr.checks = Some(vec![
+            check(PullRequestCheckBucket::Pass),
+            check(PullRequestCheckBucket::Pending),
+        ]);
+        assert_eq!(assess(&pr), WatchAssessment::Waiting);
     }
 
     #[test]

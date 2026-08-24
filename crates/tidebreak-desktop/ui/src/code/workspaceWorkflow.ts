@@ -34,6 +34,7 @@ export type WorkspaceWorkflowModel = {
     | "conflict"
     | "behind"
     | "blocked"
+    | "needs_approval"
     | "changes_requested"
     | "failing"
     | "queued"
@@ -204,9 +205,21 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
         tone: "warning",
         summary: `#${pr.number} · Blocked`,
         title: `Pull request #${pr.number} is blocked`,
-        detail: "A review or repository requirement is still outstanding.",
+        detail: "A repository requirement is still outstanding.",
         primary: "watch_and_fix",
         secondary: withOpenPr(pr, []),
+      };
+    case "needs_approval":
+      return {
+        ...common,
+        stage: "needs_approval",
+        tone: "warning",
+        summary: `#${pr.number} · Needs approval`,
+        title: `Pull request #${pr.number} needs approval`,
+        detail:
+          "GitHub requires a review approval before this pull request can merge.",
+        primary: pr.url ? "open_pr" : "watch_and_fix",
+        secondary: pr.url ? ["watch_and_fix"] : [],
       };
     case "changes_requested":
       return {

@@ -998,7 +998,7 @@ fn workflow_run_count(count: usize) -> String {
 }
 
 pub(crate) async fn act_on_pull_request(
-    runtime: &CodeRuntime,
+    runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     body: CodeDeliveryPullRequestActionBody,
@@ -1012,6 +1012,12 @@ pub(crate) async fn act_on_pull_request(
     .await?;
     let search_path = runtime.gh_search_path_owned();
     let target = body.target;
+    // The canonical URL of the pull request being acted on: the key the
+    // workspace-side digest refresh matches on (decision 66).
+    let pull_request_url = format!(
+        "https://{}/{}/{}/pull/{}",
+        target.repository.host, target.repository.owner, target.repository.name, target.number
+    );
     match body.action {
         CodeDeliveryPullRequestAction::MarkReady => {
             gh::mark_pull_request_ready(
@@ -1024,6 +1030,7 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
+            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Pull request #{} is ready for review",
                 target.number
@@ -1057,6 +1064,7 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
+            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(if auto {
                 format!("Auto-merge enabled for pull request #{}", target.number)
             } else if admin {
@@ -1100,6 +1108,7 @@ pub(crate) async fn act_on_pull_request(
             let any_success = results.iter().any(|(_, result)| result.is_ok());
             if any_success {
                 runtime.delivery_cache.invalidate();
+                runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             }
             let outcomes = results
                 .into_iter()
@@ -1136,6 +1145,7 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
+            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Pull request #{} closed",
                 target.number
@@ -1152,6 +1162,7 @@ pub(crate) async fn act_on_pull_request(
             .await
             .map_err(map_gh_error)?;
             runtime.delivery_cache.invalidate();
+            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Pull request #{} reopened",
                 target.number
@@ -2183,7 +2194,13 @@ fn pull_request_attention(
     if merge_state_status == Some("behind") {
         reasons.push(CodeDeliveryPrAttentionReason::Behind);
     }
-    if merge_state_status == Some("blocked") {
+    // GitHub reports the merge state as blocked while required checks run
+    // (decision 66): checks in flight are ordinary progress, not attention.
+    if merge_state_status == Some("blocked")
+        && !checks
+            .iter()
+            .any(|check| check.bucket == PullRequestCheckBucket::Pending)
+    {
         reasons.push(CodeDeliveryPrAttentionReason::Blocked);
     }
     reasons
@@ -3755,6 +3772,27 @@ mod tests {
             &checks,
         )
         .is_empty());
+    }
+
+    #[test]
+    fn a_blocked_merge_state_is_not_attention_while_checks_run() {
+        // GitHub says blocked whenever required checks are still running
+        // (decision 66); only a blocked state with no checks in flight is
+        // something the reader can act on.
+        let running = vec![CodeDeliveryCheck {
+            name: "test".into(),
+            bucket: PullRequestCheckBucket::Pending,
+            detail: None,
+            url: None,
+            workflow_run_id: None,
+        }];
+        assert!(
+            pull_request_attention("open", false, None, None, Some("blocked"), &running).is_empty()
+        );
+        assert_eq!(
+            pull_request_attention("open", false, None, None, Some("blocked"), &[]),
+            vec![CodeDeliveryPrAttentionReason::Blocked]
+        );
     }
 
     #[test]

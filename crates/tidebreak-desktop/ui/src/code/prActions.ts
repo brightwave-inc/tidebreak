@@ -22,6 +22,7 @@ export type PrWorkflowState =
   | "conflict"
   | "behind"
   | "blocked"
+  | "needs_approval"
   | "changes_requested"
   | "draft"
   | "queued"
@@ -83,12 +84,12 @@ export function prIsBehind(pr: PullRequestDigest): boolean {
 
 export function prIsBlocked(pr: PullRequestDigest): boolean {
   const mergeState = pr.merge_state_status?.trim().toLowerCase();
-  const review = pr.review_decision?.trim().toLowerCase();
-  return (
-    mergeState === "blocked" ||
-    mergeState === "unstable" ||
-    review === "review_required"
-  );
+  return mergeState === "blocked" || mergeState === "unstable";
+}
+
+/** GitHub still wants a review approval on this pull request. */
+export function prNeedsApproval(pr: PullRequestDigest): boolean {
+  return pr.review_decision?.trim().toLowerCase() === "review_required";
 }
 
 export function prHasChangesRequested(pr: PullRequestDigest): boolean {
@@ -158,7 +159,14 @@ export function prMergeControls(state: PrWorkflowState): {
         canMerge: false,
         canEnableAutoMerge: true,
         explanation:
-          "A review or repository requirement is still blocking a direct merge.",
+          "A repository requirement is still blocking a direct merge.",
+      };
+    case "needs_approval":
+      return {
+        canMerge: false,
+        canEnableAutoMerge: true,
+        explanation:
+          "The pull request needs a review approval before merging directly.",
       };
     case "changes_requested":
       return {
@@ -393,9 +401,15 @@ function workflowState(
   if (checks.failing > 0) return "failing";
   if (prIsQueued(pr)) return "queued";
   if (prIsBehind(pr)) return "behind";
+  // GitHub reports the merge state as blocked while required checks run, so
+  // pending checks must outrank it or every open pull request reads
+  // "Blocked" for its whole life (decision 66).
+  if (checks.pending > 0) return "pending";
+  // With no checks left to wait for, a required review is its own state,
+  // said in those words, rather than a generic block.
+  if (prNeedsApproval(pr)) return "needs_approval";
   if (prIsBlocked(pr)) return "blocked";
   if (pr.auto_merge_enabled) return "auto_merge";
-  if (checks.pending > 0) return "pending";
   const mergeable = pr.mergeable?.trim().toLowerCase();
   const mergeState = pr.merge_state_status?.trim().toLowerCase();
   return mergeable === "mergeable" && mergeState === "clean"

@@ -12,6 +12,7 @@ import {
   dirtyGit,
   failingChecksPrGit,
   fixingPrGit,
+  needsApprovalPrGit,
   openPrGit,
   readyForPrGit,
   watchingPrGit,
@@ -100,6 +101,11 @@ export const ReadyForPullRequest: Story = {
 };
 
 export const PullRequestOpen: Story = {};
+
+/** Checks are green; GitHub still wants a review approval (decision 66). */
+export const NeedsApproval: Story = {
+  args: { snapshot: needsApprovalPrGit },
+};
 
 /** A durable watch task is polling; the segment links into the fork. */
 export const Watching: Story = {
