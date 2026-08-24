@@ -777,9 +777,9 @@ impl CodePullRequestDiscovery {
 /// GitHub stays authoritative; a row is a confirmed observation, never a
 /// guess. Identity is `(owner, host, repo_owner, repo_name, number)`, so a
 /// pull request in a repository with no local checkout is representable.
-/// Checks, review decisions, and mergeability stay live-only in the delivery
-/// reads; this snapshot keeps what stack derivation, trigger edges, and list
-/// rows need.
+/// The snapshot fields keep what stack derivation, trigger edges, and list
+/// rows need; `live` carries the volatile state a digest read observed
+/// (decision 66).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodePullRequestFact {
     /// Stable id.
@@ -823,6 +823,69 @@ pub struct CodePullRequestFact {
     pub first_seen_at: chrono::DateTime<chrono::Utc>,
     /// When this store last confirmed the snapshot.
     pub last_seen_at: chrono::DateTime<chrono::Utc>,
+    /// Volatile state from the newest digest read, when one has written it
+    /// since the tier landed (decision 66).
+    pub live: Option<CodePullRequestLiveState>,
+}
+
+/// Volatile pull-request state on a fact row (decision 66).
+///
+/// The snapshot fields answer "which pull request"; this tier answers "what
+/// is it doing right now": the check rollup, review decision, mergeability,
+/// merge state, auto-merge arming, and queue membership the digest carries.
+/// A snapshot upsert never touches it, and writing it never counts as a
+/// snapshot confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodePullRequestLiveState {
+    /// One-line checks summary, as the digest carries it.
+    pub checks_summary: Option<String>,
+    /// Individual checks, when the host reported any.
+    pub checks: Option<Vec<PullRequestCheck>>,
+    /// Lowercased host review decision.
+    pub review_decision: Option<String>,
+    /// Lowercased host mergeability.
+    pub mergeable: Option<String>,
+    /// Lowercased host merge-state status.
+    pub merge_state_status: Option<String>,
+    /// Auto-merge armed on the host.
+    pub auto_merge_enabled: Option<bool>,
+    /// Merge-queue membership, when the host reported it.
+    pub in_merge_queue: Option<bool>,
+    /// When a digest read last wrote this tier.
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl CodePullRequestLiveState {
+    /// The live tier one digest read carries (decision 66).
+    #[must_use]
+    pub fn from_digest(
+        digest: &PullRequestDigest,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            checks_summary: digest.checks_summary.clone(),
+            checks: digest.checks.clone(),
+            review_decision: digest.review_decision.clone(),
+            mergeable: digest.mergeable.clone(),
+            merge_state_status: digest.merge_state_status.clone(),
+            auto_merge_enabled: digest.auto_merge_enabled,
+            in_merge_queue: digest.in_merge_queue,
+            observed_at,
+        }
+    }
+
+    /// Whether any live field other than `observed_at` differs. Broadcasts
+    /// key on this, so a read that confirms no movement stays silent.
+    #[must_use]
+    pub fn differs_from(&self, other: &Self) -> bool {
+        self.checks_summary != other.checks_summary
+            || self.checks != other.checks
+            || self.review_decision != other.review_decision
+            || self.mergeable != other.mergeable
+            || self.merge_state_status != other.merge_state_status
+            || self.auto_merge_enabled != other.auto_merge_enabled
+            || self.in_merge_queue != other.in_merge_queue
+    }
 }
 
 /// One workspace's tie to one pull request (decision 62).

@@ -218,6 +218,7 @@ pub(crate) fn fact_from_summary(
         closed_at: summary.closed_at,
         first_seen_at: now,
         last_seen_at: now,
+        live: None,
     })
 }
 
@@ -260,6 +261,7 @@ mod tests {
             closed_at: None,
             first_seen_at: chrono::Utc::now(),
             last_seen_at: chrono::Utc::now(),
+            live: None,
         }
     }
 

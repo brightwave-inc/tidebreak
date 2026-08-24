@@ -1708,6 +1708,14 @@ pub mod code_pull_request {
         pub closed_at: Option<DateTimeUtc>,
         pub first_seen_at: DateTimeUtc,
         pub last_seen_at: DateTimeUtc,
+        pub checks_summary: Option<String>,
+        pub checks: Option<String>,
+        pub review_decision: Option<String>,
+        pub mergeable: Option<String>,
+        pub merge_state_status: Option<String>,
+        pub auto_merge_enabled: Option<bool>,
+        pub in_merge_queue: Option<bool>,
+        pub live_observed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

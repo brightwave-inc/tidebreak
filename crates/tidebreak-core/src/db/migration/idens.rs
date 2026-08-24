@@ -836,6 +836,14 @@ pub(crate) enum CodePullRequest {
     ClosedAt,
     FirstSeenAt,
     LastSeenAt,
+    ChecksSummary,
+    Checks,
+    ReviewDecision,
+    Mergeable,
+    MergeStateStatus,
+    AutoMergeEnabled,
+    InMergeQueue,
+    LiveObservedAt,
 }
 
 #[derive(DeriveIden)]
