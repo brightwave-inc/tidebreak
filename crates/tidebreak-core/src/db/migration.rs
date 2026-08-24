@@ -48,6 +48,7 @@ impl MigratorTrait for Migrator {
             Box::new(TriggerDeliveryReceipts),
             Box::new(CodePullRequestFacts),
             Box::new(TriggerFactConditions),
+            Box::new(CodeQueuedTurns),
         ]
     }
 }
@@ -1359,6 +1360,106 @@ fn code_trigger_fire_outbox_indexes() -> Vec<IndexCreateStatement> {
     ]
 }
 
+/// Durable per-session queued follow-ups (decision 65).
+///
+/// Mirrors the chat `queued_turn` contract onto code sessions: a message
+/// accepted while the session or its workspace checkout is busy parks as a
+/// row rather than in the worker's single in-memory slot, so the queue
+/// survives restarts, holds more than one message, and supports list, edit,
+/// reorder, and delete. The row id is the turn id the promoted turn is
+/// inserted under, in the same transaction that deletes the row.
+struct CodeQueuedTurns;
+
+impl MigrationName for CodeQueuedTurns {
+    fn name(&self) -> &str {
+        "m20260824_000011_code_queued_turns"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeQueuedTurns {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeQueuedTurn::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::SessionId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::Message)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::AttachmentsJson)
+                            .text()
+                            .not_null()
+                            .default("[]"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::Position)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeQueuedTurn::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_queued_turn_session")
+                            .from(
+                                idens::CodeQueuedTurn::Table,
+                                idens::CodeQueuedTurn::SessionId,
+                            )
+                            .to(idens::CodeSession::Table, idens::CodeSession::Id),
+                    )
+                    .check(Func::char_length(Expr::col(idens::CodeQueuedTurn::Message)).gt(0))
+                    .check(Expr::col(idens::CodeQueuedTurn::Position).gte(0))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_queued_turn_session_position")
+                    .table(idens::CodeQueuedTurn::Table)
+                    .col(idens::CodeQueuedTurn::SessionId)
+                    .col(idens::CodeQueuedTurn::Position)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the table would lose parked messages.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -1416,6 +1517,7 @@ mod tests {
                 "m20260822_000008_trigger_delivery_receipts",
                 "m20260822_000009_code_pull_request_facts",
                 "m20260823_000010_trigger_fact_conditions",
+                "m20260824_000011_code_queued_turns",
             ]
         );
         assert!(db

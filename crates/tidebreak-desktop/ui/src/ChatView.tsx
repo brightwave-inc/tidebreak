@@ -36,7 +36,7 @@ import { useFolderAccessRequests } from "./useFolderAccessRequests";
 import { useOutputWritebackRequests } from "./useOutputWritebackRequests";
 import { useToolApprovals } from "./useToolApprovals";
 import { useStreamStalled } from "./useStreamStalled";
-import { QueueTray } from "./QueueTray";
+import { QueueTray, useChatQueueApi } from "./QueueTray";
 import { useTurnControls } from "./useTurnControls";
 import { usePlanApprovals } from "./usePlanApprovals";
 import { useTaskPlan } from "./useTaskPlan";
@@ -169,6 +169,7 @@ export function ChatView({
   );
   const compacting = useChatSessionStore((session) => session.compacting);
   const activeTurnId = useChatSessionStore((session) => session.activeTurnId);
+  const chatQueue = useChatQueueApi(client, chat.id);
   // Every applied stream event advances the seq cursor, so it doubles as the
   // liveness signal for the stall-aware working indicator.
   const lastSeq = useChatSessionStore((session) => session.lastSeq);
@@ -593,8 +594,7 @@ export function ChatView({
         ) : (
           <>
             <QueueTray
-              client={client}
-              chatId={chat.id}
+              queue={chatQueue}
               active={activeTurnId !== null}
               onStop={turnControls.cancel}
             />

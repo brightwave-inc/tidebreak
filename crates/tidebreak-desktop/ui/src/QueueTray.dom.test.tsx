@@ -4,8 +4,8 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ApiClient, QueuedTurn } from "./api";
-import { QueueTray } from "./QueueTray";
+import type { ApiClient, QueuedCodeTurn, QueuedTurn } from "./api";
+import { chatQueueApi, codeQueueApi, QueueTray } from "./QueueTray";
 
 afterEach(cleanup);
 
@@ -20,6 +20,15 @@ const first: QueuedTurn = {
   position: 1,
   created_at: "2026-08-13T12:00:00Z",
   updated_at: "2026-08-13T12:00:00Z",
+};
+
+const codeRow: QueuedCodeTurn = {
+  id: "q-1",
+  session_id: "sess-1",
+  message: "Fix the failing checks on pull request #12",
+  position: 0,
+  created_at: "2026-08-24T12:00:00Z",
+  updated_at: "2026-08-24T12:00:00Z",
 };
 
 describe("QueueTray", () => {
@@ -45,7 +54,11 @@ describe("QueueTray", () => {
     });
 
     render(
-      <QueueTray client={client} chatId="chat-1" active onStop={onStop} />,
+      <QueueTray
+        queue={chatQueueApi(client, "chat-1")}
+        active
+        onStop={onStop}
+      />,
     );
     await screen.findByText("Use the shorter introduction");
     await userEvent.click(
@@ -61,6 +74,48 @@ describe("QueueTray", () => {
       {
         position: 0,
       },
+    );
+  });
+
+  it("drives a code session's queue through the same tray", async () => {
+    const client = {
+      listCodeQueuedTurns: vi
+        .fn()
+        .mockResolvedValue({ queued: [codeRow], paused: false }),
+      patchCodeQueuedTurn: vi.fn(async () => codeRow),
+      deleteCodeQueuedTurn: vi.fn(async () => undefined),
+    } as unknown as ApiClient;
+
+    render(
+      <QueueTray
+        queue={codeQueueApi(client, "sess-1")}
+        active
+        onStop={vi.fn(async () => undefined)}
+      />,
+    );
+    const row = await screen.findByText(
+      "Fix the failing checks on pull request #12",
+    );
+    expect(row).toBeInTheDocument();
+
+    // Editing maps the tray's `content` onto the code queue's `message` key.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit queued message" }),
+    );
+    const box = screen.getByRole("textbox");
+    await userEvent.clear(box);
+    await userEvent.type(box, "Rebase onto main instead{Enter}");
+    await waitFor(() =>
+      expect(client.patchCodeQueuedTurn).toHaveBeenCalledWith("sess-1", "q-1", {
+        message: "Rebase onto main instead",
+      }),
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Delete queued message" }),
+    );
+    await waitFor(() =>
+      expect(client.deleteCodeQueuedTurn).toHaveBeenCalledWith("sess-1", "q-1"),
     );
   });
 });

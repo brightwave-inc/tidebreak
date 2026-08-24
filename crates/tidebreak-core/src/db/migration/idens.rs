@@ -927,6 +927,19 @@ pub(crate) enum CodeTurnAttachment {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum CodeQueuedTurn {
+    Table,
+    Id,
+    Owner,
+    SessionId,
+    Message,
+    AttachmentsJson,
+    Position,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum CodeEvent {
     Table,
     SessionId,

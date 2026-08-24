@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -10,32 +10,96 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import type { ApiClient, QueuedTurn } from "./api";
+import type { ApiClient } from "./api";
 import { friendlyErrorMessage } from "./lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
+/** One queued message, in the vocabulary the tray renders. */
+export type QueueTrayRow = { id: string; content: string };
+
+/**
+ * The queue operations the tray drives. Chat and code sessions expose the
+ * same five verbs over different routes; the adapters below map each surface
+ * onto this shape so both modes share one tray.
+ */
+export type QueueTrayApi = {
+  list: () => Promise<{ queued: QueueTrayRow[]; paused: boolean }>;
+  update: (
+    id: string,
+    change: { content?: string; position?: number },
+  ) => Promise<unknown>;
+  remove: (id: string) => Promise<unknown>;
+  setPaused: (paused: boolean) => Promise<unknown>;
+  sendNow: () => Promise<unknown>;
+};
+
+/** The chat queue (`/chats/{id}/queued`), decision 9. */
+export function chatQueueApi(client: ApiClient, chatId: string): QueueTrayApi {
+  return {
+    list: async () => {
+      const snapshot = await client.listQueuedTurns(chatId);
+      return {
+        queued: snapshot.queued.map((row) => ({
+          id: row.id,
+          content: row.content,
+        })),
+        paused: snapshot.paused,
+      };
+    },
+    update: (id, change) => client.patchQueuedTurn(chatId, id, change),
+    remove: (id) => client.deleteQueuedTurn(chatId, id),
+    setPaused: (paused) => client.putQueuePaused(chatId, paused),
+    sendNow: () => client.sendQueuedNow(chatId),
+  };
+}
+
+/** The code-session queue (`/code/sessions/{id}/queued`), decision 65. */
+export function codeQueueApi(
+  client: ApiClient,
+  sessionId: string,
+): QueueTrayApi {
+  return {
+    list: async () => {
+      const snapshot = await client.listCodeQueuedTurns(sessionId);
+      return {
+        queued: snapshot.queued.map((row) => ({
+          id: row.id,
+          content: row.message,
+        })),
+        paused: snapshot.paused,
+      };
+    },
+    update: (id, change) =>
+      client.patchCodeQueuedTurn(sessionId, id, {
+        ...(change.content !== undefined ? { message: change.content } : {}),
+        ...(change.position !== undefined ? { position: change.position } : {}),
+      }),
+    remove: (id) => client.deleteCodeQueuedTurn(sessionId, id),
+    setPaused: (paused) => client.putCodeQueuePaused(sessionId, paused),
+    sendNow: () => client.sendCodeQueuedNow(sessionId),
+  };
+}
+
 /**
  * The durable message queue, rendered directly above the composer.
  *
- * Every row is a `queued_turn` the server owns: reorder, edit, and delete are
+ * Every row is a queued turn the server owns: reorder, edit, and delete are
  * real API calls, the queue survives restarts, and promotion happens
- * server-side the moment the chat is free — this component only observes.
- * Hidden entirely while the queue is empty, so the ordinary composer is
- * untouched until the first mid-turn send.
+ * server-side the moment the conversation is free — this component only
+ * observes. Hidden entirely while the queue is empty, so the ordinary
+ * composer is untouched until the first mid-turn send.
  */
 export function QueueTray({
-  client,
-  chatId,
+  queue,
   active,
   onStop,
 }: {
-  client: ApiClient;
-  chatId: string;
+  queue: QueueTrayApi;
   active: boolean;
   onStop: () => Promise<void>;
 }) {
-  const [queued, setQueued] = useState<QueuedTurn[]>([]);
+  const [queued, setQueued] = useState<QueueTrayRow[]>([]);
   const [paused, setPaused] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
@@ -43,15 +107,14 @@ export function QueueTray({
   const timerRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!client) return;
     try {
-      const snapshot = await client.listQueuedTurns(chatId);
+      const snapshot = await queue.list();
       setQueued(snapshot.queued);
       setPaused(snapshot.paused);
     } catch {
       // Poll again on the next tick; a queue read is never worth a toast.
     }
-  }, [client, chatId]);
+  }, [queue]);
 
   useEffect(() => {
     void refresh();
@@ -75,17 +138,17 @@ export function QueueTray({
     }
   }
 
-  async function sendNow(row: QueuedTurn) {
+  async function sendNow(row: QueueTrayRow) {
     setBusy(true);
     let temporarilyPaused = false;
     try {
       if (!paused) {
-        await client.putQueuePaused(chatId, true);
+        await queue.setPaused(true);
         temporarilyPaused = true;
       }
-      await client.patchQueuedTurn(chatId, row.id, { position: 0 });
+      await queue.update(row.id, { position: 0 });
       if (active) await onStop();
-      await client.sendQueuedNow(chatId);
+      await queue.sendNow();
       temporarilyPaused = false;
       await refresh();
     } catch (error) {
@@ -94,7 +157,7 @@ export function QueueTray({
       );
       if (temporarilyPaused) {
         try {
-          await client.putQueuePaused(chatId, false);
+          await queue.setPaused(false);
         } catch {
           // The original failure is the useful one; polling will show the
           // actual queue state and the header still offers Resume.
@@ -135,7 +198,7 @@ export function QueueTray({
             disabled={busy}
             onClick={() =>
               void act(
-                () => client.putQueuePaused(chatId, !paused),
+                () => queue.setPaused(!paused),
                 "Could not update the queue",
               )
             }
@@ -168,8 +231,7 @@ export function QueueTray({
                     setEditing(null);
                     if (content && content !== row.content) {
                       void act(
-                        () =>
-                          client.patchQueuedTurn(chatId, row.id, { content }),
+                        () => queue.update(row.id, { content }),
                         "Could not edit the queued message",
                       );
                     }
@@ -205,10 +267,7 @@ export function QueueTray({
                 disabled={busy || index === 0}
                 onClick={() =>
                   void act(
-                    () =>
-                      client.patchQueuedTurn(chatId, row.id, {
-                        position: index - 1,
-                      }),
+                    () => queue.update(row.id, { position: index - 1 }),
                     "Could not reorder the queue",
                   )
                 }
@@ -224,10 +283,7 @@ export function QueueTray({
                 disabled={busy || index === queued.length - 1}
                 onClick={() =>
                   void act(
-                    () =>
-                      client.patchQueuedTurn(chatId, row.id, {
-                        position: index + 1,
-                      }),
+                    () => queue.update(row.id, { position: index + 1 }),
                     "Could not reorder the queue",
                   )
                 }
@@ -257,7 +313,7 @@ export function QueueTray({
                 disabled={busy}
                 onClick={() =>
                   void act(
-                    () => client.deleteQueuedTurn(chatId, row.id),
+                    () => queue.remove(row.id),
                     "Could not delete the queued message",
                   )
                 }
@@ -270,4 +326,14 @@ export function QueueTray({
       </ul>
     </section>
   );
+}
+
+/** Memoize a stable adapter so the tray's poll effect does not rearm per render. */
+export function useChatQueueApi(client: ApiClient, chatId: string) {
+  return useMemo(() => chatQueueApi(client, chatId), [client, chatId]);
+}
+
+/** Memoize a stable adapter so the tray's poll effect does not rearm per render. */
+export function useCodeQueueApi(client: ApiClient, sessionId: string) {
+  return useMemo(() => codeQueueApi(client, sessionId), [client, sessionId]);
 }

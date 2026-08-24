@@ -1008,6 +1008,38 @@ pub struct CodeTurn {
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// One durable queued follow-up: a message accepted while its session or its
+/// workspace checkout was busy, promoted into a real turn strictly FIFO once
+/// the session is free.
+///
+/// The id is the turn id the worker mints the promoted turn under, so the row
+/// deletion and the turn insertion commit together and an ambiguous retry can
+/// never run one message twice. Mirrors the chat queue contract (decision 9)
+/// onto code sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeQueuedTurn {
+    /// The turn id this row becomes when promoted.
+    pub id: CodeTurnId,
+    /// Owning session.
+    pub session_id: CodeSessionId,
+    /// Byte-exact user message.
+    pub message: String,
+    /// Bounded image references carried into the promoted turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ImageRef>,
+    /// Dense FIFO order within the session, starting at 0.
+    pub position: i32,
+    /// Enqueue time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Last edit or reorder time; promotion refuses a row that moved under it.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl CodeQueuedTurn {
+    /// Queue depth cap per session, matching the chat queue's per-chat cap.
+    pub const MAX_PER_SESSION: usize = 32;
+}
+
 /// Bounded image reference recorded on a code-mode user turn.
 ///
 /// State of a persisted watch task.

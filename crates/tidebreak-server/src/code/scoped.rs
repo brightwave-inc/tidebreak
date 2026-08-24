@@ -616,6 +616,47 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn list_queued_turns(
+        &self,
+        id: CodeSessionId,
+    ) -> Result<(Vec<tidebreak_core::CodeQueuedTurn>, bool), ServerError> {
+        self.runtime.list_queued_turns(&self.owner, id).await
+    }
+
+    pub(crate) async fn update_queued_turn(
+        &self,
+        id: CodeSessionId,
+        queued_id: CodeTurnId,
+        message: Option<&str>,
+        position: Option<i32>,
+    ) -> Result<Option<tidebreak_core::CodeQueuedTurn>, ServerError> {
+        self.runtime
+            .update_queued_turn(&self.owner, id, queued_id, message, position)
+            .await
+    }
+
+    pub(crate) async fn delete_queued_turn(
+        &self,
+        id: CodeSessionId,
+        queued_id: CodeTurnId,
+    ) -> Result<bool, ServerError> {
+        self.runtime
+            .delete_queued_turn(&self.owner, id, queued_id)
+            .await
+    }
+
+    pub(crate) async fn set_queue_paused(
+        &self,
+        id: CodeSessionId,
+        paused: bool,
+    ) -> Result<(), ServerError> {
+        self.runtime.set_queue_paused(&self.owner, id, paused).await
+    }
+
+    pub(crate) async fn send_queued_now(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        self.runtime.send_queued_now(&self.owner, id).await
+    }
+
     pub(crate) async fn set_reasoning_effort(
         &self,
         id: CodeSessionId,

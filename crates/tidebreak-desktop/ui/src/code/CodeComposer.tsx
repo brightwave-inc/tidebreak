@@ -610,8 +610,6 @@ export function CodeComposer({
   promptScope,
   sessionId,
   history,
-  queued = false,
-  lastTurnBeganId,
   reasoningEffort = null,
   engineEfforts = [],
   fastMode = false,
@@ -641,13 +639,6 @@ export function CodeComposer({
   sessionId?: string;
   /** Prior user prompts, newest first, for Up/Down recall. */
   history?: readonly string[];
-  /** A follow-up the pane is holding until the next turn begins. */
-  queued?: boolean;
-  /**
-   * The turn the journal last announced. A change drops the queued pill once
-   * the parked follow-up starts.
-   */
-  lastTurnBeganId?: string | null;
   /** The session's stored level. `null` is the engine's own default. */
   reasoningEffort?: ReasoningEffort | null;
   /** Whether the session is armed for fast mode. */
@@ -701,7 +692,6 @@ export function CodeComposer({
   );
   const [selectedFastMode, setSelectedFastMode] = useState(fastMode);
   const [notice, setNotice] = useState<{ text: string } | null>(null);
-  const [followUpQueued, setFollowUpQueued] = useState(false);
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
@@ -714,7 +704,6 @@ export function CodeComposer({
     sessionId ? async () => sessionId : undefined,
     "code",
   );
-  const showQueued = queued || followUpQueued;
   const [pathItems, setPathItems] = useState<string[]>([]);
   const searchPathsRef = useRef(searchPaths);
   searchPathsRef.current = searchPaths;
@@ -804,10 +793,6 @@ export function CodeComposer({
     setSelectedFastMode(fastMode);
   }, [fastMode, sessionId]);
 
-  useEffect(() => {
-    setFollowUpQueued(false);
-  }, [lastTurnBeganId]);
-
   async function submit() {
     const typed = draft.trim();
     if (!typed || disabled) return;
@@ -846,19 +831,19 @@ export function CodeComposer({
     // a sent turn look like it had failed to take the images.
     images.clear();
     try {
-      const outcome =
-        attachments.length > 0
-          ? await onSend(message, attachments)
-          : await onSend(message);
-      if (outcome && outcome.kind === "queued") {
-        setFollowUpQueued(true);
+      // A queued outcome needs nothing here: the queue tray above the
+      // composer polls the durable queue and shows the row.
+      if (attachments.length > 0) {
+        await onSend(message, attachments);
+      } else {
+        await onSend(message);
       }
     } catch (err) {
       images.restore(held);
       setNotice({
         text:
           err instanceof HttpError && err.kind === "queue_full"
-            ? "A follow-up is already queued. Wait for it to run, or interrupt this turn."
+            ? "The queue is full. Delete a queued message or wait for one to run."
             : err instanceof Error
               ? err.message
               : "Could not send that turn",
@@ -882,15 +867,14 @@ export function CodeComposer({
     }
     setNotice(null);
     try {
-      const outcome = await onSend(message);
-      if (outcome && outcome.kind === "queued") {
-        setFollowUpQueued(true);
-      }
+      // Ran or queued, the prompt is on its way; the queue tray shows a
+      // parked row.
+      await onSend(message);
     } catch (err) {
       setNotice({
         text:
           err instanceof HttpError && err.kind === "queue_full"
-            ? "A follow-up is already queued. Wait for it to run, or interrupt this turn."
+            ? "The queue is full. Delete a queued message or wait for one to run."
             : err instanceof Error
               ? err.message
               : "Could not send that turn",
@@ -941,14 +925,6 @@ export function CodeComposer({
 
   return (
     <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
-      {showQueued && (
-        <p
-          role="status"
-          className="text-muted-foreground pointer-events-none absolute inset-x-0 bottom-full mx-auto mb-1 max-w-3xl text-center text-[11px] [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
-        >
-          1 follow-up queued
-        </p>
-      )}
       <Composer
         activeTurnId={running ? "running" : null}
         busy={running}

@@ -1,17 +1,20 @@
 use super::temp_store;
 use crate::attention::{Attention, AttentionSource};
 use crate::code::{
-    CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeRepo,
-    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
-    HarnessKind, RepoId, WorkspaceId,
+    CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn,
+    CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
+    CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+    CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
-    append_event, bump_spawn_epoch, get_approval, get_repo, get_repo_by_root_path, get_session,
-    get_turn, get_workspace, insert_approval, insert_repo, insert_session, insert_turn,
-    insert_workspace, list_approvals, list_events, list_repos, list_sessions, list_turns,
-    mark_repo_removed, replace_session_attention, save_session, save_turn, set_session_subagents,
-    set_turn_narrative, set_workspace_title_if, CodeJournalError, MAX_REPLAY_EVENTS,
+    append_event, bump_spawn_epoch, delete_queued_turn, delete_session_queued_turns,
+    enqueue_queued_turn, get_approval, get_repo, get_repo_by_root_path, get_session, get_turn,
+    get_workspace, insert_approval, insert_repo, insert_session, insert_turn, insert_workspace,
+    list_approvals, list_events, list_queued_turns, list_repos, list_sessions, list_turns,
+    mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
+    replace_session_attention, save_session, save_turn, set_queue_paused, set_session_subagents,
+    set_turn_narrative, set_workspace_title_if, update_queued_turn, CodeJournalError,
+    MAX_REPLAY_EVENTS,
 };
 use crate::{BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, Store};
 use chrono::Utc;
@@ -2648,5 +2651,254 @@ async fn saving_a_turn_does_not_blank_its_narrative() {
         stored.checkpoint_ref.as_deref(),
         Some("refs/tidebreak/checkpoints/ws/1"),
         "and it still writes what it owns"
+    );
+}
+
+fn queued_message(session_id: CodeSessionId, message: &str) -> CodeQueuedTurn {
+    CodeQueuedTurn {
+        id: CodeTurnId::new(),
+        session_id,
+        message: message.to_owned(),
+        attachments: Vec::new(),
+        position: 0,
+        created_at: now(),
+        updated_at: now(),
+    }
+}
+
+fn turn_for(row: &CodeQueuedTurn, ordinal: i64) -> CodeTurn {
+    CodeTurn {
+        id: row.id,
+        session_id: row.session_id,
+        ordinal,
+        status: CodeTurnStatus::Running,
+        user_input: row.message.clone(),
+        user_input_blob_id: None,
+        attachments: row.attachments.clone(),
+        checkpoint_ref: None,
+        diffstat: None,
+        usage: None,
+        narrative: None,
+        started_at: now(),
+        ended_at: None,
+    }
+}
+
+#[tokio::test]
+async fn code_queued_turns_are_fifo_and_promote_into_their_own_turn_id() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+
+    let first = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "first"))
+        .await
+        .unwrap();
+    let second = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "second"))
+        .await
+        .unwrap();
+    assert_eq!(first.position, 0);
+    assert_eq!(second.position, 1);
+
+    let head = queued_turn_head(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.id, first.id);
+
+    // Promotion deletes the row and inserts the turn together, under the
+    // row's own id.
+    assert!(
+        promote_queued_turn(&store, &owner, &head, &turn_for(&head, 2))
+            .await
+            .unwrap()
+    );
+    let promoted = get_turn(&store, &owner, first.id).await.unwrap().unwrap();
+    assert_eq!(promoted.user_input, "first");
+    let remaining = list_queued_turns(&store, &owner, session_id).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, second.id);
+
+    // A second promotion of the same snapshot must refuse: the row is gone.
+    assert!(
+        !promote_queued_turn(&store, &owner, &head, &turn_for(&head, 3))
+            .await
+            .unwrap(),
+        "a spent snapshot must not promote twice"
+    );
+}
+
+#[tokio::test]
+async fn an_edited_or_retracted_row_refuses_a_stale_promotion() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+
+    let row = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "original"))
+        .await
+        .unwrap();
+    let snapshot = queued_turn_head(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // An edit after the snapshot bumps updated_at, so the stale snapshot must
+    // not run the old content — and must write no turn at all.
+    let edited = update_queued_turn(&store, &owner, session_id, row.id, Some("edited"), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.message, "edited");
+    assert!(
+        !promote_queued_turn(&store, &owner, &snapshot, &turn_for(&snapshot, 2))
+            .await
+            .unwrap()
+    );
+    assert!(get_turn(&store, &owner, row.id).await.unwrap().is_none());
+
+    // The fresh head promotes; a retracted row refuses the same way.
+    let fresh = queued_turn_head(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(delete_queued_turn(&store, &owner, session_id, fresh.id)
+        .await
+        .unwrap());
+    assert!(
+        !promote_queued_turn(&store, &owner, &fresh, &turn_for(&fresh, 2))
+            .await
+            .unwrap()
+    );
+    assert!(list_queued_turns(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn code_queue_reorders_stay_dense_and_the_cap_holds() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+
+    let a = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "a"))
+        .await
+        .unwrap();
+    let _b = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "b"))
+        .await
+        .unwrap();
+    let c = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "c"))
+        .await
+        .unwrap();
+
+    // Move the tail first; every position rewrites densely.
+    update_queued_turn(&store, &owner, session_id, c.id, None, Some(0))
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = list_queued_turns(&store, &owner, session_id).await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.message.as_str(), row.position))
+            .collect::<Vec<_>>(),
+        vec![("c", 0), ("a", 1), ("b", 2)]
+    );
+
+    // Deleting a middle row keeps order; the cap refuses the 33rd message.
+    assert!(delete_queued_turn(&store, &owner, session_id, a.id)
+        .await
+        .unwrap());
+    for index in 0..(CodeQueuedTurn::MAX_PER_SESSION - 2) {
+        enqueue_queued_turn(
+            &store,
+            &owner,
+            &queued_message(session_id, &format!("fill {index}")),
+        )
+        .await
+        .unwrap();
+    }
+    let overflow =
+        enqueue_queued_turn(&store, &owner, &queued_message(session_id, "too many")).await;
+    assert!(overflow.is_err(), "the per-session cap must hold");
+}
+
+#[tokio::test]
+async fn code_queue_pause_round_trips_and_an_ended_session_clears_its_rows() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+
+    assert!(!queue_paused(&store, &owner, session_id).await.unwrap());
+    set_queue_paused(&store, &owner, session_id, true)
+        .await
+        .unwrap();
+    assert!(queue_paused(&store, &owner, session_id).await.unwrap());
+
+    // The pause anchors on the owner's session row: a foreign owner reads
+    // the default and cannot flip it.
+    let other = OwnerId::new("intruder").unwrap();
+    assert!(!queue_paused(&store, &other, session_id).await.unwrap());
+    assert!(set_queue_paused(&store, &other, session_id, false)
+        .await
+        .is_err());
+    assert!(queue_paused(&store, &owner, session_id).await.unwrap());
+
+    set_queue_paused(&store, &owner, session_id, false)
+        .await
+        .unwrap();
+    assert!(!queue_paused(&store, &owner, session_id).await.unwrap());
+
+    enqueue_queued_turn(&store, &owner, &queued_message(session_id, "one"))
+        .await
+        .unwrap();
+    enqueue_queued_turn(&store, &owner, &queued_message(session_id, "two"))
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_session_queued_turns(&store, &owner, session_id)
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(list_queued_turns(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn another_owner_cannot_see_or_touch_a_code_queue() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let other = OwnerId::new("intruder").unwrap();
+
+    let row = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "mine"))
+        .await
+        .unwrap();
+
+    assert!(list_queued_turns(&store, &other, session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(queued_turn_head(&store, &other, session_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        update_queued_turn(&store, &other, session_id, row.id, Some("stolen"), None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!delete_queued_turn(&store, &other, session_id, row.id)
+        .await
+        .unwrap());
+    assert!(
+        !promote_queued_turn(&store, &other, &row, &turn_for(&row, 2))
+            .await
+            .unwrap(),
+        "a foreign owner's promotion must refuse"
+    );
+    assert_eq!(
+        list_queued_turns(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 }

@@ -1371,15 +1371,57 @@ pub struct SteerBody {
     pub guidance: String,
 }
 
-/// A follow-up parked while the session is already running a turn.
+/// One durable queued follow-up: a message parked while the session or its
+/// workspace checkout was busy, promoted FIFO once the session is free.
 ///
-/// No turn id: the row is created when the worker promotes this slot.
-/// `position` is 1-based in the single-slot queue.
+/// `id` names the row for edits and retraction, and is the turn id the
+/// promoted turn is inserted under. `position` is 0-based and dense within
+/// the session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct QueuedCodeTurn {
+    pub id: tidebreak_core::CodeTurnId,
     pub session_id: tidebreak_core::CodeSessionId,
     pub message: String,
-    pub position: i64,
+    pub position: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<tidebreak_core::CodeQueuedTurn> for QueuedCodeTurn {
+    fn from(row: tidebreak_core::CodeQueuedTurn) -> Self {
+        Self {
+            id: row.id,
+            session_id: row.session_id,
+            message: row.message,
+            position: row.position,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// Response of `GET /code/sessions/{id}/queued`.
+#[derive(Debug, Serialize)]
+pub struct QueuedCodeTurnsSnapshot {
+    pub queued: Vec<QueuedCodeTurn>,
+    pub paused: bool,
+}
+
+/// Body of `PATCH /code/sessions/{id}/queued/{queued_id}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueuedCodeTurnUpdate {
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub position: Option<i32>,
+}
+
+/// Body of `PUT /code/sessions/{id}/queue-paused`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueuePausedBody {
+    pub paused: bool,
 }
 
 /// Query for `GET /code/workspaces`.

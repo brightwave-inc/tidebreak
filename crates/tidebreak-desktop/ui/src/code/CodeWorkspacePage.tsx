@@ -59,6 +59,7 @@ import { PanelLayout } from "@/panel/PanelLayout";
 import type { LayoutState, PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
+import { QueueTray, useCodeQueueApi } from "@/QueueTray";
 import { followScrollBehavior } from "@/ChatScroll";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
@@ -1733,7 +1734,6 @@ function CodeSessionPane({
   const hydrated = store((state) => state.hydrated);
   const animateStreaming = store((state) => state.animateStreaming);
   const connectionState = store((state) => state.connectionState);
-  const lastTurnBeganId = store((state) => state.lastTurnBeganId);
   const lastUsage = store((state) => state.lastUsage);
   // The reducer's own applied-event cursor is the activity signal the stall
   // timer wants: every delta, tool result, and boundary advances it.
@@ -1765,7 +1765,7 @@ function CodeSessionPane({
   >({});
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | undefined>();
-  const [queued, setQueued] = useState(false);
+  const sessionQueue = useCodeQueueApi(client, session.id);
   // No `?? []` fallback here: a fresh array is a new snapshot every render,
   // and zustand v5 loops on referentially unstable snapshots.
   const cachedModels = useCodeCatalogStore(
@@ -1894,10 +1894,6 @@ function CodeSessionPane({
     [items],
   );
 
-  useEffect(() => {
-    setQueued(false);
-  }, [lastTurnBeganId]);
-
   // `items` is a fresh array on every streamed delta, so keying the fetch on it
   // would list approvals again for every token of a turn. Only an approval
   // appearing or changing state can change what the list would return.
@@ -1966,6 +1962,8 @@ function CodeSessionPane({
     follow.requestSmoothFollow();
     // Outcome and refusal both belong to the composer: it says whether the
     // message ran or queued, and it holds the draft when the server refuses.
+    // A queued outcome needs no state here — the tray polls the durable queue
+    // and shows the row.
     return submitAcceptedTurn(store.getState().update, () =>
       client.submitCodeTurn(
         session.id,
@@ -1973,10 +1971,7 @@ function CodeSessionPane({
         model ?? undefined,
         attachments,
       ),
-    ).then((outcome) => {
-      if (outcome.kind === "queued") setQueued(true);
-      return outcome;
-    });
+    );
   }
 
   async function changePermissionMode(mode: PermissionMode) {
@@ -2108,67 +2103,75 @@ function CodeSessionPane({
       </div>
       {composerOverride}
       {lifecycle !== "ended" && !composerOverride && !subagentCallId && (
-        <CodeComposer
-          running={busy || lifecycle === "running"}
-          disabled={disabled}
-          permissionMode={settings.permissionMode}
-          availableModes={availableModes}
-          reasoningEffort={settings.reasoningEffort}
-          fastMode={settings.fastMode}
-          engineEfforts={engineEfforts}
-          harness={session.harness_kind}
-          model={model ?? undefined}
-          modelOptions={modelOptions}
-          modelLoading={
-            session.harness_kind === "opencode" && cachedModels === undefined
-          }
-          promptScope={workspaceId}
-          sessionId={session.id}
-          history={composerHistory}
-          queued={queued}
-          lastTurnBeganId={lastTurnBeganId}
-          slashCommands={doctorEntry?.commands}
-          searchPaths={(query) =>
-            client
-              .listCodeWorkspaceTree(workspaceId, { query })
-              .then((tree) => tree.paths)
-          }
-          onModelChange={setModel}
-          onModeChange={changePermissionMode}
-          onEffortChange={
-            doctorEntry?.caps.reasoning_levels === "unsupported"
-              ? undefined
-              : changeReasoningEffort
-          }
-          onFastModeChange={changeFastMode}
-          contextUsage={
-            lastUsage
-              ? {
-                  // The engine's own reading of the prompt still resident
-                  // after its last model call. The four counts below are the
-                  // turn's spend across every call, which on a long turn runs
-                  // to several times this.
-                  contextTokens: lastUsage.context_tokens,
-                  spend: {
-                    input: lastUsage.input_tokens,
-                    output: lastUsage.output_tokens,
-                    cacheRead: lastUsage.cache_read_input_tokens,
-                    cacheWrite: lastUsage.cache_creation_input_tokens,
-                  },
-                  contextWindow: catalogModels.find(
-                    (entry) => entry.id === model || entry.key === model,
-                  )?.context_window,
-                  modelName:
-                    modelOptions.find((option) => option.id === model)?.label ??
-                    model ??
-                    undefined,
-                }
-              : null
-          }
-          onSend={send}
-          onSteer={steeringSupported ? steer : undefined}
-          onInterrupt={interrupt}
-        />
+        <>
+          <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)]">
+            <QueueTray
+              queue={sessionQueue}
+              active={busy || lifecycle === "running"}
+              onStop={interrupt}
+            />
+          </div>
+          <CodeComposer
+            running={busy || lifecycle === "running"}
+            disabled={disabled}
+            permissionMode={settings.permissionMode}
+            availableModes={availableModes}
+            reasoningEffort={settings.reasoningEffort}
+            fastMode={settings.fastMode}
+            engineEfforts={engineEfforts}
+            harness={session.harness_kind}
+            model={model ?? undefined}
+            modelOptions={modelOptions}
+            modelLoading={
+              session.harness_kind === "opencode" && cachedModels === undefined
+            }
+            promptScope={workspaceId}
+            sessionId={session.id}
+            history={composerHistory}
+            slashCommands={doctorEntry?.commands}
+            searchPaths={(query) =>
+              client
+                .listCodeWorkspaceTree(workspaceId, { query })
+                .then((tree) => tree.paths)
+            }
+            onModelChange={setModel}
+            onModeChange={changePermissionMode}
+            onEffortChange={
+              doctorEntry?.caps.reasoning_levels === "unsupported"
+                ? undefined
+                : changeReasoningEffort
+            }
+            onFastModeChange={changeFastMode}
+            contextUsage={
+              lastUsage
+                ? {
+                    // The engine's own reading of the prompt still resident
+                    // after its last model call. The four counts below are the
+                    // turn's spend across every call, which on a long turn runs
+                    // to several times this.
+                    contextTokens: lastUsage.context_tokens,
+                    spend: {
+                      input: lastUsage.input_tokens,
+                      output: lastUsage.output_tokens,
+                      cacheRead: lastUsage.cache_read_input_tokens,
+                      cacheWrite: lastUsage.cache_creation_input_tokens,
+                    },
+                    contextWindow: catalogModels.find(
+                      (entry) => entry.id === model || entry.key === model,
+                    )?.context_window,
+                    modelName:
+                      modelOptions.find((option) => option.id === model)
+                        ?.label ??
+                      model ??
+                      undefined,
+                  }
+                : null
+            }
+            onSend={send}
+            onSteer={steeringSupported ? steer : undefined}
+            onInterrupt={interrupt}
+          />
+        </>
       )}
     </div>
   );

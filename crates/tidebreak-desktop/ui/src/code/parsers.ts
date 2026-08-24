@@ -2265,20 +2265,29 @@ export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireQueuedCodeTurn>(value, [
+      "id",
       "session_id",
       "message",
       "position",
+      "created_at",
+      "updated_at",
     ]) ||
+    !nonEmpty(value.id) ||
     !nonEmpty(value.session_id) ||
     typeof value.message !== "string" ||
-    !isFiniteNumber(value.position)
+    !isFiniteNumber(value.position) ||
+    !nonEmpty(value.created_at) ||
+    !nonEmpty(value.updated_at)
   ) {
     return null;
   }
   return {
+    id: value.id,
     session_id: value.session_id,
     message: value.message,
     position: value.position,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
   };
 }
 
