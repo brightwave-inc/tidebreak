@@ -165,7 +165,7 @@ describe("CodeTranscript", () => {
     expect(verb.parentElement?.className).toContain("flex");
   });
 
-  it("announces the turn's lifecycle and nothing that streams", () => {
+  it("announces the turn's lifecycle and nothing that streams", async () => {
     // A tool line changes on every streamed byte. Wrapping it in a live region
     // reads the whole session out, over and over, and buries the one thing a
     // supervisor has to hear. The turn's start and end go through one region;
@@ -192,6 +192,9 @@ describe("CodeTranscript", () => {
     expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent("");
 
     rerender(<CodeTranscript items={running} busy />);
+    const tool = screen.getByRole("button", { name: /Command run.*running/ });
+    expect(screen.queryByLabelText("Output")).toBeNull();
+    await userEvent.click(tool);
     expect(
       screen
         .getByLabelText("Output")
@@ -327,6 +330,38 @@ describe("CodeTranscript", () => {
     expect(line).not.toHaveTextContent(`'"'`);
   });
 
+  it("keeps a folded multi-line command on one visible line", () => {
+    const command = "python3 - <<'PY'\nprint('ok')\nPY";
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "tool",
+            id: "tool-heredoc",
+            turnId: "t1",
+            callId: "c6",
+            parentCallId: null,
+            name: "commandExecution",
+            detail: { kind: "command", cmd: command, cwd: "/tmp" },
+            status: "succeeded",
+            preview: "ok",
+            startedAt: null,
+            durationMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const line = screen.getByRole("button", {
+      name: /Command run.*succeeded/,
+    });
+    const subject = line.querySelector("[title]");
+    expect(subject).toHaveAttribute("title", command);
+    expect(subject).toHaveTextContent("python3 - <<'PY' print('ok') PY");
+    expect(subject?.textContent).not.toMatch(/[\r\n]/);
+    expect(line).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("holds the transcript's shape until the session hydrates", () => {
     const { container, rerender } = render(
       <CodeTranscript items={items} hydrated={false} />,
@@ -340,7 +375,7 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("Looking at the tree.")).toBeInTheDocument();
   });
 
-  it("expands a failed tool, clamps long output, and stops the transcript following", async () => {
+  it("keeps a failed tool folded until the reader opens it", async () => {
     const preview = Array.from(
       { length: 13 },
       (_, index) => `line ${index + 1}`,
@@ -367,10 +402,16 @@ describe("CodeTranscript", () => {
       />,
     );
 
+    const line = screen.getByRole("button", { name: /Command run.*failed/ });
+    expect(line).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Output")).toBeNull();
+
+    await userEvent.click(line);
     const body = screen.getByLabelText("Output");
     expect(body.textContent).toContain("line 12");
     expect(body.textContent).not.toContain("line 13");
     expect(screen.getByRole("button", { name: "Copy output" })).toBeTruthy();
+    expect(reveals).toHaveLength(1);
 
     await userEvent.click(
       screen.getByRole("button", { name: "· · · 1 more line" }),
@@ -378,18 +419,17 @@ describe("CodeTranscript", () => {
     expect(screen.getByLabelText("Output").textContent).toContain("line 13");
     // Growing the column under the reader's cursor must not drag them to the
     // tail, so every reveal reaches the host that owns the scroll.
-    expect(reveals).toHaveLength(1);
+    expect(reveals).toHaveLength(2);
 
     // Collapsing the line leaves the reader on the line they collapsed: the
     // toggle is the row itself, so there is nothing for focus to fall out of.
-    const line = screen.getByRole("button", { name: /Command run.*failed/ });
     expect(line).toHaveAttribute("aria-expanded", "true");
     await userEvent.click(line);
     expect(line).toHaveAttribute("aria-expanded", "false");
     expect(line).toHaveFocus();
   });
 
-  it("keeps a successful call closed and names a denial with the constant verb", () => {
+  it("keeps a denial closed and names it with the constant verb", async () => {
     render(
       <CodeTranscript
         items={[
@@ -410,12 +450,16 @@ describe("CodeTranscript", () => {
       />,
     );
     expect(screen.getByText("Command denied")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Output")).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: /Command denied.*denied/ }),
+    );
     expect(screen.getByLabelText("Output")).toHaveTextContent(
       "denied by policy",
     );
   });
 
-  it("streams the tail of a running command without showing the head", () => {
+  it("keeps a running command folded until the reader opens its tail", async () => {
     const preview = Array.from(
       { length: 16 },
       (_, index) => `line ${index + 1}`,
@@ -440,6 +484,11 @@ describe("CodeTranscript", () => {
       />,
     );
     expect(screen.getByText("Command run")).toBeInTheDocument();
+    const line = screen.getByRole("button", { name: /Command run.*running/ });
+    expect(line).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Output")).toBeNull();
+
+    await userEvent.click(line);
     const body = screen.getByLabelText("Output");
     expect(body.textContent?.split("\n")[0]).toBe("line 5");
     expect(body.textContent).toContain("line 16");
@@ -552,7 +601,7 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("2.2s")).toBeInTheDocument();
   });
 
-  it("opens a run that holds a failure", () => {
+  it("keeps a run with a failure folded until the reader opens it", async () => {
     const middle = run("succeeded")[1]!;
     const items: CodeToolItem[] = [
       run("succeeded")[0]!,
@@ -561,11 +610,16 @@ describe("CodeTranscript", () => {
     ];
     render(<CodeTranscript items={items} />);
 
-    // A failure inside a closed group is a failure the reader has to go
-    // looking for.
-    expect(
-      screen.getByRole("button", { name: /and 2 more.*failed/ }),
-    ).toHaveAttribute("aria-expanded", "true");
+    const group = screen.getByRole("button", { name: /and 2 more.*failed/ });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("no such file")).toBeNull();
+
+    await userEvent.click(group);
+    const failed = screen.getByRole("button", {
+      name: /File read.*docs\/code-mode\.md.*failed/,
+    });
+    expect(failed).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(failed);
     expect(screen.getByText("no such file")).toBeInTheDocument();
   });
 

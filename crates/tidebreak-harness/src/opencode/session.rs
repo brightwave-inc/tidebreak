@@ -301,30 +301,34 @@ pub(crate) fn session_create_body(mode: PermissionMode, model: Option<&str>) -> 
 /// `POST /session` model object. The captured 1.18.18 schema wants
 /// `{ providerID, id }`; `{ modelID }` and `{ providerID, modelID }` are 400.
 fn session_model_field(model: &str) -> Option<Value> {
+    let (provider, id) = opencode_model_parts(model)?;
+    Some(json!({ "providerID": provider, "id": id }))
+}
+
+/// `POST /session/{id}/prompt_async` model object. The prompt schema names the
+/// same model id `modelID`, unlike the session-create schema's `id`.
+fn prompt_model_field(model: &str) -> Option<Value> {
+    let (provider, id) = opencode_model_parts(model)?;
+    Some(json!({ "providerID": provider, "modelID": id }))
+}
+
+fn opencode_model_parts(model: &str) -> Option<(&str, &str)> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if let Some((provider, id)) = split_provider_model(trimmed) {
-        return Some(json!({ "providerID": provider, "id": id }));
+    // Tidebreak's Fireworks catalog stores the upstream account path without
+    // OpenCode's provider prefix. OpenCode lists the same id under
+    // `fireworks-ai`, so keep the full path and restore that prefix.
+    if trimmed.starts_with("accounts/fireworks/") {
+        return Some(("fireworks-ai", trimmed));
     }
-    let id = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let provider = infer_opencode_provider(id)?;
-    Some(json!({ "providerID": provider, "id": id }))
-}
-
-fn split_provider_model(model: &str) -> Option<(&str, &str)> {
-    let (provider, id) = model.split_once('/')?;
-    if provider.is_empty() || id.is_empty() {
-        return None;
+    if let Some((provider, id)) = trimmed.split_once('/') {
+        if !provider.is_empty() && !id.is_empty() {
+            return Some((provider, id));
+        }
     }
-    // A gateway routing handle is not an OpenCode provider.
-    if provider.eq_ignore_ascii_case("model-gateway")
-        || provider.eq_ignore_ascii_case("model_gateway")
-    {
-        return None;
-    }
-    Some((provider, id))
+    Some((infer_opencode_provider(trimmed)?, trimmed))
 }
 
 fn infer_opencode_provider(id: &str) -> Option<&'static str> {
@@ -348,7 +352,25 @@ fn infer_opencode_provider(id: &str) -> Option<&'static str> {
     if leaf.contains("pickle") {
         return Some("opencode");
     }
+    if [
+        "deepseek", "glm", "kimi", "minimax", "qwen", "nemotron", "inkling", "muse",
+    ]
+    .iter()
+    .any(|family| leaf.contains(family))
+    {
+        return Some("model-gateway");
+    }
     None
+}
+
+fn turn_prompt_body(text: &str, model: Option<&str>) -> Value {
+    let mut body = json!({
+        "parts": [{ "type": "text", "text": text }]
+    });
+    if let Some(model) = model.and_then(prompt_model_field) {
+        body["model"] = model;
+    }
+    body
 }
 
 fn openai_o_series(id: &str) -> bool {
@@ -684,9 +706,7 @@ impl HarnessSession for OpencodeSession {
         };
         let path = format!("/session/{session_id}/prompt_async");
         let url = format!("{}{path}", self.base_url());
-        let body = json!({
-            "parts": [{ "type": "text", "text": input.text }]
-        });
+        let body = turn_prompt_body(&input.text, input.model.as_deref());
         let query = self.directory_query();
         let (status, parsed) = self
             .http("POST", &path, &url, Some(body), Some(query.as_slice()))
@@ -1015,11 +1035,34 @@ mod tests {
 
         let gateway =
             session_create_body(PermissionMode::Plan, Some("model-gateway/claude-opus-5"));
-        assert_eq!(gateway["model"]["providerID"], "anthropic");
+        assert_eq!(gateway["model"]["providerID"], "model-gateway");
         assert_eq!(gateway["model"]["id"], "claude-opus-5");
+
+        let fireworks = session_create_body(
+            PermissionMode::Plan,
+            Some("accounts/fireworks/models/deepseek-v4-pro"),
+        );
+        assert_eq!(fireworks["model"]["providerID"], "fireworks-ai");
+        assert_eq!(
+            fireworks["model"]["id"],
+            "accounts/fireworks/models/deepseek-v4-pro"
+        );
+
+        let deepseek = session_create_body(PermissionMode::Plan, Some("deepseek-v4-pro"));
+        assert_eq!(deepseek["model"]["providerID"], "model-gateway");
+        assert_eq!(deepseek["model"]["id"], "deepseek-v4-pro");
 
         let unknown = session_create_body(PermissionMode::Plan, Some("mystery-weights"));
         assert!(unknown.get("model").is_none());
+    }
+
+    #[test]
+    fn turn_model_uses_the_prompt_schema() {
+        let body = turn_prompt_body("inspect the failure", Some("model-gateway/deepseek-v4-pro"));
+        assert_eq!(body["model"]["providerID"], "model-gateway");
+        assert_eq!(body["model"]["modelID"], "deepseek-v4-pro");
+        assert!(body["model"].get("id").is_none());
+        assert_eq!(body["parts"][0]["text"], "inspect the failure");
     }
 
     #[test]

@@ -43,6 +43,7 @@ import {
   defaultCreatePermissionMode,
   gatewayCodeModels,
   harnessUnusableReason,
+  preferredCodeModels,
   PERMISSION_MODE_LABELS,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
@@ -128,7 +129,9 @@ export function NewWorkspaceDialog({
     null,
   );
   const [creating, setCreating] = useState(false);
-  const [model, setModel] = useState<string | undefined>();
+  const [modelsByHarness, setModelsByHarness] = useState<
+    Partial<Record<HarnessKind, string>>
+  >({});
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const repoTrigger = useRef<HTMLButtonElement>(null);
@@ -147,6 +150,7 @@ export function NewWorkspaceDialog({
       : undefined) ??
     recentHarness(readyHarnesses, sessions, lastCreate?.harness) ??
     "claude_code";
+  const model = modelsByHarness[harness];
 
   useEffect(() => {
     if (!open) return;
@@ -161,7 +165,7 @@ export function NewWorkspaceDialog({
     );
     setPickedHarness(null);
     setPermissionMode(null);
-    setModel(undefined);
+    setModelsByHarness({ ...lastCreate?.modelsByHarness });
     setModelOptions([]);
     setModelLoading(false);
     // Reset against the dialog opening, not against catalog refreshes
@@ -228,38 +232,53 @@ export function NewWorkspaceDialog({
     if (!open || !harness) return;
     // The reader's last model wins where it is still on offer; otherwise the
     // catalog's default, then the first row.
-    const pick = (listed: CodeModelOption[]) => (current?: string) => {
-      for (const candidate of [current, lastCreate?.model]) {
-        if (candidate && listed.some((option) => option.id === candidate)) {
-          return candidate;
-        }
-      }
-      return listed.find((option) => option.default)?.id ?? listed[0]?.id;
+    const apply = (listed: CodeModelOption[]) => {
+      setModelOptions(listed);
+      setModelsByHarness((current) => {
+        const remembered = current[harness];
+        const picked =
+          remembered && listed.some((option) => option.id === remembered)
+            ? remembered
+            : (listed.find((option) => option.default)?.id ?? listed[0]?.id);
+        if (picked === remembered) return current;
+        const next = { ...current };
+        if (picked) next[harness] = picked;
+        else delete next[harness];
+        return next;
+      });
     };
     const gateway = gatewayCodeModels(models, harness, defaultModelKey);
-    if (gateway.length > 0) {
-      setModelOptions(gateway);
-      setModel(pick(gateway));
+    const native = useCodeCatalogStore.getState().modelsByHarness[harness];
+    const needsNative = harness === "opencode" || gateway.length === 0;
+    if (!needsNative) {
+      apply(gateway);
+      setModelLoading(false);
+      return;
+    }
+    if (native !== undefined) {
+      apply(preferredCodeModels(harness, native, gateway));
       setModelLoading(false);
       return;
     }
     setModelOptions([]);
-    setModel(undefined);
     setModelLoading(true);
     let cancelled = false;
     void ensureHarnessModels(client, harness).then((listed) => {
       if (cancelled) return;
-      setModelOptions(listed);
-      setModel(pick(listed));
+      apply(preferredCodeModels(harness, listed, gateway));
       setModelLoading(false);
     });
     return () => {
       cancelled = true;
     };
-    // `lastCreate` is a seed, not a subscription: re-running on it would
-    // undo a deliberate pick the moment another create records one.
+    // `lastCreate` seeds `modelsByHarness` when the dialog opens. Subscribing
+    // this fetch to later writes would undo a deliberate pick after create.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, defaultModelKey, ensureHarnessModels, harness, models, open]);
+
+  function selectModel(next: string) {
+    setModelsByHarness((current) => ({ ...current, [harness]: next }));
+  }
 
   async function create() {
     if (!canCreate) return;
@@ -285,10 +304,11 @@ export function NewWorkspaceDialog({
       }
       try {
         const gateway = gatewayCodeModels(models, harness, defaultModelKey);
-        const listed =
-          gateway.length > 0
-            ? gateway
-            : await ensureHarnessModels(client, harness);
+        const native =
+          harness === "opencode" || gateway.length === 0
+            ? await ensureHarnessModels(client, harness)
+            : [];
+        const listed = preferredCodeModels(harness, native, gateway);
         const posted =
           model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
         const session = await client.createCodeSession(workspace.id, {
@@ -297,7 +317,12 @@ export function NewWorkspaceDialog({
           model: posted,
         });
         rememberSession(session);
-        rememberCreate({ repoId, harness, model: posted });
+        rememberCreate({
+          repoId,
+          harness,
+          model: posted,
+          modelsByHarness,
+        });
       } catch (error) {
         toast.error(
           `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
@@ -392,7 +417,6 @@ export function NewWorkspaceDialog({
               value={harness}
               onChange={(next) => {
                 setModelOptions([]);
-                setModel(undefined);
                 setModelLoading(true);
                 setPickedHarness(next);
               }}
@@ -406,7 +430,7 @@ export function NewWorkspaceDialog({
               harness={harness}
               options={modelOptions}
               value={model}
-              onChange={setModel}
+              onChange={selectModel}
               loading={modelLoading}
               disabled={creating}
               variant="field"

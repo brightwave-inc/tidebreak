@@ -10,6 +10,7 @@ import {
   gatewayCodeModels,
   groupCodeModelOptions,
   harnessUnusableReason,
+  preferredCodeModels,
   sessionLifecycleTooltip,
 } from "./labels";
 
@@ -236,6 +237,33 @@ describe("gatewayCodeModels", () => {
     ).toEqual(["gpt-5.6-sol"]);
     // opencode is vendor-neutral: the whole catalog stays.
     expect(gatewayCodeModels(catalog, "opencode")).toHaveLength(4);
+  });
+});
+
+describe("preferredCodeModels", () => {
+  const native = [
+    {
+      id: "model-gateway/deepseek-v4-pro",
+      label: "DeepSeek V4 Pro",
+      source: "opencode",
+    },
+  ];
+  const gateway = [
+    {
+      id: "accounts/fireworks/models/deepseek-v4-pro",
+      label: "DeepSeek V4 Pro",
+      source: "opencode · model-gateway",
+    },
+  ];
+
+  it("uses OpenCode's provider-qualified native ids", () => {
+    expect(preferredCodeModels("opencode", native, gateway)).toEqual(native);
+    expect(preferredCodeModels("opencode", [], gateway)).toEqual(gateway);
+  });
+
+  it("keeps gateway rows for engines that accept their ids directly", () => {
+    expect(preferredCodeModels("codex", native, gateway)).toEqual(gateway);
+    expect(preferredCodeModels("claude_code", native, [])).toEqual(native);
   });
 });
 

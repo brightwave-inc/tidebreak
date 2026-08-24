@@ -19,26 +19,34 @@ export function MiddleTruncate({
   text: string;
   className?: string;
 }) {
+  // A command summary is one row even when the command is a heredoc or a
+  // multi-line script. Keep the original in the tooltip, but collapse line
+  // breaks before splitting the visible text. The tail uses `whitespace-pre`
+  // to keep a split-leading space, so an uncollapsed newline there would turn
+  // a folded row into several lines.
+  const visibleText = text.replace(/[ \t]*[\r\n]+[ \t]*/g, " ");
   // Short strings have no interesting tail to protect, and splitting them into
   // two boxes only costs the browser a wrap opportunity.
-  if (text.length <= SHORT_ENOUGH) {
+  if (visibleText.length <= SHORT_ENOUGH) {
     return (
       <span className={cn("block truncate", className)} title={text}>
-        {text}
+        {visibleText}
       </span>
     );
   }
   const tail = Math.min(
     TAIL_MAX,
-    Math.max(TAIL_MIN, Math.ceil(text.length / 3)),
+    Math.max(TAIL_MIN, Math.ceil(visibleText.length / 3)),
   );
   return (
     <span className={cn("flex min-w-0", className)} title={text}>
-      <span className="truncate">{text.slice(0, -tail)}</span>
+      <span className="truncate">{visibleText.slice(0, -tail)}</span>
       {/* `whitespace-pre` because the split can land on a space, and a flex
           item drops the whitespace it starts with — which reads as a command
           with two of its words run together. */}
-      <span className="shrink-0 whitespace-pre">{text.slice(-tail)}</span>
+      <span className="shrink-0 whitespace-pre">
+        {visibleText.slice(-tail)}
+      </span>
     </span>
   );
 }

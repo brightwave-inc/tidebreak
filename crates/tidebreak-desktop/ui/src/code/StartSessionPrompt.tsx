@@ -10,6 +10,7 @@ import type {
 import type { ComposerWorkspaceFiles } from "@/Composer";
 import { CodeComposer } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { HarnessPicker } from "./HarnessPicker";
 import {
   autoIsUnsupervised,
@@ -17,6 +18,7 @@ import {
   defaultCreatePermissionMode,
   gatewayCodeModels,
   harnessUnusableReason,
+  preferredCodeModels,
   type CodeModelOption,
   ALLOW_ALL_NOTE,
   UNSUPERVISED_AUTO_NOTE,
@@ -65,8 +67,13 @@ export function StartSessionPrompt({
   /** Worktree files the first message names — a fork's transcript. */
   workspaceFiles?: ComposerWorkspaceFiles;
 }) {
-  const [picked, setPicked] = useState<HarnessKind | null>(null);
-  const [model, setModel] = useState<string | undefined>();
+  const lastCreate = useCodeUiStore((state) => state.lastCreate);
+  const [picked, setPicked] = useState<HarnessKind | null>(
+    lastCreate?.harness ?? null,
+  );
+  const [modelsByHarness, setModelsByHarness] = useState<
+    Partial<Record<HarnessKind, string>>
+  >({ ...lastCreate?.modelsByHarness });
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -87,39 +94,57 @@ export function StartSessionPrompt({
         : "plan";
 
   const selectedKind = selected?.kind;
+  const model = selectedKind ? modelsByHarness[selectedKind] : undefined;
 
   useEffect(() => {
     if (!selectedKind) {
       setModelOptions([]);
-      setModel(undefined);
       setModelLoading(false);
       return;
     }
+    const apply = (listed: CodeModelOption[]) => {
+      setModelOptions(listed);
+      setModelsByHarness((current) => {
+        const remembered = current[selectedKind];
+        const picked =
+          remembered && listed.some((option) => option.id === remembered)
+            ? remembered
+            : (listed.find((option) => option.default)?.id ?? listed[0]?.id);
+        if (picked === remembered) return current;
+        const next = { ...current };
+        if (picked) next[selectedKind] = picked;
+        else delete next[selectedKind];
+        return next;
+      });
+    };
     const gateway = gatewayCodeModels(
       catalogModels,
       selectedKind,
       defaultModelKey,
     );
-    if (gateway.length > 0) {
-      setModelOptions(gateway);
-      setModel(gateway.find((option) => option.default)?.id ?? gateway[0]?.id);
+    const native = useCodeCatalogStore.getState().modelsByHarness[selectedKind];
+    const needsNative = selectedKind === "opencode" || gateway.length === 0;
+    if (!needsNative) {
+      apply(gateway);
+      setModelLoading(false);
+      return;
+    }
+    if (native !== undefined) {
+      apply(preferredCodeModels(selectedKind, native, gateway));
       setModelLoading(false);
       return;
     }
     if (!client) {
-      setModelOptions([]);
-      setModel(undefined);
+      apply(gateway);
       setModelLoading(false);
       return;
     }
     setModelOptions([]);
-    setModel(undefined);
     setModelLoading(true);
     let cancelled = false;
     void ensureHarnessModels(client, selectedKind).then((listed) => {
       if (cancelled) return;
-      setModelOptions(listed);
-      setModel(listed.find((option) => option.default)?.id ?? listed[0]?.id);
+      apply(preferredCodeModels(selectedKind, listed, gateway));
       setModelLoading(false);
     });
     return () => {
@@ -155,7 +180,6 @@ export function StartSessionPrompt({
           disabled={starting}
           onChange={(next) => {
             setModelOptions([]);
-            setModel(undefined);
             setModelLoading(true);
             setPicked(next);
           }}
@@ -181,7 +205,13 @@ export function StartSessionPrompt({
           modelLoading={modelLoading}
           promptScope={workspaceId}
           workspaceFiles={workspaceFiles}
-          onModelChange={setModel}
+          onModelChange={(next) => {
+            if (!selectedKind) return;
+            setModelsByHarness((current) => ({
+              ...current,
+              [selectedKind]: next,
+            }));
+          }}
           onModeChange={onSelectMode}
           onSend={async (message) => {
             if (!selected) return;

@@ -57,9 +57,8 @@ const SETTLED: CodeToolItem[] = [
  * A run of tool calls behind one line, and the reason the code transcript no
  * longer reads as a log. The states worth looking at are the ones that decide
  * whether the reader has to open it: a live run naming the call still going, a
- * settled one totalling the phase, and a run holding a failure, which opens
- * itself because a failure inside a closed group is one the reader has to go
- * looking for.
+ * settled one totalling the phase, and a run holding a failure. Every state
+ * stays folded until the reader asks for its rows.
  */
 const meta = {
   title: "Code/Activity group",
@@ -105,7 +104,7 @@ export const Running: Story = {
   },
 };
 
-/** A failure anywhere in the run opens the group and its own row with it. */
+/** A failure marks the folded group without opening its rows. */
 export const HoldsAFailure: Story = {
   args: {
     tools: [

@@ -14,6 +14,12 @@ const REVIEW_SIDEBAR_OPEN_KEY = "tidebreak.code-review-sidebar-open";
 const LAST_CREATE_KEY = "tidebreak.code-last-create";
 const WORKSPACE_SORT_KEY = "tidebreak.code-workspace-sort";
 const RAIL_PREFS_KEY = "tidebreak.code-rail-prefs";
+const HARNESS_KINDS: readonly HarnessKind[] = [
+  "claude_code",
+  "codex",
+  "opencode",
+  "grok",
+];
 
 /**
  * How the reader shaped the workspace rail: order, card density, which meta
@@ -39,7 +45,16 @@ export const DEFAULT_RAIL_PREFS: CodeRailPrefs = {
 export type CodeCreateDefaults = {
   repoId?: string;
   harness?: HarnessKind;
+  modelsByHarness: Partial<Record<HarnessKind, string>>;
+};
+
+/** What one successful create adds to the remembered defaults. */
+export type CodeCreateSelection = {
+  repoId?: string;
+  harness: HarnessKind;
   model?: string;
+  /** Picks made before the final harness, kept for the next switch back. */
+  modelsByHarness?: Partial<Record<HarnessKind, string>>;
 };
 
 /** Inspector filter for one turn's files and diff. `label` is the ordinal, never the id. */
@@ -63,10 +78,32 @@ function readStoredCreateDefaults(): CodeCreateDefaults | null {
     const record = parsed as Record<string, unknown>;
     const text = (value: unknown) =>
       typeof value === "string" && value.length > 0 ? value : undefined;
+    const harness = text(record.harness);
+    const rememberedHarness = HARNESS_KINDS.includes(harness as HarnessKind)
+      ? (harness as HarnessKind)
+      : undefined;
+    const modelsByHarness: Partial<Record<HarnessKind, string>> = {};
+    const storedModels = record.modelsByHarness;
+    if (storedModels && typeof storedModels === "object") {
+      const modelRecord = storedModels as Record<string, unknown>;
+      for (const kind of HARNESS_KINDS) {
+        const model = text(modelRecord[kind]);
+        if (model) modelsByHarness[kind] = model;
+      }
+    }
+    // Migrate the earlier one-model shape into the harness it belonged to.
+    const legacyModel = text(record.model);
+    if (
+      rememberedHarness &&
+      legacyModel &&
+      !modelsByHarness[rememberedHarness]
+    ) {
+      modelsByHarness[rememberedHarness] = legacyModel;
+    }
     return {
       repoId: text(record.repoId),
-      harness: text(record.harness) as HarnessKind | undefined,
-      model: text(record.model),
+      harness: rememberedHarness,
+      modelsByHarness,
     };
   } catch {
     return null;
@@ -203,7 +240,7 @@ export type CodeUiStore = {
   setInspectorScope: (scope: InspectorScope | null) => void;
   setRailPrefs: (patch: Partial<CodeRailPrefs>) => void;
   /** Record a successful create so the next dialog opens on the same choices. */
-  rememberCreate: (defaults: CodeCreateDefaults) => void;
+  rememberCreate: (selection: CodeCreateSelection) => void;
   requestTerminal: () => void;
   takeTerminal: () => boolean;
   /**
@@ -367,7 +404,19 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
       storeRailPrefs(railPrefs);
       return { railPrefs };
     }),
-  rememberCreate: (defaults) => {
+  rememberCreate: (selection) => {
+    const modelsByHarness = {
+      ...get().lastCreate?.modelsByHarness,
+      ...selection.modelsByHarness,
+    };
+    if (selection.model) {
+      modelsByHarness[selection.harness] = selection.model;
+    }
+    const defaults: CodeCreateDefaults = {
+      repoId: selection.repoId,
+      harness: selection.harness,
+      modelsByHarness,
+    };
     storeCreateDefaults(defaults);
     set({ lastCreate: defaults });
   },

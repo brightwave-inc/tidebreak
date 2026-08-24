@@ -6,7 +6,7 @@ import { CodeToolCard } from "@/code/CodeTranscript";
  * The code transcript's boxless tool line: verb, mono subject, and trailing
  * meta on one row. The states that matter are the ones that stress that row —
  * a worktree-prefixed command long enough to force middle truncation, a
- * running call streaming its tail, and the failed line that opens itself.
+ * running call with a live tail, and a failed line with output to inspect.
  */
 const meta = {
   title: "Code/Tool line",
@@ -53,7 +53,7 @@ export const LongWorktreeCommand: Story = {
   },
 };
 
-/** A running call streams the last lines of output without growing the row. */
+/** A running call stays folded. Open it to inspect the latest output. */
 export const Running: Story = {
   args: {
     status: "running",
@@ -63,7 +63,7 @@ export const Running: Story = {
   },
 };
 
-/** Failure opens itself: the output and exit code are the point. */
+/** Failure stays folded. Open it to inspect the output and exit code. */
 export const Failed: Story = {
   args: {
     status: "failed",

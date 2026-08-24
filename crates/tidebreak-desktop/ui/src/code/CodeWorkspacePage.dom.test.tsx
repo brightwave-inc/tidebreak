@@ -619,7 +619,7 @@ describe("CodeWorkspacePage", () => {
     expect(within(utilities).queryByText("Running")).not.toBeInTheDocument();
   });
 
-  it("shows the Codex session model even before its native catalog loads", async () => {
+  it("keeps the Codex session model selectable before its catalog loads", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([
       {
@@ -637,10 +637,73 @@ describe("CodeWorkspacePage", () => {
     const model = await screen.findByRole("button", {
       name: "Model: GPT 5.6 Luna",
     });
-    expect(model).toBeDisabled();
-    expect(model).toHaveAttribute(
-      "title",
-      "Model: GPT 5.6 Luna (set when this session started)",
+    expect(model).toBeEnabled();
+    expect(model).toHaveAttribute("title", "Model: GPT 5.6 Luna");
+  });
+
+  it.each([
+    {
+      harness: "codex" as const,
+      current: "gpt-5.6-luna",
+      currentLabel: "GPT 5.6 Luna",
+      next: "gpt-5.6-sol",
+      nextLabel: "GPT 5.6 Sol",
+    },
+    {
+      harness: "opencode" as const,
+      current: "model-gateway/kimi-k3",
+      currentLabel: "Kimi K3",
+      next: "model-gateway/deepseek-v4-pro",
+      nextLabel: "DeepSeek V4 Pro",
+    },
+  ])("switches models on $harness for the next turn", async (choice) => {
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([
+      {
+        ...SESSION,
+        harness_kind: choice.harness,
+        model: choice.current,
+      },
+    ]);
+    client.listCodeHarnessModels.mockResolvedValue({
+      kind: choice.harness,
+      models: [
+        {
+          id: choice.current,
+          label: choice.currentLabel,
+          default: true,
+          reasoning_efforts: [],
+        },
+        {
+          id: choice.next,
+          label: choice.nextLabel,
+          default: false,
+          reasoning_efforts: [],
+        },
+      ],
+      reasoning_efforts: [],
+    } as never);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: `Model: ${choice.currentLabel}`,
+      }),
+    );
+    await user.click(
+      screen.getByRole("menuitem", { name: new RegExp(choice.nextLabel) }),
+    );
+    await user.type(screen.getByRole("textbox", { name: "Message" }), "go");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        "sess-1",
+        "go",
+        choice.next,
+        undefined,
+      ),
     );
   });
 

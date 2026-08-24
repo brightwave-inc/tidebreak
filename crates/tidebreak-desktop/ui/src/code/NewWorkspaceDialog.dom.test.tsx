@@ -151,6 +151,28 @@ function deferred<T>() {
 }
 
 describe("NewWorkspaceDialog", () => {
+  it("keeps remembered models keyed by harness", () => {
+    useCodeUiStore.getState().rememberCreate({
+      repoId: "repo-new",
+      harness: "opencode",
+      model: "model-gateway/deepseek-v4-pro",
+    });
+    useCodeUiStore.getState().rememberCreate({
+      repoId: "repo-new",
+      harness: "claude_code",
+      model: "claude-opus-5",
+    });
+
+    expect(useCodeUiStore.getState().lastCreate).toEqual({
+      repoId: "repo-new",
+      harness: "claude_code",
+      modelsByHarness: {
+        opencode: "model-gateway/deepseek-v4-pro",
+        claude_code: "claude-opus-5",
+      },
+    });
+  });
+
   it("opens on the last repo, harness, and model, and creates on Cmd+Enter", async () => {
     const repos = [repo("repo-old", "legacy"), repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
@@ -240,7 +262,7 @@ describe("NewWorkspaceDialog", () => {
       expect(useCodeUiStore.getState().lastCreate).toEqual({
         repoId: "repo-new",
         harness: "codex",
-        model: "gpt-5.6-sol",
+        modelsByHarness: { codex: "gpt-5.6-sol" },
       }),
     );
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
@@ -424,6 +446,86 @@ describe("NewWorkspaceDialog", () => {
     });
     expect(
       await screen.findByRole("button", { name: "Model: GPT 5.6 Luna" }),
+    ).toBeEnabled();
+  });
+
+  it("remembers a separate model for each harness", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code"), harness("opencode")],
+        notices: [],
+      } as never,
+    });
+    const listCodeHarnessModels = vi.fn(async (kind: HarnessKind) => ({
+      kind,
+      models:
+        kind === "opencode"
+          ? [
+              {
+                id: "model-gateway/kimi-k3",
+                label: "Kimi K3",
+                default: true,
+                reasoning_efforts: [],
+                fast_mode: false,
+              },
+              {
+                id: "model-gateway/deepseek-v4-pro",
+                label: "DeepSeek V4 Pro",
+                default: false,
+                reasoning_efforts: [],
+                fast_mode: false,
+              },
+            ]
+          : [
+              {
+                id: "claude-sonnet-5",
+                label: "Claude Sonnet 5",
+                default: true,
+                reasoning_efforts: [],
+                fast_mode: false,
+              },
+              {
+                id: "claude-opus-5",
+                label: "Claude Opus 5",
+                default: false,
+                reasoning_efforts: [],
+                fast_mode: false,
+              },
+            ],
+      reasoning_efforts: [],
+    }));
+    await renderWithRouter(
+      <AppContextProvider value={app({ listCodeHarnessModels })}>
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Model: Claude Sonnet 5" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /Claude Opus 5/ }));
+
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /opencode/ }));
+    await user.click(
+      await screen.findByRole("button", { name: "Model: Kimi K3" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /DeepSeek V4 Pro/ }));
+
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /Claude Code/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeEnabled();
+
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /opencode/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: DeepSeek V4 Pro" }),
     ).toBeEnabled();
   });
 
