@@ -190,7 +190,8 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
   return (
     <RouteFrame sidebar={<CodeSidebar />}>
       <div className="content-container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-        <CodeWorkspaceBody workspaceId={workspaceId} />
+        {/* Reset workspace-scoped state without remounting the shared rail. */}
+        <CodeWorkspaceBody key={workspaceId} workspaceId={workspaceId} />
       </div>
     </RouteFrame>
   );

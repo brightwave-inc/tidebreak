@@ -269,6 +269,15 @@ vi.mock("./ChatView", async () => {
   };
 });
 
+vi.mock("./code/CodeWorkspacePage", () => ({
+  CodeWorkspacePage: ({ workspaceId }: { workspaceId: string }) => (
+    <>
+      <aside data-testid="code-workspace-sidebar">Workspaces</aside>
+      <main data-testid="code-workspace-body">{workspaceId}</main>
+    </>
+  ),
+}));
+
 vi.mock("./outputs/OutputsView", () => ({
   OutputsView: () => <div data-testid="outputs">outputs</div>,
 }));
@@ -785,6 +794,23 @@ describe("app shell", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/c/chat-2"),
     );
+  });
+
+  it("keeps the code sidebar mounted when switching workspaces", async () => {
+    const { router } = await mountApp({ at: "/code/w/ws-1" });
+    const sidebar = await screen.findByTestId("code-workspace-sidebar");
+
+    await router.navigate({
+      to: "/code/w/$workspaceId",
+      params: { workspaceId: "ws-2" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("code-workspace-body")).toHaveTextContent(
+        "ws-2",
+      ),
+    );
+    expect(screen.getByTestId("code-workspace-sidebar")).toBe(sidebar);
   });
 
   it("remembers the collapsed rail across a restart", async () => {
