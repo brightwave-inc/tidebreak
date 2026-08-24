@@ -533,6 +533,17 @@ mod tests {
             })
             .expect("resume fixture must report a thread id");
         assert!(!started.is_empty());
+        assert_eq!(
+            completed_usage(&events),
+            tidebreak_core::CodeUsage {
+                input_tokens: 1_272,
+                output_tokens: 6,
+                cache_read_input_tokens: 14_080,
+                cache_creation_input_tokens: 0,
+                context_tokens: 15_352,
+            },
+            "the resumed turn must not inherit the first turn's spend"
+        );
     }
 
     #[test]

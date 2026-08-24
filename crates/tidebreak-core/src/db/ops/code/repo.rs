@@ -81,9 +81,9 @@ pub async fn list_repos(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeRepo
 
 /// Every registered repository on the machine, most recently created first.
 ///
-/// A system path, not a request path: the boot-time checkpoint-ref sweep
-/// walks every repo regardless of who owns it. Nothing reachable from a
-/// route may call it.
+/// A system path, not a request path: background reconciliation reads every
+/// repository regardless of who owns it. Nothing reachable from a route may
+/// call it.
 pub async fn list_repos_all_owners(store: &DbStore) -> Result<Vec<CodeRepo>> {
     entities::code_repo::Entity::find()
         .order_by_desc(entities::code_repo::Column::CreatedAt)

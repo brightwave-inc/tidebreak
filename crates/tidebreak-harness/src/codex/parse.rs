@@ -28,6 +28,9 @@ pub struct CodexStreamParser {
     version: Option<String>,
     started_tools: HashSet<String>,
     emitted_session: bool,
+    /// Thread-wide counters at the start of the active turn.
+    turn_usage_baseline: CodeUsage,
+    /// Latest thread-wide counters plus the final call's context occupancy.
     last_usage: CodeUsage,
     last_turn_id: Option<String>,
     outbound_methods: HashMap<String, String>,
@@ -202,7 +205,10 @@ impl CodexStreamParser {
             "item/started" => self.parse_item_started(&params),
             "item/completed" => self.parse_item_completed(&params),
             "item/commandExecution/requestApproval" => self.parse_approval_request(value, &params),
-            "turn/started" => vec![HarnessEvent::TurnStarted],
+            "turn/started" => {
+                self.turn_usage_baseline = self.last_usage.clone();
+                vec![HarnessEvent::TurnStarted]
+            }
             "turn/completed" => self.parse_turn_completed(&params),
             "warning" | "error" => {
                 let message = params
@@ -226,15 +232,29 @@ impl CodexStreamParser {
             "account/rateLimits/updated"
             | "hook/completed"
             | "hook/started"
+            | "item/commandExecution/outputDelta"
+            | "item/fileChange/outputDelta"
+            | "item/fileChange/patchUpdated"
+            | "item/mcpToolCall/progress"
+            | "item/plan/delta"
+            | "item/reasoning/summaryPartAdded"
+            | "item/reasoning/summaryTextDelta"
+            | "item/reasoning/textDelta"
             | "mcpServer/startupStatus/updated"
             | "remoteControl/status/changed"
             | "serverRequest/resolved"
+            | "thread/compacted"
+            | "thread/goal/updated"
+            | "thread/queue/changed"
+            | "thread/settings/updated"
             | "thread/started"
             | "thread/status/changed"
-            | "thread/goal/cleared" => {
-                // Known app-server state notifications that do not change the
-                // normalized transcript. Treating them as unknown made every
-                // healthy turn look like protocol drift.
+            | "thread/goal/cleared"
+            | "turn/diff/updated"
+            | "turn/plan/updated" => {
+                // Known app-server state and streaming notifications that do
+                // not change the normalized transcript. Treating them as
+                // unknown makes long, healthy turns look like protocol drift.
                 Vec::new()
             }
             other => {
@@ -313,7 +333,7 @@ impl CodexStreamParser {
             .unwrap_or("");
         match status {
             "completed" => vec![HarnessEvent::TurnCompleted {
-                usage: self.last_usage.clone(),
+                usage: turn_usage_since(&self.last_usage, &self.turn_usage_baseline),
             }],
             "interrupted" => vec![HarnessEvent::TurnInterrupted],
             "failed" => {
@@ -346,7 +366,7 @@ impl CodexStreamParser {
                         ),
                     },
                     HarnessEvent::TurnCompleted {
-                        usage: self.last_usage.clone(),
+                        usage: turn_usage_since(&self.last_usage, &self.turn_usage_baseline),
                     },
                 ]
             }
@@ -516,16 +536,15 @@ fn command_detail(item: &Value) -> ToolDetail {
     }
 }
 
-/// Normalize `thread/tokenUsage` into the disjoint per-turn split
-/// [`CodeUsage`] documents.
+/// Normalize `thread/tokenUsage` into disjoint cumulative counters.
 ///
 /// Two corrections over reading the payload verbatim.
 ///
-/// The engine reports `total` (the turn so far) beside `last` (the most
-/// recent model call). A turn that makes several calls has genuinely
+/// The engine reports `total` (the thread so far) beside `last` (the most
+/// recent model call). A thread that makes several calls has genuinely
 /// different values in the two — `total.totalTokens 28912` against
-/// `last.totalTokens 14471` in `approval-approve.ndjson` — and the turn's
-/// usage is the total.
+/// `last.totalTokens 14471` in `approval-approve.ndjson`. The parser snapshots
+/// these counters at `turn/started` and subtracts them at completion.
 ///
 /// `inputTokens` is the whole prompt: `totalTokens == inputTokens +
 /// outputTokens` holds in every captured payload, and `cachedInputTokens` is
@@ -549,6 +568,35 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
         cache_read_input_tokens,
         cache_creation_input_tokens,
         context_tokens: context_tokens_from(value),
+    }
+}
+
+/// Convert Codex's thread-wide counters into the current turn's usage.
+///
+/// A resumed thread publishes its previous cumulative total immediately
+/// before `turn/started`. Subtracting that snapshot keeps later turns from
+/// inheriting every earlier turn's spend. If the engine resets a counter,
+/// treat the latest value as a fresh total instead of subtracting past zero.
+fn turn_usage_since(total: &CodeUsage, baseline: &CodeUsage) -> CodeUsage {
+    let counters_reset = total.input_tokens < baseline.input_tokens
+        || total.output_tokens < baseline.output_tokens
+        || total.cache_read_input_tokens < baseline.cache_read_input_tokens
+        || total.cache_creation_input_tokens < baseline.cache_creation_input_tokens;
+    let baseline = if counters_reset {
+        CodeUsage::default()
+    } else {
+        baseline.clone()
+    };
+    CodeUsage {
+        input_tokens: total.input_tokens.saturating_sub(baseline.input_tokens),
+        output_tokens: total.output_tokens.saturating_sub(baseline.output_tokens),
+        cache_read_input_tokens: total
+            .cache_read_input_tokens
+            .saturating_sub(baseline.cache_read_input_tokens),
+        cache_creation_input_tokens: total
+            .cache_creation_input_tokens
+            .saturating_sub(baseline.cache_creation_input_tokens),
+        context_tokens: total.context_tokens,
     }
 }
 
@@ -594,11 +642,10 @@ fn bound(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// `thread/tokenUsage` reports the turn's running `total` beside the last
-    /// model call's `last`, and folds the cached portion into `inputTokens`.
-    /// Reading it verbatim took one call's slice and double-counted the cache.
+    /// `thread/tokenUsage` folds the cached portion into `inputTokens`.
+    /// Reading it verbatim double-counts the cache.
     #[test]
-    fn token_usage_is_a_disjoint_turn_total() {
+    fn token_usage_is_a_disjoint_thread_total() {
         let payload = serde_json::json!({
             "total": {
                 "totalTokens": 28912, "inputTokens": 28794,
@@ -613,7 +660,7 @@ mod tests {
         });
         let usage = usage_from(Some(&payload));
 
-        // The turn total, not the last call: `last` would report 5.
+        // The thread total, not the last call: `last` would report 5.
         assert_eq!(usage.output_tokens, 118);
         // Disjoint: the three prompt-side counts sum to the prompt the engine
         // actually sent, and the cached portion is not also in `input_tokens`.
@@ -623,6 +670,35 @@ mod tests {
             usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
             28794,
             "the split must reconstruct inputTokens"
+        );
+    }
+
+    #[test]
+    fn a_resumed_turn_excludes_the_previous_thread_usage() {
+        let baseline = CodeUsage {
+            input_tokens: 4_547,
+            output_tokens: 6,
+            cache_read_input_tokens: 9_984,
+            cache_creation_input_tokens: 0,
+            context_tokens: 14_531,
+        };
+        let total = CodeUsage {
+            input_tokens: 5_819,
+            output_tokens: 12,
+            cache_read_input_tokens: 24_064,
+            cache_creation_input_tokens: 0,
+            context_tokens: 15_352,
+        };
+
+        assert_eq!(
+            turn_usage_since(&total, &baseline),
+            CodeUsage {
+                input_tokens: 1_272,
+                output_tokens: 6,
+                cache_read_input_tokens: 14_080,
+                cache_creation_input_tokens: 0,
+                context_tokens: 15_352,
+            }
         );
     }
 
@@ -705,6 +781,20 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn known_streaming_telemetry_does_not_count_as_protocol_drift() {
+        let input = r#"
+{"method":"item/reasoning/summaryTextDelta","params":{"delta":"thinking"}}
+{"method":"item/commandExecution/outputDelta","params":{"delta":"output"}}
+{"method":"turn/diff/updated","params":{"diff":"patch"}}
+{"method":"thread/compacted","params":{}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+
+        assert_eq!(out.unrecognized, 0);
+        assert!(out.events.is_empty());
     }
 
     #[test]
