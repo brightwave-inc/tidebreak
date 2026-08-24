@@ -374,6 +374,8 @@ mod tests {
                 session_id,
                 ordinal: 1,
                 status: CodeTurnStatus::Running,
+                model: None,
+                fast_mode: false,
                 user_input: "hello".into(),
                 user_input_blob_id: None,
                 attachments: Vec::new(),

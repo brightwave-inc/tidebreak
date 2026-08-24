@@ -1,6 +1,6 @@
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
 use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
@@ -12,6 +12,20 @@ use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
+
+/// The fields analytics needs from one turn.
+///
+/// Keeping this projection separate from [`CodeTurn`] avoids loading image
+/// attachment rows for a report that never reads them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeTurnMetric {
+    pub session_id: CodeSessionId,
+    pub status: CodeTurnStatus,
+    pub model: Option<String>,
+    pub fast_mode: bool,
+    pub usage: Option<CodeUsage>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Insert a turn row under its session's owner.
 pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<()> {
@@ -37,6 +51,8 @@ where
         session_id: Set(turn.session_id.0),
         ordinal: Set(turn.ordinal),
         status: Set(turn.status.as_str().to_owned()),
+        model: Set(turn.model.clone()),
+        fast_mode: Set(turn.fast_mode),
         user_input: Set(turn.user_input.clone()),
         user_input_blob_id: Set(turn.user_input_blob_id),
         checkpoint_ref: Set(turn.checkpoint_ref.clone()),
@@ -206,6 +222,47 @@ pub async fn list_turns(
     Ok(turns)
 }
 
+/// Every turn that belongs to one owner, newest first, projected for reports.
+pub async fn list_turn_metrics(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeTurnMetric>> {
+    let rows = entities::code_turn::Entity::find()
+        .select_only()
+        .column(entities::code_turn::Column::Id)
+        .column(entities::code_turn::Column::SessionId)
+        .column(entities::code_turn::Column::Status)
+        .column(entities::code_turn::Column::Model)
+        .column(entities::code_turn::Column::FastMode)
+        .column(entities::code_turn::Column::Usage)
+        .column(entities::code_turn::Column::StartedAt)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .order_by_desc(entities::code_turn::Column::StartedAt)
+        .into_tuple::<(
+            uuid::Uuid,
+            uuid::Uuid,
+            String,
+            Option<String>,
+            bool,
+            Option<serde_json::Value>,
+            chrono::DateTime<chrono::Utc>,
+        )>()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    rows.into_iter()
+        .map(
+            |(id, session_id, status, model, fast_mode, usage, started_at)| {
+                Ok(CodeTurnMetric {
+                    session_id: CodeSessionId(session_id),
+                    status: turn_status_from_stored(id, &status)?,
+                    model,
+                    fast_mode,
+                    usage: code_usage_from_stored(id, usage)?,
+                    started_at,
+                })
+            },
+        )
+        .collect()
+}
+
 /// How many turns one of the owner's sessions has recorded.
 pub async fn count_turns(
     store: &DbStore,
@@ -360,12 +417,7 @@ async fn turn_from_stored(
 }
 
 pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn> {
-    let status = CodeTurnStatus::from_str(&row.status).ok_or_else(|| {
-        AgentError::Store(format!(
-            "code_turn {} has unknown status {}",
-            row.id, row.status
-        ))
-    })?;
+    let status = turn_status_from_stored(row.id, &row.status)?;
     let diffstat =
         match row.diffstat {
             Some(value) => Some(serde_json::from_value::<Diffstat>(value).map_err(|err| {
@@ -373,18 +425,14 @@ pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn>
             })?),
             None => None,
         };
-    let usage = match row.usage {
-        Some(value) => Some(
-            serde_json::from_value::<CodeUsage>(value)
-                .map_err(|err| AgentError::Store(format!("code_turn {} usage: {err}", row.id)))?,
-        ),
-        None => None,
-    };
+    let usage = code_usage_from_stored(row.id, row.usage)?;
     Ok(CodeTurn {
         id: CodeTurnId(row.id),
         session_id: CodeSessionId(row.session_id),
         ordinal: row.ordinal,
         status,
+        model: row.model,
+        fast_mode: row.fast_mode,
         user_input: row.user_input,
         user_input_blob_id: row.user_input_blob_id,
         attachments: Vec::new(),
@@ -395,4 +443,21 @@ pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn>
         started_at: row.started_at,
         ended_at: row.ended_at,
     })
+}
+
+fn turn_status_from_stored(id: uuid::Uuid, status: &str) -> Result<CodeTurnStatus> {
+    CodeTurnStatus::from_str(status)
+        .ok_or_else(|| AgentError::Store(format!("code_turn {id} has unknown status {status}")))
+}
+
+fn code_usage_from_stored(
+    id: uuid::Uuid,
+    usage: Option<serde_json::Value>,
+) -> Result<Option<CodeUsage>> {
+    usage
+        .map(|value| {
+            serde_json::from_value::<CodeUsage>(value)
+                .map_err(|err| AgentError::Store(format!("code_turn {id} usage: {err}")))
+        })
+        .transpose()
 }

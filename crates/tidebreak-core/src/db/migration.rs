@@ -51,7 +51,58 @@ impl MigratorTrait for Migrator {
             Box::new(CodeQueuedTurns),
             Box::new(CodePullRequestLiveTier),
             Box::new(CodePullRequestEtags),
+            Box::new(CodeTurnModelSnapshot),
         ]
+    }
+}
+
+/// Model and service-tier identity captured when a code turn starts.
+///
+/// Sessions may change either setting between turns. Keeping the snapshot on
+/// the usage row lets analytics price new turns without rewriting older turns
+/// from a session's latest selection.
+struct CodeTurnModelSnapshot;
+
+impl MigrationName for CodeTurnModelSnapshot {
+    fn name(&self) -> &str {
+        "m20260824_000014_code_turn_model_snapshot"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeTurnModelSnapshot {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("code_turn", "model").await? {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeTurn::Table)
+                        .add_column(ColumnDef::new(idens::CodeTurn::Model).text())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        if !manager.has_column("code_turn", "fast_mode").await? {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeTurn::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodeTurn::FastMode)
+                                .boolean()
+                                .not_null()
+                                .default(false),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The columns contain historical attribution. A downgrade keeps them.
+        Ok(())
     }
 }
 
@@ -1654,6 +1705,7 @@ mod tests {
                 "m20260824_000011_code_queued_turns",
                 "m20260824_000012_code_pull_request_live_tier",
                 "m20260824_000013_code_pull_request_etags",
+                "m20260824_000014_code_turn_model_snapshot",
             ]
         );
         assert!(db

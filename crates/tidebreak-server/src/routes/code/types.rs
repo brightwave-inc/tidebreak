@@ -195,6 +195,121 @@ impl From<CodeTurn> for CodeTurnSnapshot {
     }
 }
 
+/// Time window for the code analytics report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum CodeAnalyticsRange {
+    #[serde(rename = "7d")]
+    #[ts(rename = "7d")]
+    SevenDays,
+    #[serde(rename = "30d")]
+    #[ts(rename = "30d")]
+    ThirtyDays,
+    #[serde(rename = "90d")]
+    #[ts(rename = "90d")]
+    NinetyDays,
+    #[serde(rename = "all")]
+    #[ts(rename = "all")]
+    All,
+}
+
+/// Totals for one analytics window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsTotals {
+    pub sessions: u64,
+    pub turns: u64,
+    pub completed_turns: u64,
+    pub failed_turns: u64,
+    pub interrupted_turns: u64,
+    pub running_turns: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_microusd: u64,
+    pub pull_requests_opened: u64,
+    pub pull_requests_merged: u64,
+}
+
+/// One UTC day in an analytics trend.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsDay {
+    pub date: String,
+    pub sessions: u64,
+    pub turns: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_microusd: u64,
+    pub pull_requests_opened: u64,
+    pub pull_requests_merged: u64,
+}
+
+/// Metrics attributed to one registered repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsRepository {
+    pub repo_id: RepoId,
+    pub name: String,
+    pub sessions: u64,
+    pub turns: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_microusd: u64,
+    pub pull_requests_opened: u64,
+    pub pull_requests_merged: u64,
+}
+
+/// Metrics attributed to one model and service tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsModel {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    pub harness_kind: HarnessKind,
+    pub fast_mode: bool,
+    pub sessions: u64,
+    pub turns: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_microusd: u64,
+    pub priced: bool,
+}
+
+/// Metrics attributed to one code harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsHarness {
+    pub harness_kind: HarnessKind,
+    pub sessions: u64,
+    pub turns: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_microusd: u64,
+}
+
+/// How much of the report has a known local price.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsPricingCoverage {
+    pub priced_turns: u64,
+    pub unpriced_turns: u64,
+    pub priced_tokens: u64,
+    pub unpriced_tokens: u64,
+    pub prices_as_of: String,
+}
+
+/// Owner-scoped code activity and local cost estimates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeAnalyticsSnapshot {
+    pub range: CodeAnalyticsRange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    pub through: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repo_id: Option<RepoId>,
+    pub totals: CodeAnalyticsTotals,
+    pub daily: Vec<CodeAnalyticsDay>,
+    pub repositories: Vec<CodeAnalyticsRepository>,
+    pub models: Vec<CodeAnalyticsModel>,
+    pub harnesses: Vec<CodeAnalyticsHarness>,
+    pub pricing: CodeAnalyticsPricingCoverage,
+}
+
 /// One event on the per-session WebSocket.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct SequencedCodeEventFrame {

@@ -12,6 +12,7 @@
 
 pub(crate) use super::settings::double_option;
 
+mod analytics;
 mod approvals;
 mod browser;
 mod delivery;
@@ -28,6 +29,7 @@ mod usage;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
+pub(crate) use analytics::analytics;
 pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use browser::{
     browser_list, browser_navigate, browser_screenshot, browser_snapshot, browser_wait,
@@ -69,20 +71,23 @@ pub(crate) use triggers::{
 };
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CodeActionSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot, CodeCheckLog,
-    CodeCheckLogError, CodeCheckLogsSnapshot, CodeCloneDefaults, CodeCloneJobSnapshot,
-    CodeCommitSnapshot, CodeDeliveryActionResult, CodeDeliveryPullRequestActionBody,
-    CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile, CodeDeliveryPullRequestQuery,
-    CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
-    CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
-    CodeDeliveryRunsPage, CodeFileChange, CodeForkBody, CodeForkTranscript,
-    CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot, CodeRepoSnapshot,
-    CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
-    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
-    CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
-    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
-    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
+    CodeActionSnapshot, CodeAnalyticsDay, CodeAnalyticsHarness, CodeAnalyticsModel,
+    CodeAnalyticsPricingCoverage, CodeAnalyticsRange, CodeAnalyticsRepository,
+    CodeAnalyticsSnapshot, CodeAnalyticsTotals, CodeApprovalDecisionBody, CodeApprovalSnapshot,
+    CodeCheckLog, CodeCheckLogError, CodeCheckLogsSnapshot, CodeCloneDefaults,
+    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeDeliveryActionResult,
+    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
+    CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
+    CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
+    CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
+    CodeForkBody, CodeForkTranscript, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot,
+    CodePushSnapshot, CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug,
+    CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
+    CodeTerminalSnapshot, CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice,
+    CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
+    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateCodeTriggerBody,
+    HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
     UpdateCodeTriggerBody,
 };

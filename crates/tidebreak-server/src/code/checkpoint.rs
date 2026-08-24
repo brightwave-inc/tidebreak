@@ -1638,6 +1638,8 @@ mod tests {
             session_id: session.id,
             ordinal,
             status,
+            model: session.model.clone(),
+            fast_mode: session.fast_mode,
             user_input: "edit the tree".into(),
             user_input_blob_id: None,
             attachments: Vec::new(),

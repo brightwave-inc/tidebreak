@@ -1091,6 +1091,8 @@ async fn drive_turn_inner(
         session_id: session.id,
         ordinal,
         status: CodeTurnStatus::Running,
+        model: session.model.clone(),
+        fast_mode: session.fast_mode,
         user_input: message.clone(),
         user_input_blob_id: None,
         attachments,

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   liveCodeSessions,
   parseCodeAction,
+  parseCodeAnalytics,
   parseCodeApproval,
   parseCodeCloneDefaults,
   parseCodeCloneJob,
@@ -211,6 +212,95 @@ describe("parseCodeSubscriptionUsage", () => {
             ],
           },
         ],
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodeAnalytics", () => {
+  const snapshot = {
+    range: "30d",
+    from: "2026-07-26T16:00:00.000Z",
+    through: "2026-08-24T16:00:00.000Z",
+    totals: {
+      sessions: 3,
+      turns: 8,
+      completed_turns: 6,
+      failed_turns: 1,
+      interrupted_turns: 1,
+      running_turns: 0,
+      input_tokens: 1_000,
+      output_tokens: 500,
+      cache_read_tokens: 2_000,
+      cache_write_tokens: 100,
+      total_tokens: 3_600,
+      estimated_cost_microusd: 12_300,
+      pull_requests_opened: 2,
+      pull_requests_merged: 1,
+    },
+    daily: [
+      {
+        date: "2026-08-24",
+        sessions: 3,
+        turns: 8,
+        total_tokens: 3_600,
+        estimated_cost_microusd: 12_300,
+        pull_requests_opened: 2,
+        pull_requests_merged: 1,
+      },
+    ],
+    repositories: [
+      {
+        repo_id: "repo-1",
+        name: "tidebreak",
+        sessions: 3,
+        turns: 8,
+        total_tokens: 3_600,
+        estimated_cost_microusd: 12_300,
+        pull_requests_opened: 2,
+        pull_requests_merged: 1,
+      },
+    ],
+    models: [
+      {
+        model_id: "claude-sonnet-5",
+        harness_kind: "claude_code",
+        fast_mode: false,
+        sessions: 3,
+        turns: 8,
+        total_tokens: 3_600,
+        estimated_cost_microusd: 12_300,
+        priced: true,
+      },
+    ],
+    harnesses: [
+      {
+        harness_kind: "claude_code",
+        sessions: 3,
+        turns: 8,
+        total_tokens: 3_600,
+        estimated_cost_microusd: 12_300,
+      },
+    ],
+    pricing: {
+      priced_turns: 8,
+      unpriced_turns: 0,
+      priced_tokens: 3_600,
+      unpriced_tokens: 0,
+      prices_as_of: "2026-08-21",
+    },
+  };
+
+  it("accepts the complete analytics contract", () => {
+    expect(parseCodeAnalytics(snapshot)).toEqual(snapshot);
+  });
+
+  it("rejects unknown ranges and malformed totals", () => {
+    expect(parseCodeAnalytics({ ...snapshot, range: "month" })).toBeNull();
+    expect(
+      parseCodeAnalytics({
+        ...snapshot,
+        totals: { ...snapshot.totals, total_tokens: -1 },
       }),
     ).toBeNull();
   });

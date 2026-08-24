@@ -1831,6 +1831,8 @@ pub mod code_turn {
         pub session_id: Uuid,
         pub ordinal: i64,
         pub status: String,
+        pub model: Option<String>,
+        pub fast_mode: bool,
         #[sea_orm(column_type = "Text")]
         pub user_input: String,
         pub user_input_blob_id: Option<Uuid>,

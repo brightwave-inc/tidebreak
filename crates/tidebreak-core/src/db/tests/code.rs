@@ -10,8 +10,8 @@ use crate::db::code::{
     append_event, bump_spawn_epoch, delete_queued_turn, delete_session_queued_turns,
     enqueue_queued_turn, get_approval, get_repo, get_repo_by_root_path, get_session, get_turn,
     get_workspace, insert_approval, insert_repo, insert_session, insert_turn, insert_workspace,
-    list_approvals, list_events, list_queued_turns, list_repos, list_sessions, list_turns,
-    mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
+    list_approvals, list_events, list_queued_turns, list_repos, list_sessions, list_turn_metrics,
+    list_turns, mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
     replace_session_attention, save_session, save_turn, set_queue_paused, set_session_subagents,
     set_turn_narrative, set_workspace_title_if, update_queued_turn, CodeJournalError,
     MAX_REPLAY_EVENTS,
@@ -134,6 +134,8 @@ async fn seed_owner(
             session_id,
             ordinal: 1,
             status: CodeTurnStatus::Running,
+            model: None,
+            fast_mode: false,
             user_input: "hello".into(),
             user_input_blob_id: None,
             attachments: Vec::new(),
@@ -667,6 +669,8 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
             session_id,
             ordinal: 2,
             status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
             user_input: "look at this".into(),
             user_input_blob_id: None,
             attachments: vec![image],
@@ -1023,6 +1027,8 @@ async fn owner_scoped_code_queries_partition_every_table() {
         .await
         .unwrap()
         .is_empty());
+    assert_eq!(list_turn_metrics(&store, &alice).await.unwrap().len(), 1);
+    assert_eq!(list_turn_metrics(&store, &bob).await.unwrap().len(), 1);
 
     // Journal events: the second user replays nothing from the first user's
     // session, whatever cursor they ask from.
@@ -2729,6 +2735,8 @@ fn turn_for(row: &CodeQueuedTurn, ordinal: i64) -> CodeTurn {
         session_id: row.session_id,
         ordinal,
         status: CodeTurnStatus::Running,
+        model: None,
+        fast_mode: false,
         user_input: row.message.clone(),
         user_input_blob_id: None,
         attachments: row.attachments.clone(),
