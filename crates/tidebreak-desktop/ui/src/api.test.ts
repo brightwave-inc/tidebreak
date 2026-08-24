@@ -2023,6 +2023,7 @@ describe("code delivery API", () => {
         type: "merge" as const,
         method: "squash" as const,
         auto: true,
+        admin: false,
         expected_head_sha: "abc123",
       },
     };

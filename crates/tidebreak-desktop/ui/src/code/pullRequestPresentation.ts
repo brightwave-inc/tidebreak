@@ -1,6 +1,7 @@
 import type {
   CodeDeliveryCheck,
   CodeDeliveryPullRequestSummary,
+  PullRequestComment,
 } from "../api/types";
 import type { StatusTone } from "./statusTone";
 
@@ -169,6 +170,30 @@ export function mergeBlockedReason(
   const counts = checkCounts(item.checks);
   if (counts.failed > 0) return "Required checks are failing.";
   return null;
+}
+
+export type PullRequestCommentOrder = "newest" | "oldest";
+
+/**
+ * The conversation in the reader's chosen order. Hosts hand comments over
+ * oldest-first; the panel defaults to newest-first because the reason a
+ * reader opens a busy pull request is almost always the latest verdict, not
+ * the greeting. The sort is stable, so comments without a parseable
+ * timestamp keep the host's relative order and sink to the bottom of the
+ * newest-first view rather than claiming the top.
+ */
+export function orderPullRequestComments(
+  comments: readonly PullRequestComment[],
+  order: PullRequestCommentOrder,
+): PullRequestComment[] {
+  const time = (comment: PullRequestComment): number => {
+    if (!comment.created_at) return 0;
+    const parsed = Date.parse(comment.created_at);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  return [...comments].sort((left, right) =>
+    order === "newest" ? time(right) - time(left) : time(left) - time(right),
+  );
 }
 
 /** GitHub's diff-status vocabulary, as a short verb the row can show. */

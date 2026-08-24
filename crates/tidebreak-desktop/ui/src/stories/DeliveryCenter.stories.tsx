@@ -177,6 +177,22 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
       success: true,
       message: prActionMessage(action),
     }),
+    createCodeWorkspace: async (body: {
+      repo_id: string;
+      title?: string;
+      base_ref?: string;
+    }) =>
+      ({
+        id: "ws-fresh-agent",
+        repo_id: body.repo_id,
+        title: body.title ?? "Fresh agent",
+        worktree_path: "/Users/sam/tidebreak/worktrees/fresh-agent",
+        branch_name: "thet/fresh-agent",
+        base_ref: body.base_ref ?? "main",
+        status: "active",
+        created_at: "2026-08-20T15:25:00.000Z",
+      }) as CodeWorkspaceSnapshot,
+    writeCodeCheckLogs: async () => ({ logs: [], errors: [] }),
     queryCodeDeliveryRuns: async () => ({
       capability: deliveryRepositoriesSnapshot.capability,
       items: deliveryRuns,
@@ -427,75 +443,200 @@ export const PullRequestStacks: Story = {
 export const PullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    // The detail is a sheet portaled to the document body, so its content
+    // lives outside the story canvas.
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByText("Make workspace deep links durable"),
     );
     await expect(
-      await canvas.findByRole("heading", {
+      await body.findByRole("heading", {
         name: "Make workspace deep links durable",
       }),
     ).toBeVisible();
   },
 };
 
-/** The full GitHub-shaped panel: lifecycle, diffstat, reviewers, Markdown. */
+/** The full GitHub-shaped sheet: lifecycle, diffstat, reviewers, Markdown. */
 export const PullRequestDetailConversation: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByText("Build the delivery center"));
     await expect(
-      await canvas.findByRole("heading", { name: "Build the delivery center" }),
+      await body.findByRole("heading", { name: "Build the delivery center" }),
     ).toBeVisible();
     // The description renders as Markdown rather than raw "## Summary" text.
     await expect(
-      await canvas.findByRole("heading", { name: "Summary" }),
+      await body.findByRole("heading", { name: "Summary" }),
     ).toBeVisible();
-    await expect(await canvas.findByText("+2140")).toBeVisible();
+    await expect(await body.findByText("+2140")).toBeVisible();
     await expect(
-      await canvas.findByRole("button", { name: /Comment/ }),
+      await body.findByRole("button", { name: /Comment/ }),
     ).toBeVisible();
+  },
+};
+
+/**
+ * Newest first is the default: the reason a reader opens a busy pull request
+ * is the latest verdict. The select flips back to the host's chronology.
+ */
+export const PullRequestCommentOrdering: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    const later = await body.findByText(
+      "Keep repository failures visible without hiding usable results.",
+    );
+    const earlier = await body.findByText(/The narrow detail state still/);
+    await expect(
+      Boolean(
+        later.compareDocumentPosition(earlier) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+
+    await userEvent.click(
+      await body.findByRole("combobox", { name: "Comment order" }),
+    );
+    await userEvent.click(
+      await body.findByRole("option", { name: "Oldest first" }),
+    );
+    await expect(
+      Boolean(
+        earlier.compareDocumentPosition(later) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+  },
+};
+
+/**
+ * Admin merge stays behind the overflow and a confirmation: it bypasses the
+ * branch protection that is otherwise disabling the plain merge button.
+ */
+export const PullRequestAdminMerge: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await expect(
+      await body.findByRole("button", { name: "Merge" }),
+    ).toBeDisabled();
+    await userEvent.click(
+      await body.findByRole("button", { name: "More pull request actions" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: /Admin merge \(bypass protections\)/,
+      }),
+    );
+    await expect(
+      await body.findByText("Merge, bypassing branch protection?"),
+    ).toBeVisible();
+    await userEvent.click(
+      await body.findByRole("button", { name: "Admin merge" }),
+    );
+  },
+};
+
+/**
+ * A pull request with a linked active workspace routes its chores there; the
+ * menu names the workspace before anything starts.
+ */
+export const PullRequestAgentActions: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await userEvent.click(
+      await body.findByRole("button", { name: "Fix with an agent" }),
+    );
+    await expect(
+      await body.findByText(
+        "Runs in Build the delivery center, the linked workspace.",
+      ),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("menuitem", { name: "Fix failing checks" }),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("menuitem", { name: "Address review feedback" }),
+    ).toBeVisible();
+  },
+};
+
+/**
+ * Without a linked workspace the same menu cuts a fresh one from the pull
+ * request's head branch, queues the prompt, and lands on the new workspace.
+ */
+export const PullRequestFreshAgent: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await canvas.findByText("Adopt the shared status tone map"),
+    );
+    await userEvent.click(
+      await body.findByRole("button", { name: "Fix with an agent" }),
+    );
+    await expect(
+      await body.findByText(
+        "Starts a fresh workspace on brightwave-inc/tidebreak.",
+      ),
+    ).toBeVisible();
+    await userEvent.click(
+      await body.findByRole("menuitem", { name: "Resolve conflicts" }),
+    );
+    // The story router's workspace route is a stub; reaching it proves the
+    // workspace was created and the sheet handed the reader over.
+    await expect(await body.findByText("Workspace")).toBeVisible();
   },
 };
 
 export const PullRequestDetailFiles: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByText("Build the delivery center"));
-    await userEvent.click(await canvas.findByRole("tab", { name: /Files/ }));
-    await expect(await canvas.findByText(/19 files changed/)).toBeVisible();
+    await userEvent.click(await body.findByRole("tab", { name: /Files/ }));
+    await expect(await body.findByText(/19 files changed/)).toBeVisible();
     await userEvent.click(
-      await canvas.findByTitle(
+      await body.findByTitle(
         "crates/tidebreak-desktop/ui/src/code/pullRequestPresentation.ts",
       ),
     );
-    await expect(await canvas.findByText(/@@ -0,0 \+1,8 @@/)).toBeVisible();
+    await expect(await body.findByText(/@@ -0,0 \+1,8 @@/)).toBeVisible();
   },
 };
 
 export const PullRequestDetailChecks: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByText("Build the delivery center"));
-    await userEvent.click(await canvas.findByRole("tab", { name: /Checks/ }));
-    await expect(await canvas.findByText(/1 of 2 passed/)).toBeVisible();
+    await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
+    await expect(await body.findByText(/1 of 2 passed/)).toBeVisible();
   },
 };
 
-/** Merged: no merge controls, a reopen-free panel, and who merged it. */
+/** Merged: no merge controls, a reopen-free sheet, and who merged it. */
 export const MergedPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByText("Cache the workspace digest between polls"),
     );
     await expect(
-      await canvas.findByRole("heading", {
+      await body.findByRole("heading", {
         name: "Cache the workspace digest between polls",
       }),
     ).toBeVisible();
-    await expect(await canvas.findByText(/merged .* by devon/)).toBeVisible();
+    await expect(await body.findByText(/merged .* by devon/)).toBeVisible();
     await expect(
-      canvas.queryByRole("button", { name: "Merge" }),
+      body.queryByRole("button", { name: "Merge" }),
     ).not.toBeInTheDocument();
   },
 };
@@ -504,11 +645,12 @@ export const MergedPullRequestDetail: Story = {
 export const ClosedPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByText("Rewrite the deployment runbook"),
     );
     await expect(
-      await canvas.findByRole("button", { name: "Reopen" }),
+      await body.findByRole("button", { name: "Reopen" }),
     ).toBeVisible();
   },
 };
@@ -517,14 +659,15 @@ export const ClosedPullRequestDetail: Story = {
 export const DraftPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByText("Document managed deployments"),
     );
     await expect(
-      await canvas.findByRole("button", { name: "Mark ready" }),
+      await body.findByRole("button", { name: "Mark ready" }),
     ).toBeVisible();
     await expect(
-      await canvas.findByText("No description provided."),
+      await body.findByText("No description provided."),
     ).toBeVisible();
   },
 };
@@ -533,16 +676,17 @@ export const DraftPullRequestDetail: Story = {
 export const BlockedMergePullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(
       await canvas.findByText("Adopt the shared status tone map"),
     );
     await expect(
-      await canvas.findByText(
+      await body.findByText(
         "Resolve the conflicts with the base branch first.",
       ),
     ).toBeVisible();
     await expect(
-      await canvas.findByRole("button", { name: "Merge" }),
+      await body.findByRole("button", { name: "Merge" }),
     ).toBeDisabled();
   },
 };
@@ -577,13 +721,12 @@ export const RunDetail: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByText("Desktop CI"));
     await expect(
-      await canvas.findByRole("heading", { name: "Desktop CI" }),
+      await body.findByRole("heading", { name: "Desktop CI" }),
     ).toBeVisible();
-    await expect(
-      await canvas.findByText("Build static Storybook"),
-    ).toBeVisible();
+    await expect(await body.findByText("Build static Storybook")).toBeVisible();
   },
 };
 
@@ -635,9 +778,10 @@ export const NarrowPullRequestDetail: Story = {
   parameters: { viewport: { defaultViewport: "compact" } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByText("Build the delivery center"));
     await expect(
-      await canvas.findByRole("heading", { name: "Build the delivery center" }),
+      await body.findByRole("heading", { name: "Build the delivery center" }),
     ).toBeVisible();
   },
 };

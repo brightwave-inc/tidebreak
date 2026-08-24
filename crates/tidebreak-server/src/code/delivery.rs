@@ -1022,8 +1022,17 @@ pub(crate) async fn act_on_pull_request(
         CodeDeliveryPullRequestAction::Merge {
             method,
             auto,
+            admin,
             expected_head_sha,
         } => {
+            // An admin merge lands now, bypassing branch protection; arming
+            // auto-merge is the opposite ask. `gh` refuses the pair too, but
+            // with a message about flags rather than about the request.
+            if admin && auto {
+                return Err(ServerError::bad_request(
+                    "an admin merge is immediate; it cannot arm auto-merge",
+                ));
+            }
             gh::merge_pull_request_target(
                 &target.repository.host,
                 &target.repository.owner,
@@ -1031,6 +1040,7 @@ pub(crate) async fn act_on_pull_request(
                 target.number,
                 merge_method(method),
                 auto,
+                admin,
                 &expected_head_sha,
                 search_path.as_deref(),
             )
@@ -1039,6 +1049,11 @@ pub(crate) async fn act_on_pull_request(
             runtime.delivery_cache.invalidate();
             Ok(delivery_action_result(if auto {
                 format!("Auto-merge enabled for pull request #{}", target.number)
+            } else if admin {
+                format!(
+                    "Pull request #{} merged, bypassing branch protection",
+                    target.number
+                )
             } else {
                 format!("Pull request #{} merged", target.number)
             }))

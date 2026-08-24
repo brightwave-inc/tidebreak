@@ -24,7 +24,7 @@ import {
 } from "../stories/fixtures";
 import {
   CodeDeliveryPage,
-  RunDetailPanel,
+  RunDetailSheet,
   codeDeliverySearchFrom,
 } from "./CodeDeliveryPage";
 import { useCodeDeliveryStore } from "./CodeDeliveryStore";
@@ -438,7 +438,7 @@ describe("delivery run list", () => {
     const panel = (initialDetail?: typeof baseDetail) => (
       <StrictMode>
         <AppContextProvider value={appContext(client)}>
-          <RunDetailPanel
+          <RunDetailSheet
             summary={deliveryRuns.find((item) => item.github_id === 4401)!}
             initialDetail={initialDetail}
             onClose={vi.fn()}

@@ -1053,6 +1053,8 @@ pub enum CodeDeliveryPullRequestAction {
         method: CodePrMergeMethod,
         #[serde(default)]
         auto: bool,
+        #[serde(default)]
+        admin: bool,
         expected_head_sha: String,
     },
     RerunFailed {

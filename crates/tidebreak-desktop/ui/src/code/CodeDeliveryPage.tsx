@@ -85,9 +85,10 @@ import { CodeSidebar } from "./CodeSidebar";
 import { RepositoryTriggerRules } from "./RepositoryTriggerRules";
 import {
   CheckTone,
+  DetailSheet,
   DetailSkeleton,
   PrLifecycleIcon,
-  PullRequestDetailPanel,
+  PullRequestDetailSheet,
   relativeTime,
 } from "./PullRequestDetail";
 import {
@@ -901,14 +902,8 @@ function PullRequestsSurface({
   if (repositories.length === 0) return <NoDeliveryRepositories />;
 
   return (
-    <DeliverySplit selected={Boolean(selected)}>
-      <div
-        ref={scrollRef}
-        className={cn(
-          "min-h-0 flex-1 overflow-auto",
-          selected && "max-lg:hidden",
-        )}
-      >
+    <div className="flex min-h-0 flex-1">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
         )}
@@ -968,14 +963,14 @@ function PullRequestsSurface({
       targetDetailState.pending &&
       !targetDetailState.detail &&
       pullRequestMatchesTarget(selected, target) ? (
-        <PendingDetailPanel
+        <PendingDetailSheet
           context={`${selected.repository.name_with_owner} #${selected.number}`}
           title={selected.title}
           closeLabel="Close pull request details"
           onClose={closeDetail}
         />
       ) : selected ? (
-        <PullRequestDetailPanel
+        <PullRequestDetailSheet
           key={selected.id}
           client={client}
           summary={selected}
@@ -997,7 +992,7 @@ function PullRequestsSurface({
           }
         />
       ) : null}
-    </DeliverySplit>
+    </div>
   );
 }
 
@@ -1218,14 +1213,8 @@ function RunsSurface({
   if (repositories.length === 0) return <NoDeliveryRepositories />;
 
   return (
-    <DeliverySplit selected={Boolean(selected)}>
-      <div
-        ref={scrollRef}
-        className={cn(
-          "min-h-0 flex-1 overflow-auto",
-          selected && "max-lg:hidden",
-        )}
-      >
+    <div className="flex min-h-0 flex-1">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
         )}
@@ -1285,7 +1274,7 @@ function RunsSurface({
       targetDetailState.pending &&
       !targetDetailState.detail &&
       runMatchesTarget(selected, target) ? (
-        <PendingDetailPanel
+        <PendingDetailSheet
           context={`${selected.repository.name_with_owner} ${
             selected.kind === "deployment" ? "Deployment" : "Action"
           }`}
@@ -1294,7 +1283,7 @@ function RunsSurface({
           onClose={closeDetail}
         />
       ) : selected ? (
-        <RunDetailPanel
+        <RunDetailSheet
           key={selected.id}
           summary={selected}
           initialDetail={
@@ -1315,30 +1304,16 @@ function RunsSurface({
           }
         />
       ) : null}
-    </DeliverySplit>
-  );
-}
-
-function DeliverySplit({
-  selected,
-  children,
-}: {
-  selected: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={cn(
-        "flex min-h-0 flex-1",
-        selected && "lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(360px,430px)]",
-      )}
-    >
-      {children}
     </div>
   );
 }
 
-function PendingDetailPanel({
+/**
+ * The sheet while a route-targeted detail is still loading: the reader
+ * followed a deep link, so the frame opens immediately with what the link
+ * already knew — repository, number, title — and the body fills in.
+ */
+function PendingDetailSheet({
   context,
   title,
   closeLabel,
@@ -1350,8 +1325,8 @@ function PendingDetailPanel({
   onClose: () => void;
 }) {
   return (
-    <aside className="flex min-h-0 w-full flex-col border-l border-border-subtle bg-background lg:w-auto">
-      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-4 py-3">
+    <DetailSheet label={title} onClose={onClose}>
+      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-5 py-3">
         <div className="min-w-0 flex-1">
           <div className="text-xs text-muted-foreground">{context}</div>
           <h2 className="mt-1 text-base font-semibold leading-snug">{title}</h2>
@@ -1361,10 +1336,10 @@ function PendingDetailPanel({
           <span className="sr-only">{closeLabel}</span>
         </Button>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-auto p-5">
         <DetailSkeleton />
       </div>
-    </aside>
+    </DetailSheet>
   );
 }
 
@@ -1694,7 +1669,7 @@ function RunList({
   );
 }
 
-export function RunDetailPanel({
+export function RunDetailSheet({
   summary,
   initialDetail,
   onClose,
@@ -1797,8 +1772,11 @@ export function RunDetailPanel({
   };
 
   return (
-    <aside className="flex min-h-0 w-full flex-col border-l border-border-subtle bg-background lg:w-auto">
-      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-4 py-3">
+    <DetailSheet
+      label={`${summary.kind === "deployment" ? "Deployment" : "Action"}: ${summary.name}`}
+      onClose={onClose}
+    >
+      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-5 py-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{summary.repository.name_with_owner}</span>
@@ -1815,7 +1793,7 @@ export function RunDetailPanel({
           <span className="sr-only">Close run details</span>
         </Button>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-auto p-5">
         {loading && !detail ? (
           <DetailSkeleton />
         ) : error ? (
@@ -1984,7 +1962,7 @@ export function RunDetailPanel({
           </div>
         ) : null}
       </div>
-    </aside>
+    </DetailSheet>
   );
 }
 

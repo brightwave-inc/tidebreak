@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
+  Bot,
   Check,
   CircleAlert,
   CircleDot,
@@ -14,6 +16,7 @@ import {
   MoreHorizontal,
   Play,
   RefreshCw,
+  ShieldAlert,
   X,
 } from "lucide-react";
 import { formatDistanceToNowStrict } from "date-fns";
@@ -30,10 +33,18 @@ import type {
 } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
+import {
+  Dialog,
+  DialogOverlay,
+  DialogPortal,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -49,8 +60,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeUiStore } from "./CodeUiStore";
 import { codeDeliveryRepositoryTarget } from "./CodeDeliveryStore";
+import { fetchFixErrorsLogs } from "./checkLogs";
 import { MiddleTruncate } from "./MiddleTruncate";
+import {
+  deliveryPullRequestDigest,
+  prAgentQuickActions,
+  prFreshAgentPrompt,
+  prWorkflowPrompt,
+  type PrPromptAction,
+} from "./prActions";
 import { PrCommentCard } from "./PrCommentCard";
 import {
   checkCounts,
@@ -59,9 +80,11 @@ import {
   fileStatusTone,
   githubAvatarUrl,
   mergeBlockedReason,
+  orderPullRequestComments,
   pullRequestLifecycle,
   pullRequestSettledAt,
   PULL_REQUEST_LIFECYCLE_LABEL,
+  type PullRequestCommentOrder,
   type PullRequestLifecycle,
 } from "./pullRequestPresentation";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
@@ -80,7 +103,44 @@ const LIFECYCLE_BADGE_VARIANT: Record<
 };
 
 /**
- * The pull request, as close to its GitHub page as a desktop panel gets.
+ * The frame both delivery detail surfaces share: a large sheet floated over
+ * the list rather than a column squeezed beside it. The list keeps its full
+ * width, the detail gets room for a real diff, and closing is the ordinary
+ * dialog vocabulary — Escape, the overlay, or the header's X.
+ */
+export function DetailSheet({
+  label,
+  onClose,
+  children,
+}: {
+  /** Accessible name for the sheet; the visible header carries the title. */
+  label: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogPortal>
+        <DialogOverlay className="bg-black/40" />
+        <DialogPrimitive.Content
+          aria-describedby={undefined}
+          className="fixed top-1/2 left-1/2 z-50 flex h-[min(52rem,calc(100vh-3rem))] w-[min(66rem,calc(100vw-2.5rem))] translate-x-[-50%] translate-y-[-50%] flex-col overflow-hidden rounded-xl border border-border-subtle bg-background shadow-lg outline-none duration-200 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+        >
+          <DialogTitle className="sr-only">{label}</DialogTitle>
+          {children}
+        </DialogPrimitive.Content>
+      </DialogPortal>
+    </Dialog>
+  );
+}
+
+/**
+ * The pull request, as close to its GitHub page as a desktop sheet gets.
  *
  * The point is that a reader finishes here. Everything the GitHub page leads
  * with — lifecycle, who merged it and when, the branch pair, the diffstat,
@@ -88,9 +148,11 @@ const LIFECYCLE_BADGE_VARIANT: Record<
  * every check, every changed file — is on this surface, and the actions that
  * page offers (ready, merge, auto-merge, rerun, close, reopen, comment) run
  * from it. "Open on GitHub" stays, but as an escape hatch rather than the
- * only way to see what happened.
+ * only way to see what happened. Beyond the page itself, the sheet links the
+ * pull request to the Tidebreak workspaces that carry it and can put an
+ * agent — linked or fresh — onto its remaining chores.
  */
-export function PullRequestDetailPanel({
+export function PullRequestDetailSheet({
   client,
   summary,
   initialDetail,
@@ -100,7 +162,10 @@ export function PullRequestDetailPanel({
 }: {
   client: Pick<
     ApiClient,
-    "getCodeDeliveryPullRequestDetail" | "runCodeDeliveryPullRequestAction"
+    | "getCodeDeliveryPullRequestDetail"
+    | "runCodeDeliveryPullRequestAction"
+    | "createCodeWorkspace"
+    | "writeCodeCheckLogs"
   >;
   summary: CodeDeliveryPullRequestSummary;
   initialDetail?: CodeDeliveryPullRequestDetail;
@@ -116,7 +181,10 @@ export function PullRequestDetailPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("conversation");
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
+  const [commentOrder, setCommentOrder] =
+    useState<PullRequestCommentOrder>("newest");
   const [draftComment, setDraftComment] = useState("");
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const generation = useRef(0);
   const activeTarget = useRef(summary.id);
   const mounted = useRef(true);
@@ -160,6 +228,7 @@ export function PullRequestDetailPanel({
 
   useEffect(() => {
     setTab("conversation");
+    setCommentOrder("newest");
     setDraftComment("");
     if (initialDetail?.summary.id === summary.id) {
       setDetail(initialDetail);
@@ -213,7 +282,7 @@ export function PullRequestDetailPanel({
   };
 
   // Prefer the freshly loaded summary: an action just changed it, and the row
-  // behind this panel may still be a poll behind.
+  // behind this sheet may still be a poll behind.
   const current = detail?.summary ?? summary;
   const lifecycle = pullRequestLifecycle(current);
   const counts = checkCounts(current.checks);
@@ -228,8 +297,29 @@ export function PullRequestDetailPanel({
     [current.checks],
   );
 
+  const adminMerge = async () => {
+    if (!current.head_sha) return;
+    const ok = await confirm({
+      title: "Merge, bypassing branch protection?",
+      description: `Admin merge lands pull request #${current.number} immediately and skips any reviews and checks the branch still requires. GitHub records the bypass under your account.`,
+      confirmLabel: "Admin merge",
+      destructive: true,
+    });
+    if (!ok) return;
+    await runAction("admin-merge", {
+      type: "merge",
+      method: mergeMethod,
+      auto: false,
+      admin: true,
+      expected_head_sha: current.head_sha,
+    });
+  };
+
   return (
-    <aside className="flex min-h-0 w-full flex-col border-l border-border-subtle bg-background lg:w-auto">
+    <DetailSheet
+      label={`Pull request #${summary.number}: ${summary.title}`}
+      onClose={onClose}
+    >
       <PrDetailHeader
         summary={current}
         lifecycle={lifecycle}
@@ -237,7 +327,7 @@ export function PullRequestDetailPanel({
         onClose={onClose}
       />
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border-subtle px-4 py-2.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border-subtle px-5 py-2.5">
         <Button
           type="button"
           size="xs"
@@ -253,16 +343,23 @@ export function PullRequestDetailPanel({
             type="button"
             size="xs"
             variant="outline"
+            title={`Open the linked workspace on ${workspace.branch_name}`}
             onClick={() => onOpenWorkspace(workspace.workspace_id)}
           >
             <GitBranch />
             Open {workspace.title}
           </Button>
         ))}
+        <PrAgentMenu
+          client={client}
+          summary={current}
+          onOpenWorkspace={onOpenWorkspace}
+        />
         <Button
           type="button"
           size="xs"
           variant="ghost"
+          className="ml-auto"
           disabled={loading}
           onClick={() => void load()}
         >
@@ -273,7 +370,7 @@ export function PullRequestDetailPanel({
 
       <div className="min-h-0 flex-1 overflow-auto">
         {loading && !detail ? (
-          <div className="p-4">
+          <div className="p-5">
             <DetailSkeleton />
           </div>
         ) : error ? (
@@ -285,7 +382,7 @@ export function PullRequestDetailPanel({
               value={tab}
               onValueChange={(value) => setTab(value as DetailTab)}
             >
-              <TabsList className="sticky top-0 z-10 w-full justify-start rounded-none border-b border-border-subtle bg-background/95 px-4 backdrop-blur">
+              <TabsList className="sticky top-0 z-10 w-full justify-start rounded-none border-b border-border-subtle bg-background/95 px-5 backdrop-blur">
                 <TabsTrigger value="conversation">
                   <MessageSquare />
                   Conversation
@@ -322,7 +419,7 @@ export function PullRequestDetailPanel({
 
               <TabsContent
                 value="conversation"
-                className="mt-0 flex flex-col gap-5 p-4"
+                className="mt-0 flex flex-col gap-5 p-5"
               >
                 <PrActions
                   detail={detail}
@@ -332,11 +429,14 @@ export function PullRequestDetailPanel({
                   onMergeMethodChange={setMergeMethod}
                   workflowRunIds={workflowRunIds}
                   onRun={(name, action) => void runAction(name, action)}
+                  onAdminMerge={() => void adminMerge()}
                 />
                 <PrDescription body={detail.body} />
                 <PrConversation
                   detail={detail}
                   busy={busy}
+                  order={commentOrder}
+                  onOrderChange={setCommentOrder}
                   draft={draftComment}
                   onDraftChange={setDraftComment}
                   onComment={() =>
@@ -348,18 +448,19 @@ export function PullRequestDetailPanel({
                 />
               </TabsContent>
 
-              <TabsContent value="files" className="mt-0 p-4">
+              <TabsContent value="files" className="mt-0 p-5">
                 <PrFiles detail={detail} />
               </TabsContent>
 
-              <TabsContent value="checks" className="mt-0 p-4">
+              <TabsContent value="checks" className="mt-0 p-5">
                 <PrChecks checks={current.checks} />
               </TabsContent>
             </Tabs>
           </>
         ) : null}
       </div>
-    </aside>
+      {confirmDialog}
+    </DetailSheet>
   );
 }
 
@@ -407,7 +508,7 @@ function DetailErrors({
   return (
     <div
       role="alert"
-      className="m-4 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2.5 text-xs"
+      className="m-5 mb-0 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2.5 text-xs"
     >
       <p className="font-medium text-warning">Some details could not load.</p>
       <ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
@@ -434,7 +535,7 @@ function PrDetailHeader({
 }) {
   const settledAt = pullRequestSettledAt(summary);
   return (
-    <div className="shrink-0 border-b border-border-subtle px-4 py-3">
+    <div className="shrink-0 border-b border-border-subtle px-5 py-3">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -536,6 +637,129 @@ function PrDetailHeader({
   );
 }
 
+/**
+ * Put an agent onto this pull request's remaining chores.
+ *
+ * The menu offers only what the pull request actually has — conflicts,
+ * failing checks, requested changes, a stale base — and says where the agent
+ * runs before anything starts. A linked active workspace is the natural
+ * target because its branch is the pull request's own; without one, a fresh
+ * workspace is cut from the head branch and the prompt tells the agent how
+ * to push back to it.
+ */
+function PrAgentMenu({
+  client,
+  summary,
+  onOpenWorkspace,
+}: {
+  client: Pick<ApiClient, "createCodeWorkspace" | "writeCodeCheckLogs">;
+  summary: CodeDeliveryPullRequestSummary;
+  onOpenWorkspace: (workspaceId: string) => void;
+}) {
+  const [starting, setStarting] = useState(false);
+  const digest = useMemo(() => deliveryPullRequestDigest(summary), [summary]);
+  const actions = useMemo(() => prAgentQuickActions(digest), [digest]);
+  const link =
+    summary.workspace_links.find(
+      (candidate) => candidate.exact && candidate.status === "active",
+    ) ??
+    summary.workspace_links.find((candidate) => candidate.status === "active");
+  const repoId = summary.repository.tidebreak_repo_id;
+  if (actions.length === 0 || (!link && !repoId)) return null;
+
+  const run = async (action: PrPromptAction) => {
+    if (useCodeUiStore.getState().composerActionScope !== null) {
+      toast.error("Another agent action is already running");
+      return;
+    }
+    setStarting(true);
+    try {
+      if (link) {
+        const logs =
+          action === "fix_errors"
+            ? await fetchFixErrorsLogs(client, link.workspace_id)
+            : [];
+        if (
+          !useCodeUiStore
+            .getState()
+            .runComposerPrompt(
+              link.workspace_id,
+              prWorkflowPrompt(action, digest, logs),
+            )
+        ) {
+          toast.error("Another agent action is already running");
+          return;
+        }
+        onOpenWorkspace(link.workspace_id);
+        return;
+      }
+      // No linked workspace: cut a fresh one from the pull request's head.
+      // Log download is skipped on purpose — it reads the workspace's own
+      // pull request digest, which a just-created workspace does not have;
+      // the prompt's fallback already tells the agent to read CI itself.
+      const workspace = await client.createCodeWorkspace({
+        repo_id: repoId!,
+        title: freshAgentWorkspaceTitle(summary),
+        base_ref: summary.head_branch,
+      });
+      useCodeCatalogStore.getState().upsertWorkspace(workspace);
+      if (
+        !useCodeUiStore
+          .getState()
+          .runComposerPrompt(workspace.id, prFreshAgentPrompt(action, digest))
+      ) {
+        toast.error("Another agent action is already running");
+        return;
+      }
+      onOpenWorkspace(workspace.id);
+    } catch (caught) {
+      toast.error(
+        friendlyErrorMessage(
+          caught,
+          "Could not start an agent on this pull request.",
+        ),
+      );
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button type="button" size="xs" variant="outline" disabled={starting}>
+          {starting ? <LoaderCircle className="animate-spin" /> : <Bot />}
+          Fix with an agent
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        <div className="max-w-64 px-2 py-1.5 text-[11px] text-muted-foreground">
+          {link
+            ? `Runs in ${link.title}, the linked workspace.`
+            : `Starts a fresh workspace on ${summary.repository.name_with_owner}.`}
+        </div>
+        <DropdownMenuSeparator />
+        {actions.map((item) => (
+          <DropdownMenuItem
+            key={item.action}
+            onSelect={() => void run(item.action)}
+          >
+            {item.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Readable in the rail, and short enough to slug into a branch name. */
+function freshAgentWorkspaceTitle(
+  summary: CodeDeliveryPullRequestSummary,
+): string {
+  const base = `PR #${summary.number} ${summary.title}`.trim();
+  return base.length > 60 ? `${base.slice(0, 59).trimEnd()}…` : base;
+}
+
 function PrActions({
   detail,
   summary,
@@ -544,6 +768,7 @@ function PrActions({
   onMergeMethodChange,
   workflowRunIds,
   onRun,
+  onAdminMerge,
 }: {
   detail: CodeDeliveryPullRequestDetail;
   summary: CodeDeliveryPullRequestSummary;
@@ -552,9 +777,11 @@ function PrActions({
   onMergeMethodChange: (method: MergeMethod) => void;
   workflowRunIds: number[];
   onRun: (name: string, action: CodeDeliveryPullRequestAction) => void;
+  onAdminMerge: () => void;
 }) {
   const blocked = mergeBlockedReason(summary);
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;
+  const canAdminMerge = detail.can_merge && Boolean(summary.head_sha);
   const anyAction =
     detail.can_mark_ready ||
     detail.can_merge ||
@@ -603,6 +830,7 @@ function PrActions({
                   type: "merge",
                   method: mergeMethod,
                   auto: false,
+                  admin: false,
                   expected_head_sha: summary.head_sha!,
                 })
               }
@@ -621,6 +849,7 @@ function PrActions({
                   type: "merge",
                   method: mergeMethod,
                   auto: true,
+                  admin: false,
                   expected_head_sha: summary.head_sha!,
                 })
               }
@@ -667,7 +896,7 @@ function PrActions({
             Reopen
           </Button>
         )}
-        {detail.can_close && (
+        {(detail.can_close || canAdminMerge) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -677,7 +906,7 @@ function PrActions({
                 disabled={Boolean(busy)}
                 aria-label="More pull request actions"
               >
-                {busy === "close" ? (
+                {busy === "close" || busy === "admin-merge" ? (
                   <LoaderCircle className="animate-spin" />
                 ) : (
                   <MoreHorizontal />
@@ -685,13 +914,21 @@ function PrActions({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                variant="destructive"
-                onSelect={() => onRun("close", { type: "close" })}
-              >
-                <GitPullRequestClosed />
-                Close without merging
-              </DropdownMenuItem>
+              {canAdminMerge && (
+                <DropdownMenuItem onSelect={onAdminMerge}>
+                  <ShieldAlert />
+                  Admin merge (bypass protections)…
+                </DropdownMenuItem>
+              )}
+              {detail.can_close && (
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={() => onRun("close", { type: "close" })}
+                >
+                  <GitPullRequestClosed />
+                  Close without merging
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
@@ -735,24 +972,54 @@ function PrDescription({ body }: { body: string }) {
 function PrConversation({
   detail,
   busy,
+  order,
+  onOrderChange,
   draft,
   onDraftChange,
   onComment,
 }: {
   detail: CodeDeliveryPullRequestDetail;
   busy: string | null;
+  order: PullRequestCommentOrder;
+  onOrderChange: (order: PullRequestCommentOrder) => void;
   draft: string;
   onDraftChange: (value: string) => void;
   onComment: () => void;
 }) {
+  const ordered = useMemo(
+    () => orderPullRequestComments(detail.comments, order),
+    [detail.comments, order],
+  );
   return (
     <section>
-      <h3 className="text-sm font-medium">Conversation</h3>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-medium">Conversation</h3>
+        {detail.comments.length > 1 && (
+          <Select
+            value={order}
+            onValueChange={(value) =>
+              onOrderChange(value as PullRequestCommentOrder)
+            }
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-32"
+              aria-label="Comment order"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="newest">Newest first</SelectItem>
+              <SelectItem value="oldest">Oldest first</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+      </div>
       {detail.comments.length === 0 ? (
         <p className="mt-2 text-xs text-muted-foreground">No comments yet.</p>
       ) : (
         <div className="mt-2 flex flex-col gap-2.5">
-          {detail.comments.map((comment, index) => (
+          {ordered.map((comment, index) => (
             <PrCommentCard
               key={
                 comment.id ?? `${comment.created_at}:${comment.author}:${index}`
@@ -887,28 +1154,50 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
   );
 }
 
-/** A unified patch, colored the way a diff should be. */
+/**
+ * A unified patch, colored the way a diff should be: a quiet background tint
+ * per changed line and a colored sign, with the code itself kept in the
+ * ordinary foreground. Recoloring whole lines of code green and red made the
+ * text fight the tint in both themes; the tint alone carries the meaning.
+ */
 function DiffPatch({ patch }: { patch: string }) {
   const lines = useMemo(() => patch.split("\n"), [patch]);
   return (
     <pre className="overflow-x-auto py-1 font-mono text-[11px] leading-[1.45]">
-      {lines.map((line, index) => (
-        <code
-          key={index}
-          className={cn(
-            "block px-3 whitespace-pre",
-            line.startsWith("+") &&
-              !line.startsWith("+++") &&
-              "bg-success-background text-success-foreground-muted",
-            line.startsWith("-") &&
-              !line.startsWith("---") &&
-              "bg-critical-background text-critical-foreground-muted",
-            line.startsWith("@@") && "text-info-foreground",
-          )}
-        >
-          {line || " "}
-        </code>
-      ))}
+      {lines.map((line, index) => {
+        const kind =
+          line.startsWith("+") && !line.startsWith("+++")
+            ? "add"
+            : line.startsWith("-") && !line.startsWith("---")
+              ? "remove"
+              : line.startsWith("@@")
+                ? "hunk"
+                : "context";
+        return (
+          <code
+            key={index}
+            className={cn(
+              "block px-3 whitespace-pre",
+              kind === "add" && "bg-success/10",
+              kind === "remove" && "bg-critical/10",
+              kind === "hunk" && "bg-info/10 text-info-foreground-muted",
+            )}
+          >
+            {kind === "add" || kind === "remove" ? (
+              <>
+                <span
+                  className={kind === "add" ? "text-success" : "text-critical"}
+                >
+                  {line[0]}
+                </span>
+                {line.slice(1)}
+              </>
+            ) : (
+              line || " "
+            )}
+          </code>
+        );
+      })}
     </pre>
   );
 }
@@ -1038,7 +1327,7 @@ function InlineDetailError({
   onRetry: () => void;
 }) {
   return (
-    <div className="m-4 flex items-center justify-between gap-3 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
+    <div className="m-5 flex items-center justify-between gap-3 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
       <span>{message}</span>
       <Button type="button" size="xs" variant="outline" onClick={onRetry}>
         Try again

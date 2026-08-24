@@ -19,7 +19,7 @@ import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
 } from "../stories/fixtures";
-import { PullRequestDetailPanel } from "./PullRequestDetail";
+import { PullRequestDetailSheet } from "./PullRequestDetail";
 
 afterEach(cleanup);
 
@@ -52,7 +52,7 @@ function summaryFor(number: number) {
 
 async function renderPanel(number: number, api = client()) {
   render(
-    <PullRequestDetailPanel
+    <PullRequestDetailSheet
       client={api}
       summary={summaryFor(number)}
       onClose={vi.fn()}
@@ -63,7 +63,7 @@ async function renderPanel(number: number, api = client()) {
   await screen.findByRole("tab", { name: /Conversation/ });
 }
 
-describe("PullRequestDetailPanel", () => {
+describe("PullRequestDetailSheet", () => {
   it("accepts load, refresh, and mutation completions in Strict Mode", async () => {
     vi.mocked(toast.success).mockClear();
     const baseDetail = deliveryPullRequestDetails[2251]!;
@@ -99,7 +99,7 @@ describe("PullRequestDetailPanel", () => {
 
     render(
       <StrictMode>
-        <PullRequestDetailPanel
+        <PullRequestDetailSheet
           client={client({
             getCodeDeliveryPullRequestDetail: getDetail,
             runCodeDeliveryPullRequestAction: runAction,
@@ -278,7 +278,7 @@ describe("PullRequestDetailPanel", () => {
       onOpenWorkspace: vi.fn(),
     };
     const view = render(
-      <PullRequestDetailPanel
+      <PullRequestDetailSheet
         {...props}
         summary={summaryFor(2251)}
         initialDetail={deliveryPullRequestDetails[2251]}
@@ -291,7 +291,7 @@ describe("PullRequestDetailPanel", () => {
     await waitFor(() => expect(runAction).toHaveBeenCalledTimes(1));
 
     view.rerender(
-      <PullRequestDetailPanel
+      <PullRequestDetailSheet
         {...props}
         summary={summaryFor(2247)}
         initialDetail={deliveryPullRequestDetails[2247]}
