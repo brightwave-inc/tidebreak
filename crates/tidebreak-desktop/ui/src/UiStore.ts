@@ -120,6 +120,14 @@ export type UiStore = {
   /** What Enter and the single composer action do while a response is running. */
   activeTurnSendMode: ActiveTurnSendMode;
   setActiveTurnSendMode: (mode: ActiveTurnSendMode) => void;
+  /**
+   * Whether the command palette is up. Here rather than in the code store
+   * because the palette spans both modes, and because the native browser
+   * webview has to know something is drawn over the editor area.
+   */
+  commandPaletteOpen: boolean;
+  setCommandPaletteOpen: (open: boolean) => void;
+  toggleCommandPalette: () => void;
 };
 
 export function createUiStore() {
@@ -149,6 +157,10 @@ export function createUiStore() {
       storeActiveTurnSendMode(mode);
       set({ activeTurnSendMode: mode });
     },
+    commandPaletteOpen: false,
+    setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
+    toggleCommandPalette: () =>
+      set((state) => ({ commandPaletteOpen: !state.commandPaletteOpen })),
   }));
 }
 

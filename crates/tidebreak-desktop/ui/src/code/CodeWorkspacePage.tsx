@@ -234,6 +234,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     (state) => state.setReviewSidebarOpen,
   );
   const quickOpenPending = useCodeUiStore((state) => state.quickOpenPending);
+  const openFilePending = useCodeUiStore((state) => state.openFilePending);
   const archivePending = useCodeUiStore((state) => state.archivePending);
   const terminalPending = useCodeUiStore((state) => state.terminalPending);
   const shortcutHints = useCodeShortcutHints();
@@ -670,6 +671,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!useCodeUiStore.getState().takeQuickOpen()) return;
     requestNewTab(splitFocused ? "secondary" : "primary");
   }, [quickOpenPending, splitFocused]);
+
+  // The palette ranks worktree files but has nowhere to put one; the tabs live
+  // here, so it names a path and this opens it.
+  useEffect(() => {
+    if (!openFilePending) return;
+    const path = useCodeUiStore.getState().takeOpenFilePath();
+    if (path) openFile(path);
+  }, [openFilePending]);
 
   // The chord and the rail command both raise the ask above the route, because
   // starting a shell is a server call neither of them can make.

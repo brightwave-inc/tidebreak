@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { HarnessKind } from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import type { StatusTone } from "./statusTone";
 import type { WorkflowShortcut } from "./workspaceWorkflow";
 import {
   isCardDensity,
@@ -299,6 +300,37 @@ export type CodeUiStore = {
   archivePending: boolean;
   requestArchiveWorkspace: () => void;
   takeArchiveWorkspace: () => boolean;
+  /**
+   * What the workspace header says the next step is, republished for the
+   * command palette.
+   *
+   * The workflow control already resolves this from the branch and pull-request
+   * state to label its own primary button. The palette leads with the same
+   * answer rather than fetching the snapshot a second time and risking a
+   * different one — a palette that offered "Push" while the header said
+   * "Merge" would be worse than offering nothing.
+   */
+  workflowSuggestion: WorkflowSuggestion | null;
+  publishWorkflowSuggestion: (suggestion: WorkflowSuggestion | null) => void;
+  /**
+   * A path the palette picked, taken by the workspace page that owns the tabs.
+   *
+   * The palette can rank a worktree's files but has nowhere to put one: which
+   * editor group a file opens into is the page's business. So it names the
+   * path and the page opens it, the same way every other cross-surface ask
+   * here works.
+   */
+  openFilePending: string | null;
+  requestOpenFilePath: (path: string) => void;
+  takeOpenFilePath: () => string | null;
+};
+
+/** The header's primary action, as the palette's leading row. */
+export type WorkflowSuggestion = {
+  workspaceId: string;
+  label: string;
+  summary: string;
+  tone: StatusTone;
 };
 
 export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
@@ -346,6 +378,17 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     if (!get().archivePending) return false;
     set({ archivePending: false });
     return true;
+  },
+  workflowSuggestion: null,
+  publishWorkflowSuggestion: (workflowSuggestion) =>
+    set({ workflowSuggestion }),
+  openFilePending: null,
+  requestOpenFilePath: (path) => set({ openFilePending: path }),
+  takeOpenFilePath: () => {
+    const pending = get().openFilePending;
+    if (pending === null) return null;
+    set({ openFilePending: null });
+    return pending;
   },
   offerComposerPrompt: (scope, prompt) =>
     set({ pendingComposerPrompt: { scope, text: prompt, submit: false } }),

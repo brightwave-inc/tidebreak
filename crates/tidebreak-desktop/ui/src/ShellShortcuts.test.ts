@@ -59,7 +59,8 @@ describe("shell shortcut resolution", () => {
     const cases: Array<[Partial<KeyboardEvent>, ShellShortcutAction]> = [
       [{ key: "b", code: "KeyB" }, "toggle-sidebar"],
       [{ key: "n", code: "KeyN" }, "new-chat"],
-      [{ key: "k", code: "KeyK" }, "focus-composer"],
+      [{ key: "k", code: "KeyK" }, "open-command-palette"],
+      [{ key: "l", code: "KeyL" }, "focus-composer"],
       [{ key: "/", code: "Slash" }, "show-shortcuts"],
       [{ key: "0", code: "Digit0" }, "zoom-reset"],
       [{ key: "r", code: "KeyR" }, "reload-app"],
@@ -236,9 +237,13 @@ describe("shell shortcut resolution", () => {
     const dvorakN = keyEvent({ key: "l", code: "KeyN" });
     expect(resolveShellShortcut(dvorakN, context())?.id).toBe("new-chat");
 
-    // And the key that does produce "n" on Dvorak is not a new chat.
+    // And the key that does produce "n" on Dvorak is not a new chat. Dvorak's
+    // "n" sits on the physical L, which chat mode leaves to the composer
+    // shortcut rather than to anything that makes something.
     const dvorakElsewhere = keyEvent({ key: "n", code: "KeyL" });
-    expect(resolveShellShortcut(dvorakElsewhere, context())).toBeNull();
+    expect(resolveShellShortcut(dvorakElsewhere, context())?.id).toBe(
+      "focus-composer",
+    );
   });
 
   it("matches punctuation on the character, which has no fixed position", () => {
@@ -301,6 +306,22 @@ describe("shell shortcut resolution", () => {
       },
     );
     expect(resolved).toBeNull();
+  });
+
+  it("lets the palette's own chord through the modal guard, so it can close", () => {
+    // Every other chord acts behind the dialog and stays suppressed; this one
+    // acts on it. The handler still declines when the open dialog is somebody
+    // else's, which the guard alone cannot tell.
+    const resolved = resolveShellShortcut(
+      keyEvent({ key: "k", code: "KeyK" }),
+      {
+        editable: false,
+        modalOpen: true,
+        command: true,
+        mode: "code",
+      },
+    );
+    expect(resolved?.id).toBe("open-command-palette");
   });
 });
 

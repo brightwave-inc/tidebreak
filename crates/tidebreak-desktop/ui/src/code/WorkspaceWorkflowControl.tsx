@@ -116,6 +116,32 @@ export function WorkspaceWorkflowControl({
     model.pr?.checks?.filter(
       (check) => check.bucket === "fail" || check.bucket === "pending",
     ) ?? [];
+
+  // Republish the primary action for the command palette, which leads with it.
+  // Cleared on unmount so the palette never offers a step for a workspace the
+  // reader has already navigated away from.
+  const publishWorkflowSuggestion = useCodeUiStore(
+    (state) => state.publishWorkflowSuggestion,
+  );
+  useEffect(() => {
+    publishWorkflowSuggestion(
+      primaryLabel
+        ? {
+            workspaceId,
+            label: primaryLabel,
+            summary: statusLabel,
+            tone: model.tone,
+          }
+        : null,
+    );
+    return () => publishWorkflowSuggestion(null);
+  }, [
+    publishWorkflowSuggestion,
+    workspaceId,
+    primaryLabel,
+    statusLabel,
+    model.tone,
+  ]);
   // While a watch runs, agent actions would contend for the same worktree;
   // local Git and navigation actions stay available.
   const secondaryActions = watchActive

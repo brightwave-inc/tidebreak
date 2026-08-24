@@ -77,11 +77,13 @@ import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import {
+  hasOpenModalDialog,
   numberedTabIndex,
   useShellShortcuts,
   type ShellShortcutHandlers,
   type ShellShortcutMode,
 } from "./ShellShortcuts";
+import { CommandPaletteDialog } from "./CommandPaletteDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
@@ -380,6 +382,15 @@ export function AppShell() {
       }),
     "code-split-editor": () => applyCodeLayout(splitFocusedEditor),
     "close-tab": closeTab,
+    "open-command-palette": () => {
+      // The chord is allowed through the modal guard so it can close the
+      // palette. Any other dialog on screen means the reader is mid-decision,
+      // so the key is declined rather than opening a second surface over it.
+      const ui = useUiStore.getState();
+      if (ui.commandPaletteOpen) ui.setCommandPaletteOpen(false);
+      else if (hasOpenModalDialog(document)) return false;
+      else ui.setCommandPaletteOpen(true);
+    },
     "focus-composer": focusComposer,
     "zoom-in": zoom.zoomIn,
     "zoom-out": zoom.zoomOut,
@@ -993,6 +1004,7 @@ export function AppShell() {
             open={shortcutsOpen}
             onOpenChange={setShortcutsOpen}
           />
+          <CommandPaletteDialog />
           {nativeTitlebar && !sidebarCollapsed && (
             <Titlebar
               macOverlay={macOverlayTitlebar}

@@ -21,10 +21,23 @@ Command.displayName = CommandPrimitive.displayName;
 
 const CommandInput = React.forwardRef<
   React.ComponentRef<typeof CommandPrimitive.Input>,
-  React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>
->(({ className, ...props }, ref) => (
-  <div className="flex items-center gap-2 border-b px-3" cmdk-input-wrapper="">
+  React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input> & {
+    /**
+     * Drawn inside the field, between the search glyph and the text. For a
+     * scope chip or token that belongs to what is being typed rather than
+     * beside it — putting one outside the wrapper makes the field, and the
+     * rule under it, stop short of the surface's own width.
+     */
+    leading?: React.ReactNode;
+    wrapperClassName?: string;
+  }
+>(({ className, leading, wrapperClassName, ...props }, ref) => (
+  <div
+    className={cn("flex items-center gap-2 border-b px-3", wrapperClassName)}
+    cmdk-input-wrapper=""
+  >
     <SearchIcon className="size-4 shrink-0 opacity-50" aria-hidden />
+    {leading}
     <CommandPrimitive.Input
       ref={ref}
       className={cn(

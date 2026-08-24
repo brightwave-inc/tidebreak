@@ -33,6 +33,7 @@ export type ShellShortcutAction =
   | "code-source-control"
   | "code-archive-workspace"
   | "close-tab"
+  | "open-command-palette"
   | "focus-composer"
   | "zoom-in"
   | "zoom-out"
@@ -124,6 +125,14 @@ export type ShellShortcutDef = ShellShortcutBinding & {
    * so the composer's own focus never swallows them.
    */
   allowInEditable: boolean;
+  /**
+   * Whether the shortcut still fires while a modal dialog is open. Almost
+   * nothing should: the reader is mid-decision, and acting behind the dialog
+   * would be a surprise. The exception is a chord that acts *on* a dialog
+   * rather than behind it — the palette's own toggle closes the palette, which
+   * is the one thing the reader can mean by pressing it again.
+   */
+  allowInModal?: boolean;
 };
 
 export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
@@ -415,8 +424,27 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     allowInEditable: true,
   },
   {
-    id: "focus-composer",
+    // The one chord that reaches everything else: workspaces, the commands
+    // that act on them, settings, and the files. Cmd+K is where a reader
+    // trained on any other tool of this shape looks for it, which is why the
+    // composer gave the chord up.
+    id: "open-command-palette",
     codes: ["KeyK"],
+    mod: true,
+    description: "Search commands, workspaces, and settings",
+    group: "Navigation",
+    allowInEditable: true,
+    // Pressing it again closes the palette. Every other shortcut stays
+    // suppressed while it is open.
+    allowInModal: true,
+  },
+  {
+    // Cmd+L, next to the palette's Cmd+K and matching what the editors this
+    // app sits beside use to reach their agent. It takes the chord from
+    // Monaco's expand-line-selection, which is reachable with Home and
+    // Shift+Down; getting back to the composer from anywhere is not.
+    id: "focus-composer",
+    codes: ["KeyL"],
     mod: true,
     description: "Focus the message composer",
     group: "Work",
@@ -569,6 +597,24 @@ function inScope(def: ShellShortcutDef, mode: ShellShortcutMode): boolean {
   return def.scope === undefined || def.scope === mode;
 }
 
+/**
+ * The definition an action is reached by in a mode, or `null` when none is.
+ *
+ * The command palette draws each row's chord from here, so a row and the help
+ * dialog can never name different keys for the same command. Scoped by mode
+ * for the same reason the help dialog is: an action can be bound differently
+ * on the two sides of the app, and the first match is the one that fires.
+ */
+export function shellShortcutFor(
+  action: ShellShortcutAction,
+  mode: ShellShortcutMode,
+): ShellShortcutDef | null {
+  return (
+    SHELL_SHORTCUTS.find((def) => def.id === action && inScope(def, mode)) ??
+    null
+  );
+}
+
 type ShortcutKeyEvent = Pick<
   KeyboardEvent,
   "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey"
@@ -613,12 +659,12 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 /**
  * The shortcut a key event should trigger, or `null` when none should.
  *
- * A modal dialog on screen suppresses every shell shortcut: the reader is
- * mid-decision, and toggling the frame or starting a new chat behind the
- * dialog would be a surprise. `mode` decides which scoped definitions are live,
- * and is required rather than defaulted so every caller has to say which half
- * of the app the key was pressed in. Kept pure so the guard is testable without
- * a DOM.
+ * A modal dialog on screen suppresses every shell shortcut but the ones marked
+ * `allowInModal`: the reader is mid-decision, and toggling the frame or
+ * starting a new chat behind the dialog would be a surprise. `mode` decides
+ * which scoped definitions are live, and is required rather than defaulted so
+ * every caller has to say which half of the app the key was pressed in. Kept
+ * pure so the guard is testable without a DOM.
  */
 export function resolveShellShortcut(
   event: ShortcutKeyEvent,
@@ -629,8 +675,8 @@ export function resolveShellShortcut(
     mode: ShellShortcutMode;
   },
 ): ShellShortcutDef | null {
-  if (context.modalOpen) return null;
   for (const def of SHELL_SHORTCUTS) {
+    if (context.modalOpen && !def.allowInModal) continue;
     if (!inScope(def, context.mode)) continue;
     if (!matchesShellShortcut(event, def, context.command)) continue;
     if (context.editable && !def.allowInEditable) return null;
@@ -639,8 +685,14 @@ export function resolveShellShortcut(
   return null;
 }
 
-/** A radix dialog or alert dialog currently open on screen. */
-function hasOpenModalDialog(doc: Document): boolean {
+/**
+ * A radix dialog or alert dialog currently open on screen.
+ *
+ * Exported for the palette's own handler: its chord is allowed through the
+ * modal guard so it can close itself, which means the handler has to ask the
+ * question the guard would otherwise have asked for it.
+ */
+export function hasOpenModalDialog(doc: Document): boolean {
   return (
     doc.querySelector(
       '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]',
