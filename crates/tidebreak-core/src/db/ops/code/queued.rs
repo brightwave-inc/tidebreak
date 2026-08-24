@@ -1,6 +1,6 @@
 //! Durable queued follow-ups for code sessions: messages accepted while the
 //! session or its workspace checkout was busy, promoted into real turns
-//! strictly FIFO once the session worker is free (decision 65).
+//! strictly FIFO once the session worker is free (decision 67).
 //!
 //! The chat queue (decision 9) proves promotion through the turn-admission
 //! table because any process may promote. A code session has exactly one

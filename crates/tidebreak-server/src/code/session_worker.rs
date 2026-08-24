@@ -127,7 +127,7 @@ pub(crate) struct WorkerHandle {
 /// How a worker gets its next turn, and when it may start one.
 ///
 /// Queued follow-ups are durable `code_queued_turn` rows the worker drains
-/// FIFO (decision 65); `wake` is how an enqueue, a resume, or a send-now
+/// FIFO (decision 67); `wake` is how an enqueue, a resume, or a send-now
 /// tells the worker to look again. `worktree` is shared with every other
 /// session in the workspace, and holding it is what keeps two agents from
 /// editing one checkout at the same time (record 55).
@@ -814,7 +814,7 @@ async fn set_permission_mode(
     }
 }
 
-/// Run every promotable queued row, oldest first (decision 65).
+/// Run every promotable queued row, oldest first (decision 67).
 ///
 /// Each round snapshots the durable FIFO head and drives it as a turn;
 /// [`promote_queued_turn`] deletes the row and inserts the turn together, so
@@ -1084,7 +1084,7 @@ async fn drive_turn_inner(
     let mut turn = CodeTurn {
         // A promoted queue row already carries the turn's id: inserting under
         // it is what lets the row deletion and the turn insertion commit as
-        // one write (decision 65).
+        // one write (decision 67).
         id: queued_row
             .as_ref()
             .map_or_else(CodeTurnId::new, |row| row.id),

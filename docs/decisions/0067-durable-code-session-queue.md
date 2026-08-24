@@ -1,4 +1,4 @@
-# 65. Code sessions queue follow-ups durably, on the chat queue's contract
+# 67. Code sessions queue follow-ups durably, on the chat queue's contract
 
 - Status: Accepted
 - Date: 2026-08-24

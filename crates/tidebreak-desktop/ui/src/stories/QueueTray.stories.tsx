@@ -4,7 +4,7 @@ import { QueueTray, type QueueTrayApi, type QueueTrayRow } from "@/QueueTray";
 
 /**
  * The durable message queue above the composer, shared by chat and code
- * sessions (decisions 9 and 65).
+ * sessions (decisions 9 and 67).
  *
  * Every row is a server-owned queued turn: edit, reorder, delete, and
  * send-now are real API calls behind the adapter, and the tray only observes.

@@ -1423,7 +1423,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
         .expect("a queued row is addressable")
         .to_owned();
 
-    // Depth is no longer one (decision 65): a second mid-turn send parks
+    // Depth is no longer one (decision 67): a second mid-turn send parks
     // behind the first instead of refusing with queue_full.
     let second = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
