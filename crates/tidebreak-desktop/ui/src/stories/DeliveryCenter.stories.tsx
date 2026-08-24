@@ -330,6 +330,16 @@ function resetStoryState(scenario: DeliveryScenario): void {
     composerActionScope: null,
   });
   useUiStore.setState({ sidebarCollapsed: false, sidebarWidth: 280 });
+  // The author filter offers logins Delivery has already seen; seed the pool
+  // the way a prior visit would have.
+  useCodeDeliveryStore.setState({
+    knownAuthors: [
+      { login: "mara" },
+      { login: "devon" },
+      { login: "ines" },
+      { login: "dependabot[bot]" },
+    ],
+  });
 
   if (scenario === "notifications") {
     useCodeDeliveryStore.setState({
@@ -785,5 +795,23 @@ export const NarrowPullRequestDetail: Story = {
     await expect(
       await body.findByRole("heading", { name: "Build the delivery center" }),
     ).toBeVisible();
+  },
+};
+
+/**
+ * The author filter is a lookup over logins Delivery has seen — avatars and
+ * checkboxes — with typing kept as the fallback for a login it has not.
+ */
+export const PullRequestAuthorFilter: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Filters/ }),
+    );
+    await expect(
+      await body.findByRole("checkbox", { name: "mara" }),
+    ).toBeVisible();
+    await userEvent.click(await body.findByRole("checkbox", { name: "mara" }));
   },
 };

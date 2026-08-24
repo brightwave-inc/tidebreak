@@ -74,8 +74,10 @@ import type {
 import {
   codeDeliveryRepositoryKey,
   codeDeliveryRepositoryTarget,
+  deliveryAuthorSightings,
   trackedCodeDeliveryRepositories,
   useCodeDeliveryStore,
+  type CodeDeliveryAuthor,
   type CodeDeliveryPrViewFilters,
   type CodeDeliveryRunViewFilters,
   type CodeDeliverySavedView,
@@ -94,6 +96,7 @@ import {
 import {
   checkCounts,
   checkSummary,
+  githubAvatarUrl,
   pullRequestLifecycle,
   pullRequestReviewSummary,
   pullRequestSettledAt,
@@ -835,6 +838,9 @@ function PullRequestsSurface({
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
+      useCodeDeliveryStore
+        .getState()
+        .rememberDeliveryAuthors(deliveryAuthorSightings(page.items, []));
       setItems((current) => {
         let nextItems = append ? [...current, ...page.items] : page.items;
         const exactItem = target
@@ -1144,6 +1150,9 @@ function RunsSurface({
         ...(cursor ? { cursor } : {}),
       });
       if (token !== generation.current) return;
+      useCodeDeliveryStore
+        .getState()
+        .rememberDeliveryAuthors(deliveryAuthorSightings([], page.items));
       setItems((current) => {
         let nextItems = append ? [...current, ...page.items] : page.items;
         const exactItem = target
@@ -2031,13 +2040,12 @@ function PullRequestFilters({
             onChange={(checkStates) => onChange({ ...filters, checkStates })}
           />
         </FilterSection>
-        <FilterSection title="Author logins">
-          <Input
-            value={filters.authors.join(", ")}
-            placeholder="octocat, teammate"
-            onChange={(event) =>
-              onChange({ ...filters, authors: commaList(event.target.value) })
-            }
+        <FilterSection title="Authors">
+          <AuthorFilterOptions
+            noun="author"
+            emptyNote="Authors appear here as pull requests load. Type a login to filter by hand."
+            selected={filters.authors}
+            onChange={(authors) => onChange({ ...filters, authors })}
           />
         </FilterSection>
         <div className="mt-3 flex flex-col gap-2 border-t border-border-subtle pt-3">
@@ -2166,12 +2174,14 @@ function RunFilters({
           placeholder="push, pull_request"
           onChange={(events) => onChange({ ...filters, events })}
         />
-        <AdvancedTextFilter
-          label="Actors"
-          value={filters.actors}
-          placeholder="octocat, dependabot[bot]"
-          onChange={(actors) => onChange({ ...filters, actors })}
-        />
+        <FilterSection title="Actors">
+          <AuthorFilterOptions
+            noun="actor"
+            emptyNote="Actors appear here as runs load. Type a login to filter by hand."
+            selected={filters.actors}
+            onChange={(actors) => onChange({ ...filters, actors })}
+          />
+        </FilterSection>
         <div className="mt-3 flex flex-col gap-2 border-t border-border-subtle pt-3">
           <FilterSwitch
             label="Needs attention"
@@ -2245,6 +2255,150 @@ function RepositoryCheckboxes({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Login selection without the memory test: the checkable pool is every login
+ * Delivery has seen on a pull request or run, drawn with avatars, and the
+ * search box narrows it. A login the pool has never seen — a teammate who has
+ * not pushed lately, a bot — can still be typed and added by hand, which is
+ * all the old free-text field could do.
+ */
+function AuthorFilterOptions({
+  noun,
+  emptyNote,
+  selected,
+  onChange,
+}: {
+  noun: "author" | "actor";
+  emptyNote: string;
+  selected: string[];
+  onChange: (selected: string[]) => void;
+}) {
+  const knownAuthors = useCodeDeliveryStore((state) => state.knownAuthors);
+  const [query, setQuery] = useState("");
+  const trimmed = query.trim();
+  const isSelected = (login: string) =>
+    selected.some((entry) => entry.toLowerCase() === login.toLowerCase());
+
+  const options = useMemo(() => {
+    // Selected logins stay listed even when the pool has never seen them —
+    // a saved view's author must be visible to be uncheckable.
+    const byKey = new Map<string, CodeDeliveryAuthor>();
+    for (const login of selected) byKey.set(login.toLowerCase(), { login });
+    for (const author of knownAuthors) {
+      const key = author.login.toLowerCase();
+      const existing = byKey.get(key);
+      if (!existing) byKey.set(key, author);
+      else if (author.avatarUrl && !existing.avatarUrl) {
+        byKey.set(key, { ...existing, avatarUrl: author.avatarUrl });
+      }
+    }
+    const needle = trimmed.toLowerCase();
+    const chosen = new Set(selected.map((entry) => entry.toLowerCase()));
+    return [...byKey.values()]
+      .filter(
+        (author) => !needle || author.login.toLowerCase().includes(needle),
+      )
+      .sort((left, right) => {
+        const bySelection =
+          Number(chosen.has(right.login.toLowerCase())) -
+          Number(chosen.has(left.login.toLowerCase()));
+        if (bySelection !== 0) return bySelection;
+        return left.login.localeCompare(right.login);
+      });
+  }, [knownAuthors, selected, trimmed]);
+
+  const toggle = (login: string, enabled: boolean) => {
+    const rest = selected.filter(
+      (entry) => entry.toLowerCase() !== login.toLowerCase(),
+    );
+    onChange(enabled ? [...rest, login] : rest);
+  };
+
+  const exactMatchListed = options.some(
+    (author) => author.login.toLowerCase() === trimmed.toLowerCase(),
+  );
+  const addTyped = () => {
+    if (!trimmed) return;
+    toggle(trimmed, true);
+    setQuery("");
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Input
+        value={query}
+        placeholder={`Search ${noun}s or type a login`}
+        aria-label={`Search ${noun}s`}
+        onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          if (!exactMatchListed) addTyped();
+          else if (trimmed) {
+            toggle(trimmed, !isSelected(trimmed));
+            setQuery("");
+          }
+        }}
+      />
+      {options.length > 0 && (
+        <div className="flex max-h-36 flex-col gap-1 overflow-auto pr-1">
+          {options.map((author) => (
+            <label
+              key={author.login.toLowerCase()}
+              className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-muted/40"
+            >
+              <Checkbox
+                checked={isSelected(author.login)}
+                onCheckedChange={(checked) =>
+                  toggle(author.login, checked === true)
+                }
+              />
+              <AuthorAvatar login={author.login} url={author.avatarUrl} />
+              <span className="min-w-0 truncate">{author.login}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {options.length === 0 && !trimmed && (
+        <p className="text-xs text-muted-foreground">{emptyNote}</p>
+      )}
+      {trimmed && !exactMatchListed && (
+        <button
+          type="button"
+          className="cursor-pointer rounded-md px-1.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+          onClick={addTyped}
+        >
+          Filter by “{trimmed}”
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** A login's face at list scale, with initials when there is no image. */
+function AuthorAvatar({ login, url }: { login: string; url?: string }) {
+  const [failed, setFailed] = useState(false);
+  const source = url ?? githubAvatarUrl(login);
+  if (!source || failed) {
+    return (
+      <span
+        className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground"
+        aria-hidden
+      >
+        {login.slice(0, 2)}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={source}
+      alt=""
+      className="size-5 shrink-0 rounded-full object-cover"
+      onError={() => setFailed(true)}
+    />
   );
 }
 

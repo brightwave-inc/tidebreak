@@ -13,11 +13,22 @@ import type {
 const STORAGE_KEY = "tidebreak.code-delivery";
 const STORAGE_VERSION = 1;
 const MAX_NOTIFICATIONS = 500;
+const MAX_KNOWN_AUTHORS = 50;
 const MAX_SEEN_FINGERPRINTS = 5_000;
 const MAX_NOTIFICATION_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const REPOSITORY_CACHE_MS = 2 * 60 * 1_000;
 
 export type CodeDeliverySurface = "pull_requests" | "runs";
+
+/**
+ * A login Delivery has seen on a pull request or run, kept so the author
+ * filter can offer people instead of expecting logins typed from memory.
+ * Recency-ordered and bounded; the newest sighting's avatar wins.
+ */
+export type CodeDeliveryAuthor = {
+  login: string;
+  avatarUrl?: string;
+};
 
 export type CodeDeliveryPrViewFilters = {
   search: string;
@@ -134,6 +145,7 @@ type PersistedCodeDeliveryState = {
   notifications: CodeDeliveryNotification[];
   seenFingerprints: Record<string, string>;
   lastPollAt: string | null;
+  knownAuthors: CodeDeliveryAuthor[];
 };
 
 type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
@@ -169,6 +181,7 @@ type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
     runs: readonly CodeDeliveryRunSummary[],
     at: string,
   ) => number;
+  rememberDeliveryAuthors: (authors: readonly CodeDeliveryAuthor[]) => void;
   markNotificationRead: (id: string, read?: boolean) => void;
   markAllNotificationsRead: () => void;
   clearNotifications: () => void;
@@ -190,6 +203,7 @@ function emptyPersistedState(): PersistedCodeDeliveryState {
     notifications: [],
     seenFingerprints: {},
     lastPollAt: null,
+    knownAuthors: [],
   };
 }
 
@@ -216,6 +230,7 @@ function persist(state: CodeDeliveryStore): string | null {
     notifications: state.notifications,
     seenFingerprints: state.seenFingerprints,
     lastPollAt: state.lastPollAt,
+    knownAuthors: state.knownAuthors,
   };
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -373,6 +388,10 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
       set({
         notifications: next.notifications,
         seenFingerprints: next.seenFingerprints,
+        knownAuthors: mergeKnownAuthors(
+          get().knownAuthors,
+          deliveryAuthorSightings(pullRequests, runs),
+        ),
         polling: false,
         monitorError: null,
         lastPollAt: at,
@@ -380,6 +399,20 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
       });
       persistCurrent();
       return next.added;
+    },
+    rememberDeliveryAuthors: (authors) => {
+      const merged = mergeKnownAuthors(get().knownAuthors, authors);
+      const current = get().knownAuthors;
+      const unchanged =
+        merged.length === current.length &&
+        merged.every(
+          (author, index) =>
+            author.login === current[index]!.login &&
+            author.avatarUrl === current[index]!.avatarUrl,
+        );
+      if (unchanged) return;
+      set({ knownAuthors: merged });
+      persistCurrent();
     },
     markNotificationRead: (id, read = true) => {
       const at = new Date().toISOString();
@@ -734,6 +767,91 @@ export function unreadCodeDeliveryNotifications(
   );
 }
 
+/**
+ * Fold new sightings into the known-author pool: dedupe logins
+ * case-insensitively, move a resighted login to the front, let a sighting
+ * that carries an avatar refresh a stale one, and drop the oldest past the
+ * cap. Returns the current array unchanged when nothing moved, so callers
+ * can skip a persist.
+ */
+export function mergeKnownAuthors(
+  current: readonly CodeDeliveryAuthor[],
+  sightings: readonly CodeDeliveryAuthor[],
+): CodeDeliveryAuthor[] {
+  const incoming = new Map<string, CodeDeliveryAuthor>();
+  for (const sighting of sightings) {
+    const login = sighting.login.trim();
+    if (!login) continue;
+    const key = login.toLowerCase();
+    const previous = incoming.get(key);
+    incoming.set(key, {
+      login,
+      ...(sighting.avatarUrl || previous?.avatarUrl
+        ? { avatarUrl: sighting.avatarUrl ?? previous?.avatarUrl }
+        : {}),
+    });
+  }
+  if (incoming.size === 0) return [...current];
+  const merged: CodeDeliveryAuthor[] = [];
+  for (const [key, sighting] of incoming) {
+    const known = current.find((author) => author.login.toLowerCase() === key);
+    const avatarUrl = sighting.avatarUrl ?? known?.avatarUrl;
+    merged.push({ login: sighting.login, ...(avatarUrl ? { avatarUrl } : {}) });
+  }
+  for (const author of current) {
+    if (!incoming.has(author.login.toLowerCase())) merged.push(author);
+  }
+  const bounded = merged.slice(0, MAX_KNOWN_AUTHORS);
+  const unchanged =
+    bounded.length === current.length &&
+    bounded.every(
+      (author, index) =>
+        author.login === current[index]!.login &&
+        author.avatarUrl === current[index]!.avatarUrl,
+    );
+  return unchanged ? [...current] : bounded;
+}
+
+/** The logins one page of delivery rows contributes to the author pool. */
+export function deliveryAuthorSightings(
+  pullRequests: readonly CodeDeliveryPullRequestSummary[],
+  runs: readonly CodeDeliveryRunSummary[],
+): CodeDeliveryAuthor[] {
+  return [
+    ...pullRequests.flatMap((item) =>
+      item.author
+        ? [
+            {
+              login: item.author,
+              ...(item.author_avatar_url
+                ? { avatarUrl: item.author_avatar_url }
+                : {}),
+            },
+          ]
+        : [],
+    ),
+    ...runs.flatMap((item) => (item.actor ? [{ login: item.actor }] : [])),
+  ];
+}
+
+/** Tolerant: a blob written before authors existed hydrates to an empty pool. */
+function parseKnownAuthors(value: unknown): CodeDeliveryAuthor[] {
+  if (!Array.isArray(value)) return [];
+  const authors: CodeDeliveryAuthor[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.login !== "string") continue;
+    const login = entry.login.trim();
+    if (!login) continue;
+    authors.push({
+      login,
+      ...(typeof entry.avatarUrl === "string" && entry.avatarUrl
+        ? { avatarUrl: entry.avatarUrl }
+        : {}),
+    });
+  }
+  return authors.slice(0, MAX_KNOWN_AUTHORS);
+}
+
 function parsePersistedState(
   value: unknown,
 ): PersistedCodeDeliveryState | null {
@@ -768,6 +886,7 @@ function parsePersistedState(
     notifications,
     seenFingerprints: { ...value.seenFingerprints },
     lastPollAt: value.lastPollAt,
+    knownAuthors: parseKnownAuthors(value.knownAuthors),
   };
 }
 

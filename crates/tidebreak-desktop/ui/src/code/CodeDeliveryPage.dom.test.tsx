@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { StrictMode } from "react";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -175,6 +181,45 @@ describe("delivery pull request list", () => {
     expect(listCodeTriggers).toHaveBeenCalledWith(
       deliveryRepositoriesSnapshot.repositories[0]!.tidebreak_repo_id,
     );
+  });
+
+  it("filters by a picked author instead of a memorized login", async () => {
+    const user = userEvent.setup();
+    const query = vi.fn(async (_body: unknown) => ({
+      capability: deliveryRepositoriesSnapshot.capability,
+      items: deliveryPullRequests,
+      errors: [],
+      fetched_at: "2026-08-20T15:20:00.000Z",
+    }));
+    const client = {
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: query,
+    } as unknown as ApiClient;
+    useCodeDeliveryStore.setState({
+      knownAuthors: [
+        { login: "mara", avatarUrl: "https://avatars.test/mara" },
+        { login: "devon" },
+      ],
+    });
+    renderList(client);
+
+    await user.click(await screen.findByRole("button", { name: /Filters/ }));
+    await user.click(await screen.findByRole("checkbox", { name: "mara" }));
+    await waitFor(() =>
+      expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ authors: ["mara"] }),
+    );
+
+    // A login the pool has never seen still works, typed and entered.
+    await user.type(
+      screen.getByRole("textbox", { name: "Search authors" }),
+      "octocat{Enter}",
+    );
+    await waitFor(() =>
+      expect(query.mock.calls.at(-1)?.[0]).toMatchObject({
+        authors: ["mara", "octocat"],
+      }),
+    );
+    expect(screen.getByRole("checkbox", { name: "octocat" })).toBeChecked();
   });
 
   // The reported bug: every settled pull request rendered "Review Pending",

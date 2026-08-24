@@ -1215,8 +1215,11 @@ function DiffPatch({ patch }: { patch: string }) {
         return (
           <code
             key={index}
+            // `w-max min-w-full`: a block child of a scrolling <pre> otherwise
+            // sizes to the visible width, so long lines ran past their own
+            // background and scrolling right left colored stubs behind.
             className={cn(
-              "block px-3 whitespace-pre",
+              "block w-max min-w-full px-3 whitespace-pre",
               kind === "add" && "bg-success/10",
               kind === "remove" && "bg-critical/10",
               kind === "hunk" && "bg-info/10 text-info-foreground-muted",
