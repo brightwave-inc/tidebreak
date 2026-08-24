@@ -271,6 +271,32 @@ purpose:
   steer, review completion — is a thin client of a reachable deployment and
   waits on the self-host member-client path above.
 
+## Memory that outlives a session
+
+Decision records
+[67](decisions/0067-memory-records-and-scopes.md) and
+[68](decisions/0068-memory-backend-boundary.md) specify durable,
+reviewable memory: scoped records captured from completed turns, reviewed
+before they gain authority, and injected as a bounded digest into both
+surfaces. The first slices are ordinary issues. What stays parked here:
+
+- An organization-scoped shared store with deliberate promotion of
+  personal records and review on the way up, behind the same backend
+  boundary, once a governed remote store exists to host it. Promotion is
+  explicit and record-by-record; nothing is ever derived from observed
+  traffic.
+- Episodic search: read-only lexical search across past sessions'
+  journals and recaps, as a recall tier beneath the curated records.
+- A continuous one-way mirror of memory records into a user-chosen
+  folder, and a folder-backed storage backend for users who keep
+  knowledge in versioned plain files. The mirror is derived output, never
+  read back.
+- Semantic retrieval as a declared backend capability, only with a
+  readiness signal that distinguishes an unready index from an empty
+  result, and retrieval diagnostics that make degradation visible.
+- A dedicated memory model role, if maintenance judgment outgrows what
+  the utility role's models deliver.
+
 ## What this means for planning
 
 V1 is not a claim that Tidebreak has every kind of automation or connector. It
