@@ -357,7 +357,17 @@ pub(crate) async fn read_merge_queue_membership(
         "--jq",
         ".[] | select(.event == \"added_to_merge_queue\" or .event == \"removed_from_merge_queue\") | .event",
     ]);
-    let events = run_gh(cwd, binary, &args, FETCH_TIMEOUT).await.ok()?;
+    let events = match run_gh(cwd, binary, &args, FETCH_TIMEOUT).await {
+        Ok(events) => events,
+        Err(error) => {
+            // The paginated read cannot carry headers, so a limit answer
+            // parks the host by its text rather than by `Retry-After`.
+            if error.to_ascii_lowercase().contains("rate limit") {
+                gate.park(host, DEFAULT_PARK);
+            }
+            return None;
+        }
+    };
     Some(queue_membership_from_events(&events))
 }
 
