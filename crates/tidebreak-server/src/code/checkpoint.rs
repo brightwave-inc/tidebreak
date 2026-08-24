@@ -524,6 +524,60 @@ pub(crate) async fn merge_base(worktree: &Path, base_ref: &str) -> Result<String
     }
 }
 
+/// Resolve the base shown by the workspace diff.
+///
+/// A pull request can rebase onto `origin/main` while the local `main` ref
+/// stays behind. When a pull request exists, follow its remote base so the
+/// workspace pane matches the host. The read path never fetches. If the remote
+/// ref is absent, keep the workspace's configured base.
+async fn workspace_merge_base(
+    worktree: &Path,
+    configured_base: &str,
+    pull_request_base: Option<&str>,
+) -> Result<String, CheckpointError> {
+    if let Some(remote_ref) = pull_request_base.and_then(remote_tracking_ref) {
+        let commit_ref = format!("{remote_ref}^{{commit}}");
+        if git_text(
+            worktree,
+            &["rev-parse", "--verify", "--quiet", &commit_ref],
+            GIT_TIMEOUT,
+        )
+        .await
+        .is_ok()
+        {
+            return merge_base(worktree, &remote_ref).await;
+        }
+    }
+    merge_base(worktree, configured_base).await
+}
+
+fn remote_tracking_ref(base_branch: &str) -> Option<String> {
+    let base_branch = base_branch.trim();
+    if base_branch.is_empty() {
+        return None;
+    }
+    if base_branch.starts_with("refs/remotes/") {
+        return Some(base_branch.to_owned());
+    }
+    let branch = base_branch
+        .strip_prefix("refs/heads/")
+        .or_else(|| base_branch.strip_prefix("origin/"))
+        .unwrap_or(base_branch);
+    if branch.starts_with("refs/") {
+        return None;
+    }
+    Some(format!("refs/remotes/origin/{branch}"))
+}
+
+fn workspace_pull_request_base(workspace: &CodeWorkspace) -> Option<&str> {
+    workspace.pr.as_ref().map(|pull_request| {
+        pull_request
+            .base_branch
+            .as_deref()
+            .unwrap_or(&workspace.base_ref)
+    })
+}
+
 /// Delete every checkpoint ref belonging to one workspace.
 ///
 /// The workspace stays first in the ref path, so one prefix covers every
@@ -597,7 +651,12 @@ pub(crate) async fn resolve_diff_range(
     }
     match turn_id {
         None => {
-            let from = merge_base(&worktree, &workspace.base_ref).await?;
+            let from = workspace_merge_base(
+                &worktree,
+                &workspace.base_ref,
+                workspace_pull_request_base(workspace),
+            )
+            .await?;
             let to = snapshot_tree(&worktree).await?;
             Ok((worktree, from, to, None))
         }
@@ -621,7 +680,14 @@ pub(crate) async fn resolve_diff_range(
                 .ok_or_else(|| CheckpointError::user("this turn has no checkpoint"))?;
             let from = previous_checkpoint_oid(&worktree, workspace, db, &turn)
                 .await?
-                .unwrap_or(merge_base(&worktree, &workspace.base_ref).await?);
+                .unwrap_or(
+                    workspace_merge_base(
+                        &worktree,
+                        &workspace.base_ref,
+                        workspace_pull_request_base(workspace),
+                    )
+                    .await?,
+                );
             Ok((worktree, from, to, Some(id)))
         }
     }
@@ -1256,6 +1322,44 @@ mod tests {
             .unwrap();
         assert!(diff.truncated);
         assert!(diff.diff.len() <= 80, "{}", diff.diff.len());
+    }
+
+    #[tokio::test]
+    async fn workspace_diff_follows_the_pull_requests_remote_base() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "remote-base");
+
+        std::fs::write(tree.join("base-change.txt"), "landed on main\n").unwrap();
+        run(&tree, &["git", "add", "base-change.txt"]);
+        run(&tree, &["git", "commit", "-m", "advance remote main"]);
+        let remote_base = git_text(&tree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        run(
+            &tree,
+            &[
+                "git",
+                "update-ref",
+                "refs/remotes/origin/main",
+                &remote_base,
+            ],
+        );
+
+        std::fs::write(tree.join("workspace-change.txt"), "pull request change\n").unwrap();
+        run(&tree, &["git", "add", "workspace-change.txt"]);
+        run(&tree, &["git", "commit", "-m", "change the workspace"]);
+
+        let from = workspace_merge_base(&tree, "main", Some("main"))
+            .await
+            .unwrap();
+        let to = snapshot_tree(&tree).await.unwrap();
+        let files = list_changed_files(&tree, &from, &to, DiffBounds::default())
+            .await
+            .unwrap();
+        let paths: Vec<_> = files.files.iter().map(|file| file.path.as_str()).collect();
+
+        assert_eq!(paths, vec!["workspace-change.txt"]);
+        assert_eq!(files.stat.files, 1);
     }
 
     #[tokio::test]

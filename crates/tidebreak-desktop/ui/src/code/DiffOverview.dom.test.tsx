@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +50,14 @@ describe("DiffOverview", () => {
     expect(screen.queryByText("src/new.ts")).not.toBeInTheDocument();
     expect(screen.getByText("Turn 4")).toBeInTheDocument();
     expect(screen.queryByText(/^@@/)).not.toBeInTheDocument();
+    const summary = screen.getByLabelText("2 files, 9 additions, 1 deletion");
+    expect(summary).toHaveClass("font-mono");
+    expect(within(summary).getByText("+9")).toHaveClass(
+      "text-success-foreground",
+    );
+    expect(within(summary).getByText("−1")).toHaveClass(
+      "text-critical-foreground",
+    );
     expect(client.listCodeWorkspaceFiles).toHaveBeenCalledWith(
       "ws-1",
       "turn-1",
