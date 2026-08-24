@@ -976,10 +976,10 @@ async fn a_hosted_pull_request_create_fails_closed_with_the_gateway_refusal() {
 }
 
 /// The moments after a push are when the reader most wants "checks pending
-/// on the new head", and the digest cache used to keep serving the pre-push
-/// snapshot for its whole TTL (decision 66).
+/// on the new head" (decision 66): the push refreshes the row before it
+/// answers, and a plain read never serves anything but that row.
 #[tokio::test]
-async fn a_push_drops_the_cached_pull_request_digest() {
+async fn a_push_refreshes_the_pull_request_row_immediately() {
     let (router, token, runtime, dir) = code_app().await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
@@ -1068,7 +1068,7 @@ exit 3
     )
     .unwrap();
 
-    // Within the TTL the cache still serves the old head...
+    // A plain read serves the stored row without a fetch of its own...
     let cached = client
         .get(format!("http://{addr}/code/workspaces/{id}/pr"))
         .bearer_auth(&token)
@@ -1080,7 +1080,8 @@ exit 3
         .unwrap();
     assert_eq!(cached["pr"]["head_sha"], "aaaaaaaa");
 
-    // ...and a push drops it, so the next read carries the new head.
+    // ...and a push refreshes the row immediately, so the next read carries
+    // the new head.
     std::fs::write(path.join("extra.txt"), "two\n").unwrap();
     let committed = client
         .post(format!("http://{addr}/code/workspaces/{id}/git/commit"))
@@ -1217,19 +1218,29 @@ exit 3
     );
     runtime.set_gh_search_path(Some(shim_dir.path().display().to_string()));
 
-    // Both workspaces observe the first snapshot.
-    for id in [&a, &b] {
-        let status = client
-            .get(format!("http://{addr}/code/workspaces/{id}/pr"))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .unwrap()
-            .json::<serde_json::Value>()
-            .await
-            .unwrap();
-        assert_eq!(status["pr"]["head_sha"], "aaaaaaaa");
-    }
+    // Workspace A fetches the first snapshot; the write-through hands it to
+    // B's column, and B's own read serves that column with no host read of
+    // its own (decision 66: the request path reads the stored row).
+    let refreshed = client
+        .post(format!("http://{addr}/code/workspaces/{a}/pr/refresh"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(refreshed["pr"]["head_sha"], "aaaaaaaa");
+    let status_b = client
+        .get(format!("http://{addr}/code/workspaces/{b}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(status_b["pr"]["head_sha"], "aaaaaaaa");
 
     // GitHub moves, and only workspace A reads it.
     std::fs::write(
@@ -1260,8 +1271,8 @@ exit 3
         .unwrap();
     assert_eq!(listed["pr"]["head_sha"], "bbbbbbbb");
 
-    // ...its next digest read serves that copy rather than a stale cache
-    // entry that would write the old head back...
+    // ...its next digest read serves that column with no fetch of its
+    // own...
     let status_b = client
         .get(format!("http://{addr}/code/workspaces/{b}/pr"))
         .bearer_auth(&token)

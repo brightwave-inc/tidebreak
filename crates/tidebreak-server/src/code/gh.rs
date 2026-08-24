@@ -5,7 +5,6 @@
 //! a hosted machine instead lends each git operation a dying, gateway-minted
 //! credential through the environment (decision 63).
 
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,7 +15,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
-use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction, WorkspaceId};
+use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction};
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv};
 
 use super::setup_script::spawn_workspace_script;
@@ -27,7 +26,6 @@ const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_CHARS: usize = 4_096;
-const PR_CACHE_TTL: Duration = Duration::from_secs(20);
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
 pub(crate) const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
 pub(crate) const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
@@ -93,43 +91,6 @@ impl CachedGhObservation {
             self.observed_at.elapsed() <= GH_OBSERVATION_TTL
         };
         fresh.then(|| self.observation.clone())
-    }
-}
-
-/// Brief in-memory cache of a workspace PR digest.
-#[derive(Debug, Default)]
-pub(crate) struct PrDigestCache {
-    entries: std::sync::Mutex<HashMap<WorkspaceId, CachedPr>>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedPr {
-    fetched_at: Instant,
-    digest: PullRequestDigest,
-}
-
-impl PrDigestCache {
-    pub(crate) fn get(&self, id: WorkspaceId) -> Option<PullRequestDigest> {
-        let guard = self.entries.lock().expect("pr cache");
-        let entry = guard.get(&id)?;
-        if entry.fetched_at.elapsed() > PR_CACHE_TTL {
-            return None;
-        }
-        Some(entry.digest.clone())
-    }
-
-    pub(crate) fn put(&self, id: WorkspaceId, digest: PullRequestDigest) {
-        self.entries.lock().expect("pr cache").insert(
-            id,
-            CachedPr {
-                fetched_at: Instant::now(),
-                digest,
-            },
-        );
-    }
-
-    pub(crate) fn invalidate(&self, id: WorkspaceId) {
-        self.entries.lock().expect("pr cache").remove(&id);
     }
 }
 
@@ -407,13 +368,11 @@ pub(crate) async fn authenticated_gh_binary(search_path: Option<&str>) -> Option
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_pull_request(
     worktree: &Path,
-    workspace_id: WorkspaceId,
     title: &str,
     branch: &str,
     base_ref: &str,
     requested_title: Option<&str>,
     requested_body: Option<&str>,
-    cache: &PrDigestCache,
     gh_search_path: Option<&str>,
 ) -> Result<PullRequestDigest, GhError> {
     let inspect = inspect_git(worktree, base_ref, title).await?;
@@ -460,7 +419,6 @@ pub(crate) async fn create_pull_request(
             &inspect.diffstat,
         )
     })?;
-    cache.invalidate(workspace_id);
     // A light digest from the creation answer. The caller's next status
     // read enriches it through the conditional fetcher (decision 66), which
     // needs exactly this URL to name the pull request.
@@ -504,13 +462,11 @@ pub(crate) async fn create_pull_request(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_pull_request_rest(
     worktree: &Path,
-    workspace_id: WorkspaceId,
     title: &str,
     branch: &str,
     base_ref: &str,
     requested_title: Option<&str>,
     requested_body: Option<&str>,
-    cache: &PrDigestCache,
     api_base: &str,
     target: &crate::routes::code::types::CodeGitHubRepositoryTarget,
     credential: &GitCredential,
@@ -532,11 +488,9 @@ pub(crate) async fn create_pull_request_rest(
     )
     .await
     .map_err(|reason| GhError::user(format!("the pull request was not created: {reason}")))?;
-    cache.invalidate(workspace_id);
     if let Ok(Some(digest)) =
         super::forge_rest::pull_request_digest(api_base, target, credential, branch).await
     {
-        cache.put(workspace_id, digest.clone());
         return Ok((digest, fact));
     }
     let number = fact.get("number").and_then(serde_json::Value::as_u64);
@@ -573,7 +527,6 @@ pub(crate) async fn create_pull_request_rest(
         auto_merge_enabled: None,
         in_merge_queue: None,
     };
-    cache.put(workspace_id, digest.clone());
     Ok((digest, fact))
 }
 
@@ -601,10 +554,8 @@ impl MergeMethod {
 /// refuses merge argv outright.
 pub(crate) async fn merge_pull_request(
     worktree: &Path,
-    workspace_id: WorkspaceId,
     method: MergeMethod,
     auto: bool,
-    cache: &PrDigestCache,
     gh_search_path: Option<&str>,
 ) -> Result<(), GhError> {
     let gh = observe_gh(gh_search_path).await;
@@ -616,7 +567,6 @@ pub(crate) async fn merge_pull_request(
     run_gh_user_merge(worktree, &binary, &args, GH_TIMEOUT)
         .await
         .map_err(classify_merge_error)?;
-    cache.invalidate(workspace_id);
     Ok(())
 }
 
@@ -632,8 +582,6 @@ pub(crate) async fn merge_pull_request(
 /// point of having two runners (decision 42).
 pub(crate) async fn mark_workspace_pull_request_ready(
     worktree: &Path,
-    workspace_id: WorkspaceId,
-    cache: &PrDigestCache,
     gh_search_path: Option<&str>,
 ) -> Result<(), GhError> {
     let observation = observe_gh(gh_search_path).await;
@@ -641,7 +589,6 @@ pub(crate) async fn mark_workspace_pull_request_ready(
     run_gh(worktree, &binary, &["pr", "ready"], GH_TIMEOUT)
         .await
         .map_err(|error| classify_observed_gh(error, &observation))?;
-    cache.invalidate(workspace_id);
     Ok(())
 }
 
@@ -2645,16 +2592,13 @@ exit 3
                 log = log.display()
             ),
         );
-        let cache = PrDigestCache::default();
         let digest = create_pull_request(
             &work,
-            WorkspaceId::new(),
             "first change",
             "tidebreak/first-change",
             "origin/main",
             None,
             None,
-            &cache,
             Some(shim_dir.path().to_str().unwrap()),
         )
         .await
@@ -2722,16 +2666,9 @@ exit 3
             ),
         );
         let work = TempDir::new().unwrap();
-        let cache = PrDigestCache::default();
-        let workspace = WorkspaceId::new();
-        mark_workspace_pull_request_ready(
-            work.path(),
-            workspace,
-            &cache,
-            Some(shim_dir.path().to_str().unwrap()),
-        )
-        .await
-        .expect("gh pr ready should run");
+        mark_workspace_pull_request_ready(work.path(), Some(shim_dir.path().to_str().unwrap()))
+            .await
+            .expect("gh pr ready should run");
         let logged = std::fs::read_to_string(&log).unwrap();
         assert!(logged.contains("pr ready"), "{logged}");
         assert!(!logged.contains("merge"), "{logged}");
@@ -2786,23 +2723,18 @@ exit 3
         assert!(!log.exists(), "a refused argv must never spawn gh");
 
         // The dedicated merge operation is the one path that runs it.
-        let cache = PrDigestCache::default();
         merge_pull_request(
             dir.path(),
-            WorkspaceId::new(),
             MergeMethod::Squash,
             false,
-            &cache,
             Some(shim_dir.path().to_str().unwrap()),
         )
         .await
         .unwrap();
         merge_pull_request(
             dir.path(),
-            WorkspaceId::new(),
             MergeMethod::Merge,
             true,
-            &cache,
             Some(shim_dir.path().to_str().unwrap()),
         )
         .await
