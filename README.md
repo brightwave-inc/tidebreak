@@ -6,7 +6,11 @@
 <h1 align="center">Tidebreak</h1>
 
 <p align="center">
-  <strong>A local-first agentic coworker you can configure without limit. Choose your files and model. Walk away with a spreadsheet, deck, or working app.</strong>
+  <strong>The open-source, local-first desktop for AI coding agents and finished work.</strong>
+</p>
+
+<p align="center">
+  Run Claude Code, Codex CLI, opencode, or Grok CLI in isolated Git worktrees. Ship reviewed pull requests, repair CI, or turn documents and data into versioned spreadsheets, decks, reports, and apps.
 </p>
 
 <p align="center">
@@ -27,40 +31,136 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/tidebreak-hero-dark.png">
-    <img src="assets/tidebreak-hero-light.png" alt="Tidebreak coordinating four background agents and previewing the launch-readiness brief they produced">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/tidebreak-code-dark.webp">
+    <img src="assets/tidebreak-code-light.webp" alt="Tidebreak in Code mode running a coding agent in an isolated Git worktree, with pull request checks, review comments, and merge controls beside the conversation">
   </picture>
 </p>
 
----
+## What is Tidebreak?
 
-Tidebreak is a local-first desktop agent for work that ends in a file, not just
-a chat response. It can read attached documents, work in explicitly connected
-folders, run code in a sandbox, search the web, delegate parallel jobs, and
-publish anything it creates as a versioned output. Code mode turns the same
-supervision onto software work: it drives coding agents such as Claude Code in
-isolated git worktrees, with native approvals and per-turn diffs.
+Tidebreak is an Apache-2.0, local-first AI coding tool and agent workspace.
+**Code mode** takes a Git repository from task prompt to reviewed pull request.
+**Work mode** turns documents and folders into versioned spreadsheets,
+presentations, reports, charts, and apps.
 
-You choose the model route: Anthropic, OpenAI, Google, xAI, OpenRouter, a local
-Ollama daemon, or another OpenAI-compatible endpoint. Conversations can switch
-providers without starting over. Credentials stay in the operating system's
-credential store, while chats and outputs remain in the local Tidebreak
-profile.
+Tidebreak does not replace the coding agents or models you already use. It runs
+Claude Code, Codex CLI, opencode, and Grok CLI inside durable workspaces, then
+adds worktree isolation, agent control, diffs, terminals, browser testing,
+source control, continuous integration (CI), reviews, and delivery.
 
-The [website](https://www.tidebreak.io) is the product overview. The
-[user documentation](https://www.tidebreak.io/docs/) covers installation,
-configuration, permissions, connected folders, code execution, outputs, and
-the headless CLI.
+You choose the model, tools, files, repository, and execution boundary. Bring a
+ChatGPT Plus or Pro subscription, an API key from Anthropic, OpenAI, Google,
+xAI, Fireworks, Together, or OpenRouter, a local Ollama model, or another
+OpenAI-compatible endpoint. Switch models without restarting the conversation.
+
+The desktop runs on macOS, Windows, and Linux without a Tidebreak account.
+Provider credentials stay in the operating system's credential store. Chats,
+outputs, code sessions, and workspace metadata stay in your local Tidebreak
+profile unless you connect an external service.
+
+Brightwave built the original engine for three years of private-equity
+diligence, then rewrote it in Rust and released it as Tidebreak.
 
 > [!WARNING]
-> Tidebreak is pre-1.0 and changing quickly. Interfaces and local data formats
-> may change between releases, and profiles may be rebuilt rather than
-> migrated. Windows and Linux packages ship for x86_64 and ARM64; some native
-> capabilities remain macOS-only and are reported as unavailable in the app.
+> Tidebreak is pre-1.0. Interfaces and local data formats may change between
+> releases. Windows and Linux packages ship for x86_64 and ARM64, but some
+> platform-specific capabilities remain macOS-only and appear as unavailable
+> in the app.
+
+## Code mode
+
+Code mode is a full coding-agent workspace around the engines you already use.
+Tidebreak manages the checkout, sessions, review, pull request, CI, and delivery
+workflow while the selected engine writes the code. Conversations, tool calls,
+approvals, usage, changes, and failures remain visible as structured workspace
+state.
+
+| Area | Capabilities |
+| --- | --- |
+| **Engines and models** | Run Claude Code, Codex CLI, opencode, or Grok CLI. Tidebreak downloads the supported engine the first time you select it, uses the engine's own sign-in, and exposes the models, reasoning levels, fast modes, and permission modes that engine supports. |
+| **Isolated workspaces** | Register a local checkout, or clone from a Git URL or GitHub. Each workspace gets its own branch and Git worktree, so agents can work in parallel without touching your working copy. Configure setup and archive scripts, keep quick actions per repository, and restore archived work later. With Model Gateway, the same workspace can run on a hosted machine that clones, commits, pushes, and works with pull requests as the connected person. |
+| **Sessions and control** | Keep several conversations in one workspace and run separate workspaces side by side. Fork any completed turn into a new conversation or workspace. Inspect supported engine subagents as child rows. Attach files and images, queue follow-ups, steer a live turn, stop work, and change the model or reasoning effort between turns. Shared-worktree turns run in sequence, so two engines never edit the same checkout at once. |
+| **Coding workbench** | Browse files, inspect the whole diff or one turn, and open the worktree in your editor. Keep several terminal and browser tabs beside the conversation, split them into panes, test responsive pages, inspect elements, and capture screenshots. Supported agents receive scoped browser tools instead of control over your everyday browser. |
+| **Source control and review** | Review unified diffs, then commit and push from the source-control view. Create or update a pull request, move a draft into review, read checks and comments, see stacked pull requests as lanes, update a stale branch, resolve conflicts, and choose the supported merge method or auto-merge. Merge and auto-merge always start with a user action. |
+| **CI repair and automation** | Give the agent failing job logs, review feedback, conflicts, or a stale branch to repair. **Watch and fix** survives app restarts, handles new failures, and stops when the pull request is ready for you. Durable triggers can react to failed checks, conflicts, requested changes, stale branches, ready-to-merge state, pull request updates, merges, and closures. |
+| **Delivery and navigation** | Track pull requests, workflow runs, and deployments across repositories in **Delivery**. Follow changes in **Notifications**, and find old work in **Archive**. The command palette reaches workspaces, files, actions, review, terminals, Delivery, Analytics, settings, and navigation. |
+| **Analytics and health** | See sessions, turn outcomes, context use, tokens, prompt-cache traffic, model and engine breakdowns, pull requests opened and merged, estimated cost when pricing is known, and subscription usage. The coding-engine doctor reports installation, authentication, version, and capability problems. |
+
+Tidebreak is not an integrated development environment (IDE). Keep your editor
+for hands-on coding. Use Tidebreak to coordinate agents, isolate their work,
+review what they changed, and carry the result through CI and pull request
+delivery.
+
+The [Code mode guide](https://www.tidebreak.io/docs/code-mode/) covers engines,
+repositories, workspaces, permissions, review, and pull request delivery.
+
+## Work mode
+
+Work mode starts with your files and ends with a deliverable you can inspect,
+restore, and export. The agent can research, analyze, write, calculate, run
+code, delegate bounded jobs, and build applications while you keep one durable
+conversation around the work.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/tidebreak-work-dark.webp">
+    <img src="assets/tidebreak-work-light.webp" alt="Tidebreak in Work mode coordinating four background agents to build a retail launch model, with the finished spreadsheet open beside the conversation">
+  </picture>
+</p>
+
+| Area | Capabilities |
+| --- | --- |
+| **Files and sources** | Attach documents, images, and text, or connect a folder through the operating-system picker. Preview PDF, Word, PowerPoint, spreadsheets, images, and text in the app. Source links jump to the page, line, sheet, or cell that supports an answer. |
+| **Deliverables** | Files written to `output/` become versioned outputs. Preview any version, restore without deleting later history, export the version you want, and keep Plotly charts interactive. Write back into a connected folder; replacing an existing file always asks. |
+| **Research and browsing** | Search with Anthropic or OpenAI built-in search, Exa, Tavily, Brave, or self-hosted SearXNG. Fetch pages as sources. Use the embedded browser for visible web work and computer use for consent-gated screen capture and desktop app control. |
+| **Agents and durable work** | Delegate background jobs to sandboxed agents and inspect their progress and files. Queue follow-ups or steer the live turn. Turns, approvals, user questions, queued work, and the unified inbox survive restarts. |
+| **Documents and data** | Use bundled skills for Word, PDF, PowerPoint, spreadsheets, and charts. The agent can clean data, build financial models, write reports, create decks, generate PDFs, and produce working web apps. |
+| **Apps and integrations** | Add your own skills and plugins. Connect Model Context Protocol (MCP) servers over standard input/output or HTTP. Register REST APIs from an OpenAPI document. Ask the agent to create a local mini-app and keep it in the sidebar. |
+| **Voice and interaction** | Dictate with local or cloud speech recognition. Attach files and folders with `@`, attach skills and saved prompts with `/`, answer structured questions in place, and review tool activity while the turn runs. |
+
+## Models, execution, and permissions
+
+| Layer | Choices |
+| --- | --- |
+| **Models** | ChatGPT Plus or Pro; Anthropic, OpenAI, Gemini, xAI, Fireworks, Together, or OpenRouter API keys; a local or remote OpenAI-compatible endpoint, including Ollama. Switch providers during a conversation while Tidebreak keeps one provider-neutral history. |
+| **Execution** | macOS sandbox, local Docker, E2B, or Daytona for generated code and background work. Choose the network policy per conversation. Code workspaces use local or optional Model Gateway-hosted machines. |
+| **Permissions** | Plan, Ask, Auto, or Allow all, with the exact choices limited to what the selected runtime or coding engine can enforce. Folder grants belong to the conversation. Standing grants are visible and revocable. |
+| **Extensions** | Built-in and personal skills, plugins, MCP servers and apps, OpenAPI-backed connected apps, local apps, web search, browser tools, and computer use. |
+| **Interfaces** | Tauri desktop app, headless server, command-line client, local HTTP and WebSocket API, and an MCP server surface. The desktop and headless clients share the same Rust runtime. |
+
+The [website](https://www.tidebreak.io) gives the product overview. The
+[documentation](https://www.tidebreak.io/docs/) covers installation,
+providers, permissions, connected folders, execution, outputs, extensions,
+Code mode, and the headless interface.
+
+## Common questions
+
+### Does Tidebreak replace Claude Code or Codex CLI?
+
+No. Tidebreak runs Claude Code, Codex CLI, opencode, or Grok CLI and adds the
+workspace around them: isolated worktrees, durable sessions, review, CI repair,
+pull requests, delivery, and analytics.
+
+### Do I need a Tidebreak account?
+
+No. Use a ChatGPT Plus or Pro subscription, a provider API key, Ollama, or
+another OpenAI-compatible endpoint. Anthropic connects through an API key;
+Tidebreak does not use Claude subscription sign-in.
+
+### Can Tidebreak run locally and offline?
+
+The app, conversations, outputs, and workspace state live on your machine. To
+keep inference and execution local, use Ollama, a local execution backend, no
+external integrations, and an offline network policy.
+
+### Is Tidebreak free and open source?
+
+Yes. Tidebreak uses the Apache-2.0 license. You pay the model, search, or hosted
+execution providers that you choose; the Tidebreak desktop adds no usage fee.
 
 ## Downloads
 
-| Platform | Latest packages | Notes |
+| Platform | Packages | Notes |
 | --- | --- | --- |
 | **macOS** | [Universal `.dmg`](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-macos-universal.dmg) | Apple Silicon and Intel; signed and notarized |
 | **Windows** | [x86_64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-x86_64-setup.exe) · [ARM64 installer](https://github.com/brightwave-inc/tidebreak/releases/latest/download/Tidebreak-windows-aarch64-setup.exe) | Windows may show a SmartScreen warning while installers are not Authenticode-signed |
@@ -68,74 +168,67 @@ the headless CLI.
 
 Every package has a `.sha256` sidecar on the release. See the
 [installation guide](https://www.tidebreak.io/docs/installation/) for checksum
-commands, Linux runtime requirements, update behavior, and platform-specific
-limitations.
+commands, Linux runtime requirements, updates, and platform limits.
 
 ## Quick start
 
-1. Install the latest desktop build above and open Tidebreak.
-2. In **Settings → Providers**, sign in with a ChatGPT Plus or Pro subscription,
-   add a provider API key, or configure a local Ollama/OpenAI-compatible model.
-3. Start a chat, attach a file with `@` or connect a folder, choose a permission
-   mode, and ask for a concrete output: a cleaned spreadsheet, a deck, a report,
-   a chart, or a working app.
-4. Open files from the **Outputs** panel and export the version you want.
+1. Install a desktop package and open Tidebreak.
+2. In **Settings → Providers**, sign in with ChatGPT Plus or Pro, add a provider
+   API key, or configure Ollama or another OpenAI-compatible endpoint.
+3. To create a deliverable, open **Work**, attach a file or connect a folder,
+   and ask for the spreadsheet, deck, report, chart, or app you need.
+4. To change software, open **Code**, add or clone a repository, choose a coding
+   engine, and describe the change. If the pinned engine is missing, Tidebreak
+   downloads it. Sign in through the engine's own terminal flow when prompted.
+5. Review the output. Export a file version from **Work**, or inspect the diff,
+   checks, and review state before you merge from **Code**.
 
-The [full quickstart](https://www.tidebreak.io/docs/quickstart/) walks through a
-first file-backed task and explains the approval prompts you will see.
-
-## Features
-
-| Area | What it does |
-| --- | --- |
-| **Chat** | Voice input, local or cloud. Queue a follow-up or steer the live turn. `@` attaches files and folders; `/` attaches a skill or saved prompt. Turns, approvals, and questions survive a restart. An inbox collects anything waiting on you. |
-| **Documents** | Attach any file. Office, PDF, images, and text open in native viewers; other formats fall back to extracted text when they can be read. Source pills jump to the page, line, sheet, or cell. No vector index: the agent reads bounded ranges directly. |
-| **Outputs** | Files written to `output/` are versioned by filename. Restore is append-only. Plotly charts stay interactive. The agent can write back into a connected folder; replacing an existing file always asks. |
-| **Models** | ChatGPT Plus or Pro, an API key (Anthropic, OpenAI, Gemini, xAI, Fireworks, Together, OpenRouter), or a local OpenAI-compatible endpoint including Ollama. Switch mid-chat. Keys stay in the OS credential store. |
-| **Execution** | Native macOS sandbox, local Docker, E2B, or Daytona. Per-chat network policy. Background agents one level deep. Built-in or configured web search (Exa, Tavily, Brave, SearXNG). Computer use: screen capture and consent-gated control of native apps. |
-| **Permissions** | Plan, Ask, Auto, or Allow all, per chat. Folder access is per capability from a native picker. Standing grants are revocable. Overwrite of a connected file always asks. |
-| **Extensions** | Built-in skills for Word, PDF, PowerPoint, spreadsheets, and charts; add your own. MCP servers over stdio or HTTP. REST APIs from an OpenAPI document, for local apps. Ask once for a mini-app and keep it in the sidebar. |
-| **Code mode** | A second surface that drives coding agents (Claude Code, Codex CLI, opencode, Grok CLI) in isolated git worktrees: native approvals, per-turn diffs, and a reviewable change flow. |
+The [full quickstart](https://www.tidebreak.io/docs/quickstart/) explains a
+first file-backed task and the approval prompts you will see.
 
 ## Data, privacy, and security
 
-Tidebreak does not require a Tidebreak account or route work through a hosted
-Tidebreak service. Chats, attached documents, and outputs live in the local app
-profile, and provider credentials live in the operating system's credential
-store.
+The desktop runs on your machine and does not require a Tidebreak account. It
+stores chats, attached documents, outputs, code history, and settings in the
+local app profile. Provider and integration credentials live in the operating
+system's credential store. Code worktrees live under a visible root that you
+control.
 
-Local-first does not automatically mean offline. The selected model provider may
-receive relevant prompts and document content; search providers receive search
-queries; configured APIs and MCP servers receive the calls made to them; and
-explicit web fetches reach the requested sites. Use a local model, avoid external
-integrations, and select an offline execution policy when a workflow must remain
-on the machine.
+Local-first does not mean offline. A cloud model receives the prompt and source
+content needed for the turn. Search providers receive queries. Connected APIs,
+MCP servers, managed sandboxes, and hosted machines receive the calls or work
+that you send to them. To keep a workflow on the machine, use a local model,
+local execution, no external integrations, and an offline network policy.
 
-Permission modes govern what the agent may do without asking, while the selected
-execution backend and per-chat network policy govern where code runs and what it
-can reach. Start with the [permission guide](https://www.tidebreak.io/docs/permission-modes/)
-and [code-execution guide](https://www.tidebreak.io/docs/code-execution/). Report
+Permission modes govern what an agent may do without asking. The selected
+execution backend and network policy govern where code runs and what it can
+reach. Overwriting a connected file always asks. In Code mode, the agent can
+prepare and repair a pull request, but only you invoke merge.
+
+Start with the
+[permission guide](https://www.tidebreak.io/docs/permission-modes/) and
+[code-execution guide](https://www.tidebreak.io/docs/code-execution/). Report
 vulnerabilities privately through [`SECURITY.md`](SECURITY.md), not a public
 issue.
 
 ## Run from source
 
-Install [rustup](https://rustup.rs/) (which picks up the repository's pinned Rust
-toolchain), Node.js 22, [pnpm](https://pnpm.io), the
+Install [rustup](https://rustup.rs/) for the pinned Rust toolchain, Node.js 22,
+[pnpm](https://pnpm.io), the
 [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/), the Tauri
-CLI, and CMake (used by the local voice engine):
+CLI, and CMake for the local voice engine:
 
 ```sh
 cargo install tauri-cli --version "^2"
 ```
 
-Then, from the repository root on macOS or Linux:
+On macOS or Linux, run the development script from the repository root:
 
 ```sh
 scripts/dev.sh
 ```
 
-The script checks the prerequisites, installs the desktop UI dependencies, and
+The script checks prerequisites, installs the desktop UI dependencies, and
 opens the app. On Windows, or without Bash, run the equivalent commands:
 
 ```sh
@@ -144,9 +237,8 @@ pnpm --dir ui install
 cargo tauri dev
 ```
 
-See
-[`CONTRIBUTING.md`](CONTRIBUTING.md#development) for formatting, tests, and
-platform notes, or
+See [`CONTRIBUTING.md`](CONTRIBUTING.md#development) for formatting, tests, and
+platform notes. See
 [`crates/tidebreak-desktop/README.md`](crates/tidebreak-desktop/README.md) for
 the native and browser-based UI workflows.
 
@@ -157,31 +249,31 @@ ANTHROPIC_API_KEY=sk-... cargo run -p tidebreak-cli -- serve
 ```
 
 See the [headless documentation](https://www.tidebreak.io/docs/headless/) for
-one-shot mode, HTTP API, MCP server, configuration, and self-hosting.
+one-shot mode, the HTTP API, MCP server, configuration, and self-hosting.
 
 ## Repository guide
 
 | Path | Purpose |
 | --- | --- |
-| [`crates/`](crates) | Rust workspace: agent runtime, providers, server, CLI, sandboxing, MCP, and desktop host |
+| [`crates/`](crates) | Rust workspace: agent runtime, providers, server, CLI, sandboxing, MCP, coding harnesses, and desktop host |
 | [`crates/tidebreak-desktop/ui/`](crates/tidebreak-desktop/ui) | React frontend embedded by the Tauri desktop app |
 | [`docs-site/`](docs-site) | Source for the public user documentation |
-| [`docs/`](docs) | Maintainer architecture, contracts, operations, plans, and decision records |
+| [`docs/`](docs) | Maintainer architecture, contracts, operations, and decision records |
 | [`skills/`](skills) and [`plugins/`](plugins) | Bundled artifact skills and plugin manifests |
 | [`deploy/self-host/`](deploy/self-host) | Self-host deployment assets |
 
 Start with [`docs/how-tidebreak-works.md`](docs/how-tidebreak-works.md) for an
-end-to-end technical tour or [`docs/crates.md`](docs/crates.md) for the
-workspace map. [`docs/README.md`](docs/README.md) indexes the rest of the
-maintainer documentation.
+end-to-end technical tour, [`docs/code-mode.md`](docs/code-mode.md) for the
+coding architecture, or [`docs/crates.md`](docs/crates.md) for the workspace
+map. [`docs/README.md`](docs/README.md) indexes the maintainer documentation.
 
 ## Contributing
 
 Tidebreak is built in the open. Bug reports, focused fixes, and design
 discussion are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before
 opening a substantial change. Decisions that future work must preserve live in
-[`docs/decisions/`](docs/decisions), and all participation is covered by the
-[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+[`docs/decisions/`](docs/decisions). The
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) covers all participation.
 
 ## Support
 
@@ -196,5 +288,6 @@ opening a substantial change. Decisions that future work must preserve live in
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), and the
+Tidebreak is licensed under Apache-2.0. See [`LICENSE`](LICENSE),
+[`NOTICE`](NOTICE), and the
 [contributor license agreement](CONTRIBUTING.md#contributor-license-agreement).
