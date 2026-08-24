@@ -182,7 +182,7 @@ export function WorkspaceCard({
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <AttentionBadge attention={digest?.attention} compact />
-                  <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-5">
+                  <span className="min-w-0 flex-1 truncate text-md font-medium leading-5">
                     {title}
                   </span>
                   <span
@@ -203,7 +203,7 @@ export function WorkspaceCard({
                 </span>
                 {density === "detailed" &&
                   (visibleMeta.repoChip || visibleMeta.branch) && (
-                    <span className="flex min-w-0 items-center gap-1.5 pl-5 text-[11px] text-muted-foreground">
+                    <span className="flex min-w-0 items-center gap-1.5 pl-5 text-xs text-muted-foreground">
                       {visibleMeta.repoChip && (
                         <span className="min-w-0 max-w-[46%] truncate">
                           {repoName}
@@ -386,7 +386,7 @@ function WorkspaceDetailPanel({
   return (
     <div data-testid="workspace-hover-card">
       <div className="p-3.5">
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-[2px]",
@@ -425,7 +425,7 @@ function WorkspaceDetailPanel({
           ) : null}
         </div>
 
-        <p className="mt-2.5 text-[15px] font-semibold leading-5 text-pretty">
+        <p className="mt-2.5 text-base font-semibold leading-5 text-pretty">
           {title}
         </p>
         {showPrTitle && (
@@ -469,13 +469,13 @@ function WorkspaceDetailPanel({
                     Pull request #{pr.number}
                   </span>
                   {prCountLabel && (
-                    <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground tabular-nums">
+                    <span className="rounded-md bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground tabular-nums">
                       {prCountLabel}
                     </span>
                   )}
                   <span
                     className={cn(
-                      "ml-auto shrink-0 text-[11px] font-medium",
+                      "ml-auto shrink-0 text-xs font-medium",
                       STATUS_TEXT[model.tone],
                     )}
                   >
@@ -488,7 +488,7 @@ function WorkspaceDetailPanel({
               </div>
             </div>
 
-            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-muted-foreground">
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
               {checkLabel && (
                 <WorkspaceStatusFact
                   icon={<CheckCircle2 />}
@@ -520,7 +520,7 @@ function WorkspaceDetailPanel({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="mt-3 h-7 bg-foreground px-2.5 text-[11px] text-background hover:bg-foreground/88 hover:text-background"
+                  className="mt-3 h-7 bg-foreground px-2.5 text-xs text-background hover:bg-foreground/88 hover:text-background"
                   title={model.detail}
                   onClick={() => onWorkflowAction(primary)}
                 >
@@ -536,7 +536,7 @@ function WorkspaceDetailPanel({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-7 gap-1.5 px-2 text-[11px]"
+          className="h-7 gap-1.5 px-2 text-xs"
           onClick={() => onCommand(archived ? "restore" : "archive")}
         >
           {archived ? (
@@ -552,7 +552,7 @@ function WorkspaceDetailPanel({
             variant="ghost"
             size="sm"
             className={cn(
-              "h-7 gap-1.5 px-2 text-[11px]",
+              "h-7 gap-1.5 px-2 text-xs",
               STATUS_TEXT[prStatusTone(pr)],
             )}
             aria-label={`Open pull request #${pr.number}`}
@@ -565,7 +565,7 @@ function WorkspaceDetailPanel({
         )}
         {age && (
           <span
-            className="ml-auto shrink-0 text-[11px] text-muted-foreground tabular-nums"
+            className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums"
             title={stamp}
           >
             {age === "now" ? "just now" : `${age} ago`}
@@ -617,7 +617,7 @@ function WorkspaceActivityLine({
   const running = activity.tone === "running";
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-[11px] text-muted-foreground">
+    <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-xs text-muted-foreground">
       {activity.needsYou ? (
         <CircleAlert
           className={cn("size-3 shrink-0", STATUS_TEXT.critical)}
@@ -751,7 +751,7 @@ function WorkspaceChildRow({
       type="button"
       aria-label={ariaLabel}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground",
+        "flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground",
         FOCUS_RING_INSET,
         HOVER_TINT,
       )}

@@ -57,7 +57,7 @@ export function FileViewer({
           <h2 className="text-sm font-medium">File</h2>
           <MiddleTruncate
             text={path}
-            className="text-muted-foreground font-mono text-[11px]"
+            className="text-muted-foreground font-mono text-xs"
           />
         </div>
         <span className="grid size-3.5 shrink-0 place-items-center">

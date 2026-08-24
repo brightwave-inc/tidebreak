@@ -1520,7 +1520,7 @@ function PullRequestList({
     <div role="list" aria-label="Pull requests" className="min-w-[760px]">
       <div
         className={cn(
-          "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur",
+          "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur",
           PR_GRID,
         )}
       >
@@ -1638,12 +1638,12 @@ function PullRequestRow({
           <span className="tabular-nums">#{item.number}</span>
           <span className="truncate font-mono">{item.head_branch}</span>
           {stackedOn !== undefined && (
-            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">
+            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-2xs tabular-nums">
               Stacked on #{stackedOn}
             </span>
           )}
           {item.workspace_links.length > 0 && (
-            <span className="shrink-0 rounded bg-info-background px-1.5 py-0.5 text-[10px] text-info-foreground-muted">
+            <span className="shrink-0 rounded bg-info-background px-1.5 py-0.5 text-2xs text-info-foreground-muted">
               Tidebreak
             </span>
           )}
@@ -1690,7 +1690,7 @@ function RunList({
     >
       <div
         className={cn(
-          "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-[11px] font-medium text-muted-foreground backdrop-blur",
+          "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur",
           RUN_GRID,
         )}
       >
@@ -1984,7 +1984,7 @@ export function RunDetailSheet({
                           {job.name}
                         </span>
                         {job.failed_steps.length > 0 && (
-                          <span className="mt-1 block text-[11px] text-critical">
+                          <span className="mt-1 block text-xs text-critical">
                             {job.failed_steps.join(", ")}
                           </span>
                         )}
@@ -2007,7 +2007,7 @@ export function RunDetailSheet({
                     >
                       <div className="flex items-center justify-between gap-2">
                         <RunStateText value={status.state} />
-                        <span className="text-[11px] text-muted-foreground">
+                        <span className="text-xs text-muted-foreground">
                           {relativeTime(status.created_at)}
                         </span>
                       </div>
@@ -2078,7 +2078,7 @@ function PullRequestFilters({
           <Filter />
           Filters
           {count > 0 && (
-            <span className="rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">
+            <span className="rounded-full bg-primary px-1.5 text-2xs text-primary-foreground">
               {count}
             </span>
           )}
@@ -2179,7 +2179,7 @@ function RunFilters({
           <Filter />
           Filters
           {count > 0 && (
-            <span className="rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">
+            <span className="rounded-full bg-primary px-1.5 text-2xs text-primary-foreground">
               {count}
             </span>
           )}
@@ -2289,7 +2289,7 @@ function FilterSection({
 }) {
   return (
     <fieldset className="mb-3 border-b border-border-subtle pb-3 last:mb-0 last:border-b-0 last:pb-0">
-      <legend className="mb-2 text-[11px] font-medium text-muted-foreground">
+      <legend className="mb-2 text-xs font-medium text-muted-foreground">
         {title}
       </legend>
       {children}
@@ -2472,7 +2472,7 @@ function AuthorAvatar({
     return (
       <span
         className={cn(
-          "grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[9px] font-semibold uppercase text-muted-foreground",
+          "grid size-5 shrink-0 place-items-center rounded-full bg-muted text-2xs font-semibold uppercase text-muted-foreground",
           className,
         )}
         aria-hidden
@@ -2583,7 +2583,7 @@ function AdvancedTextFilter({
 }) {
   return (
     <div className="mb-3 flex flex-col gap-1.5">
-      <Label className="text-[11px] text-muted-foreground">{label}</Label>
+      <Label className="text-xs text-muted-foreground">{label}</Label>
       <Input
         value={value.join(", ")}
         placeholder={placeholder}
@@ -2827,7 +2827,7 @@ function RepositorySettingRow({
         <p className="truncate text-sm font-medium">
           {repository.name_with_owner}
         </p>
-        <p className="truncate text-[11px] text-muted-foreground">
+        <p className="truncate text-xs text-muted-foreground">
           {repository.host}
         </p>
       </div>
@@ -2967,7 +2967,7 @@ function FreshnessBar({
   onRefresh: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 px-5 py-1.5 text-[11px] text-muted-foreground">
+    <div className="flex items-center justify-between gap-3 px-5 py-1.5 text-xs text-muted-foreground">
       <span>
         {count === 0 ? "" : `${count} ${noun}${count === 1 ? "" : "s"}`}
         {fetchedAt && count > 0 && ` · updated ${relativeTime(fetchedAt)}`}
@@ -3113,7 +3113,7 @@ function DetailStat({
 }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] text-muted-foreground">{label}</dt>
+      <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className={cn("mt-0.5 truncate", mono && "font-mono")}>{value}</dd>
     </div>
   );
@@ -3125,7 +3125,7 @@ function RunStatusBadge({ item }: { item: CodeDeliveryRunSummary }) {
   return (
     <span
       className={cn(
-        "rounded-md px-2 py-1 text-[11px] font-medium",
+        "rounded-md px-2 py-1 text-xs font-medium",
         tone === "success" &&
           "bg-success-background text-success-foreground-muted",
         tone === "critical" &&

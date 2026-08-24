@@ -109,7 +109,7 @@ export function BrowserViewportControl({
             variant="ghost"
             size={compact ? "icon-xs" : "xs"}
             className={
-              compact ? "size-7" : "h-7 gap-1.5 px-2 text-[10px] font-medium"
+              compact ? "size-7" : "h-7 gap-1.5 px-2 text-2xs font-medium"
             }
             disabled={disabled}
             aria-label={triggerAriaLabel}
@@ -288,7 +288,7 @@ function CustomWidthField({
         <label
           id={`${controlGroupId}-custom-label`}
           htmlFor={`${controlGroupId}-custom-input`}
-          className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground"
+          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground"
         >
           <SlidersHorizontal className="size-3" />
           Custom width
@@ -316,18 +316,18 @@ function CustomWidthField({
           }}
           onFocus={(event) => event.currentTarget.select()}
         />
-        <span className="text-[10px] text-muted-foreground/70">px</span>
+        <span className="text-2xs text-muted-foreground/70">px</span>
       </div>
       {error && (
         <p
           id={errorId}
           role="alert"
-          className="mt-1 text-[10px] text-critical-foreground"
+          className="mt-1 text-2xs text-critical-foreground"
         >
           {error}
         </p>
       )}
-      <p className="mt-1 text-[10px] text-muted-foreground/60">
+      <p className="mt-1 text-2xs text-muted-foreground/60">
         {MIN_CUSTOM_WIDTH}–{MAX_CUSTOM_WIDTH} px
       </p>
     </form>

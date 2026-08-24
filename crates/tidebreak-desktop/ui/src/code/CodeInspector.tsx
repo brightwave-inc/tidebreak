@@ -202,7 +202,7 @@ export function CodeInspector({
               <button
                 type="button"
                 className={cn(
-                  "text-muted-foreground hover:bg-background hover:text-foreground cursor-pointer truncate rounded-lg border border-border-subtle bg-background/60 px-2 py-1 font-mono text-[11px]",
+                  "text-muted-foreground hover:bg-background hover:text-foreground cursor-pointer truncate rounded-lg border border-border-subtle bg-background/60 px-2 py-1 font-mono text-xs",
                   FOCUS_RING,
                   HOVER_TINT,
                 )}
@@ -635,7 +635,7 @@ export function PrTab({
             </span>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-medium">Merge pull request</p>
-              <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+              <p className="text-muted-foreground mt-0.5 text-xs leading-4">
                 {mergeControls.explanation ??
                   `Ready to land on ${pr.base_branch ?? "the base branch"}.`}
               </p>
@@ -647,7 +647,7 @@ export function PrTab({
                 disabled={mutationBusy}
               >
                 <SelectTrigger
-                  className="h-7 w-[116px] shrink-0 text-[11px]"
+                  className="h-7 w-[116px] shrink-0 text-xs"
                   aria-label="Merge method"
                 >
                   <SelectValue />
@@ -693,7 +693,7 @@ export function PrTab({
             <button
               type="button"
               className={cn(
-                "text-muted-foreground hover:text-foreground cursor-pointer self-center rounded-sm text-[11px]",
+                "text-muted-foreground hover:text-foreground cursor-pointer self-center rounded-sm text-xs",
                 FOCUS_RING,
                 HOVER_TINT,
               )}
@@ -812,7 +812,7 @@ function CommentsSection({
           <button
             type="button"
             className={cn(
-              "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+              "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
               FOCUS_RING,
               HOVER_TINT,
             )}

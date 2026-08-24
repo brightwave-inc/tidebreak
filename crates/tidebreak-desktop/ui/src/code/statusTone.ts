@@ -39,7 +39,7 @@ export type StatusTone =
  */
 export const STATUS_TEXT: Record<StatusTone, string> = {
   neutral: "text-muted-foreground",
-  running: "text-info-foreground",
+  running: "text-live-foreground",
   ready: "text-success-foreground",
   pending: "text-info-foreground",
   warning: "text-warning-foreground",
@@ -53,7 +53,7 @@ export const STATUS_TEXT: Record<StatusTone, string> = {
  */
 export const STATUS_MARK: Record<StatusTone, string> = {
   neutral: "text-muted-foreground",
-  running: "text-info",
+  running: "text-live",
   ready: "text-success",
   pending: "text-info",
   warning: "text-warning",
@@ -64,7 +64,7 @@ export const STATUS_MARK: Record<StatusTone, string> = {
 /** A filled dot. Same reasoning as a mark, in a background rather than ink. */
 export const STATUS_DOT: Record<StatusTone, string> = {
   neutral: "bg-muted-foreground/60",
-  running: "bg-info",
+  running: "bg-live",
   ready: "bg-success",
   pending: "bg-info",
   warning: "bg-warning",
@@ -75,7 +75,7 @@ export const STATUS_DOT: Record<StatusTone, string> = {
 /** A pill: a tinted field with text that has to stay legible on it. */
 export const STATUS_CHIP: Record<StatusTone, string> = {
   neutral: "bg-muted text-muted-foreground",
-  running: "bg-info-background text-info-foreground-muted",
+  running: "bg-live-background text-live-foreground-muted",
   ready: "bg-success-background text-success-foreground-muted",
   pending: "bg-info-background text-info-foreground-muted",
   warning: "bg-warning-background text-warning-foreground-muted",
@@ -86,9 +86,9 @@ export const STATUS_CHIP: Record<StatusTone, string> = {
 /**
  * Motion, for the tones that mean something is happening right now.
  *
- * Running and pending share the info ramp because both are in flight, and hue
- * alone cannot separate them. Movement can: a running agent is doing work this
- * second, while a pending check is only waiting to be told. Callers spread this
+ * Running paints the live ramp — the one accent reserved for an agent doing
+ * work this second — while pending stays on info's blue: it is only waiting
+ * to be told. Motion still reinforces the difference; callers spread this
  * onto the same element they tone.
  */
 export const STATUS_MOTION: Partial<Record<StatusTone, string>> = {

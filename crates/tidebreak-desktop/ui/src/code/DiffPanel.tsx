@@ -85,7 +85,7 @@ export function DiffPanel({
           <h2 className="text-sm font-medium">Diff</h2>
           <MiddleTruncate
             text={scopeCaption}
-            className="text-muted-foreground font-mono text-[11px]"
+            className="text-muted-foreground font-mono text-xs"
           />
         </div>
         <div className="flex items-center gap-2">
@@ -100,7 +100,7 @@ export function DiffPanel({
             <button
               type="button"
               className={cn(
-                "text-muted-foreground hover:bg-muted hover:text-foreground flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[11px]",
+                "text-muted-foreground hover:bg-muted hover:text-foreground flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-xs",
                 FOCUS_RING_TIGHT,
                 HOVER_TINT,
               )}
@@ -224,7 +224,7 @@ function FileDiffSection({
             // the path to tell them apart.
             aria-label={`Open ${group.path}`}
             className={cn(
-              "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer rounded-sm text-[11px] underline-offset-2 hover:underline",
+              "text-muted-foreground hover:text-foreground shrink-0 cursor-pointer rounded-sm text-xs underline-offset-2 hover:underline",
               FOCUS_RING_TIGHT,
               HOVER_TINT,
             )}
@@ -233,7 +233,7 @@ function FileDiffSection({
             Open
           </button>
         )}
-        <span className="shrink-0 font-mono text-[11px] tabular-nums">
+        <span className="shrink-0 font-mono text-xs tabular-nums">
           {/*
             `--success` and `--critical` are mark colours: they clear 3:1
             against either background, which an icon needs and a numeral this
@@ -265,10 +265,7 @@ function FileDiffSection({
 
 function DiffBody({ group, id }: { group: DiffFileGroup; id?: string }) {
   return (
-    <pre
-      id={id}
-      className="overflow-x-auto py-1 font-mono text-[13px] leading-5"
-    >
+    <pre id={id} className="overflow-x-auto py-1 font-mono text-md leading-5">
       {group.lines.map((line, index) => (
         <DiffLineRow key={`${group.path}:${index}`} line={line} />
       ))}
@@ -294,17 +291,17 @@ function DiffLineRow({ line }: { line: DiffLine }) {
         line.kind === "hunk" &&
           "border-info-border/60 bg-info-background/45 text-info-foreground my-1 border-y border-l-0",
         line.kind === "meta" &&
-          "text-muted-foreground bg-muted/20 border-l-0 text-[11px]",
+          "text-muted-foreground bg-muted/20 border-l-0 text-xs",
       )}
     >
       <span
-        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-[11px] tabular-nums"
+        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
         data-diff-gutter="old"
       >
         {line.oldNo ?? ""}
       </span>
       <span
-        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-[11px] tabular-nums"
+        className="text-muted-foreground/80 bg-background/35 w-[5.25ch] shrink-0 select-none border-r px-1 text-right text-xs tabular-nums"
         data-diff-gutter="new"
       >
         {line.newNo ?? ""}

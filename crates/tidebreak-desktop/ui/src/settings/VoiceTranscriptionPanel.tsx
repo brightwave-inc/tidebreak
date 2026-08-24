@@ -280,7 +280,7 @@ function LocalModelItem({ model }: { model: LocalVoiceModelInfo }) {
             {formatModelSize(model.total_bytes)}
           </span>
           {model.recommended && (
-            <span className="rounded-full border px-1.5 text-[0.68rem] text-muted-foreground">
+            <span className="rounded-full border px-1.5 text-2xs text-muted-foreground">
               Recommended
             </span>
           )}

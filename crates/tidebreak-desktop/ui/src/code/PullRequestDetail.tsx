@@ -566,7 +566,7 @@ function PrDetailHeader({
           </Badge>
         )}
         {detail && (
-          <span className="font-mono text-[11px] tabular-nums">
+          <span className="font-mono text-xs tabular-nums">
             <span className={STATUS_TEXT.ready}>+{detail.additions}</span>{" "}
             <span className={STATUS_TEXT.critical}>−{detail.deletions}</span>
           </span>
@@ -595,7 +595,7 @@ function PrDetailHeader({
         )}
       </p>
 
-      <p className="mt-1.5 flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+      <p className="mt-1.5 flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground">
         <GitBranch className="size-3 shrink-0" />
         <MiddleTruncate className="min-w-0" text={summary.base_branch} />
         <span aria-hidden>←</span>
@@ -614,7 +614,7 @@ function PrDetailHeader({
           {detail?.assignees.map((login) => (
             <span
               key={`assignee:${login}`}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground"
+              className="flex items-center gap-1 text-xs text-muted-foreground"
             >
               <Avatar login={login} className="size-4" />
               {login}
@@ -623,12 +623,12 @@ function PrDetailHeader({
           {detail?.requested_reviewers.map((login) => (
             <span
               key={`reviewer:${login}`}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground"
+              className="flex items-center gap-1 text-xs text-muted-foreground"
               title={`Review requested from ${login}`}
             >
               <Avatar login={login} className="size-4" />
               {login}
-              <span className="text-[10px]">(review requested)</span>
+              <span className="text-2xs">(review requested)</span>
             </span>
           ))}
         </div>
@@ -733,7 +733,7 @@ function PrAgentMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <div className="max-w-64 px-2 py-1.5 text-[11px] text-muted-foreground">
+        <div className="max-w-64 px-2 py-1.5 text-xs text-muted-foreground">
           {link
             ? `Runs in ${link.title}, the linked workspace.`
             : `Starts a fresh workspace on ${summary.repository.name_with_owner}.`}
@@ -994,7 +994,7 @@ function PrDescription({ body }: { body: string }) {
     <section>
       <h3 className="text-sm font-medium">Description</h3>
       {trimmed ? (
-        <div className="review-comment-markdown mt-2 text-[13px] leading-5">
+        <div className="review-comment-markdown mt-2 text-md leading-5">
           <MessageMarkdown>
             {expandGithubEmojiShortcodes(trimmed)}
           </MessageMarkdown>
@@ -1159,7 +1159,7 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
       >
         <span
           className={cn(
-            "shrink-0 text-[10px] font-medium uppercase",
+            "shrink-0 text-2xs font-medium uppercase",
             STATUS_TEXT[fileStatusTone(file.status)],
           )}
         >
@@ -1173,7 +1173,7 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
               : file.path
           }
         />
-        <span className="shrink-0 font-mono text-[11px] tabular-nums">
+        <span className="shrink-0 font-mono text-xs tabular-nums">
           <span className={STATUS_TEXT.ready}>+{file.additions}</span>{" "}
           <span className={STATUS_TEXT.critical}>−{file.deletions}</span>
         </span>
@@ -1202,7 +1202,7 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
 function DiffPatch({ patch }: { patch: string }) {
   const lines = useMemo(() => patch.split("\n"), [patch]);
   return (
-    <pre className="overflow-x-auto py-1 font-mono text-[11px] leading-[1.45]">
+    <pre className="overflow-x-auto py-1 font-mono text-xs leading-[1.45]">
       {lines.map((line, index) => {
         const kind =
           line.startsWith("+") && !line.startsWith("+++")
@@ -1342,7 +1342,7 @@ function Avatar({
     return (
       <span
         className={cn(
-          "grid shrink-0 place-items-center rounded-full bg-muted text-[8px] font-semibold uppercase text-muted-foreground",
+          "grid shrink-0 place-items-center rounded-full bg-muted text-2xs font-semibold uppercase text-muted-foreground",
           className,
         )}
         aria-hidden

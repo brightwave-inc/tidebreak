@@ -106,11 +106,11 @@ export function CodeSubscriptionUsage() {
         <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2.5">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <h2 className="truncate text-[13px] font-semibold">
+              <h2 className="truncate text-md font-semibold">
                 Subscription usage
               </h2>
               {report && (
-                <span className="text-muted-foreground shrink-0 text-[10px] font-medium">
+                <span className="text-muted-foreground shrink-0 text-2xs font-medium">
                   {sourceLabel(report.source)}
                 </span>
               )}
@@ -141,7 +141,7 @@ export function CodeSubscriptionUsage() {
           {report && report.providers.length > 0 && (
             <div className="flex flex-col gap-3">
               {report.diagnostics.length > 0 && (
-                <p className="text-muted-foreground text-[11px]">
+                <p className="text-muted-foreground text-xs">
                   {report.diagnostics[0]}
                 </p>
               )}
@@ -195,7 +195,7 @@ function ProviderUsage({
         <div className="flex min-w-0 flex-1 items-baseline justify-between gap-2">
           <h3 className="truncate text-xs font-semibold">{provider.label}</h3>
           {provider.accounts.length > shown.length && (
-            <span className="text-muted-foreground shrink-0 text-[9px]">
+            <span className="text-muted-foreground shrink-0 text-2xs">
               {provider.accounts.length - shown.length} shared hidden
             </span>
           )}
@@ -229,10 +229,10 @@ function AccountUsage({
       )}
     >
       <div className="flex min-w-0 items-baseline justify-between gap-2">
-        <span className="min-w-0 truncate text-[11px] font-medium">
+        <span className="min-w-0 truncate text-xs font-medium">
           {account.label}
         </span>
-        <span className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-[9px] tabular-nums">
+        <span className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-2xs tabular-nums">
           {account.state !== "available" && (
             <span className={accountStateClass(account.state)}>
               {accountStateLabel(account.state)}
@@ -263,7 +263,7 @@ function UsageWindowRow({ window }: { window: CodeSubscriptionUsageWindow }) {
     ? formatReset(window.resets_at_unix_seconds)
     : null;
   return (
-    <div className="grid min-h-5 grid-cols-[minmax(72px,0.9fr)_minmax(52px,1.1fr)_auto_auto] items-center gap-x-2 text-[10px]">
+    <div className="grid min-h-5 grid-cols-[minmax(72px,0.9fr)_minmax(52px,1.1fr)_auto_auto] items-center gap-x-2 text-2xs">
       <span
         className="text-muted-foreground min-w-0 truncate"
         title={window.label}
@@ -339,7 +339,7 @@ function UnavailableUsage({ diagnostics }: { diagnostics: string[] }) {
         subscription-usage command.
       </p>
       {diagnostics[0] && (
-        <p className="text-muted-foreground text-[11px]">{diagnostics[0]}</p>
+        <p className="text-muted-foreground text-xs">{diagnostics[0]}</p>
       )}
     </div>
   );

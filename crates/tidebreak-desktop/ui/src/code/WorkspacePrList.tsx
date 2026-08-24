@@ -69,12 +69,12 @@ export function WorkspacePrList({
               #{item.number}
             </span>
             <span className="min-w-0 flex-1 truncate">{item.title}</span>
-            <span className="text-muted-foreground shrink-0 truncate text-[10px]">
+            <span className="text-muted-foreground shrink-0 truncate text-2xs">
               {item.repo_owner}/{item.repo_name}
             </span>
             <span
               className={cn(
-                "shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium",
+                "shrink-0 rounded-full px-1.5 py-px text-2xs font-medium",
                 PR_CHIP_TONE_CLASSES[tone],
               )}
             >

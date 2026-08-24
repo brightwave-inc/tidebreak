@@ -75,7 +75,7 @@ export function ToolCardShell({
       <button
         type="button"
         className={cn(
-          "-mx-1.5 flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-[13.5px] hover:bg-muted/50",
+          "-mx-1.5 flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-0.5 text-left text-md hover:bg-muted/50",
           FOCUS_RING_TIGHT,
           HOVER_TINT,
         )}
@@ -98,7 +98,7 @@ export function ToolCardShell({
             title
           )}
         </span>
-        <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+        <span className="text-muted-foreground ml-auto flex shrink-0 items-center gap-1.5 text-xs tabular-nums">
           {trailing}
           <ChevronDown
             className={cn(

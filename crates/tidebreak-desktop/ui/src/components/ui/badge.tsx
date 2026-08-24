@@ -23,6 +23,7 @@ const badgeVariants = cva(
         info: "border-transparent bg-info-background text-info-foreground-muted",
         merged:
           "border-transparent bg-merged-background text-merged-foreground-muted",
+        live: "border-transparent bg-live-background text-live-foreground-muted",
       },
       size: {
         default: "px-2.5 py-0.5 font-semibold",

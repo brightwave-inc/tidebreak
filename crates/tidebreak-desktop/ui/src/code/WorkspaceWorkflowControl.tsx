@@ -482,7 +482,7 @@ export function WorkspaceWorkflowControl({
               <div className="min-w-0 flex-1">
                 <h2
                   id={popoverTitleId}
-                  className="text-[13px] font-semibold leading-5"
+                  className="text-md font-semibold leading-5"
                 >
                   {model.title}
                 </h2>
@@ -510,7 +510,7 @@ export function WorkspaceWorkflowControl({
               <div className="flex items-center gap-3 py-2.5">
                 <dt className="text-foreground-subtle shrink-0">Branch</dt>
                 <dd
-                  className="min-w-0 flex-1 truncate text-right font-mono text-[11px]"
+                  className="min-w-0 flex-1 truncate text-right font-mono text-xs"
                   title={branchName}
                 >
                   {branchName}
@@ -519,7 +519,7 @@ export function WorkspaceWorkflowControl({
               {(model.pr?.base_branch ?? baseRef) ? (
                 <div className="flex items-center gap-3 py-2.5">
                   <dt className="text-foreground-subtle shrink-0">Base</dt>
-                  <dd className="min-w-0 flex-1 truncate text-right font-mono text-[11px]">
+                  <dd className="min-w-0 flex-1 truncate text-right font-mono text-xs">
                     {model.pr?.base_branch ?? baseRef}
                   </dd>
                 </div>
@@ -547,7 +547,7 @@ export function WorkspaceWorkflowControl({
 
             {activeChecks.length > 0 ? (
               <div className="border-t border-border-subtle px-3 py-2.5">
-                <p className="text-foreground-subtle mb-1.5 text-[11px] font-medium">
+                <p className="text-foreground-subtle mb-1.5 text-xs font-medium">
                   Active checks
                 </p>
                 <ul className="flex flex-col gap-1.5">
@@ -571,7 +571,7 @@ export function WorkspaceWorkflowControl({
                       </span>
                       <span
                         className={cn(
-                          "shrink-0 text-[11px] font-medium",
+                          "shrink-0 text-xs font-medium",
                           check.bucket === "fail"
                             ? STATUS_TEXT.critical
                             : STATUS_TEXT.pending,
@@ -583,7 +583,7 @@ export function WorkspaceWorkflowControl({
                   ))}
                 </ul>
                 {activeChecks.length > 4 ? (
-                  <p className="text-foreground-subtle mt-1.5 text-[11px]">
+                  <p className="text-foreground-subtle mt-1.5 text-xs">
                     +{activeChecks.length - 4} more
                   </p>
                 ) : null}

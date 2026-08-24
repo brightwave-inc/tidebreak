@@ -860,7 +860,7 @@ export function BrowserFallback({
         >
           <Icon className="size-4.5" />
         </div>
-        <p className="mt-5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
+        <p className="mt-5 text-2xs font-semibold tracking-[0.16em] text-muted-foreground uppercase">
           Workspace browser
         </p>
         <h2 className="mt-1.5 max-w-md text-xl font-semibold tracking-[-0.025em] text-balance">
@@ -873,7 +873,7 @@ export function BrowserFallback({
             "Open a local preview, documentation, or a pull request here. The browser stays attached to this workspace so you and its agents can work from the same page."}
         </p>
         {!error && (
-          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[11px] text-muted-foreground">
+          <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
               <Braces className="size-3.5 text-foreground/70" />
               Local previews

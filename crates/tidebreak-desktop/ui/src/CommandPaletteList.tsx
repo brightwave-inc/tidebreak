@@ -96,7 +96,7 @@ export function CommandPaletteList({
             aria-label="Loading"
           />
         )}
-        <kbd className="absolute top-1/2 right-3 -translate-y-1/2 shrink-0 rounded border px-1.5 py-0.5 font-sans text-[10px] text-muted-foreground">
+        <kbd className="absolute top-1/2 right-3 -translate-y-1/2 shrink-0 rounded border px-1.5 py-0.5 font-sans text-2xs text-muted-foreground">
           esc
         </kbd>
       </div>
@@ -165,7 +165,7 @@ function PaletteItem({
       )}
       <span className="min-w-0 flex-1 truncate text-sm">{row.label}</span>
       {row.hint && (
-        <span className="min-w-0 max-w-[45%] shrink-0 truncate text-[11px] text-muted-foreground">
+        <span className="min-w-0 max-w-[45%] shrink-0 truncate text-xs text-muted-foreground">
           {row.hint}
         </span>
       )}
@@ -174,7 +174,7 @@ function PaletteItem({
           {caps.map((cap) => (
             <kbd
               key={cap}
-              className="inline-flex h-5 min-w-5 items-center justify-center rounded border bg-muted/60 px-1 font-sans text-[10px] leading-none text-muted-foreground"
+              className="inline-flex h-5 min-w-5 items-center justify-center rounded border bg-muted/60 px-1 font-sans text-2xs leading-none text-muted-foreground"
             >
               {cap}
             </kbd>
@@ -194,7 +194,7 @@ function PaletteItem({
  */
 function PaletteFooter({ scoped }: { scoped: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-3 border-t px-3 py-1.5 text-[10px] text-muted-foreground">
+    <div className="flex items-center justify-between gap-3 border-t px-3 py-1.5 text-2xs text-muted-foreground">
       <span className="flex items-center gap-2.5">
         {scoped ? (
           <span>

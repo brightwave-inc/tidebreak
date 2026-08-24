@@ -1044,7 +1044,7 @@ export function CodeComposer({
       {notice && (
         <p
           role="alert"
-          className="text-critical-foreground mx-auto max-w-3xl pt-1 text-[11px]"
+          className="text-critical-foreground mx-auto max-w-3xl pt-1 text-xs"
         >
           {notice.text}
         </p>

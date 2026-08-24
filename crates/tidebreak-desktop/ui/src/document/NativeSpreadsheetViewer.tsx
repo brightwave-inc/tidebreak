@@ -447,7 +447,7 @@ function WorkbookToolbar({
           ))}
         </div>
         {selectedTab?.kind === "chartsheet" ? (
-          <span className="flex shrink-0 items-center border-l px-3 text-[11px] text-muted-foreground">
+          <span className="flex shrink-0 items-center border-l px-3 text-xs text-muted-foreground">
             Chart sheet
           </span>
         ) : null}

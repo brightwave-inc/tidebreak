@@ -39,6 +39,10 @@ that list onto the board.
 
 ## Desktop UI workflow
 
+- Read [`crates/tidebreak-desktop/ui/DESIGN.md`](crates/tidebreak-desktop/ui/DESIGN.md)
+  before visual work. It defines the palette, type scale, and status
+  vocabulary; `src/stylesContract.test.ts` enforces the mechanical rules, so
+  arbitrary font sizes and raw Tailwind palette classes fail CI.
 - When adding or changing a reusable visual component or a meaningful UI state,
   add or update its Storybook story under
   `crates/tidebreak-desktop/ui/src/stories/`.

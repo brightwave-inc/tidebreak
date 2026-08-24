@@ -197,7 +197,7 @@ function FileChangeRow({
           <p className="truncate font-mono text-xs" title={file.relative_path}>
             {file.relative_path}
           </p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
+          <p className="mt-0.5 text-xs text-muted-foreground">
             {file.folder_name} · {fileStatus(file)}
           </p>
         </div>
@@ -248,7 +248,7 @@ function TextDiff({ diff }: { diff: string }) {
         </Button>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/40 py-2 text-[11px] leading-4">
+        <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/40 py-2 text-xs leading-4">
           {diff.split("\n").map((line, index) => (
             <span
               // A unified diff can contain identical lines; position is the
@@ -258,10 +258,10 @@ function TextDiff({ diff }: { diff: string }) {
                 "block min-h-4 px-2",
                 line.startsWith("+") &&
                   !line.startsWith("+++") &&
-                  "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                  "bg-success/10 text-success-foreground",
                 line.startsWith("-") &&
                   !line.startsWith("---") &&
-                  "bg-red-500/10 text-red-700 dark:text-red-300",
+                  "bg-critical/10 text-critical-foreground",
                 line.startsWith("@@") && "text-muted-foreground",
               )}
             >
@@ -391,7 +391,7 @@ function RevisionPreview({
   const label = revision === "before" ? "Before" : "After";
   return (
     <figure className="overflow-hidden rounded-md border border-border bg-muted/20">
-      <figcaption className="border-b border-border px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+      <figcaption className="border-b border-border px-2 py-1.5 text-xs font-medium text-muted-foreground">
         {label}
       </figcaption>
       <div className="flex min-h-36 items-center justify-center p-2">

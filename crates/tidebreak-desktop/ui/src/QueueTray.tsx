@@ -184,7 +184,7 @@ export function QueueTray({
           </span>
         </span>
         {paused && (
-          <span className="rounded-full border border-warning-border/45 bg-warning-background px-1.5 py-px text-[10px] font-medium leading-4 text-warning-foreground">
+          <span className="rounded-full border border-warning-border/45 bg-warning-background px-1.5 py-px text-2xs font-medium leading-4 text-warning-foreground">
             Paused
           </span>
         )}
@@ -214,7 +214,7 @@ export function QueueTray({
       <ul className="divide-y divide-border/60 px-3">
         {queued.map((row, index) => (
           <li key={row.id} className="group flex h-8 items-center gap-2">
-            <span className="w-3 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+            <span className="w-3 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
               {index + 1}
             </span>
             {editing === row.id ? (

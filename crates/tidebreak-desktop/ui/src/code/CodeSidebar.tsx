@@ -148,7 +148,7 @@ export function CodeSidebar() {
           <div key={group.key} className="flex flex-col gap-1">
             {group.label && (
               <div
-                className="truncate px-2 pt-3 pb-1 text-[11px] font-medium text-muted-foreground/90"
+                className="truncate px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90"
                 title={group.label}
               >
                 {group.key === "archived"
@@ -402,7 +402,7 @@ function CodeUtilityLinks({
           <link.icon />
           <span className="min-w-0 flex-1 truncate">{link.label}</span>
           {link.to === "/code/notifications" && unreadNotifications > 0 && (
-            <span className="min-w-5 rounded-full bg-primary px-1.5 py-0.5 text-center text-[10px] font-medium leading-none text-primary-foreground">
+            <span className="min-w-5 rounded-full bg-primary px-1.5 py-0.5 text-center text-2xs font-medium leading-none text-primary-foreground">
               {unreadNotifications > 99 ? "99+" : unreadNotifications}
             </span>
           )}

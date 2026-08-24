@@ -84,7 +84,7 @@ function DocxAnnotationCard({
     >
       <div className="flex min-w-0 items-start justify-between gap-2">
         <div
-          className="min-w-0 text-[11px] leading-tight font-medium"
+          className="min-w-0 text-xs leading-tight font-medium"
           style={{ color: mutedTextColor }}
         >
           <div className="truncate">{meta}</div>
@@ -100,7 +100,7 @@ function DocxAnnotationCard({
       </div>
       {anchorText ? (
         <div
-          className="rounded-md px-2 py-1 text-[11px] leading-snug italic"
+          className="rounded-md px-2 py-1 text-xs leading-snug italic"
           style={anchorStyle}
         >
           {anchorText}

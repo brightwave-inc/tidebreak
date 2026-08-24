@@ -55,7 +55,7 @@ export function PrCommentCard({
       )}
     >
       <div className="flex min-w-0 items-start gap-2">
-        <span className="bg-muted text-muted-foreground grid size-7 shrink-0 place-items-center overflow-hidden rounded-full text-[10px] font-semibold uppercase">
+        <span className="bg-muted text-muted-foreground grid size-7 shrink-0 place-items-center overflow-hidden rounded-full text-2xs font-semibold uppercase">
           {avatar && !avatarFailed ? (
             <img
               src={avatar}
@@ -73,25 +73,25 @@ export function PrCommentCard({
               {author}
             </span>
             {comment.kind === "review" && comment.review_state && (
-              <span className="text-muted-foreground shrink-0 text-[11px] capitalize">
+              <span className="text-muted-foreground shrink-0 text-xs capitalize">
                 {comment.review_state.replaceAll("_", " ")}
               </span>
             )}
             {resolved && (
-              <span className="text-success-foreground flex shrink-0 items-center gap-1 text-[10px] font-medium">
+              <span className="text-success-foreground flex shrink-0 items-center gap-1 text-2xs font-medium">
                 <CircleCheck className="size-3" />
                 Resolved here
               </span>
             )}
             {when && (
-              <span className="text-muted-foreground ml-auto shrink-0 text-[10px] tabular-nums">
+              <span className="text-muted-foreground ml-auto shrink-0 text-2xs tabular-nums">
                 {when}
               </span>
             )}
           </div>
           {anchor && (
             <div
-              className="text-muted-foreground mt-0.5 truncate font-mono text-[10px]"
+              className="text-muted-foreground mt-0.5 truncate font-mono text-2xs"
               title={anchor}
             >
               {anchor}
@@ -100,7 +100,7 @@ export function PrCommentCard({
         </div>
         {actions}
       </div>
-      <div className="review-comment-markdown mt-2 pl-9 text-[13px] leading-5">
+      <div className="review-comment-markdown mt-2 pl-9 text-md leading-5">
         <MessageMarkdown>
           {expandGithubEmojiShortcodes(comment.body)}
         </MessageMarkdown>

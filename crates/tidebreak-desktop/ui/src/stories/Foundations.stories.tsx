@@ -38,9 +38,11 @@ function Foundations() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="success">Passing</Badge>
-          <Badge variant="warning">Waiting</Badge>
+          <Badge variant="warning">Stalled</Badge>
           <Badge variant="critical">Failed</Badge>
-          <Badge variant="info">Running</Badge>
+          <Badge variant="info">Waiting</Badge>
+          <Badge variant="merged">Merged</Badge>
+          <Badge variant="live">Working</Badge>
           <Badge variant="outline">Neutral</Badge>
         </div>
       </section>

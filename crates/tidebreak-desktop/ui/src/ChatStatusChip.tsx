@@ -208,7 +208,7 @@ export function ChatStatusChip({
                 />
               ))}
               {overflowRuns > 0 && (
-                <span className="text-[0.65rem] leading-none">{`+${overflowRuns}`}</span>
+                <span className="text-2xs leading-none">{`+${overflowRuns}`}</span>
               )}
             </span>
           )}

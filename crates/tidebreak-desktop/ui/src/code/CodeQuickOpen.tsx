@@ -152,7 +152,7 @@ export function CodeQuickOpen({
                 aria-label="Loading files"
               />
             )}
-            <kbd className="text-muted-foreground absolute top-1/2 right-3 -translate-y-1/2 shrink-0 rounded border px-1.5 py-0.5 font-sans text-[10px]">
+            <kbd className="text-muted-foreground absolute top-1/2 right-3 -translate-y-1/2 shrink-0 rounded border px-1.5 py-0.5 font-sans text-2xs">
               esc
             </kbd>
           </div>
@@ -190,7 +190,7 @@ export function CodeQuickOpen({
                           {name}
                         </span>
                         {parent && (
-                          <span className="text-muted-foreground min-w-0 max-w-[55%] truncate text-[11px]">
+                          <span className="text-muted-foreground min-w-0 max-w-[55%] truncate text-xs">
                             {parent}
                           </span>
                         )}
@@ -202,7 +202,7 @@ export function CodeQuickOpen({
             )}
           </CommandList>
         </Command>
-        <div className="text-muted-foreground flex items-center justify-end gap-3 border-t px-3 py-1.5 text-[10px]">
+        <div className="text-muted-foreground flex items-center justify-end gap-3 border-t px-3 py-1.5 text-2xs">
           <span>↑↓ navigate</span>
           <span>↵ open</span>
         </div>

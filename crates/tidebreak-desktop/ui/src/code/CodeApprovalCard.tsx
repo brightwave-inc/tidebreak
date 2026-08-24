@@ -48,7 +48,7 @@ export function CodeApprovalCard({
       data-testid="code-approval-card"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-[13.5px] font-medium break-words">
+        <h3 className="text-md font-medium break-words">
           {approvalTitle(approval)}
         </h3>
         <ApprovalState approval={approval} />
@@ -59,10 +59,10 @@ export function CodeApprovalCard({
         decidedAt={approval.decided_at}
       />
       {approval.state === "denied" && approval.feedback && (
-        <p className="text-[13.5px] break-words">{approval.feedback}</p>
+        <p className="text-md break-words">{approval.feedback}</p>
       )}
       {approval.state === "abandoned" && (
-        <p className="text-muted-foreground text-[13.5px] break-words">
+        <p className="text-muted-foreground text-md break-words">
           The engine stopped waiting for this one, so a decision can no longer
           reach it. Whatever it asked for did not run on your say-so.
         </p>
@@ -71,7 +71,7 @@ export function CodeApprovalCard({
         <button
           type="button"
           className={cn(
-            "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-[11px]",
+            "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
             FOCUS_RING,
             HOVER_TINT,
           )}
@@ -93,7 +93,7 @@ export function CodeApprovalCard({
           */}
           <ScrollableContainer
             id={payloadId}
-            className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-[11px] break-words whitespace-pre-wrap"
+            className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
           >
             {prettyRaw(approval.harness_raw_json)}
           </ScrollableContainer>
@@ -154,7 +154,7 @@ export function CodeApprovalCard({
       )}
       {error && (
         <p
-          className="text-critical-foreground text-[11px] break-words"
+          className="text-critical-foreground text-xs break-words"
           role="alert"
         >
           {error}
@@ -166,18 +166,14 @@ export function CodeApprovalCard({
 
 function ApprovalState({ approval }: { approval: CodeApprovalSnapshot }) {
   if (approval.state === "approved") {
-    return (
-      <p className="text-success-foreground shrink-0 text-[11px]">Approved</p>
-    );
+    return <p className="text-success-foreground shrink-0 text-xs">Approved</p>;
   }
   if (approval.state === "denied") {
-    return (
-      <p className="text-warning-foreground shrink-0 text-[11px]">Denied</p>
-    );
+    return <p className="text-warning-foreground shrink-0 text-xs">Denied</p>;
   }
   if (approval.state === "abandoned") {
     return (
-      <p className="text-muted-foreground shrink-0 text-[11px]">Not decided</p>
+      <p className="text-muted-foreground shrink-0 text-xs">Not decided</p>
     );
   }
   return null;
@@ -188,11 +184,11 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
     case "command":
       return (
         <div className="flex flex-col gap-1">
-          <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-[13.5px] break-words whitespace-pre-wrap">
+          <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-md break-words whitespace-pre-wrap">
             {approval.kind.cmd || "Command"}
           </pre>
           {approval.kind.cwd && (
-            <p className="text-muted-foreground font-mono text-[11px] break-words">
+            <p className="text-muted-foreground font-mono text-xs break-words">
               cwd {approval.kind.cwd}
             </p>
           )}
@@ -203,17 +199,17 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
         <ul className="space-y-0.5">
           {approval.kind.paths.map((path) => (
             <li key={path}>
-              <MiddleTruncate text={path} className="font-mono text-[13.5px]" />
+              <MiddleTruncate text={path} className="font-mono text-md" />
             </li>
           ))}
         </ul>
       ) : (
-        <p className="text-muted-foreground text-[13.5px]">File write</p>
+        <p className="text-muted-foreground text-md">File write</p>
       );
     case "network":
     case "other":
       return (
-        <p className="text-muted-foreground text-[13.5px] break-words">
+        <p className="text-muted-foreground text-md break-words">
           {otherSummary(approval.kind.summary)}
         </p>
       );
@@ -233,7 +229,7 @@ function ApprovalTimes({
     : null;
   if (!requested && !decided) return null;
   return (
-    <p className="text-muted-foreground text-[11px]">
+    <p className="text-muted-foreground text-xs">
       {requested && (
         <WithTooltip label={requested.full}>
           <time dateTime={requestedAt}>{requested.short}</time>
