@@ -164,17 +164,39 @@ struct ExchangeResponse {
     expires_in: u64,
 }
 
-/// The forge identity a hosted machine's git operations act as (decision 63).
+/// The forge identity a hosted machine's git operations act as.
 ///
-/// Work done with a borrowed credential lands as the deployment's GitHub App,
-/// not as the caller — this is what the UI says so with.
+/// Work done with a borrowed credential lands as the deployment's GitHub App
+/// (decision 63) or, once the caller has connected their own account at the
+/// gateway, as the caller (decision 65) — this is what the UI names the
+/// acting identity with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitForgeIdentity {
     /// The gateway's display name for the forge app.
     pub app_name: String,
-    /// The bot account work lands as, `<slug>[bot]`, when the gateway has
-    /// recorded the App slug.
-    pub bot_login: Option<String>,
+    /// Whose account work lands as.
+    pub attribution: GitForgeAttribution,
+}
+
+/// Whose account work done with a borrowed forge credential lands as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GitForgeAttribution {
+    /// The App's bot account (decision 63): `<slug>[bot]` when the gateway
+    /// has recorded the App slug.
+    Bot {
+        /// The bot account work lands as, when known.
+        bot_login: Option<String>,
+    },
+    /// The caller's own account (decision 65), lent per operation from
+    /// their gateway connection.
+    Person {
+        /// The forge login work lands as.
+        login: String,
+        /// The account's display name, when the forge records one.
+        display_name: Option<String>,
+        /// The no-reply email commits should name the person by.
+        commit_email: Option<String>,
+    },
 }
 
 /// One borrowed, repository-scoped forge credential (decision 63).
@@ -214,9 +236,13 @@ pub(crate) enum GitForgeError {
     NoGitForge,
     /// More than one forge is available; the gateway refuses to pick.
     AmbiguousGitForge,
-    /// The forge's identity is a person's own Connect, never lent to a
-    /// shared machine.
+    /// The forge's identity is a person's own Connect, and this machine did
+    /// not or could not ask to act as them.
     ConnectModeForge,
+    /// The forge acts as each caller individually, and this caller has not
+    /// connected their account at the gateway yet (decision 65). Carries
+    /// the gateway page where they connect, when the gateway names one.
+    NotConnected { connect_url: Option<String> },
     /// The forge has no approved GitHub App installation yet.
     ForgeAppNotInstalled,
     /// The App installation does not cover the requested repository.
@@ -662,6 +688,7 @@ impl OboGateway {
                 GitForgeError::NoGitForge
                 | GitForgeError::AmbiguousGitForge
                 | GitForgeError::ConnectModeForge
+                | GitForgeError::NotConnected { .. }
                 | GitForgeError::ForgeAppNotInstalled
                 | GitForgeError::RepositoryNotInstalled,
             ) => {
@@ -705,6 +732,11 @@ impl OboGateway {
             .json(&serde_json::json!({
                 "resource": self.resource,
                 "repository": repository,
+                // This machine renders person attribution (decision 65), so
+                // a connect-mode forge may lend the caller's own credential.
+                // A gateway that predates the field ignores it and refuses
+                // connect-mode forges exactly as before.
+                "attribution": "person",
             }))
             .send()
             .await
@@ -743,11 +775,19 @@ impl OboGateway {
 
     /// One probe of the gateway's git-forge surface with the caller's
     /// machine-bound token.
+    ///
+    /// The `attribution=person` parameter declares that this machine renders
+    /// person attribution (decision 65): a connect-mode forge may answer with
+    /// the caller's own identity instead of refusing. A gateway that predates
+    /// the parameter ignores it.
     async fn fetch_git_forge(&self, subject: &str) -> Result<GitForgeIdentity, GitForgeError> {
         let response = self
             .client
             .get(self.git_forge_url.clone())
-            .query(&[("resource", self.resource.as_str())])
+            .query(&[
+                ("resource", self.resource.as_str()),
+                ("attribution", "person"),
+            ])
             .bearer_auth(subject)
             .send()
             .await
@@ -768,15 +808,50 @@ impl OboGateway {
             app_name: String,
             #[serde(default)]
             bot_login: Option<String>,
+            #[serde(default)]
+            attribution: Option<String>,
+            #[serde(default)]
+            acts_as: Option<String>,
+            #[serde(default)]
+            display_name: Option<String>,
+            #[serde(default)]
+            commit_email: Option<String>,
         }
         let answer: GitForgeAnswer = serde_json::from_slice(&body).map_err(|error| {
             GitForgeError::Unavailable(format!(
                 "the Model Gateway returned an unreadable git-forge answer: {error}"
             ))
         })?;
+        // Person attribution is trusted only when the gateway states it
+        // (decision 65); an answer without the field is the App's bot
+        // (decision 63). An attribution this build does not know is refused
+        // rather than guessed — a wrong identity on screen is worse than a
+        // retryable error.
+        let attribution = match answer.attribution.as_deref() {
+            None | Some("bot") => GitForgeAttribution::Bot {
+                bot_login: answer.bot_login,
+            },
+            Some("person") => {
+                let Some(login) = answer.acts_as.filter(|login| !login.is_empty()) else {
+                    return Err(GitForgeError::Unavailable(
+                        "the Model Gateway answered person attribution with no login".into(),
+                    ));
+                };
+                GitForgeAttribution::Person {
+                    login,
+                    display_name: answer.display_name.filter(|name| !name.is_empty()),
+                    commit_email: answer.commit_email.filter(|email| !email.is_empty()),
+                }
+            }
+            Some(other) => {
+                return Err(GitForgeError::Unavailable(format!(
+                    "the Model Gateway answered an attribution this machine does not know: {other}"
+                )));
+            }
+        };
         Ok(GitForgeIdentity {
             app_name: answer.app_name,
-            bot_login: answer.bot_login,
+            attribution,
         })
     }
 
@@ -893,6 +968,22 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
             "no_git_forge" => return GitForgeError::NoGitForge,
             "ambiguous_git_forge" => return GitForgeError::AmbiguousGitForge,
             "connect_mode_forge" => return GitForgeError::ConnectModeForge,
+            "not_connected" => {
+                // The refusal names where the caller connects, when the
+                // gateway knows the page. Parsed beside the OAuth error
+                // shape rather than inside it: the field is this refusal's
+                // alone.
+                #[derive(serde::Deserialize)]
+                struct NotConnectedAnswer {
+                    #[serde(default)]
+                    connect_url: Option<String>,
+                }
+                let connect_url = serde_json::from_slice::<NotConnectedAnswer>(body)
+                    .ok()
+                    .and_then(|answer| answer.connect_url)
+                    .filter(|url| !url.is_empty());
+                return GitForgeError::NotConnected { connect_url };
+            }
             "forge_app_not_installed" => return GitForgeError::ForgeAppNotInstalled,
             "repository_not_installed" => return GitForgeError::RepositoryNotInstalled,
             "forge_credential_mint_failed" => {
@@ -982,7 +1073,26 @@ pub(crate) mod test_support {
             Self {
                 identity: std::sync::Mutex::new(Ok(GitForgeIdentity {
                     app_name: "Acme Forge".to_owned(),
-                    bot_login: Some(bot_login.to_owned()),
+                    attribution: GitForgeAttribution::Bot {
+                        bot_login: Some(bot_login.to_owned()),
+                    },
+                })),
+                mint_refusal: std::sync::Mutex::new(None),
+                minted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A deployment whose forge acts as this caller's own account
+        /// (decision 65).
+        pub(crate) fn offering_person(login: &str) -> Self {
+            Self {
+                identity: std::sync::Mutex::new(Ok(GitForgeIdentity {
+                    app_name: "Acme Forge".to_owned(),
+                    attribution: GitForgeAttribution::Person {
+                        login: login.to_owned(),
+                        display_name: Some("Mira Chen".to_owned()),
+                        commit_email: Some(format!("8675309+{login}@users.noreply.github.com")),
+                    },
                 })),
                 mint_refusal: std::sync::Mutex::new(None),
                 minted: std::sync::Mutex::new(Vec::new()),
@@ -1168,6 +1278,9 @@ mod tests {
         /// The `error` code the git surfaces refuse with, with its status, or
         /// empty to succeed.
         git_refusal: Arc<std::sync::Mutex<Option<(u16, String)>>>,
+        /// The probe answer the git-forge route serves, or `None` for the
+        /// default bot-attributed answer.
+        forge_answer: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     }
 
     impl FakeGateway {
@@ -1181,6 +1294,7 @@ mod tests {
                 forge_probes: Arc::new(AtomicUsize::new(0)),
                 credential_mints: Arc::new(AtomicUsize::new(0)),
                 git_refusal: Arc::new(std::sync::Mutex::new(None)),
+                forge_answer: Arc::new(std::sync::Mutex::new(None)),
                 catalog: Arc::new(std::sync::Mutex::new(serde_json::json!({
                     "models": [
                         {
@@ -1343,14 +1457,28 @@ mod tests {
                                 query.get("resource").map(String::as_str),
                                 Some(TEST_RESOURCE)
                             );
+                            // The machine declares it renders person
+                            // attribution (decision 65) — asserted server-side
+                            // so a drifted client fails the test.
+                            assert_eq!(
+                                query.get("attribution").map(String::as_str),
+                                Some("person")
+                            );
                             state.forge_probes.fetch_add(1, Ordering::SeqCst);
                             if let Some(refused) = state.next_git_refusal() {
                                 return refused;
                             }
-                            Json(serde_json::json!({
-                                "app_id": "0193a1c0-0000-7000-8000-000000000001",
-                                "app_name": "Acme Forge",
-                                "bot_login": "acme-ship[bot]",
+                            let scripted = state
+                                .forge_answer
+                                .lock()
+                                .map(|answer| answer.clone())
+                                .unwrap_or_default();
+                            Json(scripted.unwrap_or_else(|| {
+                                serde_json::json!({
+                                    "app_id": "0193a1c0-0000-7000-8000-000000000001",
+                                    "app_name": "Acme Forge",
+                                    "bot_login": "acme-ship[bot]",
+                                })
                             }))
                             .into_response()
                         }
@@ -1376,6 +1504,8 @@ mod tests {
                                 repository.split('/').count() == 2,
                                 "the mint must name owner/repo, got {repository:?}"
                             );
+                            // Decision 65's opt-in rides every mint.
+                            assert_eq!(body["attribution"], "person");
                             state.credential_mints.fetch_add(1, Ordering::SeqCst);
                             if let Some(refused) = state.next_git_refusal() {
                                 return refused;
@@ -1404,6 +1534,9 @@ mod tests {
         }
 
         /// The configured git refusal as a ready response, or `None`.
+        ///
+        /// A `not_connected` refusal carries the connect page beside the
+        /// OAuth error shape, exactly as the gateway sends it.
         fn next_git_refusal(&self) -> Option<axum::response::Response> {
             let held = self
                 .git_refusal
@@ -1411,14 +1544,19 @@ mod tests {
                 .map(|refusal| refusal.clone())
                 .unwrap_or_default()?;
             let (status, code) = held;
+            let mut body = serde_json::json!({
+                "error": code,
+                "error_description": "the fake gateway refused",
+            });
+            if code == "not_connected" {
+                body["connect_url"] =
+                    serde_json::Value::String("https://gateway.example/account/apps".to_owned());
+            }
             Some(
                 (
                     axum::http::StatusCode::from_u16(status)
                         .unwrap_or(axum::http::StatusCode::BAD_REQUEST),
-                    Json(serde_json::json!({
-                        "error": code,
-                        "error_description": "the fake gateway refused",
-                    })),
+                    Json(body),
                 )
                     .into_response(),
             )
@@ -1888,7 +2026,13 @@ mod tests {
 
         let identity = obo.git_forge_identity(&alice).await.unwrap();
         assert_eq!(identity.app_name, "Acme Forge");
-        assert_eq!(identity.bot_login.as_deref(), Some("acme-ship[bot]"));
+        assert_eq!(
+            identity.attribution,
+            GitForgeAttribution::Bot {
+                bot_login: Some("acme-ship[bot]".to_owned())
+            },
+            "an answer without an attribution field is the App's bot"
+        );
         obo.git_forge_identity(&alice).await.unwrap();
         assert_eq!(
             gateway.forge_probes.load(Ordering::SeqCst),
@@ -1899,6 +2043,82 @@ mod tests {
         obo.expire_git_forge_for_test(&alice).await;
         obo.git_forge_identity(&alice).await.unwrap();
         assert_eq!(gateway.forge_probes.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    /// Decision 65: a gateway that states person attribution is read as the
+    /// caller's own account, and an attribution this build does not know is
+    /// refused rather than guessed.
+    #[tokio::test]
+    async fn the_probe_reads_person_attribution_only_when_the_gateway_states_it() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        *gateway.forge_answer.lock().unwrap() = Some(serde_json::json!({
+            "app_id": "0193a1c0-0000-7000-8000-000000000001",
+            "app_name": "Acme Forge",
+            "attribution": "person",
+            "acts_as": "mira-chen",
+            "display_name": "Mira Chen",
+            "commit_email": "8675309+mira-chen@users.noreply.github.com",
+        }));
+        let identity = obo.git_forge_identity(&alice).await.unwrap();
+        assert_eq!(
+            identity.attribution,
+            GitForgeAttribution::Person {
+                login: "mira-chen".to_owned(),
+                display_name: Some("Mira Chen".to_owned()),
+                commit_email: Some("8675309+mira-chen@users.noreply.github.com".to_owned()),
+            }
+        );
+
+        *gateway.forge_answer.lock().unwrap() = Some(serde_json::json!({
+            "app_id": "0193a1c0-0000-7000-8000-000000000001",
+            "app_name": "Acme Forge",
+            "attribution": "org",
+            "acts_as": "acme",
+        }));
+        obo.expire_git_forge_for_test(&alice).await;
+        assert!(
+            matches!(
+                obo.git_forge_identity(&alice).await.unwrap_err(),
+                GitForgeError::Unavailable(_)
+            ),
+            "an unknown attribution must refuse, never guess an identity"
+        );
+        server.abort();
+    }
+
+    /// Decision 65: the not-connected refusal is typed, carries the gateway
+    /// page where the caller connects, and is held like any settled answer.
+    #[tokio::test]
+    async fn a_not_connected_refusal_names_the_connect_page_and_is_held() {
+        let gateway = FakeGateway::new();
+        let (obo, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        obo.record_caller(&alice, "mg_at_alice".into());
+
+        *gateway.git_refusal.lock().unwrap() = Some((403, "not_connected".to_owned()));
+        let refusal = obo.git_forge_identity(&alice).await.unwrap_err();
+        assert_eq!(
+            refusal,
+            GitForgeError::NotConnected {
+                connect_url: Some("https://gateway.example/account/apps".to_owned()),
+            }
+        );
+        obo.git_forge_identity(&alice).await.unwrap_err();
+        assert_eq!(
+            gateway.forge_probes.load(Ordering::SeqCst),
+            1,
+            "not-connected is settled until the caller acts; it must not re-probe"
+        );
+        assert_eq!(
+            obo.git_credential(&alice, "acme/demo").await.unwrap_err(),
+            refusal,
+            "the mint refuses with the same typed cause"
+        );
         server.abort();
     }
 

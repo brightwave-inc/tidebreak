@@ -1632,11 +1632,16 @@ export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: bool
  */
 export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, 
 /**
- * The identity a push from this machine acts as, when it is not the
- * caller: the deployment's GitHub App bot account (decision 63). The UI
- * states this plainly beside the push control.
+ * The identity a push from this machine acts as: the deployment's
+ * GitHub App bot account (decision 63) or the caller's own login
+ * (decision 65). The UI states this plainly beside the push control.
  */
-pushes_as?: string, watch?: CodeWatchSnapshot, };
+pushes_as?: string, 
+/**
+ * Whether `pushes_as` is the caller's own account (decision 65)
+ * rather than the deployment's App.
+ */
+pushes_as_self?: boolean, watch?: CodeWatchSnapshot, };
 
 /**
  * One pull request attributed to a workspace, from the durable fact store

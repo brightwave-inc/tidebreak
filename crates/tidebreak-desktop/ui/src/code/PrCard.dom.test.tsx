@@ -102,6 +102,23 @@ describe("PrCard", () => {
     expect(screen.getByText(/not as your GitHub account/)).toBeInTheDocument();
   });
 
+  it("names the caller when pushes land as their own account", () => {
+    renderState({
+      ...BASE,
+      unpushed: true,
+      ahead: 1,
+      gh_found: false,
+      gh_authenticated: undefined,
+      pushes_as: "mira-chen",
+      pushes_as_self: true,
+    });
+    expect(screen.getByText("mira-chen")).toBeInTheDocument();
+    expect(screen.getByText(/your own GitHub account/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/not as your GitHub account/),
+    ).not.toBeInTheDocument();
+  });
+
   it("names no acting identity on a machine with its own credentials", () => {
     renderState({ ...BASE, unpushed: true, ahead: 1 });
     expect(

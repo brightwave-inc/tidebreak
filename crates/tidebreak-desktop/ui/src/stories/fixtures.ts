@@ -133,6 +133,15 @@ export const hostedAppGit: CodeWorkspacePrSnapshot = {
   pushes_as: "tidebreak-ship[bot]",
 };
 
+/** A hosted machine whose pushes land as the caller's own account. */
+export const hostedPersonGit: CodeWorkspacePrSnapshot = {
+  ...unpushedGit,
+  gh_found: false,
+  gh_authenticated: undefined,
+  pushes_as: "mira-chen",
+  pushes_as_self: true,
+};
+
 export const readyForPrGit: CodeWorkspacePrSnapshot = {
   ...cleanGit,
   ahead: 1,

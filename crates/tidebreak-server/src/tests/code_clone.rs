@@ -514,6 +514,43 @@ async fn a_hosted_machine_offers_github_per_caller_from_the_gateway() {
     assert!(reason.contains("no git forge"), "{reason}");
 }
 
+/// Decision 65: a caller who connected their own account reads the person
+/// attribution sentence, and a caller who has not reads "not offered" with
+/// the gateway's connect page as the remediation — never a silent fall back
+/// to another identity.
+#[tokio::test]
+async fn a_hosted_machine_offers_github_as_the_person_per_caller() {
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, _runtime, _dir) =
+        code_app_with(Some(lender as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let sources = fetch_sources(&client, addr, &token).await;
+    let github = source(&sources, "github");
+    assert_eq!(github["available"], true);
+    let hint = github["remediation"].as_str().unwrap();
+    assert!(hint.contains("your own GitHub account"), "{hint}");
+    assert!(hint.contains("mira-chen"), "{hint}");
+    assert!(!hint.contains("not as your GitHub account"), "{hint}");
+
+    let unconnected = Arc::new(FakeLender::refusing(GitForgeError::NotConnected {
+        connect_url: Some("https://gateway.example/account/apps".to_owned()),
+    }));
+    let (router, token, _runtime, _dir) =
+        code_app_with(Some(unconnected as Arc<dyn GitCredentialLender>)).await;
+    let addr = serve(router).await;
+    let sources = fetch_sources(&client, addr, &token).await;
+    let github = source(&sources, "github");
+    assert_eq!(github["available"], false);
+    let reason = github["remediation"].as_str().unwrap();
+    assert!(reason.contains("connect your GitHub account"), "{reason}");
+    assert!(
+        reason.contains("https://gateway.example/account/apps"),
+        "{reason}"
+    );
+}
+
 /// Decision 63 rule 4: a clone the gateway refuses fails with the gateway's
 /// reason — before any network is touched — and the mint was asked for
 /// exactly the repository the caller named.

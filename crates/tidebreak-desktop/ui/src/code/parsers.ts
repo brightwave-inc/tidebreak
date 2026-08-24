@@ -1757,6 +1757,7 @@ export function parseCodeWorkspacePr(
       "gh_authenticated",
       "remediation",
       "pushes_as",
+      "pushes_as_self",
       "watch",
     ]) ||
     typeof value.dirty !== "boolean" ||
@@ -1768,7 +1769,9 @@ export function parseCodeWorkspacePr(
     (value.gh_authenticated !== undefined &&
       typeof value.gh_authenticated !== "boolean") ||
     typeof value.remediation !== "string" ||
-    (value.pushes_as !== undefined && typeof value.pushes_as !== "string")
+    (value.pushes_as !== undefined && typeof value.pushes_as !== "string") ||
+    (value.pushes_as_self !== undefined &&
+      typeof value.pushes_as_self !== "boolean")
   ) {
     return null;
   }
@@ -1784,6 +1787,9 @@ export function parseCodeWorkspacePr(
       ? { gh_authenticated: value.gh_authenticated }
       : {}),
     ...(value.pushes_as !== undefined ? { pushes_as: value.pushes_as } : {}),
+    ...(value.pushes_as_self !== undefined
+      ? { pushes_as_self: value.pushes_as_self }
+      : {}),
   };
   if (value.pr !== undefined) {
     const pr = parsePullRequestDigest(value.pr);

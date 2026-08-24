@@ -20,7 +20,7 @@ use super::bus::{CloneProgress, CodeLiveUpdate};
 use super::gh::{self, resolve_github_clone_url};
 use super::runtime::CodeRuntime;
 use crate::error::ServerError;
-use crate::obo_gateway::{GitCredential, GitForgeError, GitForgeIdentity};
+use crate::obo_gateway::{GitCredential, GitForgeAttribution, GitForgeError, GitForgeIdentity};
 use crate::routes::code::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSource, CodeRepoSources,
 };
@@ -493,17 +493,22 @@ fn hosted_github_source(
     }
 }
 
-/// The sentence a hosted machine states its git identity with (decision 63).
+/// The sentence a hosted machine states its git identity with.
 ///
-/// Issue #2510's contract: an `installation_only` deployment cannot
-/// attribute work to the person, so the UI must say plainly that it lands as
-/// the App.
+/// Issue #2510's contract, extended by decision 65: the add-repository
+/// dialog says out loud whose account work lands as — the deployment's App
+/// (decision 63), or the caller's own once they have connected it.
 pub(crate) fn hosted_attribution_sentence(identity: &GitForgeIdentity) -> String {
-    match identity.bot_login.as_deref() {
-        Some(bot_login) => format!(
+    match &identity.attribution {
+        GitForgeAttribution::Person { login, .. } => format!(
+            "Clones and pushes use your own GitHub account: work lands as {login}."
+        ),
+        GitForgeAttribution::Bot {
+            bot_login: Some(bot_login),
+        } => format!(
             "Clones and pushes use this deployment's GitHub App: work lands as {bot_login}, not as your GitHub account."
         ),
-        None => format!(
+        GitForgeAttribution::Bot { bot_login: None } => format!(
             "Clones and pushes use this deployment's GitHub App ({}): work lands as the App's bot account, not as your GitHub account.",
             identity.app_name
         ),
@@ -526,11 +531,20 @@ pub(crate) fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
                                              administrator can disable the extras."
             .to_owned(),
         GitForgeError::ConnectModeForge => "This deployment's git forge identifies each person \
-                                            individually, and a personal identity is never lent \
-                                            to a shared machine. An administrator can register a \
-                                            second, installation-mode forge app on the Model \
-                                            Gateway."
+                                            individually, and its gateway does not lend personal \
+                                            credentials to this machine. An administrator can \
+                                            update the Model Gateway to one that serves personal \
+                                            git credentials."
             .to_owned(),
+        GitForgeError::NotConnected { connect_url } => match connect_url {
+            Some(url) => format!(
+                "To use GitHub as yourself here, connect your GitHub account at the Model \
+                 Gateway: {url}"
+            ),
+            None => "To use GitHub as yourself here, connect your GitHub account at the Model \
+                     Gateway."
+                .to_owned(),
+        },
         GitForgeError::ForgeAppNotInstalled => "This deployment's git forge app has no approved \
                                                 GitHub App installation yet. An administrator can \
                                                 finish installing it on GitHub."
