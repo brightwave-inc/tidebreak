@@ -274,6 +274,13 @@ pub async fn next_turn_ordinal(
 }
 
 /// Persist mutable turn fields. `id`, `session_id`, `ordinal`, and `started_at` stay as stored.
+///
+/// `narrative` is deliberately not among them. It is derived asynchronously
+/// after a turn ends and can land at any point, while the callers here hold a
+/// [`CodeTurn`] read before that — `checkpoint::after_turn_ended` takes its
+/// snapshot before the turn is even terminal. Writing the whole row from a
+/// stale snapshot would blank a recap that had already been stored, so the
+/// column has exactly one writer: [`set_turn_narrative`].
 pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<bool> {
     let result = entities::code_turn::Entity::update_many()
         .col_expr(
@@ -307,14 +314,34 @@ pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Res
             }),
         )
         .col_expr(
-            entities::code_turn::Column::Narrative,
-            sea_orm::sea_query::Expr::value(turn.narrative.clone()),
-        )
-        .col_expr(
             entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(turn.ended_at),
         )
         .filter(entities::code_turn::Column::Id.eq(turn.id.0))
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Store one turn's derived narrative, touching no other column.
+///
+/// Targeted for the reason [`save_turn`] documents: this lands while other
+/// writers hold a `CodeTurn` read before the narrative existed, so it must not
+/// be carried on a whole-row write in either direction.
+pub async fn set_turn_narrative(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeTurnId,
+    narrative: &str,
+) -> Result<bool> {
+    let result = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Narrative,
+            sea_orm::sea_query::Expr::value(Some(narrative.to_owned())),
+        )
+        .filter(entities::code_turn::Column::Id.eq(id.0))
         .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await

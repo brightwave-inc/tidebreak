@@ -10,8 +10,8 @@ use crate::db::code::{
     append_event, bump_spawn_epoch, get_approval, get_repo, get_repo_by_root_path, get_session,
     get_turn, get_workspace, insert_approval, insert_repo, insert_session, insert_turn,
     insert_workspace, list_approvals, list_events, list_repos, list_sessions, list_turns,
-    mark_repo_removed, replace_session_attention, save_session, set_session_subagents,
-    set_workspace_title_if, CodeJournalError, MAX_REPLAY_EVENTS,
+    mark_repo_removed, replace_session_attention, save_session, save_turn, set_session_subagents,
+    set_turn_narrative, set_workspace_title_if, CodeJournalError, MAX_REPLAY_EVENTS,
 };
 use crate::{BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, Store};
 use chrono::Utc;
@@ -2609,4 +2609,44 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         .await
         .unwrap()
         .is_empty());
+}
+
+/// A whole-row turn save cannot blank a recap that landed while it was held.
+///
+/// The two writers genuinely overlap. A recap is derived after the turn ends
+/// and takes seconds; `checkpoint::after_turn_ended` holds a `CodeTurn` read
+/// before the turn was even terminal and saves it once the git work finishes.
+/// While `save_turn` still wrote `narrative`, whichever landed second won, so
+/// the recap survived or vanished depending on how long a checkpoint took.
+#[tokio::test]
+async fn saving_a_turn_does_not_blank_its_narrative() {
+    let (_dir, store, _session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+
+    set_turn_narrative(
+        &store,
+        &owner,
+        turn_id,
+        "Tests pass. Next: the refresh path.",
+    )
+    .await
+    .unwrap();
+
+    // The snapshot a checkpoint writer holds: read before the recap existed.
+    let mut stale = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    stale.narrative = None;
+    stale.checkpoint_ref = Some("refs/tidebreak/checkpoints/ws/1".into());
+    assert!(save_turn(&store, &owner, &stale).await.unwrap());
+
+    let stored = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.narrative.as_deref(),
+        Some("Tests pass. Next: the refresh path."),
+        "the checkpoint save must not carry a stale narrative over the stored one"
+    );
+    assert_eq!(
+        stored.checkpoint_ref.as_deref(),
+        Some("refs/tidebreak/checkpoints/ws/1"),
+        "and it still writes what it owns"
+    );
 }

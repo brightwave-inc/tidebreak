@@ -48,7 +48,9 @@ use std::sync::{Arc, Mutex};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use tidebreak_core::db::code::{get_session, get_turn, list_recent_events, list_turns, save_turn};
+use tidebreak_core::db::code::{
+    get_session, get_turn, list_recent_events, list_turns, set_turn_narrative,
+};
 use tidebreak_core::{
     CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, OwnerId, Result,
 };
@@ -271,14 +273,15 @@ impl TurnRecapper {
         let Some(recap) = recap else {
             return Ok(Outcome::Declined);
         };
-        // Re-read rather than reusing the row fetched above: the turn's
-        // checkpoint and diffstat land from a different task while the model
-        // call is in flight, and writing back a stale copy would drop them.
-        let Some(mut stored) = get_turn(&self.db, owner, turn_id).await? else {
+        // A targeted column write, never a whole-row save. The checkpoint task
+        // is writing this same row from a `CodeTurn` it read before the turn
+        // ended, so a whole-row save from either side blanks the other's work:
+        // ours would drop the checkpoint ref, and theirs would drop this line
+        // — silently, and only sometimes, depending on which finished last.
+        if !set_turn_narrative(&self.db, owner, turn_id, &recap).await? {
+            // The turn was deleted while the call ran; nothing to announce.
             return Ok(Outcome::NotApplicable);
-        };
-        stored.narrative = Some(recap.clone());
-        save_turn(&self.db, owner, &stored).await?;
+        }
         // Announced only once the write applied, on the digest channel every
         // list surface already watches.
         super::attention::emit_digest(&self.db, &self.bus, &session).await;
