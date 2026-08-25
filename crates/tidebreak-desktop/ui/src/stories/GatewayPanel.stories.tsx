@@ -49,6 +49,20 @@ function stubMachine(state: RemoteMachineState): MachineControls {
 const meta = {
   title: "Settings/Model Gateway",
   component: GatewayPanel,
+  parameters: { layout: "fullscreen" },
+  decorators: [
+    (Story, context) => (
+      <div
+        className="h-full min-w-0"
+        style={{
+          width: context.globals.viewport === "compact" ? 420 : "100%",
+          maxWidth: "100%",
+        }}
+      >
+        <Story />
+      </div>
+    ),
+  ],
   args: {
     client: stubClient(gatewaySignedIn),
     managed: true,
@@ -78,6 +92,19 @@ export const Unmanaged: Story = {
 /** Managed by policy, signed in to nothing yet. */
 export const SignedOut: Story = {
   args: { client: stubClient(gatewaySignedOut) },
+};
+
+/** The browser flow is still pending and can be restarted without waiting. */
+export const PendingSignIn: Story = {
+  args: {
+    client: stubClient({
+      ...gatewaySignedOut,
+      sign_in: {
+        state: "pending",
+        authorization_url: "https://gateway.example.com/sign-in/pending",
+      },
+    }),
+  },
 };
 
 /** Signed in, with the entitled apps the deployment grants. */

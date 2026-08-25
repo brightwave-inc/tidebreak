@@ -281,6 +281,11 @@ function ManagedGatewayPanel({
     }
   }
 
+  async function startSignIn() {
+    const started = await client.gatewaySignIn();
+    await openInBrowser(started.authorization_url);
+  }
+
   if (!status) {
     return (
       <SettingsPanel title="Model Gateway" description="Loading…" busy>
@@ -319,7 +324,7 @@ function ManagedGatewayPanel({
     >
       <SettingsSection title="Gateway">
         <p className="text-sm">
-          <code className="font-medium">{origin ?? "—"}</code>
+          <code className="break-all font-medium">{origin ?? "—"}</code>
         </p>
         <p className="text-xs text-muted-foreground">
           Set by your organization&apos;s policy and not editable here.
@@ -403,10 +408,10 @@ function ManagedGatewayPanel({
               <SettingsError>{status.sign_in.message}</SettingsError>
             )}
             {pendingUrl ? (
-              <p className="text-sm">
-                Waiting for the browser…{" "}
+              <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-1 text-sm">
+                <span>Waiting for the browser…</span>
                 <a
-                  className="underline"
+                  className="break-words underline"
                   href={pendingUrl}
                   rel="noreferrer noopener"
                   onClick={(event) => {
@@ -420,19 +425,26 @@ function ManagedGatewayPanel({
                 >
                   Open the sign-in page again
                 </a>
-              </p>
+                <span aria-hidden="true">·</span>
+                {/* A pending flow can remain open until the server timeout.
+                    Starting over creates a fresh generation, so a late
+                    completion from the abandoned attempt is ignored. */}
+                <button
+                  type="button"
+                  className="underline disabled:opacity-50"
+                  disabled={working}
+                  onClick={() => void run(startSignIn)}
+                >
+                  Start over
+                </button>
+              </div>
             ) : (
               <Button
                 type="button"
                 // No origin means a misconfigured policy: there is no
                 // deployment to sign in against, and the server would refuse.
                 disabled={working || origin === null}
-                onClick={() =>
-                  void run(async () => {
-                    const started = await client.gatewaySignIn();
-                    await openInBrowser(started.authorization_url);
-                  })
-                }
+                onClick={() => void run(startSignIn)}
               >
                 <ExternalLink size={14} />
                 Connect
