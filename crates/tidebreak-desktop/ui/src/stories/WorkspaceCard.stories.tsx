@@ -15,6 +15,7 @@ import {
   monitorDigest,
   needsYouDigest,
   openPrDigest,
+  queuedPrDigest,
   runningDigest,
   shellDigest,
   stalledDigest,
@@ -196,6 +197,22 @@ export const PullRequestInRail: Story = {
       archived: false,
       hasSession: true,
     }),
+    onWorkflowAction: fn(),
+  },
+};
+
+/** Queue membership replaces the open chip in the hover detail. */
+export const MergeQueued: Story = {
+  args: {
+    workspace: { ...codeWorkspace, pr: queuedPrDigest },
+    digest: { ...doneDigest, pr_state: queuedPrDigest },
+    session: codeSession,
+    commands: workspaceCommands({
+      hasPr: true,
+      archived: false,
+      hasSession: true,
+    }),
+    detailDefaultOpen: true,
     onWorkflowAction: fn(),
   },
 };

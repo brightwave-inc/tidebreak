@@ -65,11 +65,9 @@ import {
   isSessionRowWorthy,
   isPutAway,
   middleTruncate,
-  PR_CHIP_TONE_CLASSES,
-  PR_ICON_TONE_CLASSES,
+  prStatusLabel,
   prStatusTone,
   prTone,
-  prToneLabel,
   repoAccentClass,
   sessionRowLabel,
   watchRowLabel,
@@ -432,10 +430,10 @@ function WorkspaceDetailPanel({
             <span
               className={cn(
                 "shrink-0 rounded-md px-1.5 py-0.5 font-medium",
-                PR_CHIP_TONE_CLASSES[prTone(pr)],
+                STATUS_CHIP[prStatusTone(pr)],
               )}
             >
-              {prToneLabel(pr)}
+              {prStatusLabel(pr)}
             </span>
           ) : null}
         </div>
@@ -474,7 +472,7 @@ function WorkspaceDetailPanel({
               <GitPullRequest
                 className={cn(
                   "mt-0.5 size-3.5 shrink-0",
-                  PR_ICON_TONE_CLASSES[prTone(pr)],
+                  STATUS_MARK[prStatusTone(pr)],
                 )}
                 aria-hidden
               />
@@ -827,7 +825,7 @@ function PrGlyph({ pr }: { pr: PullRequestDigest }) {
   const tone = prTone(pr);
   return (
     <GitPullRequest
-      className={cn("size-3 shrink-0", PR_ICON_TONE_CLASSES[tone])}
+      className={cn("size-3 shrink-0", STATUS_MARK[prStatusTone(pr)])}
       data-pr-state={tone}
       aria-hidden
     />

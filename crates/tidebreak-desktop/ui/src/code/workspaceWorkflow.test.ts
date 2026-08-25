@@ -93,6 +93,7 @@ describe("workspaceWorkflowModel", () => {
       }),
     });
     expect(queued.summary).toBe("#41 · Queued");
+    expect(queued.tone).toBe("warning");
     expect(queued.primary).toBe("open_pr");
     expect(workspaceWorkflowActionLabel(queued.primary!, queued.stage)).toBe(
       "View queue",

@@ -61,7 +61,8 @@ import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { useWorkspacePullRequests } from "./useWorkspacePullRequests";
 import { digestFromFact, factKey, WorkspacePrList } from "./WorkspacePrList";
-import { PR_ICON_TONE_CLASSES, prTone, prToneLabel } from "./workspaceCards";
+import { STATUS_MARK } from "./statusTone";
+import { prStatusLabel, prStatusTone, prTone } from "./workspaceCards";
 
 export type InspectorTab = "files" | "source" | "pr";
 
@@ -199,7 +200,7 @@ export function CodeInspector({
               <GitPullRequest
                 className={cn(
                   "size-3.5",
-                  pr ? PR_ICON_TONE_CLASSES[prTone(pr)] : undefined,
+                  pr ? STATUS_MARK[prStatusTone(pr)] : undefined,
                 )}
               />
             </InspectorTabTrigger>
@@ -574,7 +575,7 @@ export function PrTab({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <GitPullRequest
-              className={cn("size-4 shrink-0", PR_ICON_TONE_CLASSES[tone])}
+              className={cn("size-4 shrink-0", STATUS_MARK[prStatusTone(pr)])}
             />
             {pr.url ? (
               <a
@@ -612,8 +613,11 @@ export function PrTab({
           />
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <Badge variant={prStateVariant(tone)} size="sm">
-            {prToneLabel(pr)}
+          <Badge
+            variant={pr.in_merge_queue ? "warning" : prStateVariant(tone)}
+            size="sm"
+          >
+            {prStatusLabel(pr)}
           </Badge>
           <Button
             type="button"
@@ -635,7 +639,7 @@ export function PrTab({
 
       <div className="flex flex-wrap items-center gap-1">
         {open && <ReviewDecisionBadge decision={pr.review_decision} />}
-        {open && pr.auto_merge_enabled && (
+        {open && pr.auto_merge_enabled && !pr.in_merge_queue && (
           <Badge variant="info" size="sm">
             Auto-merge on
           </Badge>
@@ -700,6 +704,11 @@ export function PrTab({
               {merging === "auto_merge" ? <Spinner aria-hidden /> : null}
               Enable auto-merge
             </Button>
+          ) : workflow.state === "queued" ? (
+            <div className="text-warning-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
+              <CircleDashed className="size-3.5" />
+              In merge queue
+            </div>
           ) : pr.auto_merge_enabled ? (
             <div className="text-success-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
               <CircleCheck className="size-3.5" />

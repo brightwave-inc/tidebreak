@@ -374,7 +374,12 @@ export function workspaceCardLabel(input: {
   branchName: string;
   attention?: Attention;
   session?: CodeSessionDigest;
-  pr?: { number: number; state: string; draft?: boolean };
+  pr?: {
+    number: number;
+    state: string;
+    draft?: boolean;
+    in_merge_queue?: boolean;
+  };
   terminalOpen?: boolean;
   workspaceStatus?: CodeWorkspaceStatus;
 }): string {
@@ -387,7 +392,7 @@ export function workspaceCardLabel(input: {
     parts.push(sessionActivityLabel(input.session));
   }
   if (input.pr) {
-    parts.push(`Pull request #${input.pr.number} ${prToneLabel(input.pr)}`);
+    parts.push(`Pull request #${input.pr.number} ${prStatusLabel(input.pr)}`);
   }
   if (input.terminalOpen) parts.push("Terminal open");
   parts.push(input.repoName);
@@ -480,6 +485,15 @@ export function prToneLabel(pr: { state: string; draft?: boolean }): string {
   }
 }
 
+/** Queue membership replaces the lifecycle word on compact status surfaces. */
+export function prStatusLabel(pr: {
+  state: string;
+  draft?: boolean;
+  in_merge_queue?: boolean;
+}): string {
+  return pr.in_merge_queue ? "Queued" : prToneLabel(pr);
+}
+
 /**
  * The PR vocabulary as a view of the shared status one. A PR chip is a status
  * chip; keeping its own color table is what let merged drift onto a hardcoded
@@ -497,7 +511,9 @@ const PR_STATUS_TONES: Record<PrChipTone, StatusTone> = {
 export function prStatusTone(pr: {
   state: string;
   draft?: boolean;
+  in_merge_queue?: boolean;
 }): StatusTone {
+  if (pr.in_merge_queue) return "warning";
   return PR_STATUS_TONES[prTone(pr)];
 }
 

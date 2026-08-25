@@ -168,7 +168,11 @@ describe("pullRequestListStatus", () => {
           checks: [{ name: "preview", bucket: "fail" }],
         }),
       ),
-    ).toMatchObject({ label: "In merge queue", group: "handed_off" });
+    ).toMatchObject({
+      label: "In merge queue",
+      tone: "warning",
+      group: "handed_off",
+    });
     expect(
       pullRequestListStatus(pr({ auto_merge_enabled: true })),
     ).toMatchObject({ label: "Auto-merge armed", group: "handed_off" });

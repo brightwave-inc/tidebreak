@@ -164,6 +164,21 @@ describe("PrCard", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it("shows queued instead of open after GitHub accepts the merge queue entry", () => {
+    renderState({
+      ...BASE,
+      pr: {
+        number: 12,
+        url: "https://github.com/example/demo/pull/12",
+        state: "open",
+        in_merge_queue: true,
+      },
+    });
+
+    expect(screen.getByText("Queued")).toHaveClass("bg-warning-background");
+    expect(screen.queryByText("open")).not.toBeInTheDocument();
+  });
+
   it("keeps an existing pull request visible while changes are dirty", () => {
     renderState({
       ...BASE,

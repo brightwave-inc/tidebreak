@@ -10,6 +10,7 @@ import {
   hostedAppGit,
   hostedPersonGit,
   openPrGit,
+  queuedPrGit,
   readyForPrGit,
   unpushedGit,
 } from "./fixtures";
@@ -94,6 +95,10 @@ export const ReadyForPullRequest: Story = {
 
 export const PullRequestOpen: Story = {
   args: { snapshot: openPrGit },
+};
+
+export const MergeQueued: Story = {
+  args: { snapshot: queuedPrGit },
 };
 
 export const RefreshFailed: Story = {

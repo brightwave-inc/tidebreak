@@ -161,6 +161,21 @@ export const openPrGit: CodeWorkspacePrSnapshot = {
   },
 };
 
+/** GitHub has accepted the pull request into its merge queue. */
+export const queuedPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  pr: {
+    ...openPrGit.pr!,
+    auto_merge_enabled: true,
+    in_merge_queue: true,
+    checks_summary: "8 passing, 1 pending, 0 failing",
+    checks: [
+      { name: "desktop test", bucket: "pass" },
+      { name: "merge queue", bucket: "pending" },
+    ],
+  },
+};
+
 /** Failing checks with nobody watching: the Fix errors action's own state. */
 export const failingChecksPrGit: CodeWorkspacePrSnapshot = {
   ...openPrGit,
@@ -671,6 +686,12 @@ export const openPrDigest: PullRequestDigest = {
   url: "https://github.com/example/tidebreak/pull/184",
   state: "open",
   title: "Add a scoped UI workshop",
+};
+
+export const queuedPrDigest: PullRequestDigest = {
+  ...openPrDigest,
+  auto_merge_enabled: true,
+  in_merge_queue: true,
 };
 
 export const draftPrDigest: PullRequestDigest = {
