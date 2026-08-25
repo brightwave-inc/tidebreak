@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::sync::oneshot;
+use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
     arm_trigger, delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo,
@@ -182,8 +183,8 @@ pub(crate) struct CodeRuntime {
     /// Workspaces whose digest was requested recently, with the owner each
     /// belongs to: the hot tier the refresher walks (decision 66).
     hot_prs: Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>,
-    /// When each owner last took a delivery nudge, for the debounce.
-    delivery_nudges: Mutex<HashMap<OwnerId, Instant>>,
+    /// Per-owner delivery nudge debounce, including one pending trailing edge.
+    delivery_nudges: DeliveryNudgeDebounce,
     /// Paces and parks every conditional GitHub read (decision 66).
     host_gate: super::pr_fetch::HostGate,
     /// Base-branch rules, cached per branch: whether a merge queue runs
@@ -236,6 +237,80 @@ const HOT_WINDOW: Duration = Duration::from_secs(120);
 /// Floor between two delivery nudges to one owner (decision 66): a sweep
 /// updating many rows collapses to one re-read on the other side.
 const DELIVERY_NUDGE_DEBOUNCE: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct DeliveryNudgeDebounce {
+    owners: Arc<Mutex<HashMap<OwnerId, DeliveryNudgeState>>>,
+}
+
+struct DeliveryNudgeState {
+    sent_at: TokioInstant,
+    trailing_at: Option<TokioInstant>,
+}
+
+impl DeliveryNudgeDebounce {
+    fn publish(&self, bus: &Arc<CodeEventBus>, owner: &OwnerId) {
+        let now = TokioInstant::now();
+        let trailing_at = {
+            let mut owners = self.owners.lock().expect("delivery nudges");
+            match owners.get_mut(owner) {
+                Some(state) if now.duration_since(state.sent_at) < DELIVERY_NUDGE_DEBOUNCE => {
+                    if state.trailing_at.is_some() {
+                        return;
+                    }
+                    let deadline = state.sent_at + DELIVERY_NUDGE_DEBOUNCE;
+                    state.trailing_at = Some(deadline);
+                    Some(deadline)
+                }
+                Some(state) => {
+                    state.sent_at = now;
+                    state.trailing_at = None;
+                    None
+                }
+                None => {
+                    owners.insert(
+                        owner.clone(),
+                        DeliveryNudgeState {
+                            sent_at: now,
+                            trailing_at: None,
+                        },
+                    );
+                    None
+                }
+            }
+        };
+        let Some(trailing_at) = trailing_at else {
+            bus.publish_update(owner, super::bus::CodeLiveUpdate::Delivery);
+            return;
+        };
+
+        let owner = owner.clone();
+        let owners = Arc::downgrade(&self.owners);
+        let bus = Arc::downgrade(bus);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(trailing_at).await;
+            let (Some(owners), Some(bus)) = (owners.upgrade(), bus.upgrade()) else {
+                return;
+            };
+            let publish = {
+                let mut owners = owners.lock().expect("delivery nudges");
+                let Some(state) = owners.get_mut(&owner) else {
+                    return;
+                };
+                if state.trailing_at != Some(trailing_at) {
+                    false
+                } else {
+                    state.sent_at = TokioInstant::now();
+                    state.trailing_at = None;
+                    true
+                }
+            };
+            if publish {
+                bus.publish_update(&owner, super::bus::CodeLiveUpdate::Delivery);
+            }
+        });
+    }
+}
 
 /// One cached branch-rules answer. `rules: None` records a host that has no
 /// rules endpoint, so a known 404 is not re-read every refresh.
@@ -301,7 +376,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: Mutex::new(HashMap::new()),
-            delivery_nudges: Mutex::new(HashMap::new()),
+            delivery_nudges: DeliveryNudgeDebounce::default(),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
@@ -423,7 +498,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: Mutex::new(HashMap::new()),
-            delivery_nudges: Mutex::new(HashMap::new()),
+            delivery_nudges: DeliveryNudgeDebounce::default(),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
             delivery_cache: DeliveryCache::default(),
@@ -1606,17 +1681,7 @@ impl CodeRuntime {
     /// (decision 66): a sweep that moves several rows costs one re-read,
     /// not one per row.
     fn nudge_delivery_update(&self, owner: &OwnerId) {
-        {
-            let mut nudged = self.delivery_nudges.lock().expect("delivery nudges");
-            if let Some(last) = nudged.get(owner) {
-                if last.elapsed() < DELIVERY_NUDGE_DEBOUNCE {
-                    return;
-                }
-            }
-            nudged.insert(owner.clone(), Instant::now());
-        }
-        self.bus
-            .publish_update(owner, super::bus::CodeLiveUpdate::Delivery);
+        self.delivery_nudges.publish(&self.bus, owner);
     }
 
     /// The workspaces the hot refresher walks this tick.
@@ -4388,6 +4453,56 @@ fn map_worker(err: WorkerError) -> ServerError {
 impl From<WorktreeError> for ServerError {
     fn from(err: WorktreeError) -> Self {
         map_worktree(err)
+    }
+}
+
+#[cfg(test)]
+mod delivery_nudge_tests {
+    use super::super::bus::CodeLiveUpdate;
+    use super::*;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    #[tokio::test(start_paused = true)]
+    async fn suppressed_changes_share_one_trailing_nudge_per_owner() {
+        let nudges = DeliveryNudgeDebounce::default();
+        let bus = Arc::new(CodeEventBus::default());
+        let alice = OwnerId::new("alice").unwrap();
+        let bob = OwnerId::new("bob").unwrap();
+        let mut alice_updates = bus.subscribe_updates(&alice);
+        let mut bob_updates = bus.subscribe_updates(&bob);
+
+        nudges.publish(&bus, &alice);
+        assert_eq!(alice_updates.try_recv().unwrap(), CodeLiveUpdate::Delivery);
+
+        nudges.publish(&bus, &alice);
+        nudges.publish(&bus, &alice);
+        assert!(matches!(alice_updates.try_recv(), Err(TryRecvError::Empty)));
+
+        nudges.publish(&bus, &bob);
+        assert_eq!(bob_updates.try_recv().unwrap(), CodeLiveUpdate::Delivery);
+
+        tokio::time::advance(DELIVERY_NUDGE_DEBOUNCE).await;
+        tokio::task::yield_now().await;
+        assert_eq!(alice_updates.try_recv().unwrap(), CodeLiveUpdate::Delivery);
+        assert!(matches!(alice_updates.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(bob_updates.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_trailing_nudge_stops_with_its_runtime_state() {
+        let bus = Arc::new(CodeEventBus::default());
+        let owner = OwnerId::new("alice").unwrap();
+        let mut updates = bus.subscribe_updates(&owner);
+        let nudges = DeliveryNudgeDebounce::default();
+
+        nudges.publish(&bus, &owner);
+        assert_eq!(updates.try_recv().unwrap(), CodeLiveUpdate::Delivery);
+        nudges.publish(&bus, &owner);
+        drop(nudges);
+
+        tokio::time::advance(DELIVERY_NUDGE_DEBOUNCE).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(updates.try_recv(), Err(TryRecvError::Empty)));
     }
 }
 
