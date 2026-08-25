@@ -72,6 +72,10 @@ const CATALOG_STALE_GRACE_SECONDS: u64 = 3600;
 /// below anything that could stall the process.
 const CATALOG_RESPONSE_LIMIT: usize = 1024 * 1024;
 
+/// Cap on a git-repositories list body. The gateway's first page is up to
+/// 100 names with descriptions, which does not fit the token-exchange cap.
+const GIT_REPOSITORIES_RESPONSE_LIMIT: usize = 1024 * 1024;
+
 /// How long one caller's probed git-forge identity stays fresh.
 ///
 /// The identity decorates surfaces that refetch often — the PR card reloads
@@ -276,7 +280,7 @@ pub(crate) struct OboGateway {
     git_credential_url: reqwest::Url,
     /// The no-mint git-forge availability probe beside it.
     git_forge_url: reqwest::Url,
-    /// The repository list beside the probe (gateway ADR 0091).
+    /// The repository list beside the probe (gateway ADR 0092).
     git_repositories_url: reqwest::Url,
     /// This machine's `tidebreak:<sha256>` resource, named in every
     /// git-credential request so the gateway verifies the token lives in
@@ -813,7 +817,7 @@ impl OboGateway {
                 ))
             })?;
         let status = response.status();
-        let body = read_bounded(response, RESPONSE_LIMIT)
+        let body = read_bounded(response, GIT_REPOSITORIES_RESPONSE_LIMIT)
             .await
             .map_err(|error| GitForgeError::Unavailable(error.to_string()))?;
         if !status.is_success() {

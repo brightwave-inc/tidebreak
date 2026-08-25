@@ -24,7 +24,7 @@ The repository field has the same shape of gap. Decision 65 already borrows
 the caller's forge identity for clone, push, and pull requests. The dialog
 still asks them to type `owner/repo` even though that identity can list the
 repositories they can already clone. The gateway lists those names itself
-(gateway ADR 0091) so the machine never holds a token for the read.
+(gateway ADR 0092) so the machine never holds a token for the read.
 
 ## Decision
 

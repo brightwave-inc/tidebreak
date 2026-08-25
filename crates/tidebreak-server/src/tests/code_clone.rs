@@ -539,6 +539,31 @@ async fn a_hosted_machine_lists_the_callers_github_repositories() {
     assert_eq!(listed["repositories"][0]["private"], true);
 }
 
+#[tokio::test]
+async fn a_hosted_machine_does_not_treat_a_failed_github_list_as_empty() {
+    let lender = Arc::new(FakeLender::refusing(GitForgeError::Unavailable(
+        "the Model Gateway git-repositories request failed".into(),
+    )));
+    let (router, token, _runtime, _dir) = code_app_with(Some(lender)).await;
+    let addr = serve(router).await;
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/code/repos/github"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["kind"], "git_forge_refused");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("git-repositories request failed"),
+        "{body:?}"
+    );
+}
+
 async fn fetch_sources(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,

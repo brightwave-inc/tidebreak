@@ -99,6 +99,7 @@ export function AddRepoPalette({
   const [githubRepos, setGithubRepos] = useState<CodeGithubRepository[] | null>(
     null,
   );
+  const [githubListFailed, setGithubListFailed] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,14 +176,21 @@ export function AddRepoPalette({
     setError(null);
     setSources(null);
     setGithubRepos(null);
+    setGithubListFailed(false);
     void client
       .getCodeRepoSources()
       .then(setSources)
       .catch(() => setSources(null));
     void client
       .listCodeGithubRepositories()
-      .then((next) => setGithubRepos(next.repositories))
-      .catch(() => setGithubRepos([]));
+      .then((next) => {
+        setGithubRepos(next.repositories);
+        setGithubListFailed(false);
+      })
+      .catch(() => {
+        setGithubRepos([]);
+        setGithubListFailed(true);
+      });
     // Administrator-only, and the person adding a repo on a shared machine
     // usually is not one. A refusal leaves the remembered destination unknown,
     // which the machine fills in for itself.
@@ -492,6 +500,7 @@ export function AddRepoPalette({
             defaults={defaults}
             hint={githubHint}
             repositories={githubRepos}
+            listFailed={githubListFailed}
             busy={busy}
             error={error}
             onGithub={setGithub}
@@ -707,6 +716,7 @@ function GithubStage({
   defaults,
   hint,
   repositories,
+  listFailed,
   busy,
   error,
   onGithub,
@@ -726,6 +736,7 @@ function GithubStage({
   /** The machine's note about GitHub, when it still offers it. */
   hint: string | null;
   repositories: CodeGithubRepository[] | null;
+  listFailed: boolean;
   busy: boolean;
   error: string | null;
   onGithub: (value: string) => void;
@@ -757,6 +768,7 @@ function GithubStage({
       <GithubRepoField
         value={github}
         repositories={repositories}
+        listFailed={listFailed}
         busy={busy}
         onChange={onGithub}
       />
@@ -808,28 +820,41 @@ function GithubStage({
 function GithubRepoField({
   value,
   repositories,
+  listFailed,
   busy,
   onChange,
 }: {
   value: string;
   repositories: CodeGithubRepository[] | null;
+  listFailed: boolean;
   busy: boolean;
   onChange: (value: string) => void;
 }) {
   const listed = repositories ?? [];
   const loading = repositories === null;
+  const typeIn = listFailed || (listed.length === 0 && repositories !== null);
 
   return (
     <label className="flex flex-col gap-1 text-sm">
       <span className="font-medium">Repository</span>
-      {listed.length === 0 && repositories !== null ? (
-        <Input
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder="owner/repo"
-          disabled={busy}
-          autoFocus
-        />
+      {typeIn ? (
+        <>
+          <Input
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder="owner/repo"
+            disabled={busy}
+            autoFocus
+          />
+          {listFailed && (
+            <p
+              className="text-muted-foreground text-xs"
+              data-testid="github-list-failed"
+            >
+              Suggestions did not load. Type owner/repo to clone.
+            </p>
+          )}
+        </>
       ) : (
         <Select
           value={value}

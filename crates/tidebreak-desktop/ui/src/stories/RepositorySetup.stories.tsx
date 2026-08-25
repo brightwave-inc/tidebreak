@@ -30,6 +30,7 @@ type SetupScenario =
   | "clone-failure"
   | "clone-progress"
   | "hosted-picker"
+  | "hosted-list-failed"
   | "workspace"
   | "workspace-needs-harness";
 
@@ -49,8 +50,11 @@ function setupClient(scenario: SetupScenario): ApiClient {
         ? "GitHub CLI is not signed in on this machine."
         : "",
     }),
-    listCodeGithubRepositories: async () =>
-      scenario === "hosted-picker"
+    listCodeGithubRepositories: async () => {
+      if (scenario === "hosted-list-failed") {
+        throw new Error("502: bad gateway");
+      }
+      return scenario === "hosted-picker"
         ? {
             repositories: [
               {
@@ -65,7 +69,8 @@ function setupClient(scenario: SetupScenario): ApiClient {
               },
             ],
           }
-        : { repositories: [] },
+        : { repositories: [] };
+    },
     getCodeRepoSources: async () => ({
       sources: localOnly
         ? [
@@ -88,14 +93,16 @@ function setupClient(scenario: SetupScenario): ApiClient {
               kind: "github",
               available: true,
               remediation:
-                scenario === "hosted-picker"
+                scenario === "hosted-picker" ||
+                scenario === "hosted-list-failed"
                   ? "Clones and pushes use your own GitHub account: work lands as mira-chen."
                   : githubHint
                     ? "GitHub CLI is not signed in on this machine."
                     : undefined,
             },
           ],
-      chooses_destination: scenario === "hosted-picker",
+      chooses_destination:
+        scenario === "hosted-picker" || scenario === "hosted-list-failed",
     }),
     startCodeClone: async () => {
       if (scenario === "clone-failure") {
@@ -316,6 +323,18 @@ export const HostedGitHubPicker: Story = {
       await body.findByRole("option", { name: /mira-chen\/notes/ }),
     ).toBeVisible();
     await expect(body.queryByText("Destination folder")).toBeNull();
+  },
+};
+
+export const HostedGitHubListFailed: Story = {
+  args: { scenario: "hosted-list-failed" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await body.findByRole("option", { name: /GitHub repository/ }),
+    );
+    await expect(await body.findByPlaceholderText("owner/repo")).toBeVisible();
+    await expect(await body.findByTestId("github-list-failed")).toBeVisible();
   },
 };
 

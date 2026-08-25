@@ -402,6 +402,44 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
     ).toHaveTextContent("mira-chen/notes");
   });
 
+  it("keeps type-in when the list fails and says the suggestions did not load", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: true,
+              remediation:
+                "Clones and pushes use your own GitHub account: work lands as mira-chen.",
+            },
+          ],
+          chooses_destination: true,
+        })),
+        listCodeGithubRepositories: vi.fn(async () => {
+          throw new Error("502: bad gateway");
+        }),
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    expect(
+      await screen.findByPlaceholderText("owner/repo"),
+    ).toBeInTheDocument();
+    expect(await screen.findByTestId("github-list-failed")).toHaveTextContent(
+      /Suggestions did not load/,
+    );
+    expect(
+      screen.queryByRole("combobox", { name: "Repository" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("clones from the dropdown with Cmd+Enter", async () => {
     const startCodeClone = vi.fn(async () => ({
       id: "job-1",

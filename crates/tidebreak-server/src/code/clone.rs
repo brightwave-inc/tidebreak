@@ -246,7 +246,9 @@ impl CodeRuntime {
     /// picker (decision 70).
     ///
     /// A hosted machine asks the gateway; a machine with no lender answers
-    /// an empty list so the typed `owner/repo` field stays the path.
+    /// an empty list so the typed `owner/repo` field stays the path. A
+    /// lender error is a failed list, not an empty one: the dialog keeps
+    /// type-in and says the suggestions did not load.
     pub(crate) async fn list_github_repositories(
         &self,
         owner: &OwnerId,
@@ -267,15 +269,10 @@ impl CodeRuntime {
                     })
                     .collect(),
             }),
-            Err(error) => {
-                tracing::debug!(
-                    error = ?error,
-                    "code-mode: github repository list skipped"
-                );
-                Ok(CodeGithubRepositories {
-                    repositories: Vec::new(),
-                })
-            }
+            Err(error) => Err(ServerError::unprocessable_kind(
+                "git_forge_refused",
+                git_forge_refusal_message(&error),
+            )),
         }
     }
 
