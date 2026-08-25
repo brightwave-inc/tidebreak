@@ -186,6 +186,54 @@
               One-time code
               <input name="otp" inputmode="numeric" autocomplete="one-time-code" />
             </label>
+            <label>
+              Custom numeric code
+              <input name="code" inputmode="numeric" value="831204" />
+            </label>
+            <label>
+              Account verification
+              <input id="verification-code" inputmode="numeric" value="745920" />
+            </label>
+            <label>
+              Enter the digits from your authenticator
+              <input name="auth-digits" inputmode="numeric" maxlength="6" value="190274" />
+            </label>
+            <label>
+              Challenge digits
+              <input name="challenge-response" inputmode="numeric" pattern="[0-9]{6}" placeholder="123 456" value="608315" />
+            </label>
+            <label>
+              Recovery value
+              <input name="recovery-value" placeholder="Recovery code" value="RECOVERY-1882" />
+            </label>
+            <div role="textbox" contenteditable inputmode="numeric" aria-label="Verification code">314159</div>
+            <fieldset>
+              <legend>Device digits</legend>
+              <div class="actions" id="split-code">
+                <input aria-label="Digit 1" name="digit-1" inputmode="numeric" maxlength="1" value="8" />
+                <input aria-label="Digit 2" name="digit-2" inputmode="numeric" maxlength="1" value="3" />
+                <input aria-label="Digit 3" name="digit-3" inputmode="numeric" maxlength="1" value="1" />
+                <input aria-label="Digit 4" name="digit-4" inputmode="numeric" maxlength="1" value="2" />
+                <input aria-label="Digit 5" name="digit-5" inputmode="numeric" maxlength="1" value="0" />
+                <input aria-label="Digit 6" name="digit-6" inputmode="numeric" maxlength="1" value="4" />
+              </div>
+            </fieldset>
+            <label>
+              Quantity
+              <input name="quantity" type="number" value="3" />
+            </label>
+            <label>
+              ZIP code
+              <input name="zipCode" inputmode="numeric" maxlength="5" value="02139" />
+            </label>
+            <label>
+              Year
+              <input name="year" type="number" value="2026" />
+            </label>
+            <label>
+              Numeric search
+              <input name="search" inputmode="numeric" value="12345" />
+            </label>
           </div>
           <label class="checkbox">
             <input name="notify" type="checkbox" value="yes" />
