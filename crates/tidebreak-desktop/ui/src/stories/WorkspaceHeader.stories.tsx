@@ -3,16 +3,31 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { MoreHorizontal } from "lucide-react";
 import { fn } from "storybook/test";
 
-import type { CodeWorkspacePrSnapshot } from "@/api";
+import type {
+  Attention,
+  CodeSessionSnapshot,
+  CodeWorkspacePrSnapshot,
+} from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { AttentionBadge } from "@/code/AttentionBadge";
+import { SessionLifecycleIndicator } from "@/code/SessionLifecycleIndicator";
 import { WorkspaceHeader } from "@/code/WorkspaceHeader";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
 import type {
   CodeWorkspacePrMutation,
   CodeWorkspacePrResource,
 } from "@/code/useCodeWorkspacePr";
-import { dirtyGit, openPrGit, watchingPrGit } from "./fixtures";
+import {
+  attentionDoneUnreviewed,
+  attentionFenced,
+  attentionNeedsYou,
+  attentionStalled,
+  attentionWorking,
+  dirtyGit,
+  openPrGit,
+  watchingPrGit,
+} from "./fixtures";
 
 function resourceFor(
   snapshot: CodeWorkspacePrSnapshot | null,
@@ -37,11 +52,19 @@ function HeaderState({
   loading = false,
   initialReviewOpen = true,
   activityLabel = "Agent working",
+  attention = attentionWorking,
+  lifecycle = "running",
+  pendingApprovals = 0,
+  unrecognizedEventCount = 0,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   loading?: boolean;
   initialReviewOpen?: boolean;
   activityLabel?: string;
+  attention?: Attention;
+  lifecycle?: CodeSessionSnapshot["lifecycle"];
+  pendingApprovals?: number;
+  unrecognizedEventCount?: number;
 }) {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(initialReviewOpen);
@@ -76,9 +99,24 @@ function HeaderState({
       }
       sessionStatus={
         loading ? undefined : (
-          <Badge variant="outline" size="sm">
-            {activityLabel}
-          </Badge>
+          <>
+            {attention?.state.type !== "working" && (
+              <AttentionBadge attention={attention} compact />
+            )}
+            {pendingApprovals > 0 && (
+              <Badge variant="warning" size="sm">
+                {pendingApprovals}{" "}
+                {pendingApprovals === 1 ? "approval" : "approvals"}
+              </Badge>
+            )}
+            <SessionLifecycleIndicator
+              lifecycle={lifecycle}
+              harness="codex"
+              version="0.84.0"
+              unrecognizedEventCount={unrecognizedEventCount}
+              runningLabel={lifecycle === "running" ? activityLabel : undefined}
+            />
+          </>
         )
       }
       terminalOpen={terminalOpen}
@@ -139,6 +177,46 @@ export const Monitoring: Story = {
 
 export const SubagentsWorking: Story = {
   args: { snapshot: openPrGit, activityLabel: "2 subagents working" },
+};
+
+export const NeedsYou: Story = {
+  args: { snapshot: openPrGit, attention: attentionNeedsYou },
+};
+
+export const ApprovalPending: Story = {
+  args: { snapshot: openPrGit, pendingApprovals: 1 },
+};
+
+export const Stalled: Story = {
+  args: {
+    snapshot: openPrGit,
+    attention: attentionStalled,
+    lifecycle: "idle",
+  },
+};
+
+export const Fenced: Story = {
+  args: {
+    snapshot: openPrGit,
+    attention: attentionFenced,
+    lifecycle: "fenced",
+  },
+};
+
+export const DoneUnreviewed: Story = {
+  args: {
+    snapshot: openPrGit,
+    attention: attentionDoneUnreviewed,
+    lifecycle: "ended",
+  },
+};
+
+export const UnrecognizedEngineEvents: Story = {
+  args: {
+    snapshot: openPrGit,
+    activityLabel: "Shell running",
+    unrecognizedEventCount: 3,
+  },
 };
 
 export const Loading: Story = {

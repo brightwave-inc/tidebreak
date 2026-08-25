@@ -1,12 +1,14 @@
+import { Ban, CircleAlert, CircleCheck, Clock, Pin } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 import type { Attention } from "../api/types";
 import { attentionLabel, attentionTooltip } from "./labels";
 import {
   attentionStatusTone,
-  STATUS_DOT,
-  STATUS_MOTION,
+  STATUS_MARK,
   type StatusTone,
 } from "./statusTone";
 
@@ -16,11 +18,10 @@ import {
  * NeedsYou is strongest. Stalled and Fenced are distinct warnings.
  * DoneUnreviewed is a quiet mark.
  *
- * Working is a dot but not a pill. The compact dot is often the only state a
- * row carries, and an agent mid-turn used to draw there as nothing at all —
- * indistinguishable from an idle one, for the state a reader most wants to
- * see. The full badge always sits beside text that names the state already, so
- * a "Working" pill there would only repeat it.
+ * Working is a spinner but not a pill. Compact surfaces use a distinct glyph
+ * for each state, so the shape still carries the meaning when color is subtle
+ * or unavailable. The full badge always sits beside text that names the state
+ * already, so a "Working" pill there would only repeat it.
  */
 
 const BADGE_VARIANTS: Record<
@@ -53,20 +54,17 @@ export function AttentionBadge({
   if (compact) {
     return (
       <span
-        className={cn(
-          "inline-block size-2 shrink-0 rounded-full",
-          STATUS_DOT[tone],
-          STATUS_MOTION[tone],
-          className,
-        )}
-        // A dot with no text is only a state if something says which one. On a
-        // bare `span` the label would be dropped; `img` is the role that takes
-        // a name and has no children to read.
+        className={cn("inline-flex size-3 shrink-0 items-center", className)}
+        // A glyph with no text is only a state if something says which one.
+        // `img` is the role that gives the wrapper an accessible name while
+        // the inner icon stays decorative.
         role="img"
         aria-label={label}
         title={tooltip}
         data-attention={attention.state.type}
-      />
+      >
+        <CompactAttentionMark attention={attention} tone={tone} />
+      </span>
     );
   }
   return (
@@ -81,4 +79,28 @@ export function AttentionBadge({
       {label}
     </Badge>
   );
+}
+
+function CompactAttentionMark({
+  attention,
+  tone,
+}: {
+  attention: Attention;
+  tone: StatusTone;
+}) {
+  const className = cn("size-3", STATUS_MARK[tone]);
+  switch (attention.state.type) {
+    case "working":
+      return <Spinner className={className} aria-hidden="true" />;
+    case "needs_you":
+      return <CircleAlert className={className} aria-hidden="true" />;
+    case "stalled":
+      return <Clock className={className} aria-hidden="true" />;
+    case "fenced":
+      return <Ban className={className} aria-hidden="true" />;
+    case "done_unreviewed":
+      return <CircleCheck className={className} aria-hidden="true" />;
+    case "manual":
+      return <Pin className={className} aria-hidden="true" />;
+  }
 }

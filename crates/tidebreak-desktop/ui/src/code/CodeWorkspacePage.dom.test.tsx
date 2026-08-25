@@ -599,7 +599,7 @@ describe("CodeWorkspacePage", () => {
     expect(screen.queryByText("repo-1")).not.toBeInTheDocument();
   });
 
-  it("marks recorded unrecognized engine events with a warning dot", async () => {
+  it("marks recorded unrecognized engine events with a warning icon", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([
       { ...SESSION, unrecognized_event_count: 3 },
@@ -609,7 +609,7 @@ describe("CodeWorkspacePage", () => {
     expect(
       await screen.findByRole("heading", { name: /Fix login/ }),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("unrecognized-event-dot")).toHaveAttribute(
+    expect(screen.getByTestId("unrecognized-event-indicator")).toHaveAttribute(
       "aria-label",
       "3 unrecognized engine events recorded in this session",
     );
