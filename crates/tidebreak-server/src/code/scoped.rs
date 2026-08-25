@@ -157,7 +157,7 @@ impl ScopedCode {
         &self,
         id: uuid::Uuid,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
-        self.runtime.get_clone_job(id)
+        self.runtime.get_clone_job(&self.owner, id)
     }
 
     // ------------------------------------------------------------------

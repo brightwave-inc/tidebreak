@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -31,6 +31,8 @@ const CLONE_TIMEOUT: Duration = Duration::from_secs(900);
 /// without git reports so rather than stalling the dialog that asked.
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_CHARS: usize = 4_096;
+const COMPLETED_JOB_RETENTION: Duration = Duration::from_secs(30 * 60);
+const MAX_COMPLETED_JOBS: usize = 256;
 pub(crate) const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
 
 /// In-memory clone jobs for this process. Not journaled; a restart drops them.
@@ -42,31 +44,74 @@ pub(crate) struct CloneJobs {
 #[derive(Debug, Clone)]
 struct CloneJob {
     id: Uuid,
+    owner: OwnerId,
     phase: String,
     percent: Option<u8>,
     done: bool,
     error: Option<String>,
     repo_id: Option<RepoId>,
+    finished_at: Option<Instant>,
 }
 
 impl CloneJobs {
-    fn snapshot(&self, id: Uuid) -> Option<CodeCloneJobSnapshot> {
-        self.jobs
-            .lock()
-            .expect("clone jobs")
-            .get(&id)
+    fn snapshot(&self, owner: &OwnerId, id: Uuid) -> Option<CodeCloneJobSnapshot> {
+        let mut jobs = self.jobs.lock().expect("clone jobs");
+        prune_completed_jobs(&mut jobs, Instant::now());
+        jobs.get(&id)
+            .filter(|job| &job.owner == owner)
             .map(CloneJob::to_snapshot)
     }
 
     fn insert(&self, job: CloneJob) {
-        self.jobs.lock().expect("clone jobs").insert(job.id, job);
+        let mut jobs = self.jobs.lock().expect("clone jobs");
+        jobs.insert(job.id, job);
+        prune_completed_jobs(&mut jobs, Instant::now());
     }
 
-    fn apply(&self, id: Uuid, update: impl FnOnce(&mut CloneJob)) -> Option<CloneJob> {
-        let mut guard = self.jobs.lock().expect("clone jobs");
-        let job = guard.get_mut(&id)?;
-        update(job);
-        Some(job.clone())
+    fn apply(
+        &self,
+        owner: &OwnerId,
+        id: Uuid,
+        update: impl FnOnce(&mut CloneJob),
+    ) -> Option<CloneJob> {
+        let now = Instant::now();
+        let mut jobs = self.jobs.lock().expect("clone jobs");
+        prune_completed_jobs(&mut jobs, now);
+        let updated = {
+            let job = jobs.get_mut(&id)?;
+            if &job.owner != owner {
+                return None;
+            }
+            update(job);
+            if job.done && job.finished_at.is_none() {
+                job.finished_at = Some(now);
+            }
+            job.clone()
+        };
+        prune_completed_jobs(&mut jobs, now);
+        Some(updated)
+    }
+}
+
+fn prune_completed_jobs(jobs: &mut std::collections::HashMap<Uuid, CloneJob>, now: Instant) {
+    jobs.retain(|_, job| {
+        !job.done
+            || job.finished_at.is_none_or(|finished_at| {
+                now.saturating_duration_since(finished_at) <= COMPLETED_JOB_RETENTION
+            })
+    });
+
+    let mut completed = jobs
+        .iter()
+        .filter_map(|(id, job)| job.finished_at.map(|finished_at| (*id, finished_at)))
+        .collect::<Vec<_>>();
+    if completed.len() <= MAX_COMPLETED_JOBS {
+        return;
+    }
+    completed.sort_unstable_by_key(|(_, finished_at)| *finished_at);
+    let excess = completed.len() - MAX_COMPLETED_JOBS;
+    for (id, _) in completed.into_iter().take(excess) {
+        jobs.remove(&id);
     }
 }
 
@@ -276,9 +321,13 @@ impl CodeRuntime {
         }
     }
 
-    pub(crate) fn get_clone_job(&self, id: Uuid) -> Result<CodeCloneJobSnapshot, ServerError> {
+    pub(crate) fn get_clone_job(
+        &self,
+        owner: &OwnerId,
+        id: Uuid,
+    ) -> Result<CodeCloneJobSnapshot, ServerError> {
         self.clone_jobs
-            .snapshot(id)
+            .snapshot(owner, id)
             .ok_or_else(|| ServerError::not_found(format!("clone job {id} not found")))
     }
 
@@ -326,14 +375,16 @@ impl CodeRuntime {
         let id = Uuid::new_v4();
         let job = CloneJob {
             id,
+            owner: owner.clone(),
             phase: "starting".into(),
             percent: None,
             done: false,
             error: None,
             repo_id: None,
+            finished_at: None,
         };
         self.clone_jobs.insert(job.clone());
-        self.publish_clone(owner, &job);
+        self.publish_clone(&job);
 
         let runtime = std::sync::Arc::clone(self);
         let owner = owner.clone();
@@ -404,8 +455,8 @@ impl CodeRuntime {
     }
 
     fn touch_clone(&self, owner: &OwnerId, id: Uuid, update: impl FnOnce(&mut CloneJob)) {
-        if let Some(job) = self.clone_jobs.apply(id, update) {
-            self.publish_clone(owner, &job);
+        if let Some(job) = self.clone_jobs.apply(owner, id, update) {
+            self.publish_clone(&job);
         }
     }
 
@@ -418,9 +469,9 @@ impl CodeRuntime {
         });
     }
 
-    fn publish_clone(&self, owner: &OwnerId, job: &CloneJob) {
+    fn publish_clone(&self, job: &CloneJob) {
         self.bus.publish_update(
-            owner,
+            &job.owner,
             CodeLiveUpdate::CloneProgress(CloneProgress {
                 job: job.id.to_string(),
                 phase: job.phase.clone(),
@@ -882,6 +933,57 @@ fn bound_stderr(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn job(owner: &OwnerId, done: bool, finished_at: Option<Instant>) -> CloneJob {
+        CloneJob {
+            id: Uuid::new_v4(),
+            owner: owner.clone(),
+            phase: if done { "done" } else { "starting" }.to_owned(),
+            percent: done.then_some(100),
+            done,
+            error: None,
+            repo_id: None,
+            finished_at,
+        }
+    }
+
+    #[test]
+    fn clone_jobs_are_visible_only_to_their_owner() {
+        let jobs = CloneJobs::default();
+        let alice = OwnerId::new("user:alice").unwrap();
+        let bob = OwnerId::new("user:bob").unwrap();
+        let job = job(&alice, false, None);
+        let id = job.id;
+        jobs.insert(job);
+
+        assert!(jobs.snapshot(&alice, id).is_some());
+        assert!(jobs.snapshot(&bob, id).is_none());
+        assert!(jobs.apply(&bob, id, |_| {}).is_none());
+    }
+
+    #[test]
+    fn completed_clone_jobs_expire_and_stay_bounded() {
+        let jobs = CloneJobs::default();
+        let owner = OwnerId::new("user:alice").unwrap();
+        let expired = job(
+            &owner,
+            true,
+            Instant::now().checked_sub(COMPLETED_JOB_RETENTION + Duration::from_secs(1)),
+        );
+        let expired_id = expired.id;
+        jobs.insert(expired);
+        assert!(jobs.snapshot(&owner, expired_id).is_none());
+
+        for offset in 0..=MAX_COMPLETED_JOBS {
+            let finished_at = Instant::now()
+                .checked_sub(Duration::from_millis((MAX_COMPLETED_JOBS - offset) as u64))
+                .unwrap();
+            jobs.insert(job(&owner, true, Some(finished_at)));
+        }
+        let guard = jobs.jobs.lock().expect("clone jobs");
+        assert_eq!(guard.len(), MAX_COMPLETED_JOBS);
+        assert!(guard.values().all(|job| job.done));
+    }
 
     #[test]
     fn progress_parser_reads_git_percent_lines() {
