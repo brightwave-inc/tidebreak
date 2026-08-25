@@ -194,7 +194,7 @@ fn import_child_skills(
             "This folder contains more than {MAX_PARENT_ENTRIES} entries. Choose a smaller folder"
         ));
     }
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|entry| entry.file_name());
 
     let mut candidate_skills = 0_usize;
     let mut child_directories = 0_usize;
@@ -401,7 +401,7 @@ fn inspect_directory(
         .map_err(|_| "Could not read a folder in this skill".to_owned())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "Could not read a folder in this skill".to_owned())?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|entry| entry.file_name());
 
     let mut files = Vec::new();
     let mut directories = Vec::new();
