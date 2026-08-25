@@ -72,8 +72,10 @@ feel like Tidebreak.
 - Keep icons subordinate. Lucide icons are lightweight recognition markers,
   not decorative advertising. Size them to the surrounding text, align them
   to the primary text line, and never place them in a gray container on
-  high-density surfaces. The `EmptyMedia variant="icon"` container is the
-  only allowed exception, and only on low-density surfaces.
+  high-density surfaces. `EmptyMedia variant="icon"` draws no filled
+  container at all; it is how Inbox, Folders, Outputs, Plugins, Apps, and
+  the Code empty pages render an empty index, and it is the only icon
+  treatment allowed on an empty surface.
 - Show the canonical answer in Storybook. Real product examples beat prose
   principles. The `Foundations/Patterns` story shows the right way to
   compose settings, cards, approvals, and empty states so the next builder
