@@ -90,6 +90,7 @@ pub(super) async fn resume_product_attachment(
         RootSummary {
             root_id,
             display_name: sync.display_name,
+            owner: None,
         },
     )
     .await
@@ -847,6 +848,7 @@ mod tests {
                 root: RootSummary {
                     root_id,
                     display_name: "Documents".to_owned(),
+                    owner: None,
                 },
             },
             &sync,
@@ -857,6 +859,7 @@ mod tests {
                 root: RootSummary {
                     root_id,
                     display_name: "Documents".to_owned(),
+                    owner: None,
                 },
             },
             &sync,

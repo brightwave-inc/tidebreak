@@ -551,6 +551,59 @@ async fn bundled_document_helpers_are_installed_as_one_library() {
     );
 }
 
+/// A stored user skill reaches execution with every resource at the same path
+/// that its `SKILL.md` names, including nested directories and root helpers.
+#[tokio::test]
+async fn stored_skill_resources_keep_their_paths_in_execution_staging() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let skill = source.path().join("document-review");
+    std::fs::create_dir_all(skill.join("scripts").join("lib")).unwrap();
+    std::fs::create_dir_all(skill.join("references").join("formats")).unwrap();
+    std::fs::create_dir_all(skill.join("assets").join("templates")).unwrap();
+    std::fs::write(
+        skill.join(tidebreak_code_execution::SKILL_MANIFEST_FILE),
+        "---\nname: document-review\ndescription: Review documents.\n---\nBody.\n",
+    )
+    .unwrap();
+
+    let resources = [
+        ("validate.sh", b"exit 0\n".as_slice()),
+        (
+            "scripts/run.py",
+            b"from lib.layout import render\n".as_slice(),
+        ),
+        ("scripts/lib/layout.py", b"def render(): pass\n".as_slice()),
+        (
+            "references/formats/pdf-a.md",
+            b"Preserve the archive profile.\n".as_slice(),
+        ),
+        ("assets/templates/page.bin", b"\0\x01\x02".as_slice()),
+    ];
+    for (relative, content) in resources {
+        std::fs::write(skill.join(relative), content).unwrap();
+    }
+
+    let skills = tidebreak_code_execution::load_skills(
+        source.path(),
+        tidebreak_code_execution::SkillOrigin::User,
+    );
+    assert_eq!(skills.len(), 1);
+    prepare_execution_directories(workspace.path(), false, None, &skills)
+        .await
+        .unwrap();
+
+    let staged = workspace
+        .path()
+        .join(tidebreak_code_execution::SKILLS_DIR)
+        .join("document-review");
+    for (relative, content) in resources {
+        let actual = std::fs::read(staged.join(relative)).unwrap();
+        assert_eq!(actual.as_slice(), content);
+    }
+    assert!(!staged.join("scripts").join("validate.sh").exists());
+}
+
 /// Turn-start staging pins the contract the prompt catalog relies on:
 /// every advertised skill's `SKILL.md` — and the helper files it tells the
 /// model to run — is readable in the chat's private scratch, the directory

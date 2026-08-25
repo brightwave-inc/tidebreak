@@ -1,7 +1,12 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 
+import { CodeTranscript } from "@/code/CodeTranscript";
+import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
 import { TurnReviewCard } from "@/code/TurnReviewCard";
+
+const CODEX_REVOKED_TOKEN_ERROR =
+  "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.";
 
 function boundary(
   overrides: Partial<Parameters<typeof TurnReviewCard>[0]["turn"]> = {},
@@ -84,6 +89,47 @@ export const Failed: Story = {
       diffstat: null,
     }),
   },
+};
+
+const codexRevokedTokenItems: CodeTranscriptItem[] = [
+  {
+    kind: "notice",
+    id: "notice-codex-auth",
+    level: "error",
+    message: CODEX_REVOKED_TOKEN_ERROR,
+  },
+  boundary({
+    status: "failed",
+    error: CODEX_REVOKED_TOKEN_ERROR,
+    diffstat: null,
+  }),
+];
+
+const renderCodexRevokedTokenTranscript = () => (
+  <div className="h-[520px] min-h-0 overflow-auto">
+    <CodeTranscript items={codexRevokedTokenItems} />
+  </div>
+);
+
+const assertOneCodexRecovery = async (canvasElement: HTMLElement) => {
+  const canvas = within(canvasElement);
+  const alerts = await canvas.findAllByRole("alert");
+  await expect(alerts).toHaveLength(1);
+  await expect(alerts[0]).toHaveTextContent(
+    "Codex CLI rejected its saved sign-in",
+  );
+};
+
+/** The transcript folds the duplicate harness error into one recovery card. */
+export const CodexRevokedRefreshToken: Story = {
+  render: renderCodexRevokedTokenTranscript,
+  play: ({ canvasElement }) => assertOneCodexRecovery(canvasElement),
+};
+
+export const CodexRevokedRefreshTokenCompact: Story = {
+  render: renderCodexRevokedTokenTranscript,
+  parameters: { viewport: { defaultViewport: "compact" } },
+  play: ({ canvasElement }) => assertOneCodexRecovery(canvasElement),
 };
 
 /**

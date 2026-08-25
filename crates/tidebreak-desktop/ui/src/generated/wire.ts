@@ -1947,7 +1947,7 @@ export type ConsentHandle = { "kind": "tool_grant", call_id: CallId, } | { "kind
 /**
  * The trusted interaction that captured a consent statement.
  */
-export type ConsentMethodSnapshot = "approval_card" | "folder_picker" | "permission_dialog" | "operator_config" | "carried_forward";
+export type ConsentMethodSnapshot = "approval_card" | "folder_picker" | "trusted_folder" | "permission_dialog" | "operator_config" | "carried_forward";
 
 /**
  * What a consent statement's verb is allowed to touch.

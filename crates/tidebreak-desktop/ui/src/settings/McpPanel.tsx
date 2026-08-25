@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import type {
   ApiClient,
   GatewayApps,
@@ -21,9 +21,15 @@ import {
   SettingsSection,
   SettingsStatus,
 } from "./primitives";
+import {
+  parseMcpImport,
+  type McpImportResult,
+  type McpImportSecret,
+} from "./mcpImport";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
+const MAX_IMPORT_BYTES = 1024 * 1024;
 /** Mount health lives in the local MCP supervisor, so a modest refresh while
  * the section is visible keeps the health lines honest without gateway load. */
 const MOUNT_REFRESH_MS = 15_000;
@@ -31,6 +37,8 @@ const MOUNT_REFRESH_MS = 15_000;
  * to 127, so the mount name is derived, not the slug itself. Mount identity
  * is always the `gateway_endpoint` field, never the name. */
 const MAX_NAMESPACE_BYTES = 32;
+
+type McpImportSummary = McpImportResult & { fileName: string };
 
 function emptyServer(index: number): McpServerInfo {
   return {
@@ -196,9 +204,15 @@ export function McpPanel({
   const [servers, setServers] = useState<McpServerInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSummary, setImportSummary] = useState<McpImportSummary | null>(
+    null,
+  );
+  const importInputRef = useRef<HTMLInputElement>(null);
   // Gateway session state, held here because the gateway endpoints section
   // shares this panel's one server list instead of owning a second copy.
   const [signedIn, setSignedIn] = useState(false);
@@ -376,6 +390,34 @@ export function McpPanel({
     }
   }
 
+  async function importConfiguration(file: File) {
+    setImporting(true);
+    setImportError(null);
+    setImportSummary(null);
+    try {
+      if (file.size > MAX_IMPORT_BYTES) {
+        throw new Error("Choose a JSON file no larger than 1 MB.");
+      }
+      const text = await file.text();
+      let value: unknown;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        throw new Error("The file is not valid JSON.");
+      }
+      const result = parseMcpImport(value, servers);
+      setImportSummary({ ...result, fileName: file.name });
+      if (result.servers.length > 0) {
+        markDirty(true);
+        setServers((current) => [...current, ...result.servers]);
+      }
+    } catch (err) {
+      setImportError(`Couldn't import ${file.name}: ${errorMessage(err)}`);
+    } finally {
+      setImporting(false);
+    }
+  }
+
   /** Mount or unmount one endpoint: an immediate, complete configuration
    * write, rebuilt from the live configuration rather than the draft above
    * so it never persists an unsaved edit — nor drops a server saved from
@@ -436,7 +478,7 @@ export function McpPanel({
     }
   }
 
-  const working = saving || reconnecting !== null || mounting;
+  const working = saving || importing || reconnecting !== null || mounting;
 
   const entitledSlugs = new Set(
     apps?.apps.flatMap((app) => app.mcp_endpoint_slugs) ?? [],
@@ -626,6 +668,47 @@ export function McpPanel({
         <p className="text-sm text-muted-foreground">Loading MCP servers…</p>
       ) : (
         <>
+          <SettingsSection
+            title="Import configuration"
+            description="Add servers from a Tidebreak, Claude, or Cursor JSON file. Imported servers stay unsaved until you review them and save."
+          >
+            <div className="flex flex-col items-start gap-2">
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="sr-only"
+                aria-label="Import MCP configuration"
+                disabled={working}
+                onChange={(event) => {
+                  const input = event.currentTarget;
+                  const file = input.files?.[0];
+                  if (file !== undefined) void importConfiguration(file);
+                  input.value = "";
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                disabled={working}
+                onClick={() => importInputRef.current?.click()}
+              >
+                <Upload size={14} />
+                {importing ? "Importing…" : "Import JSON"}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Tidebreak imports environment variable names but never their
+                values. Enter secret values again before you save.
+              </p>
+            </div>
+            {importSummary !== null && (
+              <ImportSummary summary={importSummary} />
+            )}
+            {importError !== null && (
+              <SettingsError>{importError}</SettingsError>
+            )}
+          </SettingsSection>
+
           {servers.length === 0 && (
             <SettingsSection>
               <p className="text-sm text-muted-foreground">
@@ -946,6 +1029,76 @@ export function McpPanel({
       {error && <SettingsError>{error}</SettingsError>}
     </McpKindSection>
   );
+}
+
+function ImportSummary({ summary }: { summary: McpImportSummary }) {
+  const imported = summary.servers.length;
+  const skipped = summary.skipped.length;
+  const secrets = secretsByServer(summary.secrets);
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <p className="min-w-0 text-sm" role="status" aria-atomic="true">
+        {imported === 0 ? (
+          <>
+            No servers imported from{" "}
+            <span className="break-all">{summary.fileName}</span>.
+          </>
+        ) : (
+          <>
+            {imported} server{imported === 1 ? "" : "s"} added to the editor
+            from <span className="break-all">{summary.fileName}</span>.
+          </>
+        )}{" "}
+        {skipped > 0 &&
+          `${skipped} entr${skipped === 1 ? "y was" : "ies were"} skipped.`}
+      </p>
+      {secrets.length > 0 && (
+        <div className="text-xs text-muted-foreground">
+          <p>Enter these environment values before saving:</p>
+          <ul
+            aria-label="Environment values to enter"
+            className="mt-1 list-disc space-y-1 pl-5"
+          >
+            {secrets.map(([server, names]) => (
+              <li key={server} className="min-w-0 break-words">
+                <code className="break-all">{server}</code>:{" "}
+                {names.map((name, index) => (
+                  <span key={name}>
+                    {index > 0 && ", "}
+                    <code className="break-all">{name}</code>
+                  </span>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {summary.skipped.length > 0 && (
+        <ul
+          aria-label="Skipped MCP servers"
+          className="list-disc space-y-1 pl-5 text-xs text-muted-foreground"
+        >
+          {summary.skipped.map((item, index) => (
+            <li key={`${item.name}-${index}`} className="min-w-0 break-words">
+              <code className="break-all">{item.name}</code>: {item.reason}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function secretsByServer(
+  secrets: McpImportSecret[],
+): Array<[string, string[]]> {
+  const grouped = new Map<string, string[]>();
+  for (const secret of secrets) {
+    const names = grouped.get(secret.server) ?? [];
+    if (!names.includes(secret.name)) names.push(secret.name);
+    grouped.set(secret.server, names);
+  }
+  return [...grouped.entries()];
 }
 
 /**

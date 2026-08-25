@@ -25,6 +25,7 @@ it("attaches and confirms revoking a folder from the ordinary chat composer", as
             rootId: "root-1",
             displayName: "Research",
             status: "connected",
+            availableInFutureChats: true,
             statements: (["read_files", "write_files"] as const).map(
               (capability, index) => ({
                 handle: {
@@ -87,6 +88,7 @@ it("drops folder chips after send without needing a disconnect", () => {
             rootId: "root-1",
             displayName: "Downloads",
             status: "connected",
+            availableInFutureChats: true,
             statements: (
               ["read_files", "write_files", "execute_commands"] as const
             ).map((capability, index) => ({

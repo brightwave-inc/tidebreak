@@ -406,6 +406,75 @@ describe("CodeTranscript", () => {
     expect(alert).toHaveTextContent("4.0s");
   });
 
+  it("attributes a revoked refresh token to Codex CLI and gives recovery steps", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "notice",
+            id: "notice-codex-auth",
+            level: "error",
+            message:
+              "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+          },
+          {
+            kind: "turn_boundary",
+            id: "b-codex-auth",
+            turnId: "t-codex-auth",
+            status: "failed",
+            durationMs: 4_000,
+            usage: null,
+            error:
+              "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+            diffstat: null,
+          },
+        ]}
+      />,
+    );
+
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    const alert = alerts[0]!;
+    expect(alert).toHaveTextContent("Codex CLI rejected its saved sign-in");
+    expect(alert).toHaveTextContent(
+      "Tidebreak's account sign-in does not reset Codex CLI",
+    );
+    expect(within(alert).getByText("codex logout").tagName).toBe("CODE");
+    expect(within(alert).getByText("codex login").tagName).toBe("CODE");
+    expect(alert).toHaveTextContent(
+      "Then open Settings → Coding harnesses and select Re-check",
+    );
+    expect(alert).not.toHaveTextContent("Your access token could not");
+  });
+
+  it("keeps a revoked-token notice when the next turn failed for another reason", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "notice",
+            id: "notice-codex-auth",
+            level: "error",
+            message:
+              "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+          },
+          {
+            kind: "turn_boundary",
+            id: "b-other-failure",
+            turnId: "t-other-failure",
+            status: "failed",
+            durationMs: 4_000,
+            usage: null,
+            error: "the engine exited before the turn completed",
+            diffstat: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+  });
+
   it("falls back to the tool name when the engine sends no target", () => {
     render(
       <CodeTranscript

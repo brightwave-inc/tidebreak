@@ -140,6 +140,91 @@ describe("McpPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("imports a JSON file into the editor and reports skipped servers", async () => {
+    const client = api();
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await screen.findByText("Healthy");
+    const fileName =
+      "mcp-configuration-with-a-filename-that-must-wrap-without-overflowing.json";
+    const secretName =
+      "CALENDAR_TOKEN_WITH_A_LONG_UNBROKEN_IDENTIFIER_FOR_A_COMPACT_PANEL";
+    const file = new File(
+      [
+        JSON.stringify({
+          mcpServers: {
+            private_docs: { command: "duplicate" },
+            "bad.name": { command: "invalid-name" },
+            calendar: {
+              command: "npx",
+              args: ["-y", "@example/calendar-mcp"],
+              env: { [secretName]: "do-not-retain" },
+            },
+            remote: { url: "https://mcp.example.test/tools" },
+          },
+        }),
+      ],
+      fileName,
+      { type: "application/json" },
+    );
+    if (typeof file.text !== "function") {
+      Object.defineProperty(file, "text", {
+        value: vi
+          .fn()
+          .mockResolvedValue(
+            await file
+              .arrayBuffer()
+              .then((value) => new TextDecoder().decode(value)),
+          ),
+      });
+    }
+    await user.upload(screen.getByLabelText("Import MCP configuration"), file);
+
+    const importSection = screen
+      .getByRole("heading", { name: "Import configuration" })
+      .closest("section");
+    if (!importSection) throw new Error("import section missing");
+    const status = await within(importSection).findByRole("status");
+    expect(status).toHaveTextContent(
+      `2 servers added to the editor from ${fileName}. 2 entries were skipped.`,
+    );
+    expect(status.closest("[aria-live]")).toBeNull();
+    expect(status).not.toContainElement(
+      within(importSection).getByRole("list", {
+        name: "Environment values to enter",
+      }),
+    );
+    expect(within(status).getByText(fileName)).toHaveClass("break-all");
+    const skipped = within(
+      screen.getByRole("list", { name: "Skipped MCP servers" }),
+    )
+      .getAllByRole("listitem")
+      .map((item) => item.textContent);
+    expect(skipped).toEqual([
+      "private_docs: Namespace already exists.",
+      "bad.name: Namespace must use 1–32 ASCII letters, numbers, underscores, or hyphens.",
+    ]);
+    expect(screen.getByRole("heading", { name: "calendar" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "remote" })).toBeVisible();
+    expect(screen.getByText(secretName)).toHaveClass("break-all");
+    expect(
+      within(
+        screen.getByRole("list", { name: "Skipped MCP servers" }),
+      ).getByText("private_docs"),
+    ).toHaveClass("break-all");
+    expect(screen.queryByText("do-not-retain")).not.toBeInTheDocument();
+    expect(client.putMcpServers).not.toHaveBeenCalled();
+
+    const calendarSection = screen
+      .getByRole("heading", { name: "calendar" })
+      .closest("section");
+    if (!calendarSection) throw new Error("calendar section missing");
+    expect(
+      within(calendarSection).getByLabelText("Environment value 1"),
+    ).toHaveValue("");
+  });
+
   it("sends argv and selected environment names as typed arrays", async () => {
     const client = api({ servers: [] });
     const user = userEvent.setup();

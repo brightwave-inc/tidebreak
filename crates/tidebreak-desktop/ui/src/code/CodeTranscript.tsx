@@ -43,6 +43,7 @@ import { MiddleTruncate } from "./MiddleTruncate";
 import {
   formatElapsedDuration,
   formatTurnDuration,
+  isCodexRevokedRefreshTokenError,
   TurnReviewCard,
 } from "./TurnReviewCard";
 
@@ -159,10 +160,11 @@ export function CodeTranscript({
       </div>
     );
   }
+  const presentationItems = codeTranscriptPresentationItems(items);
   // The recap belongs to the session, so only its newest boundary carries one.
   let newestBoundaryId: string | undefined;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
+  for (let index = presentationItems.length - 1; index >= 0; index -= 1) {
+    const item = presentationItems[index];
     if (item?.kind === "turn_boundary") {
       newestBoundaryId = item.id;
       break;
@@ -172,7 +174,7 @@ export function CodeTranscript({
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
       <div className="messages-column" ref={contentRef}>
-        {groupCodeTranscriptRows(items).map((row) =>
+        {groupCodeTranscriptRows(presentationItems).map((row) =>
           row.kind === "group"
             ? isolatedCard(
                 row.id,
@@ -220,13 +222,45 @@ export function CodeTranscript({
                 />,
               ),
         )}
-        {shouldShowCodeWorking(items, busy, streamStalled) && (
+        {shouldShowCodeWorking(presentationItems, busy, streamStalled) && (
           <AssistantWorkingIndicator />
         )}
-        <TurnLifecycleAnnouncer text={codeTurnAnnouncement(items, busy)} />
+        <TurnLifecycleAnnouncer
+          text={codeTurnAnnouncement(presentationItems, busy)}
+        />
       </div>
     </div>
   );
+}
+
+/**
+ * Remove a harness error when the turn boundary already presents the same
+ * Codex CLI recovery. The notice has no turn id, so transcript order is the
+ * boundary: only the next boundary before another prompt can absorb it.
+ */
+export function codeTranscriptPresentationItems(
+  items: readonly CodeTranscriptItem[],
+): CodeTranscriptItem[] {
+  return items.filter((item, index) => {
+    if (
+      item.kind !== "notice" ||
+      item.level !== "error" ||
+      !isCodexRevokedRefreshTokenError(item.message)
+    ) {
+      return true;
+    }
+
+    for (let nextIndex = index + 1; nextIndex < items.length; nextIndex += 1) {
+      const next = items[nextIndex];
+      if (!next || next.kind === "user") return true;
+      if (next.kind !== "turn_boundary") continue;
+      return !(
+        next.status === "failed" && isCodexRevokedRefreshTokenError(next.error)
+      );
+    }
+
+    return true;
+  });
 }
 
 /**

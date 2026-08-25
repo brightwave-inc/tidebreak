@@ -181,6 +181,7 @@ describe("PermissionsPanel", () => {
         rootId: "55555555-5555-5555-5555-555555555555",
         displayName: "Documents",
         status: "connected",
+        availableInFutureChats: true,
       },
     ]);
     grantFolderCapability.mockImplementation(() => {

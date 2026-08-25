@@ -673,6 +673,7 @@ mod tests {
             tidebreak_host_broker::RootSummary {
                 root_id: tidebreak_host_broker::RootId::new(),
                 display_name: "Documents".into(),
+                owner: None,
             },
             Some(&[
                 Capability::ReadFiles,

@@ -65,7 +65,12 @@ function composerFolders(
   return {
     items: [],
     approved: [
-      { rootId: "root-1", displayName: "Reports", status: "connected" },
+      {
+        rootId: "root-1",
+        displayName: "Reports",
+        status: "connected",
+        availableInFutureChats: true,
+      },
     ],
     working: false,
     error: null,

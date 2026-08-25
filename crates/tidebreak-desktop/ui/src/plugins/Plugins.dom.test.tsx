@@ -12,6 +12,7 @@ import type { PluginCatalog } from "@/api";
 import { PluginDetailView } from "./PluginDetailView";
 import type { PluginsApis } from "./pluginsApis";
 import { PluginsView } from "./PluginsView";
+import type { SkillImportReport } from "./skillImport";
 import { usePluginCatalog } from "./usePluginCatalog";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
@@ -80,13 +81,20 @@ function apisWith(overrides: Partial<PluginsApis> = {}): PluginsApis {
 }
 
 /** Drives the real catalog hook so a toggle exercises the whole round trip. */
-function ListHarness({ apis }: { apis: PluginsApis }) {
+function ListHarness({
+  apis,
+  importSkills,
+}: {
+  apis: PluginsApis;
+  importSkills?: () => Promise<SkillImportReport | null>;
+}) {
   const state = usePluginCatalog(apis);
   return (
     <PluginsView
       state={state}
       loadInstructions={apis.instructions}
       onOpen={() => {}}
+      importSkills={importSkills}
     />
   );
 }
@@ -218,5 +226,59 @@ describe("Plugins library", () => {
     expect(await screen.findByText("No plugins installed")).toBeInTheDocument();
     // The user-skills section is absent rather than empty when there are none.
     expect(screen.queryByLabelText("Your skills")).not.toBeInTheDocument();
+  });
+
+  it("reports every import outcome and reloads the catalog", async () => {
+    const apis = apisWith();
+    const importedName =
+      "customer-support-incident-review-with-a-long-unbroken-skill-name";
+    const importSkills = vi.fn().mockResolvedValue({
+      imported: [importedName],
+      skipped: [
+        { name: "draft-helper", reason: "No regular SKILL.md was found" },
+      ],
+      conflicts: [
+        {
+          name: "documents",
+          reason: "A skill included with Tidebreak already uses this name",
+        },
+      ],
+    } satisfies SkillImportReport);
+    render(<ListHarness apis={apis} importSkills={importSkills} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Import skills" }),
+    );
+
+    expect(
+      await screen.findByText("Skill import complete"),
+    ).toBeInTheDocument();
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(
+      "1 skill imported, 1 skipped, and 1 conflict",
+    );
+    expect(status).not.toHaveTextContent(importedName);
+    expect(screen.getByText(importedName)).toHaveClass("break-all");
+    expect(screen.getByText("draft-helper")).toBeInTheDocument();
+    expect(screen.getAllByText("documents").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("No regular SKILL.md was found"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(apis.list).toHaveBeenCalledTimes(2));
+  });
+
+  it("leaves the catalog alone when the folder picker is cancelled", async () => {
+    const apis = apisWith();
+    const importSkills = vi.fn().mockResolvedValue(null);
+    render(<ListHarness apis={apis} importSkills={importSkills} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Import skills" }),
+    );
+
+    await waitFor(() => expect(importSkills).toHaveBeenCalledOnce());
+    expect(apis.list).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Skill import complete")).not.toBeInTheDocument();
+    expect(screen.queryByText("No skills imported")).not.toBeInTheDocument();
   });
 });

@@ -49,6 +49,8 @@ mod office_pdf;
 #[cfg(target_os = "macos")]
 mod office_sandbox;
 mod remote;
+mod skill_import;
+mod trusted_folders;
 mod updater;
 mod voice_transcription;
 
@@ -829,6 +831,8 @@ pub fn run() {
             host_access::pick_code_directory,
             host_access::connect_folder,
             host_access::connect_approved_folder,
+            host_access::attach_trusted_folders,
+            host_access::set_trusted_folder,
             host_access::list_approved_folders,
             host_access::list_capability_consents,
             host_access::revoke_capability_consent,
@@ -837,6 +841,7 @@ pub fn run() {
             host_access::disconnect_folder,
             host_access::forget_folder,
             host_access::purge_deleted_conversation_subject,
+            skill_import::import_skills,
             updater::desktop_update_state,
             updater::check_for_update,
             updater::restart_for_update

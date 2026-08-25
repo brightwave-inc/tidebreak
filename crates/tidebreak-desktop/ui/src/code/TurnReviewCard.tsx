@@ -36,6 +36,22 @@ import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 
 type TurnBoundary = Extract<CodeTranscriptItem, { kind: "turn_boundary" }>;
 
+const CODEX_REVOKED_REFRESH_TOKEN_FINGERPRINT =
+  "your access token could not be refreshed because your refresh token was revoked";
+
+/**
+ * Whether Codex CLI rejected the saved refresh token for this session.
+ *
+ * The CLI can wrap the sentence with its own prefix or line breaks. Normalize
+ * whitespace and match the full diagnostic clause so other authentication and
+ * engine failures keep their original text.
+ */
+export function isCodexRevokedRefreshTokenError(error: string | null): boolean {
+  if (!error) return false;
+  const normalized = error.toLowerCase().replace(/\s+/g, " ").trim();
+  return normalized.includes(CODEX_REVOKED_REFRESH_TOKEN_FINGERPRINT);
+}
+
 export function TurnReviewCard({
   turn,
   narrative,
@@ -71,6 +87,7 @@ export function TurnReviewCard({
   );
 
   if (turn.status === "failed") {
+    const codexNeedsLogin = isCodexRevokedRefreshTokenError(turn.error);
     return (
       <div
         role="alert"
@@ -83,7 +100,11 @@ export function TurnReviewCard({
             <span className="font-normal tabular-nums">· {duration}</span>
           )}
         </p>
-        <p>{turn.error ?? "The engine stopped without saying why."}</p>
+        {codexNeedsLogin ? (
+          <CodexLoginRecovery />
+        ) : (
+          <p>{turn.error ?? "The engine stopped without saying why."}</p>
+        )}
         {narrative}
         {(diffstat || actions) && (
           <div className="flex items-center gap-2">
@@ -117,6 +138,33 @@ export function TurnReviewCard({
       {diffstat}
       {actions}
     </SeamRow>
+  );
+}
+
+/** Recovery for the revoked credential that belongs to Codex CLI. */
+function CodexLoginRecovery() {
+  return (
+    <div className="flex flex-col gap-2">
+      <p>
+        Codex CLI rejected its saved sign-in. Tidebreak&apos;s account sign-in
+        does not reset Codex CLI.
+      </p>
+      <div className="flex flex-col gap-1">
+        <p>Run these commands in your terminal:</p>
+        <ol className="list-decimal space-y-1 pl-5">
+          <li>
+            <code className="font-mono">codex logout</code>
+          </li>
+          <li>
+            <code className="font-mono">codex login</code>
+          </li>
+        </ol>
+      </div>
+      <p>
+        Then open Settings → Coding harnesses and select{" "}
+        <strong>Re-check</strong>.
+      </p>
+    </div>
   );
 }
 

@@ -369,6 +369,7 @@ fn install_legacy_alias(
                     root: RootSummary {
                         root_id: alias_root_id,
                         display_name,
+                        owner: Some(subject),
                     },
                 })),
             },
@@ -791,15 +792,19 @@ fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation(
     let second_conversation = Uuid::new_v4();
     let second_subject = GrantSubject::conversation(second_conversation).unwrap();
     let attach_id = OperationId::new();
-    mutate_attachment(
-        &broker.controller(),
-        attach_id,
-        second_subject,
-        second_conversation,
-        root_id,
-        RootAttachmentMutationKind::Attach,
-    )
+    let result = unwrap_response(broker.controller().handle(ControlEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crate::RequestId::new(),
+        request: ControlRequest::AttachRoot(RootAttachmentMutationRequest {
+            operation_id: attach_id,
+            subject: second_subject,
+            conversation_id: second_conversation,
+            root_id,
+            consent_method: Some(ConsentMethod::TrustedFolder),
+        }),
+    }))
     .unwrap();
+    assert!(matches!(result, ControlResult::AttachRoot(_)));
     assert!(broker
         .shared
         .state
@@ -811,7 +816,7 @@ fn approved_roots_can_be_explicitly_attached_to_another_standalone_conversation(
             grant.subject() == second_subject
                 && grant.capability() == Capability::ReadFiles
                 && matches!(grant.scope(), Scope::Root { root_id: granted } if *granted == root_id)
-                && grant.consent().method() == ConsentMethod::PermissionDialog
+                && grant.consent().method() == ConsentMethod::TrustedFolder
         }));
     let conflicting_consent = broker.controller().handle(ControlEnvelope {
         protocol_version: PROTOCOL_VERSION,

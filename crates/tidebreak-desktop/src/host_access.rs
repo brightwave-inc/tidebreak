@@ -20,6 +20,7 @@ use crate::client_execution::{ControlPlaneClient, ReceiptStore};
 
 pub(crate) struct HostAccess {
     pub(super) broker: BrokerClient,
+    pub(super) trusted_folders: crate::trusted_folders::TrustedFolderStore,
     pub(super) picker: Mutex<()>,
     pub(super) output_exports: Mutex<()>,
     pub(super) debug_exports: Mutex<()>,
@@ -46,8 +47,11 @@ impl HostAccess {
     ) -> Result<Self, String> {
         let receipts = ReceiptStore::open(&data_dir)
             .map_err(|_| "could not open private client-execution receipts".to_owned())?;
+        let trusted_folders = crate::trusted_folders::TrustedFolderStore::open(&data_dir)
+            .map_err(|_| "could not open trusted folder defaults".to_owned())?;
         Ok(Self {
             broker: BrokerClient::new(app, data_dir, home_dir),
+            trusted_folders,
             picker: Mutex::const_new(()),
             output_exports: Mutex::const_new(()),
             debug_exports: Mutex::const_new(()),
@@ -554,6 +558,13 @@ pub(crate) struct ConnectApprovedFolderRequest {
     root_id: RootId,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SetTrustedFolderRequest {
+    root_id: RootId,
+    trusted: bool,
+}
+
 /// Whether the broker can currently reach a listed folder.
 ///
 /// `Unavailable` is the set-aside state: the approval and attachment stand,
@@ -573,6 +584,7 @@ pub(crate) struct ConnectedFolder {
     pub(crate) root_id: RootId,
     pub(crate) display_name: String,
     pub(crate) status: FolderStatus,
+    pub(crate) available_in_future_chats: bool,
 }
 
 #[tauri::command]
@@ -598,11 +610,19 @@ pub(crate) async fn connect_folder(
     }
 
     let _root_change = state.root_changes.lock().await;
-    crate::client_execution::root_attachment_reconciliation::connect_selected_folder(
-        &state, context, path,
-    )
-    .await
-    .map(Some)
+    let connected =
+        crate::client_execution::root_attachment_reconciliation::connect_selected_folder(
+            &state, context, path,
+        )
+        .await?;
+    state
+        .trusted_folders
+        .set(connected.root_id, true)
+        .map_err(trusted_folder_error)?;
+    Ok(Some(ConnectedFolder {
+        available_in_future_chats: true,
+        ..connected
+    }))
 }
 
 /// The folders attached to one conversation, by their safe identities.
@@ -641,6 +661,7 @@ async fn connected_folders(
     if chat.root_attachments.is_empty() {
         return Ok(Vec::new());
     }
+    let trusted = state.trusted_folders.list().map_err(trusted_folder_error)?;
     let roots = approved_roots(state).await?;
     let product_roots = chat
         .root_attachments
@@ -654,6 +675,7 @@ async fn connected_folders(
             root_id: root.root_id,
             display_name: root.display_name,
             status: FolderStatus::Connected,
+            available_in_future_chats: trusted.contains(&root.root_id),
         })
         .collect::<Vec<_>>();
     // A set-aside root — one the broker could not reopen — used to vanish
@@ -676,6 +698,7 @@ async fn connected_folders(
                 root_id: root.root_id,
                 display_name: root.display_name,
                 status: FolderStatus::Unavailable,
+                available_in_future_chats: trusted.contains(&root.root_id),
             }),
     );
     Ok(folders)
@@ -753,6 +776,7 @@ async fn capability_statement(
     };
     let method = match grant.consent_method {
         ConsentMethod::FolderPicker => ConsentMethodSnapshot::FolderPicker,
+        ConsentMethod::TrustedFolder => ConsentMethodSnapshot::TrustedFolder,
         ConsentMethod::PermissionDialog => ConsentMethodSnapshot::PermissionDialog,
         ConsentMethod::OperatorConfig => ConsentMethodSnapshot::OperatorConfig,
         ConsentMethod::CarriedForward => ConsentMethodSnapshot::CarriedForward,
@@ -853,37 +877,115 @@ pub(crate) async fn revoke_capability_consent(
 
 #[tauri::command]
 pub(crate) async fn connect_approved_folder(
-    app: AppHandle,
     state: State<'_, HostAccess>,
     request: ConnectApprovedFolderRequest,
 ) -> Result<Option<ConnectedFolder>, String> {
     state
         .require_local(crate::host_authority::Authority::FolderBroker)
         .await?;
-    state.context(request.chat_id).await?;
-    let chat_label = conversation_label(&state, request.chat_id).await?;
     let root = approved_roots(&state)
         .await?
         .into_iter()
         .find(|root| root.root_id == request.root_id)
         .ok_or_else(|| "the approved folder is no longer available".to_owned())?;
-    let _consent = state
-        .picker
-        .try_lock()
-        .map_err(|_| "a folder permission prompt is already open".to_owned())?;
-    if !confirm_folder_attachment(&app, &chat_label, &root.display_name).await? {
-        return Ok(None);
-    }
-
-    // Resolve authority again after the user responds so a deleted or changed
-    // conversation cannot reuse the earlier context.
     let _root_change = state.root_changes.lock().await;
     let context = state.context(request.chat_id).await?;
-    crate::client_execution::root_attachment_reconciliation::connect_existing_root(
+    let connected = crate::client_execution::root_attachment_reconciliation::connect_existing_root(
         &state, context, root,
     )
-    .await
-    .map(Some)
+    .await?;
+    state
+        .trusted_folders
+        .set(connected.root_id, true)
+        .map_err(trusted_folder_error)?;
+    Ok(Some(ConnectedFolder {
+        available_in_future_chats: true,
+        ..connected
+    }))
+}
+
+/// Save or clear one folder's automatic attachment default.
+#[tauri::command]
+pub(crate) async fn set_trusted_folder(
+    state: State<'_, HostAccess>,
+    request: SetTrustedFolderRequest,
+) -> Result<bool, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
+    let _root_change = state.root_changes.lock().await;
+    if request.trusted {
+        let live = approved_roots(&state)
+            .await?
+            .iter()
+            .any(|root| root.root_id == request.root_id);
+        if !live {
+            let result = state
+                .broker
+                .control(ControlRequest::ListUnavailableRoots)
+                .await
+                .map_err(|error| error.to_string())?;
+            let ControlResult::ListUnavailableRoots { roots } = result else {
+                return Err("host broker returned an unexpected response".to_owned());
+            };
+            if !roots.iter().any(|root| root.root_id == request.root_id) {
+                return Err("the approved folder is no longer available".to_owned());
+            }
+        }
+    }
+    state
+        .trusted_folders
+        .set(request.root_id, request.trusted)
+        .map_err(trusted_folder_error)
+}
+
+/// Attach every saved folder to one newly created chat without another host
+/// prompt. The saved root IDs are intersected with the broker's current live
+/// approvals before any product or broker attachment changes.
+#[tauri::command]
+pub(crate) async fn attach_trusted_folders(
+    state: State<'_, HostAccess>,
+    chat_id: Uuid,
+) -> Result<Vec<ConnectedFolder>, String> {
+    state
+        .require_local(crate::host_authority::Authority::FolderBroker)
+        .await?;
+    let trusted = state.trusted_folders.list().map_err(trusted_folder_error)?;
+    if trusted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let roots = approved_roots(&state)
+        .await?
+        .into_iter()
+        .filter(|root| trusted.contains(&root.root_id))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let _root_change = state.root_changes.lock().await;
+    let attached = connected_folders(&state, chat_id)
+        .await?
+        .into_iter()
+        .map(|folder| folder.root_id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut connected = Vec::new();
+    for root in roots {
+        if attached.contains(&root.root_id) {
+            continue;
+        }
+        let context = state.context(chat_id).await?;
+        let folder =
+            crate::client_execution::root_attachment_reconciliation::connect_existing_root(
+                &state, context, root,
+            )
+            .await?;
+        connected.push(ConnectedFolder {
+            available_in_future_chats: true,
+            ..folder
+        });
+    }
+    Ok(connected)
 }
 
 /// The capabilities the folders and permissions surfaces may ask to add to an
@@ -996,14 +1098,7 @@ pub(crate) struct ForgetFolderRequest {
     root_id: RootId,
 }
 
-/// Withdraw the host approval for a folder the broker can no longer reach.
-///
-/// The remove half of the set-aside surface: a folder that is gone for good
-/// would otherwise keep its grants and attachments indefinitely, since the
-/// broker only ever deletes a registration on an explicit revocation and
-/// nothing sent one. Deliberately restricted to set-aside roots — a live
-/// folder's exit is the ordinary per-chat disconnect — and addressed at the
-/// registering subject the broker reports, which `RevokeRoot` requires.
+/// Withdraw one folder's approval, grants, and attachments everywhere.
 #[tauri::command]
 pub(crate) async fn forget_folder(
     state: State<'_, HostAccess>,
@@ -1013,6 +1108,11 @@ pub(crate) async fn forget_folder(
         .require_local(crate::host_authority::Authority::FolderBroker)
         .await?;
     let _root_change = state.root_changes.lock().await;
+    let live = approved_roots(&state)
+        .await?
+        .into_iter()
+        .find(|root| root.root_id == request.root_id)
+        .and_then(|root| root.owner);
     let result = state
         .broker
         .control(ControlRequest::ListUnavailableRoots)
@@ -1021,18 +1121,20 @@ pub(crate) async fn forget_folder(
     let ControlResult::ListUnavailableRoots { roots } = result else {
         return Err("host broker returned an unexpected response".to_owned());
     };
-    let root = roots
+    let unavailable = roots
         .into_iter()
         .find(|root| root.root_id == request.root_id)
-        .ok_or_else(|| {
-            "the folder is not unavailable — disconnect it from its chats instead".to_owned()
-        })?;
+        .map(|root| root.owner);
+    let owner = live
+        .or(unavailable)
+        .ok_or_else(|| "the approved folder is no longer available".to_owned())?;
+    disconnect_root_everywhere(&state, request.root_id).await?;
     let result = state
         .broker
         .control(ControlRequest::RevokeRoot(
             tidebreak_host_broker::RevokeRootRequest {
                 operation_id: tidebreak_host_broker::OperationId::new(),
-                subject: root.owner,
+                subject: owner,
                 root_id: request.root_id,
             },
         ))
@@ -1041,7 +1143,37 @@ pub(crate) async fn forget_folder(
     let ControlResult::RevokeRoot(result) = result else {
         return Err("host broker returned an unexpected response".to_owned());
     };
+    state
+        .trusted_folders
+        .set(request.root_id, false)
+        .map_err(trusted_folder_error)?;
     Ok(result.revoked)
+}
+
+async fn disconnect_root_everywhere(state: &HostAccess, root_id: RootId) -> Result<(), String> {
+    let store = state
+        .store()
+        .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
+    let chat_ids = store
+        .list_chats()
+        .await
+        .map_err(|_| "could not load chats using this folder".to_owned())?
+        .into_iter()
+        .filter(|chat| {
+            chat.root_attachments
+                .iter()
+                .any(|attachment| *attachment.root_id.as_uuid() == root_id.as_uuid())
+        })
+        .map(|chat| chat.id.0)
+        .collect::<Vec<_>>();
+    for chat_id in chat_ids {
+        let context = state.context(chat_id).await?;
+        crate::client_execution::root_attachment_reconciliation::disconnect_root(
+            state, context, root_id,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Forget host-broker authority held by a conversation that no longer exists.
@@ -1098,6 +1230,7 @@ pub(crate) struct PurgeDeletedConversationSubjectRequest {
 }
 
 async fn approved_folders(state: &HostAccess) -> Result<Vec<ConnectedFolder>, String> {
+    let trusted = state.trusted_folders.list().map_err(trusted_folder_error)?;
     Ok(approved_roots(state)
         .await?
         .into_iter()
@@ -1105,8 +1238,13 @@ async fn approved_folders(state: &HostAccess) -> Result<Vec<ConnectedFolder>, St
             root_id: root.root_id,
             display_name: root.display_name,
             status: FolderStatus::Connected,
+            available_in_future_chats: trusted.contains(&root.root_id),
         })
         .collect())
+}
+
+fn trusted_folder_error(_error: std::io::Error) -> String {
+    "could not update trusted folder defaults".to_owned()
 }
 
 async fn approved_roots(state: &HostAccess) -> Result<Vec<RootSummary>, String> {
@@ -1153,33 +1291,6 @@ fn safe_dialog_label(value: &str) -> String {
             }
         })
         .collect()
-}
-
-async fn confirm_folder_attachment(
-    app: &AppHandle,
-    chat_label: &str,
-    display_name: &str,
-) -> Result<bool, String> {
-    let folder_label = safe_dialog_label(display_name);
-    let (tx, rx) = oneshot::channel();
-    let mut dialog = app
-        .dialog()
-        .message(format!(
-            "Allow the chat “{chat_label}” to read the previously approved folder “{folder_label}”?"
-        ))
-        .title("Connect folder")
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Connect".to_owned(),
-            "Cancel".to_owned(),
-        ));
-    if let Some(window) = app.get_webview_window("main") {
-        dialog = dialog.parent(&window);
-    }
-    dialog.show(move |approved| {
-        let _ = tx.send(approved);
-    });
-    rx.await
-        .map_err(|_| "folder permission prompt closed unexpectedly".to_owned())
 }
 
 async fn confirm_folder_widening(

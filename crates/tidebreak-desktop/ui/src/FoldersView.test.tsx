@@ -16,6 +16,7 @@ vi.mock("./host", () => ({
   listCapabilityConsents: vi.fn(),
   listConnectedFolders: vi.fn(),
   revokeCapabilityConsent: vi.fn(),
+  setTrustedFolder: vi.fn(),
 }));
 
 const chat = {
@@ -28,8 +29,9 @@ function folder(
   rootId: string,
   displayName: string,
   status: host.FolderStatus = "connected",
+  availableInFutureChats = false,
 ): host.ConnectedFolder {
-  return { rootId, displayName, status };
+  return { rootId, displayName, status, availableInFutureChats };
 }
 
 type FolderCapabilityVerb = Extract<
@@ -73,6 +75,7 @@ beforeEach(() => {
   vi.mocked(host.forgetFolder).mockResolvedValue(true);
   vi.mocked(host.grantFolderCapability).mockResolvedValue(null);
   vi.mocked(host.revokeCapabilityConsent).mockResolvedValue(true);
+  vi.mocked(host.setTrustedFolder).mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -258,9 +261,12 @@ describe("FoldersView", () => {
       screen.queryByText("Available on this device"),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Forget" }));
+    await user.click(screen.getAllByRole("button", { name: "Forget" })[1]);
     // Forgetting is destructive across every chat, so it confirms first.
-    await user.click(await screen.findByRole("button", { name: "Forget" }));
+    const forgetButtons = await screen.findAllByRole("button", {
+      name: "Forget",
+    });
+    await user.click(forgetButtons[forgetButtons.length - 1]);
     await waitFor(() =>
       expect(host.forgetFolder).toHaveBeenCalledWith("unplugged"),
     );
@@ -300,13 +306,20 @@ describe("FoldersView", () => {
         rootId: "connected",
         displayName: "Current project",
         status: "connected",
+        availableInFutureChats: false,
       },
-      { rootId: "available", displayName: "Research", status: "connected" },
+      {
+        rootId: "available",
+        displayName: "Research",
+        status: "connected",
+        availableInFutureChats: false,
+      },
     ]);
     vi.mocked(host.connectApprovedFolder).mockResolvedValue({
       rootId: "available",
       displayName: "Research",
       status: "connected",
+      availableInFutureChats: true,
     });
     const user = userEvent.setup();
     render(<FoldersView chat={chat} />);
@@ -329,9 +342,14 @@ describe("FoldersView", () => {
     expect(screen.getAllByText("Research")).toHaveLength(1);
   });
 
-  it("leaves an approved folder unattached when native consent is canceled", async () => {
+  it("leaves an approved folder listed when connection returns no change", async () => {
     vi.mocked(host.listApprovedFolders).mockResolvedValue([
-      { rootId: "available", displayName: "Research", status: "connected" },
+      {
+        rootId: "available",
+        displayName: "Research",
+        status: "connected",
+        availableInFutureChats: false,
+      },
     ]);
     const user = userEvent.setup();
     render(<FoldersView chat={chat} />);
@@ -341,6 +359,42 @@ describe("FoldersView", () => {
     expect(host.connectApprovedFolder).toHaveBeenCalledWith(chat, "available");
     expect(host.listConnectedFolders).toHaveBeenCalledOnce();
     expect(screen.getByText("Research")).toBeInTheDocument();
+  });
+
+  it("changes whether a folder is available in future chats", async () => {
+    vi.mocked(host.listConnectedFolders)
+      .mockResolvedValueOnce([folder("drafts", "Drafts")])
+      .mockResolvedValueOnce([folder("drafts", "Drafts", "connected", true)]);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Available in future chats for Drafts",
+    });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+
+    expect(host.setTrustedFolder).toHaveBeenCalledWith("drafts", true);
+    await waitFor(() => expect(toggle).toBeChecked());
+  });
+
+  it("forgets a live folder everywhere without using per-chat disconnect", async () => {
+    vi.mocked(host.listConnectedFolders)
+      .mockResolvedValueOnce([folder("drafts", "Drafts", "connected", true)])
+      .mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+    render(<FoldersView chat={chat} />);
+
+    await user.click(await screen.findByRole("button", { name: "Forget" }));
+    const forgetButtons = await screen.findAllByRole("button", {
+      name: "Forget",
+    });
+    await user.click(forgetButtons[forgetButtons.length - 1]);
+
+    await waitFor(() =>
+      expect(host.forgetFolder).toHaveBeenCalledWith("drafts"),
+    );
+    expect(host.disconnectFolder).not.toHaveBeenCalled();
   });
 
   it("ignores a late folder response after switching chats", async () => {

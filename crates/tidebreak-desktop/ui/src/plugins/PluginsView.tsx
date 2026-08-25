@@ -1,5 +1,6 @@
-import { Puzzle } from "lucide-react";
+import { FolderInput, Puzzle } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import type { PluginInfo, PluginSkillInfo } from "@/api";
 import { SearchInput } from "@/components/SearchInput";
@@ -15,6 +16,11 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { PluginGlyph, SkillGlyph } from "./PluginGlyph";
 import type { PluginsApis } from "./pluginsApis";
+import {
+  importSkillsFromFolder,
+  type SkillImportIssue,
+  type SkillImportReport,
+} from "./skillImport";
 import { SkillDialog } from "./SkillDialog";
 import {
   hostToolProvisioningLabel,
@@ -40,16 +46,23 @@ export function PluginsView({
   state,
   loadInstructions,
   onOpen,
+  importSkills = importSkillsFromFolder,
 }: {
   state: PluginCatalogState;
   loadInstructions: PluginsApis["instructions"];
   /** Navigate to the bundle's own page. */
   onOpen: (pluginId: string) => void;
+  /** Open a native picker and copy user skills into this installation. */
+  importSkills?: () => Promise<SkillImportReport | null>;
 }) {
   const { catalog, loading, error, reload, setEnabled } = state;
   const provisioning = useHostToolProvisioning();
   const [query, setQuery] = useState("");
   const [openSkill, setOpenSkill] = useState<PluginSkillInfo | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importReport, setImportReport] = useState<SkillImportReport | null>(
+    null,
+  );
 
   const filtered = useMemo(
     () => filterCatalog(catalog, query),
@@ -81,6 +94,23 @@ export function PluginsView({
       openSkill)
     : null;
 
+  const runImport = async () => {
+    setImporting(true);
+    setImportReport(null);
+    try {
+      const report = await importSkills();
+      if (!report) return;
+      setImportReport(report);
+      reload();
+    } catch (caught) {
+      toast.error(
+        friendlyImportError(caught, "Could not import those skills."),
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -92,15 +122,26 @@ export function PluginsView({
                 Skills the agent can use when you turn them on.
               </p>
             </div>
-            {catalog && !isEmpty && (
-              <SearchInput
-                value={query}
-                onValueChange={setQuery}
-                placeholder="Search plugins and skills…"
-                aria-label="Search plugins and skills"
-                className="w-full max-w-md rounded-full"
-              />
-            )}
+            <div className="flex w-full max-w-xl flex-col items-stretch justify-center gap-2 sm:flex-row">
+              {catalog && !isEmpty && (
+                <SearchInput
+                  value={query}
+                  onValueChange={setQuery}
+                  placeholder="Search plugins and skills…"
+                  aria-label="Search plugins and skills"
+                  className="min-w-0 flex-1 rounded-full"
+                />
+              )}
+              <Button
+                variant="outline"
+                className="shrink-0"
+                disabled={importing}
+                onClick={() => void runImport()}
+              >
+                <FolderInput aria-hidden="true" />
+                {importing ? "Importing…" : "Import skills"}
+              </Button>
+            </div>
           </header>
 
           {provisioning && (
@@ -128,6 +169,8 @@ export function PluginsView({
               </Button>
             </div>
           )}
+
+          {importReport && <SkillImportSummary report={importReport} />}
 
           {loading && !catalog && (
             <p
@@ -231,6 +274,116 @@ export function PluginsView({
       />
     </div>
   );
+}
+
+export function SkillImportSummary({ report }: { report: SkillImportReport }) {
+  const imported = report.imported.length;
+  const heading = imported > 0 ? "Skill import complete" : "No skills imported";
+  return (
+    <section
+      className="border-border bg-background flex flex-col gap-3 rounded-xl border p-4"
+      aria-labelledby="skill-import-title"
+    >
+      <div className="flex flex-col gap-0.5" role="status" aria-atomic="true">
+        <h2 id="skill-import-title" className="text-md font-semibold">
+          {heading}
+        </h2>
+        <p className="text-muted-foreground text-xs">{importSummary(report)}</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <ImportResultGroup
+          title="Imported"
+          empty="None"
+          names={report.imported}
+        />
+        <ImportIssueGroup
+          title="Skipped"
+          empty="None"
+          issues={report.skipped}
+        />
+        <ImportIssueGroup
+          title="Conflicts"
+          empty="None"
+          issues={report.conflicts}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ImportResultGroup({
+  title,
+  empty,
+  names,
+}: {
+  title: string;
+  empty: string;
+  names: string[];
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <h3 className="text-muted-foreground text-2xs font-medium tracking-wide uppercase">
+        {title} · {names.length}
+      </h3>
+      {names.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {names.map((name) => (
+            <li key={name} className="break-all font-mono text-xs">
+              {name}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-muted-foreground text-xs">{empty}</p>
+      )}
+    </div>
+  );
+}
+
+function ImportIssueGroup({
+  title,
+  empty,
+  issues,
+}: {
+  title: string;
+  empty: string;
+  issues: SkillImportIssue[];
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <h3 className="text-muted-foreground text-2xs font-medium tracking-wide uppercase">
+        {title} · {issues.length}
+      </h3>
+      {issues.length > 0 ? (
+        <ul className="flex flex-col gap-2">
+          {issues.map((issue) => (
+            <li key={`${issue.name}:${issue.reason}`} className="min-w-0">
+              <p className="break-all font-mono text-xs">{issue.name}</p>
+              <p className="text-muted-foreground break-words text-xs leading-snug">
+                {issue.reason}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-muted-foreground text-xs">{empty}</p>
+      )}
+    </div>
+  );
+}
+
+function importSummary(report: SkillImportReport): string {
+  const imported = `${report.imported.length} skill${report.imported.length === 1 ? "" : "s"} imported`;
+  const skipped = `${report.skipped.length} skipped`;
+  const conflicts = `${report.conflicts.length} conflict${report.conflicts.length === 1 ? "" : "s"}`;
+  return `${imported}, ${skipped}, and ${conflicts}.`;
+}
+
+function friendlyImportError(error: unknown, fallback: string): string {
+  const message = String(error)
+    .replace(/^Error:\s*/, "")
+    .trim();
+  return message && message.length <= 240 ? message : fallback;
 }
 
 function Section({

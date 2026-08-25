@@ -1,6 +1,32 @@
 import { describe, expect, it } from "vitest";
 
-import { formatElapsedDuration, formatTurnDuration } from "./TurnReviewCard";
+import {
+  formatElapsedDuration,
+  formatTurnDuration,
+  isCodexRevokedRefreshTokenError,
+} from "./TurnReviewCard";
+
+describe("isCodexRevokedRefreshTokenError", () => {
+  it("recognizes the Codex CLI diagnostic through prefixes and line wrapping", () => {
+    expect(
+      isCodexRevokedRefreshTokenError(
+        "Error: Your access token could not be refreshed because your refresh\n token was revoked. Please log out and sign in again.",
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves other engine and authentication failures unchanged", () => {
+    expect(isCodexRevokedRefreshTokenError(null)).toBe(false);
+    expect(isCodexRevokedRefreshTokenError("claude exited with status 1")).toBe(
+      false,
+    );
+    expect(
+      isCodexRevokedRefreshTokenError(
+        "Your access token expired. Please sign in again.",
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("formatTurnDuration", () => {
   it("never rounds a turn that happened to zero", () => {

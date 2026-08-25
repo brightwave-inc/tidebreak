@@ -593,6 +593,7 @@ fn capability_json(capability: Capability) -> &'static str {
 fn consent_json(method: ConsentMethod) -> &'static str {
     match method {
         ConsentMethod::FolderPicker => "folder_picker",
+        ConsentMethod::TrustedFolder => "trusted_folder",
         ConsentMethod::PermissionDialog => "permission_dialog",
         ConsentMethod::OperatorConfig => "operator_config",
         ConsentMethod::CarriedForward => "carried_forward",
@@ -660,6 +661,7 @@ fn capability_label(capability: Capability) -> &'static str {
 fn consent_label(method: ConsentMethod) -> &'static str {
     match method {
         ConsentMethod::FolderPicker => "folder-picker",
+        ConsentMethod::TrustedFolder => "trusted-folder",
         ConsentMethod::PermissionDialog => "permission-dialog",
         ConsentMethod::OperatorConfig => "operator-config",
         ConsentMethod::CarriedForward => "carried-forward",

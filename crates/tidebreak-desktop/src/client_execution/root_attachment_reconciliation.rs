@@ -66,7 +66,7 @@ pub(crate) async fn connect_selected_folder(
     drive_manual_connect(state, &mut receipt, ConnectMode::Interactive).await
 }
 
-/// Attach a host-approved root to one exact conversation after native consent.
+/// Attach a saved host-approved root to one exact conversation.
 ///
 /// The root summary carries no path or authority. The broker creates the
 /// conversation grant only when the durable product attachment is driven.
@@ -628,7 +628,7 @@ async fn dispatch_mutation(
         conversation_id: context.chat_id,
         root_id,
         consent_method: match action {
-            RootAttachmentChangeAction::Attach => Some(ConsentMethod::PermissionDialog),
+            RootAttachmentChangeAction::Attach => Some(ConsentMethod::TrustedFolder),
             RootAttachmentChangeAction::Detach => None,
         },
     };
@@ -867,6 +867,7 @@ fn connected_folder(root: RootSummary) -> ConnectedFolder {
         root_id: root.root_id,
         display_name: root.display_name,
         status: crate::host_access::FolderStatus::Connected,
+        available_in_future_chats: false,
     }
 }
 
