@@ -1751,9 +1751,19 @@ last_seen_at: string, };
 export type CodeWorkspacePullRequests = { items: Array<CodeWorkspacePullRequestFact>, fetched_at: string, };
 
 /**
+ * One repository-wide conversation-history match.
+ */
+export type CodeWorkspaceHistorySearchMatch = { workspace_id: WorkspaceId, workspace_title: string, session_id: CodeSessionId, turn_id?: CodeTurnId, source: CodeWorkspaceHistorySearchSource, preview: string, created_at: string, };
+
+/**
+ * Stored field that produced a workspace conversation-history match.
+ */
+export type CodeWorkspaceHistorySearchSource = "turn_user_input" | "turn_narrative" | "event";
+
+/**
  * Bounded content-search response for `GET /code/workspaces/{id}/search`.
  */
-export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, truncated: boolean, };
+export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, history_matches?: Array<CodeWorkspaceHistorySearchMatch>, truncated: boolean, };
 
 /**
  * One matching line from a workspace content search.

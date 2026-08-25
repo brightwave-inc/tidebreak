@@ -2627,12 +2627,14 @@ export class ApiClient {
       include?: string;
       exclude?: string;
       limit?: number;
+      history?: boolean;
     },
   ): Promise<CodeWorkspaceSearch> {
     const params = new URLSearchParams({ query: query.query });
     if (query.include) params.set("include", query.include);
     if (query.exclude) params.set("exclude", query.exclude);
     if (query.limit !== undefined) params.set("limit", String(query.limit));
+    if (query.history) params.set("history", "true");
     return requireParsed(
       parseCodeWorkspaceSearch(
         await this.json(

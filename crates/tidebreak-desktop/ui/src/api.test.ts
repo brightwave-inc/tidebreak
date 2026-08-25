@@ -21,6 +21,44 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("code workspace history search", () => {
+  it("uses the existing search route and parses session addresses", async () => {
+    const response = {
+      matches: [],
+      history_matches: [
+        {
+          workspace_id: "workspace-1",
+          workspace_title: "Archived search work",
+          session_id: "session-1",
+          source: "event",
+          preview: "The archived transcript contains the result.",
+          created_at: "2026-08-25T12:00:00Z",
+        },
+      ],
+      truncated: false,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(
+      client.searchCodeWorkspace("workspace/1", {
+        query: "archived transcript",
+        limit: 25,
+        history: true,
+      }),
+    ).resolves.toEqual(response);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "http://127.0.0.1/code/workspaces/workspace%2F1/search?query=archived+transcript&limit=25&history=true",
+    );
+  });
+});
+
 describe("parseFolderAccessRequest", () => {
   it("accepts only the closed renderer-safe consent projection", () => {
     expect(

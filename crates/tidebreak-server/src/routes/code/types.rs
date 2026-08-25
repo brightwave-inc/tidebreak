@@ -1605,6 +1605,8 @@ pub struct WorkspaceSearchQuery {
     pub exclude: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub history: bool,
 }
 
 /// One matching line from a workspace content search.
@@ -1615,10 +1617,36 @@ pub struct CodeWorkspaceSearchMatch {
     pub line: String,
 }
 
+/// Stored field that produced a workspace conversation-history match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeWorkspaceHistorySearchSource {
+    TurnUserInput,
+    TurnNarrative,
+    Event,
+}
+
+/// One repository-wide conversation-history match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceHistorySearchMatch {
+    pub workspace_id: WorkspaceId,
+    pub workspace_title: String,
+    pub session_id: CodeSessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_id: Option<CodeTurnId>,
+    pub source: CodeWorkspaceHistorySearchSource,
+    pub preview: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Bounded content-search response for `GET /code/workspaces/{id}/search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeWorkspaceSearch {
     pub matches: Vec<CodeWorkspaceSearchMatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional)]
+    pub history_matches: Vec<CodeWorkspaceHistorySearchMatch>,
     pub truncated: bool,
 }
 

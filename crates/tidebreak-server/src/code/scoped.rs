@@ -359,6 +359,29 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn workspace_transcript_search(
+        &self,
+        id: WorkspaceId,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<tidebreak_core::db::code::CodeTranscriptSearchPage, ServerError> {
+        let workspace = self.runtime.get_workspace(&self.owner, id).await?;
+        let requested = limit.unwrap_or(tidebreak_core::db::code::DEFAULT_TRANSCRIPT_SEARCH_LIMIT);
+        let limit = if requested == 0 {
+            tidebreak_core::db::code::DEFAULT_TRANSCRIPT_SEARCH_LIMIT
+        } else {
+            requested.min(tidebreak_core::db::code::MAX_TRANSCRIPT_SEARCH_LIMIT)
+        };
+        Ok(tidebreak_core::db::code::search_repo_transcripts(
+            &self.runtime.db,
+            &self.owner,
+            workspace.repo_id,
+            query,
+            u64::from(limit),
+        )
+        .await?)
+    }
+
     pub(crate) async fn workspace_blob(
         &self,
         id: WorkspaceId,

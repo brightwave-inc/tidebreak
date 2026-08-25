@@ -30,6 +30,7 @@ import {
   disconnectCodeUpdates,
   useCodeUpdatesStore,
 } from "@/code/CodeUpdatesStore";
+import { panelSearchFrom } from "@/panel/panelUrl";
 import { useUiStore } from "@/UiStore";
 import {
   deliveryCodeRepo,
@@ -54,6 +55,7 @@ type DeliveryScenario =
   | "github-unavailable"
   | "runs"
   | "archive"
+  | "archive-search"
   | "archive-empty"
   | "notifications"
   | "notifications-empty";
@@ -247,6 +249,31 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
         status: "active",
       } as CodeWorkspaceSnapshot;
     },
+    searchCodeWorkspace: async (
+      _workspaceId: string,
+      query: Parameters<ApiClient["searchCodeWorkspace"]>[1],
+    ) => ({
+      matches: [],
+      ...(scenario === "archive-search" &&
+      query.history &&
+      query.query.toLocaleLowerCase().includes("reclaim")
+        ? {
+            history_matches: [
+              {
+                workspace_id: "ws-archived-shortcuts",
+                workspace_title: "Unify keyboard shortcuts",
+                session_id: "session-reclaim-notes",
+                turn_id: "turn-reclaim-notes",
+                source: "turn_user_input" as const,
+                preview:
+                  "Make the reclaim tiers safe by keeping archived conversations searchable.",
+                created_at: "2026-08-12T09:15:00.000Z",
+              },
+            ],
+          }
+        : {}),
+      truncated: false,
+    }),
     startCodeWatch: async () => ({}) as never,
     patchCodeWorkspace: async () => deliveryWorkspaces[0]!,
     archiveCodeWorkspace: async () => ({
@@ -311,6 +338,8 @@ function storyRouter(initialUrl: string) {
   const workspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code/w/$workspaceId",
+    validateSearch: (search: Record<string, unknown>) =>
+      panelSearchFrom(search),
     component: () => <p className="p-6">Workspace</p>,
   });
   const pullRequestsRoute = createRoute({
@@ -909,6 +938,27 @@ export const ArchivePopulated: Story = {
   args: {
     scenario: "archive",
     initialUrl: "/code/archive",
+  },
+};
+
+export const ArchiveConversationSearch: Story = {
+  args: {
+    scenario: "archive-search",
+    initialUrl: "/code/archive",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(
+      await canvas.findByPlaceholderText(
+        "Search workspaces and conversations…",
+      ),
+      "reclaim tiers",
+    );
+    await expect(
+      await canvas.findByText(
+        "Make the reclaim tiers safe by keeping archived conversations searchable.",
+      ),
+    ).toBeVisible();
   },
 };
 
