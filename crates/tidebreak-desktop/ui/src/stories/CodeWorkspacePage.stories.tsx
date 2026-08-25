@@ -36,6 +36,7 @@ import {
   searchFromLayout,
   type PanelSearch,
 } from "@/panel/panelUrl";
+import { SidebarExpandStrip } from "@/sidebar/SidebarExpandStrip";
 import { useUiStore } from "@/UiStore";
 import {
   attentionNeedsYou,
@@ -816,6 +817,7 @@ function WorkspacePageStory({
 
   return (
     <div className="app-shell h-full min-h-0 w-full overflow-hidden">
+      <SidebarExpandStrip macOverlay />
       <div className="app-body">
         <RouterProvider router={state.router as never} />
       </div>
@@ -1120,6 +1122,17 @@ export const MinimumWindowBusy: Story = {
 export const CompactConversation: Story = {
   args: { sidebarCollapsed: true, reviewOpen: false },
   globals: { viewport: { value: "compact", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const strip = canvasElement.querySelector<HTMLElement>(
+      ".sidebar-expand-strip",
+    );
+    const header = await canvas.findByTestId("workspace-header");
+    await expect(strip).toBeVisible();
+    await expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      (strip?.getBoundingClientRect().bottom ?? 0) - 1,
+    );
+  },
 };
 
 /** The filtered context and transcript remain legible in the compact desktop pane. */

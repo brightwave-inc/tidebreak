@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { expect, fn, userEvent, within } from "storybook/test";
 
+import { ChatHeaderTitle } from "@/ChatHeaderTitle";
 import { RouteFrame } from "@/RouteFrame";
 import { AppSidebar } from "@/sidebar/AppSidebar";
 import { NewProjectDialog } from "@/sidebar/NewProjectDialog";
@@ -29,21 +30,32 @@ type NavigationScenario =
   | "dense"
   | "failure"
   | "narrow"
-  | "collapsed";
+  | "collapsed"
+  | "collapsed-mac";
 
 function NavigationSurface({ activeChatId }: { activeChatId?: string }) {
   const activeChat = routeChats.find((chat) => chat.id === activeChatId);
   return (
     <RouteFrame sidebar={<AppSidebar chat={activeChat} />}>
-      <div className="content-container grid h-full min-h-0 place-items-center p-8">
-        <div className="max-w-md text-center">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Navigation review surface
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            This canvas keeps the production rail in context while you inspect
-            active routes, list density, loading, and failure states.
-          </p>
+      <div className="content-container flex h-full min-h-0 flex-col">
+        {activeChat && (
+          <header
+            className="window-chrome-row flex h-12 shrink-0 items-center border-b border-border-subtle pr-3"
+            data-testid="work-window-chrome"
+          >
+            <ChatHeaderTitle chat={activeChat} />
+          </header>
+        )}
+        <div className="grid min-h-0 flex-1 place-items-center p-8">
+          <div className="max-w-md text-center">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Navigation review surface
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              This canvas keeps the production rail in context while you inspect
+              active routes, list density, loading, and failure states.
+            </p>
+          </div>
         </div>
       </div>
     </RouteFrame>
@@ -135,7 +147,8 @@ function NavigationStory({ scenario }: { scenario: NavigationScenario }) {
       inboxLoaded: scenario !== "loading",
       attentionChatIds: dense ? ["chat-2", "dense-chat-2"] : ["chat-2"],
       sidebarWidth: scenario === "narrow" ? 220 : 280,
-      sidebarCollapsed: scenario === "collapsed",
+      sidebarCollapsed:
+        scenario === "collapsed" || scenario === "collapsed-mac",
     });
 
     const initialPath =
@@ -147,7 +160,9 @@ function NavigationStory({ scenario }: { scenario: NavigationScenario }) {
             ? "/apps"
             : scenario === "collapsed"
               ? "/apps"
-              : "/";
+              : scenario === "collapsed-mac"
+                ? "/c/chat-1"
+                : "/";
     return {
       client: storyClient(),
       router: createNavigationRouter(initialPath),
@@ -157,7 +172,7 @@ function NavigationStory({ scenario }: { scenario: NavigationScenario }) {
   return (
     <RouteStoryProviders client={state.client}>
       <div className="app-shell h-full min-h-0 w-full overflow-hidden">
-        <SidebarExpandStrip macOverlay={false} />
+        <SidebarExpandStrip macOverlay={scenario === "collapsed-mac"} />
         <div className="app-body">
           <RouterProvider router={state.router as never} />
         </div>
@@ -209,6 +224,22 @@ export const NarrowRail: Story = {
 
 export const CollapsedRail: Story = {
   args: { scenario: "collapsed" },
+};
+
+export const CollapsedMacWork: Story = {
+  args: { scenario: "collapsed-mac" },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const strip = canvasElement.querySelector<HTMLElement>(
+      ".sidebar-expand-strip",
+    );
+    const header = await canvas.findByTestId("work-window-chrome");
+    await expect(strip).toBeVisible();
+    await expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      (strip?.getBoundingClientRect().bottom ?? 0) - 1,
+    );
+  },
 };
 
 export const CollapseAndRestoreActiveRoute: Story = {

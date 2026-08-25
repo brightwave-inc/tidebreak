@@ -7,6 +7,7 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
+import { expect, within } from "storybook/test";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
@@ -25,6 +26,7 @@ import {
   useCodeUpdatesStore,
 } from "@/code/CodeUpdatesStore";
 import { resetCodeSubscriptionUsageStore } from "@/code/useCodeSubscriptionUsage";
+import { SidebarExpandStrip } from "@/sidebar/SidebarExpandStrip";
 import { useUiStore } from "@/UiStore";
 import {
   deliveryCodeRepo,
@@ -362,7 +364,7 @@ function storyRouter() {
   });
 }
 
-function resetStoryState() {
+function resetStoryState(sidebarCollapsed: boolean) {
   disconnectCodeUpdates();
   useCodeCatalogStore.getState().reset();
   useCodeUpdatesStore.getState().reset();
@@ -375,12 +377,18 @@ function resetStoryState() {
     pendingComposerPrompt: null,
     composerActionScope: null,
   });
-  useUiStore.setState({ sidebarCollapsed: false, sidebarWidth: 280 });
+  useUiStore.setState({ sidebarCollapsed, sidebarWidth: 280 });
 }
 
-function CodeAnalyticsStory({ scenario }: { scenario: AnalyticsScenario }) {
+function CodeAnalyticsStory({
+  scenario,
+  sidebarCollapsed = false,
+}: {
+  scenario: AnalyticsScenario;
+  sidebarCollapsed?: boolean;
+}) {
   const [state] = useState(() => {
-    resetStoryState();
+    resetStoryState(sidebarCollapsed);
     const client = storyClient(scenario);
     return { client, router: storyRouter() };
   });
@@ -396,7 +404,10 @@ function CodeAnalyticsStory({ scenario }: { scenario: AnalyticsScenario }) {
   return (
     <AppContextProvider value={appContext(state.client)}>
       <div className="app-shell h-full min-h-0 w-full overflow-hidden">
-        <RouterProvider router={state.router as never} />
+        <SidebarExpandStrip macOverlay />
+        <div className="app-body">
+          <RouterProvider router={state.router as never} />
+        </div>
       </div>
     </AppContextProvider>
   );
@@ -405,9 +416,14 @@ function CodeAnalyticsStory({ scenario }: { scenario: AnalyticsScenario }) {
 const meta = {
   title: "Code/Analytics",
   component: CodeAnalyticsStory,
-  args: { scenario: "gateway" },
+  args: { scenario: "gateway", sidebarCollapsed: false },
   parameters: { layout: "fullscreen" },
-  render: (args) => <CodeAnalyticsStory key={args.scenario} {...args} />,
+  render: (args) => (
+    <CodeAnalyticsStory
+      key={`${args.scenario}:${args.sidebarCollapsed}`}
+      {...args}
+    />
+  ),
 } satisfies Meta<typeof CodeAnalyticsStory>;
 
 export default meta;
@@ -433,6 +449,24 @@ export const Failure: Story = {
 
 export const LongContent: Story = {
   args: { scenario: "long" },
+};
+
+export const CollapsedMacRail: Story = {
+  args: { scenario: "gateway", sidebarCollapsed: true },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const strip = canvasElement.querySelector<HTMLElement>(
+      ".sidebar-expand-strip",
+    );
+    const heading = await canvas.findByRole("heading", { name: "Analytics" });
+    const header = heading.closest("header");
+    await expect(strip).toBeVisible();
+    await expect(header).toBeTruthy();
+    await expect(
+      header?.getBoundingClientRect().top ?? 0,
+    ).toBeGreaterThanOrEqual((strip?.getBoundingClientRect().bottom ?? 0) - 1);
+  },
 };
 
 export const NarrowWidth: Story = {
