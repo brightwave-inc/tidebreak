@@ -21,6 +21,7 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-core = { path = "../tidebreak-core", default-features = false }
@@ -35,7 +36,6 @@ libc = { workspace = true }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [[bin]]
