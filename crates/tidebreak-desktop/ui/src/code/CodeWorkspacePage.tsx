@@ -239,13 +239,20 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const archivePending = useCodeUiStore((state) => state.archivePending);
   const terminalPending = useCodeUiStore((state) => state.terminalPending);
   const shortcutHints = useCodeShortcutHints();
-  const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
-    null,
-  );
   const catalogWorkspace = catalog.workspaces.find(
     (candidate) => candidate.id === workspaceId,
   );
-  const [repo, setRepo] = useState<CodeRepoSnapshot | null>(null);
+  const [workspace, setWorkspace] = useState<CodeWorkspaceSnapshot | null>(
+    () => catalogWorkspace ?? null,
+  );
+  const catalogRepo = catalogWorkspace
+    ? catalog.repos.find(
+        (candidate) => candidate.id === catalogWorkspace.repo_id,
+      )
+    : undefined;
+  const [repo, setRepo] = useState<CodeRepoSnapshot | null>(
+    () => catalogRepo ?? null,
+  );
   /**
    * Every session the server knows about here, conversations and watches alike.
    *
@@ -270,6 +277,13 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       current?.id === catalogWorkspace.id ? catalogWorkspace : current,
     );
   }, [catalogWorkspace]);
+
+  useEffect(() => {
+    if (!catalogRepo) return;
+    setRepo((current) =>
+      current?.id === catalogRepo.id ? catalogRepo : current,
+    );
+  }, [catalogRepo]);
   /** True while the reader is filling in a new agent that has no session yet. */
   const [draftAgent, setDraftAgent] = useState(false);
   /**

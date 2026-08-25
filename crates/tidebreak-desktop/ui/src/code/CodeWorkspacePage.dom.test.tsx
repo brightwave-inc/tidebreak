@@ -599,6 +599,29 @@ describe("CodeWorkspacePage", () => {
     expect(screen.queryByText("repo-1")).not.toBeInTheDocument();
   });
 
+  it("shows catalog workspace metadata while the route refreshes", async () => {
+    const client = makeClient();
+    client.getCodeWorkspace.mockImplementation(() => new Promise(() => {}));
+    useCodeCatalogStore.setState({
+      repos: [REPO],
+      workspaces: [WORKSPACE],
+    });
+
+    await mountWorkspace(client);
+
+    expect(
+      screen.getByRole("heading", { name: WORKSPACE.title }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("workspace-header")).getByText(
+        REPO.display_name,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("workspace-header-skeleton"),
+    ).not.toBeInTheDocument();
+  });
+
   it("marks recorded unrecognized engine events with a warning icon", async () => {
     const client = makeClient();
     client.listCodeWorkspaceSessions.mockResolvedValue([
