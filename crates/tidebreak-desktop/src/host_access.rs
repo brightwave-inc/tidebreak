@@ -1162,7 +1162,7 @@ async fn disconnect_root_everywhere(state: &HostAccess, root_id: RootId) -> Resu
         .filter(|chat| {
             chat.root_attachments
                 .iter()
-                .any(|attachment| attachment.root_id.as_uuid() == root_id.as_uuid())
+                .any(|attachment| *attachment.root_id.as_uuid() == root_id.as_uuid())
         })
         .map(|chat| chat.id.0)
         .collect::<Vec<_>>();
