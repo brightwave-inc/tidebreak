@@ -1,6 +1,6 @@
 # 47. Gateway-linked hosting: machines, clients, and roster-derived identity
 
-- Status: Proposed
+- Status: Proposed (amended 2026-08-25, see [Amendment](#amendment-2026-08-25))
 - Date: 2026-08-19
 - Owners: server, desktop
 - Related: [`0006-self-host-deployment-plane-authorization.md`](0006-self-host-deployment-plane-authorization.md),
@@ -85,14 +85,10 @@ the single interaction model those clients speak.
    tables gain owners, and `/code/*` joins the owner-scoped regime, before a
    multi-user deployment enables code mode. This is the first work item, and
    decision 48 sequences it as convergence step one.
-5. **Gateway-linked deployments are disposable until 1.0.** For this
-   deployment class, the durable-self-host posture is narrowed: a baseline
-   edit may drop and recreate the shared store, as the desktop schema epoch
-   does locally. The deployment documentation states it, and operators of a
-   gateway-linked deployment are told the store carries no retention
-   promise. Ordinary operator-managed self-host deployments keep the
-   existing back-up-before-upgrade posture; the narrowing applies only where
-   the gateway tooling owns the database and can recreate it.
+5. **Gateway-linked deployments keep durable state ahead of 1.0.** The
+   server data volume is durable by default, and the hosted deployment's
+   database is durable as well. Disposable deployments remain supported
+   for evaluation.
 
 Deliberately excluded: synchronizing a desktop profile's local data with a
 hosted machine (a distributed-state problem this record does not open);
@@ -159,3 +155,12 @@ record does not claim one.
 - Gateway-identity drill: inactive, revoked, and wrong-resource credentials
   are refused; the server still fails closed when neither Gateway identity nor
   a standalone token file is configured.
+
+## Amendment (2026-08-25)
+
+**Decision point 5 no longer treats gateway-linked deployments as disposable
+until 1.0.** The server data volume is durable by default, and the hosted
+deployment's database is durable as well. Disposable deployments remain
+supported for evaluation.
+
+The rest of this record stands.
