@@ -151,6 +151,14 @@ struct RawActionResult {
     title: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawScreenshotPrivacyScan {
+    sensitive_fields: usize,
+    uninspectable_regions: usize,
+    changed: bool,
+}
+
 pub(crate) async fn browser_semantic_snapshot(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -372,7 +380,7 @@ pub(crate) async fn browser_semantic_action(
         return Ok(action_result(
             &request,
             BrowserSemanticActionStatus::HumanTakeoverRequired,
-            "Password and one-time-code fields require human takeover.",
+            "Password, file, and verification-code fields require human takeover.",
         ));
     }
 
@@ -466,7 +474,7 @@ async fn execute_semantic_action(
         return Ok(action_result(
             &request,
             BrowserSemanticActionStatus::HumanTakeoverRequired,
-            "Password and one-time-code fields require human takeover.",
+            "Password, file, and verification-code fields require human takeover.",
         ));
     }
     let webview = app
@@ -911,8 +919,37 @@ async fn capture_screenshot(
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
-    let image_base64 =
-        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await?;
+    let privacy_watch = format!("__tidebreak_screenshot_privacy_{}", Uuid::new_v4().simple());
+    let initial_privacy: RawScreenshotPrivacyScan =
+        evaluate_json(&webview, &screenshot_privacy_script(&privacy_watch, false)?).await?;
+    if initial_privacy.sensitive_fields > 0 || initial_privacy.uninspectable_regions > 0 {
+        let _ = evaluate_json::<RawScreenshotPrivacyScan>(
+            &webview,
+            &screenshot_privacy_script(&privacy_watch, true)?,
+        )
+        .await;
+        return Err(screenshot_human_takeover_message(&initial_privacy));
+    }
+
+    let image_result =
+        capture_browser_image(&webview, arguments.max_width, arguments.max_height).await;
+    let final_privacy: RawScreenshotPrivacyScan = evaluate_json(
+        &webview,
+        &screenshot_privacy_script(&privacy_watch, true)?,
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "browser screenshot requires human takeover because the privacy scan could not be completed: {error}"
+        )
+    })?;
+    if final_privacy.sensitive_fields > 0
+        || final_privacy.uninspectable_regions > 0
+        || final_privacy.changed
+    {
+        return Err(screenshot_human_takeover_message(&final_privacy));
+    }
+    let image_base64 = image_result?;
 
     // One atomic completion: recheck capability, workspace, visibility,
     // halt, controller, grant, instance, document epoch, and stored
@@ -936,6 +973,17 @@ async fn capture_screenshot(
         image_base64,
         mime_type: "image/png".to_owned(),
     })
+}
+
+fn screenshot_human_takeover_message(scan: &RawScreenshotPrivacyScan) -> String {
+    if scan.uninspectable_regions > 0 {
+        return "browser screenshot requires human takeover because cross-origin or closed-shadow content cannot be checked for sensitive fields".to_owned();
+    }
+    if scan.sensitive_fields > 0 {
+        return "browser screenshot requires human takeover because the page contains a password, file, or verification-code field".to_owned();
+    }
+    "browser screenshot requires human takeover because the page changed during privacy-safe capture"
+        .to_owned()
 }
 
 #[cfg(target_os = "macos")]
@@ -1232,6 +1280,7 @@ fn snapshot_script(max_nodes: usize, marker: &str) -> String {
     SNAPSHOT_SCRIPT
         .replace("__MAX_NODES__", &max_nodes.to_string())
         .replace("__MARKER__", marker)
+        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
 }
 
 fn action_script(
@@ -1272,7 +1321,21 @@ fn action_script(
         },
     });
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
-    Ok(ACTION_SCRIPT.replace("__PAYLOAD__", &payload))
+    Ok(ACTION_SCRIPT
+        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
+        .replace("__PAYLOAD__", &payload))
+}
+
+fn inspect_overlay_script() -> String {
+    INSPECT_OVERLAY_SCRIPT.replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
+}
+
+fn screenshot_privacy_script(watch_key: &str, finish: bool) -> Result<String, String> {
+    let watch_key = serde_json::to_string(watch_key).map_err(|error| error.to_string())?;
+    Ok(SCREENSHOT_PRIVACY_SCRIPT
+        .replace("__WATCH_KEY__", &watch_key)
+        .replace("__FINISH__", if finish { "true" } else { "false" })
+        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY))
 }
 
 #[cfg(target_os = "macos")]
@@ -1283,7 +1346,10 @@ async fn evaluate_json<T: serde::de::DeserializeOwned>(
     use std::sync::Mutex;
 
     use block2::RcBlock;
-    use objc2::runtime::AnyObject;
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
     use objc2_foundation::{NSError, NSString};
     use objc2_web_kit::WKWebView;
     use tokio::{sync::oneshot, time::timeout};
@@ -1294,6 +1360,25 @@ async fn evaluate_json<T: serde::de::DeserializeOwned>(
     webview
         .with_webview(move |platform| unsafe {
             let view: &WKWebView = &*platform.inner().cast();
+            let Some(content_world_class) = AnyClass::get(c"WKContentWorld") else {
+                if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                    let _ = sender.send(Err(
+                        "browser JavaScript isolation is unavailable on this platform".to_owned(),
+                    ));
+                }
+                return;
+            };
+            let world_name = NSString::from_str("TidebreakBrowserSemantics");
+            let content_world: *mut AnyObject =
+                msg_send![content_world_class, worldWithName: &*world_name];
+            if content_world.is_null() {
+                if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                    let _ = sender.send(Err(
+                        "browser JavaScript isolation could not be created".to_owned()
+                    ));
+                }
+                return;
+            }
             let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
                 let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) else {
                     return;
@@ -1310,7 +1395,14 @@ async fn evaluate_json<T: serde::de::DeserializeOwned>(
                 let value: &NSString = &*value.cast();
                 let _ = sender.send(Ok(value.to_string()));
             });
-            view.evaluateJavaScript_completionHandler(&NSString::from_str(&script), Some(&handler));
+            let script = NSString::from_str(&script);
+            let _: () = msg_send![
+                view,
+                evaluateJavaScript: &*script,
+                inFrame: std::ptr::null_mut::<AnyObject>(),
+                inContentWorld: content_world,
+                completionHandler: &*handler
+            ];
         })
         .map_err(|error| format!("browser host: {error}"))?;
 
@@ -1332,6 +1424,135 @@ async fn evaluate_json<T: serde::de::DeserializeOwned>(
     Err("semantic browser control is not available on this platform yet".to_owned())
 }
 
+const SENSITIVE_FIELD_POLICY: &str = r##"
+  const tidebreakAriaName = (element, doc) => {
+    const labelledBy = clean(element.getAttribute("aria-labelledby"), 200);
+    if (labelledBy) {
+      const root = element.getRootNode?.();
+      const value = labelledBy.split(/\s+/)
+        .map((id) => clean(
+          root?.getElementById?.(id)?.textContent
+            || doc.getElementById(id)?.textContent,
+        ))
+        .filter(Boolean)
+        .join(" ");
+      if (value) return clean(value);
+    }
+    return clean(element.getAttribute("aria-label"));
+  };
+  const tidebreakAccessibleName = (element, doc) => {
+    const direct = tidebreakAriaName(element, doc)
+      || clean(element.labels && Array.from(element.labels).map((label) => label.textContent).join(" "))
+      || clean(element.getAttribute("alt"))
+      || clean(element.getAttribute("title"))
+      || clean(element.getAttribute("placeholder"));
+    if (direct) return direct;
+    return clean(element.innerText || element.textContent);
+  };
+  const tidebreakDescribedText = (element, doc) => clean(
+    clean(element.getAttribute("aria-describedby"), 200)
+      .split(/\s+/)
+      .map((id) => clean(
+        element.getRootNode?.()?.getElementById?.(id)?.textContent
+          || doc.getElementById(id)?.textContent,
+      ))
+      .filter(Boolean)
+      .join(" "),
+    240,
+  );
+  const tidebreakSensitiveSignal = (value) => clean(value, 500)
+    .normalize("NFKC")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const tidebreakIsSensitiveField = (element, doc) => {
+    const tag = element.localName || "";
+    const role = clean(element.getAttribute("role"), 60).toLowerCase();
+    const editable = tag === "input"
+      || tag === "textarea"
+      || element.isContentEditable
+      || role === "textbox";
+    if (!editable) return false;
+
+    const type = clean(element.getAttribute("type") || element.type, 40).toLowerCase();
+    const autocomplete = clean(element.getAttribute("autocomplete"), 160).toLowerCase();
+    if (type === "password" || type === "file") return true;
+    if (["one-time-code", "current-password", "new-password", "cc-csc"]
+      .some((token) => autocomplete.split(/\s+/).includes(token))) return true;
+
+    const form = element.form;
+    const group = element.closest("[role='group']");
+    const accessibleName = tidebreakAccessibleName(element, doc);
+    const signal = tidebreakSensitiveSignal([
+      element.getAttribute("name"),
+      element.id,
+      accessibleName,
+      element.getAttribute("placeholder"),
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      tidebreakDescribedText(element, doc),
+      element.closest("fieldset")?.querySelector("legend")?.textContent,
+      group && tidebreakAriaName(group, doc),
+      form?.getAttribute("name"),
+      form?.id,
+      form && tidebreakAriaName(form, doc),
+      form?.querySelector("legend, h1, h2, h3")?.textContent,
+    ].filter(Boolean).join(" "));
+    const benignNumeric = /\b(quantity|qty|count|amount|price|year|age|zip|postal|search|phone|mobile|page|size|score|rating|percent|percentage|width|height|distance|duration)\b/.test(signal);
+    const explicitSensitive = /\b(one time|otp|totp|verification|verify|auth|authentication|authenticator|security|recovery|backup|two factor|2fa|mfa|passcode|password|passphrase|secret|pin|cvv|cvc|cid)\b/.test(signal);
+    const codeOrToken = /\b(code|token)\b/.test(signal);
+    if (explicitSensitive || (!benignNumeric && codeOrToken)) return true;
+
+    const inputMode = clean(element.getAttribute("inputmode") || element.inputMode, 40).toLowerCase();
+    const pattern = clean(element.getAttribute("pattern"), 120);
+    const maxLength = Number(element.getAttribute("maxlength") || element.maxLength || 0);
+    const size = Number(element.getAttribute("size") || element.size || 0);
+    const numeric = ["numeric", "decimal", "tel"].includes(inputMode)
+      || ["number", "tel"].includes(type)
+      || /\\d|\[0-9\]|digit/i.test(pattern);
+    const shortConstraint = (maxLength >= 3 && maxLength <= 12)
+      || (size >= 3 && size <= 12);
+    const patternBounds = pattern.match(/\{\s*(\d{1,2})\s*(?:,\s*(\d{1,2})?\s*)?\}/);
+    const patternMin = Number(patternBounds?.[1]);
+    const patternMax = patternBounds?.[0].includes(",")
+      ? Number(patternBounds?.[2] || Number.POSITIVE_INFINITY)
+      : patternMin;
+    const shortDigitPattern = /\\d|\[0-9\]|digit/i.test(pattern)
+      && patternMin >= 3
+      && patternMax <= 12;
+    const looksLikeShortDigits = (value) => {
+      const example = clean(value, 80).normalize("NFKC").trim();
+      return /^(?:\d[\s\-–—]*){3,12}$/.test(example);
+    };
+    const digitExample = [
+      element.getAttribute("placeholder"),
+      element.getAttribute("aria-label"),
+      accessibleName,
+    ].some(looksLikeShortDigits);
+    if (numeric && !benignNumeric && (shortConstraint || shortDigitPattern || digitExample)) {
+      return true;
+    }
+
+    if (numeric && !benignNumeric && maxLength === 1) {
+      const container = element.closest("fieldset, [role='group'], form, div");
+      const peers = container
+        ? Array.from(container.querySelectorAll("input")).filter((candidate) => {
+          const candidateMode = clean(candidate.getAttribute("inputmode") || candidate.inputMode, 40).toLowerCase();
+          const candidateType = clean(candidate.getAttribute("type") || candidate.type, 40).toLowerCase();
+          const candidateLength = Number(candidate.getAttribute("maxlength") || candidate.maxLength || 0);
+          return candidateLength === 1
+            && (["numeric", "decimal", "tel"].includes(candidateMode)
+              || ["number", "tel"].includes(candidateType));
+        })
+        : [];
+      if (peers.length >= 4 && peers.length <= 12) return true;
+    }
+    return false;
+  };
+"##;
+
 const SNAPSHOT_SCRIPT: &str = r#"
 (() => {
   const MAX_NODES = __MAX_NODES__;
@@ -1344,7 +1565,8 @@ const SNAPSHOT_SCRIPT: &str = r#"
 
   const INTERACTIVE_SELECTOR = [
     "a[href]", "button", "input:not([type='hidden'])", "textarea", "select",
-    "[contenteditable='true']", "[role='button']", "[role='link']",
+    "[contenteditable]:not([contenteditable='false'])", "[role='textbox']",
+    "[role='button']", "[role='link']",
     "[role='checkbox']", "[role='radio']", "[role='tab']",
     "[tabindex]:not([tabindex='-1'])"
   ].join(",");
@@ -1358,6 +1580,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, limit);
+  __SENSITIVE_FIELD_POLICY__
   const escapeCss = (value) => globalThis.CSS?.escape
     ? globalThis.CSS.escape(value)
     : String(value).replace(/[^a-zA-Z0-9_-]/g, (character) => `\\${character}`);
@@ -1409,33 +1632,6 @@ const SNAPSHOT_SCRIPT: &str = r#"
     if (element.isContentEditable) return "textbox";
     return tag || "element";
   };
-  const accessibleName = (element, doc) => {
-    const labelledBy = clean(element.getAttribute("aria-labelledby"), 200);
-    if (labelledBy) {
-      const value = labelledBy.split(/\s+/)
-        .map((id) => clean(doc.getElementById(id)?.textContent))
-        .filter(Boolean)
-        .join(" ");
-      if (value) return clean(value);
-    }
-    const direct = clean(element.getAttribute("aria-label"))
-      || clean(element.labels && Array.from(element.labels).map((label) => label.textContent).join(" "))
-      || clean(element.getAttribute("alt"))
-      || clean(element.getAttribute("title"))
-      || clean(element.getAttribute("placeholder"));
-    if (direct) return direct;
-    return clean(element.innerText || element.textContent);
-  };
-  const isSensitive = (element) => {
-    if (element.localName !== "input") return false;
-    const type = clean(element.getAttribute("type"), 40).toLowerCase();
-    const autocomplete = clean(element.getAttribute("autocomplete"), 100).toLowerCase();
-    return type === "password"
-      || type === "file"
-      || autocomplete.includes("one-time-code")
-      || autocomplete.includes("current-password")
-      || autocomplete.includes("new-password");
-  };
   const isConsequential = (element) => {
     const tag = element.localName;
     const type = clean(element.getAttribute("type") || element.type, 40).toLowerCase();
@@ -1480,7 +1676,7 @@ const SNAPSHOT_SCRIPT: &str = r#"
       if (!interactive && !text) continue;
       const rect = element.getBoundingClientRect();
       const role = inferredRole(element);
-      const sensitive = interactive && isSensitive(element);
+      const sensitive = interactive && tidebreakIsSensitiveField(element, doc);
       const consequential = interactive && isConsequential(element);
       const targetRef = interactive ? `@e${nextTargetRef++}` : null;
       if (interactive) {
@@ -1501,9 +1697,11 @@ const SNAPSHOT_SCRIPT: &str = r#"
         ref: targetRef,
         tag: element.localName || "element",
         role,
-        name: interactive ? accessibleName(element, doc) : text,
+        name: interactive
+          ? (sensitive ? "Sensitive field" : tidebreakAccessibleName(element, doc))
+          : text,
         frame: frameName,
-        text: text || null,
+        text: sensitive ? null : (text || null),
         value: value || null,
         href: interactive && element.href ? clean(element.href, 2048) : null,
         inputType,
@@ -1568,99 +1766,345 @@ const SNAPSHOT_SCRIPT: &str = r#"
 
 const INSPECT_OVERLAY_SCRIPT: &str = r##"
 (() => {
-  const existing = document.getElementById("__tidebreak_inspect_overlay__");
-  if (existing) return "already_injected";
-  const style = document.createElement("style");
-  style.id = "__tidebreak_inspect_style__";
-  style.textContent = `
-    .__tidebreak_inspect_overlay__ {
-      all: initial;
-      position: fixed;
-      pointer-events: none;
-      z-index: 2147483647;
-      border: 1.5px solid rgba(20, 130, 240, 0.72);
-      background: rgba(20, 130, 240, 0.09);
-      border-radius: 3px;
-      box-sizing: border-box;
-      transition: opacity 0.12s ease;
-    }
-    .__tidebreak_inspect_label__ {
-      all: initial;
-      position: fixed;
-      z-index: 2147483647;
-      pointer-events: none;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: 9px;
-      font-weight: 600;
-      line-height: 1;
-      color: rgb(20, 130, 240);
-      background: rgba(255, 255, 255, 0.92);
-      padding: 1.5px 4px;
-      border-radius: 2px;
-      border: 1px solid rgba(20, 130, 240, 0.38);
-      white-space: nowrap;
-      max-width: 160px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-  `;
-  document.head.appendChild(style);
+  const STATE_KEY = "__tidebreak_inspect_state__";
+  const active = window[STATE_KEY];
+  if (active && !active.cancelled) return "already_injected";
 
-  const INTERACTIVE_SELECTOR = "a[href], button, input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='button'], [role='link'], [role='checkbox'], [role='radio'], [role='tab'], [tabindex]:not([tabindex='-1'])";
+  const INTERACTIVE_SELECTOR = "a[href], button, input:not([type='hidden']), textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox'], [role='button'], [role='link'], [role='checkbox'], [role='radio'], [role='tab'], [tabindex]:not([tabindex='-1'])";
+  const clean = (value, limit = 240) => String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+  __SENSITIVE_FIELD_POLICY__
 
-  const isVisible = (element) => {
-    const style = window.getComputedStyle(element);
+  const state = { cancelled: false, frame: null, host: null, observers: [], schedule: null };
+  window[STATE_KEY] = state;
+
+  const isVisible = (element, win) => {
+    const style = win.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     return style.display !== "none"
       && style.visibility !== "hidden"
       && Number(style.opacity || 1) !== 0
       && rect.width > 0
-      && rect.height > 0;
+      && rect.height > 0
+      && rect.right > 0
+      && rect.bottom > 0
+      && rect.left < win.innerWidth
+      && rect.top < win.innerHeight;
+  };
+  const absoluteRect = (rect, offsetX, offsetY) => ({
+    left: offsetX + rect.left,
+    top: offsetY + rect.top,
+    width: rect.width,
+    height: rect.height,
+  });
+  const ordinaryLabel = (element) => (element.localName || "element")
+    + (element.id ? "#" + element.id : "")
+    + (element.className && typeof element.className === "string"
+      ? "." + element.className.split(" ").filter(Boolean).slice(0, 2).join(".")
+      : "");
+  const addMask = (entries, rect, label = "Sensitive region · human takeover") => {
+    entries.push({ rect, sensitive: true, label });
   };
 
-  const highlight = () => {
-    const candidates = document.querySelectorAll(INTERACTIVE_SELECTOR);
-    const overlay = document.createElement("div");
-    overlay.id = "__tidebreak_inspect_overlay__";
-    candidates.forEach((element, index) => {
-      if (!isVisible(element)) return;
-      const rect = element.getBoundingClientRect();
-      const marker = document.createElement("div");
-      marker.className = "__tidebreak_inspect_overlay__";
-      marker.style.left = rect.left + "px";
-      marker.style.top = rect.top + "px";
-      marker.style.width = rect.width + "px";
-      marker.style.height = rect.height + "px";
-      overlay.appendChild(marker);
+  const scanRoot = (root, doc, win, offsetX, offsetY, entries, roots) => {
+    roots.push({ root, win });
+    let containsSensitive = false;
+    for (const element of root.querySelectorAll(INTERACTIVE_SELECTOR)) {
+      const sensitive = tidebreakIsSensitiveField(element, doc);
+      if (sensitive) containsSensitive = true;
+      if (!isVisible(element, win)) continue;
+      entries.push({
+        rect: absoluteRect(element.getBoundingClientRect(), offsetX, offsetY),
+        sensitive,
+        label: sensitive ? "Sensitive field · human takeover" : ordinaryLabel(element),
+      });
+    }
 
-      const label = document.createElement("span");
-      label.className = "__tidebreak_inspect_label__";
-      label.style.left = rect.left + "px";
-      label.style.top = Math.max(0, rect.top - 11) + "px";
-      label.textContent = (element.localName || "element")
-        + (element.id ? "#" + element.id : "")
-        + (element.className && typeof element.className === "string"
-          ? "." + element.className.split(" ").filter(Boolean).slice(0, 2).join(".")
-          : "");
-      overlay.appendChild(label);
+    for (const element of root.querySelectorAll("*")) {
+      if (element.shadowRoot) {
+        const shadowEntries = [];
+        const shadowSensitive = scanRoot(
+          element.shadowRoot,
+          doc,
+          win,
+          offsetX,
+          offsetY,
+          shadowEntries,
+          roots,
+        );
+        if (shadowSensitive) {
+          addMask(entries, absoluteRect(element.getBoundingClientRect(), offsetX, offsetY));
+          containsSensitive = true;
+        } else {
+          entries.push(...shadowEntries);
+        }
+      } else if (element.localName?.includes("-")) {
+        if (isVisible(element, win)) {
+          addMask(entries, absoluteRect(element.getBoundingClientRect(), offsetX, offsetY));
+        }
+        containsSensitive = true;
+      }
+    }
+
+    for (const frame of root.querySelectorAll("iframe")) {
+      const frameRect = absoluteRect(frame.getBoundingClientRect(), offsetX, offsetY);
+      try {
+        const childDoc = frame.contentDocument;
+        const childWin = frame.contentWindow;
+        if (!childDoc || !childWin) throw new Error("frame unavailable");
+        const childEntries = [];
+        const childSensitive = scanRoot(
+          childDoc,
+          childDoc,
+          childWin,
+          frameRect.left,
+          frameRect.top,
+          childEntries,
+          roots,
+        );
+        if (childSensitive) {
+          addMask(entries, frameRect);
+          containsSensitive = true;
+        } else {
+          entries.push(...childEntries);
+        }
+      } catch (_) {
+        if (isVisible(frame, win)) {
+          addMask(entries, frameRect, "Uninspectable frame · human takeover");
+        }
+        containsSensitive = true;
+      }
+    }
+    return containsSensitive;
+  };
+
+  const setImportant = (style, name, value) => style.setProperty(name, value, "important");
+  const buildMarker = (entry, shadow) => {
+    const marker = document.createElement("div");
+    setImportant(marker.style, "all", "initial");
+    setImportant(marker.style, "position", "fixed");
+    setImportant(marker.style, "left", entry.rect.left + "px");
+    setImportant(marker.style, "top", entry.rect.top + "px");
+    setImportant(marker.style, "width", entry.rect.width + "px");
+    setImportant(marker.style, "height", entry.rect.height + "px");
+    setImportant(marker.style, "box-sizing", "border-box");
+    setImportant(marker.style, "pointer-events", "none");
+    setImportant(marker.style, "border-radius", "3px");
+    setImportant(marker.style, "border", entry.sensitive
+      ? "1.5px solid rgb(157, 64, 40)"
+      : "1.5px solid rgba(20, 130, 240, 0.72)");
+    setImportant(marker.style, "background", entry.sensitive
+      ? "rgb(247, 240, 232)"
+      : "rgba(20, 130, 240, 0.09)");
+
+    const label = document.createElement("span");
+    label.textContent = entry.label;
+    setImportant(label.style, "all", "initial");
+    setImportant(label.style, "position", "absolute");
+    setImportant(label.style, "left", "0");
+    setImportant(label.style, "top", "0");
+    setImportant(label.style, "box-sizing", "border-box");
+    setImportant(label.style, "max-width", Math.max(1, entry.rect.width) + "px");
+    setImportant(label.style, "overflow", "hidden");
+    setImportant(label.style, "text-overflow", "ellipsis");
+    setImportant(label.style, "white-space", "nowrap");
+    setImportant(label.style, "padding", "1.5px 4px");
+    setImportant(label.style, "font-family", "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif");
+    setImportant(label.style, "font-size", "9px");
+    setImportant(label.style, "font-weight", "600");
+    setImportant(label.style, "line-height", "1");
+    setImportant(label.style, "color", entry.sensitive ? "rgb(126, 48, 29)" : "rgb(20, 130, 240)");
+    setImportant(label.style, "background", entry.sensitive ? "rgb(255, 248, 240)" : "rgba(255, 255, 255, 0.92)");
+    marker.appendChild(label);
+    shadow.appendChild(marker);
+  };
+
+  const schedule = () => {
+    if (state.cancelled || state.frame !== null) return;
+    state.frame = window.requestAnimationFrame(() => {
+      state.frame = null;
+      render();
     });
-    document.body.appendChild(overlay);
-    return "injected";
+  };
+  state.schedule = schedule;
+  const render = () => {
+    if (state.cancelled) return;
+    const entries = [];
+    const roots = [];
+    const takeoverRequired = scanRoot(document, document, window, 0, 0, entries, roots);
+    if (takeoverRequired) {
+      entries.splice(0, entries.length, {
+        rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
+        sensitive: true,
+        label: "Sensitive content · human takeover",
+      });
+    }
+
+    const host = document.createElement("div");
+    host.setAttribute("data-tidebreak-inspect", "true");
+    setImportant(host.style, "all", "initial");
+    setImportant(host.style, "position", "fixed");
+    setImportant(host.style, "inset", "0");
+    setImportant(host.style, "display", "block");
+    setImportant(host.style, "pointer-events", "none");
+    setImportant(host.style, "z-index", "2147483647");
+    const shadow = host.attachShadow({ mode: "closed" });
+    for (const entry of entries) buildMarker(entry, shadow);
+    host.addEventListener("toggle", (event) => {
+      if (event.newState === "closed" && state.host === host) schedule();
+    });
+
+    for (const observer of state.observers) observer.disconnect();
+    state.observers = [];
+    if (state.host?.isConnected) state.host.replaceWith(host);
+    else document.documentElement.appendChild(host);
+    if (typeof host.showPopover === "function") {
+      host.setAttribute("popover", "manual");
+      try { host.showPopover(); } catch (_) {}
+    }
+    state.host = host;
+
+    for (const observed of roots) {
+      const observer = new observed.win.MutationObserver(schedule);
+      observer.observe(observed.root, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+      state.observers.push(observer);
+    }
   };
 
-  window.__tidebreak_highlight_inspect__ = highlight;
-  return highlight();
+  window.addEventListener("scroll", schedule, true);
+  window.addEventListener("resize", schedule, true);
+  document.addEventListener("fullscreenchange", schedule, true);
+  render();
+  return "injected";
 })()
 "##;
 
 const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
 (() => {
-  const overlay = document.getElementById("__tidebreak_inspect_overlay__");
-  if (overlay) overlay.remove();
-  const style = document.getElementById("__tidebreak_inspect_style__");
-  if (style) style.remove();
+  const state = window.__tidebreak_inspect_state__;
+  if (state) {
+    state.cancelled = true;
+    if (state.frame !== null) window.cancelAnimationFrame(state.frame);
+    for (const observer of state.observers || []) observer.disconnect();
+    window.removeEventListener("scroll", state.schedule, true);
+    window.removeEventListener("resize", state.schedule, true);
+    document.removeEventListener("fullscreenchange", state.schedule, true);
+    state.host?.remove();
+    delete window.__tidebreak_inspect_state__;
+  }
+  document.getElementById("__tidebreak_inspect_overlay__")?.remove();
+  document.getElementById("__tidebreak_inspect_style__")?.remove();
   delete window.__tidebreak_highlight_inspect__;
   return "removed";
+})()
+"#;
+
+const SCREENSHOT_PRIVACY_SCRIPT: &str = r#"
+(() => {
+  const WATCH_KEY = __WATCH_KEY__;
+  const FINISH = __FINISH__;
+  const clean = (value, limit = 240) => String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+  __SENSITIVE_FIELD_POLICY__
+
+  const hashText = (seed, value) => {
+    let hash = seed >>> 0;
+    for (const character of String(value || "")) {
+      hash ^= character.codePointAt(0);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return hash;
+  };
+
+  const scanRoot = (root, doc, win, observers, state) => {
+    if (!FINISH) {
+      const observer = new win.MutationObserver(() => { state.changed = true; });
+      observer.observe(root, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: [
+          "type", "autocomplete", "name", "id", "aria-label", "aria-labelledby",
+          "aria-describedby", "placeholder", "title", "inputmode", "pattern",
+          "maxlength", "size", "role", "style", "class", "hidden",
+        ],
+      });
+      observers.push(observer);
+    }
+
+    let sensitiveFields = 0;
+    let uninspectableRegions = 0;
+    let signature = 2166136261;
+    for (const element of root.querySelectorAll("input, textarea, [contenteditable]:not([contenteditable='false']), [role='textbox']")) {
+      signature = hashText(signature, element.localName);
+      signature = hashText(signature, element.getAttribute("type"));
+      signature = hashText(signature, element.getAttribute("name"));
+      signature = hashText(signature, element.id);
+      signature = hashText(signature, "value" in element ? element.value : element.textContent);
+      if (tidebreakIsSensitiveField(element, doc)) sensitiveFields += 1;
+    }
+    for (const element of root.querySelectorAll("*")) {
+      if (element.shadowRoot) {
+        const child = scanRoot(element.shadowRoot, doc, win, observers, state);
+        sensitiveFields += child.sensitiveFields;
+        uninspectableRegions += child.uninspectableRegions;
+        signature = hashText(signature, child.signature);
+      } else if (element.localName?.includes("-")) {
+        uninspectableRegions += 1;
+      }
+    }
+    for (const frame of root.querySelectorAll("iframe")) {
+      try {
+        const childDoc = frame.contentDocument;
+        const childWin = frame.contentWindow;
+        if (!childDoc || !childWin) throw new Error("frame unavailable");
+        const child = scanRoot(childDoc, childDoc, childWin, observers, state);
+        sensitiveFields += child.sensitiveFields;
+        uninspectableRegions += child.uninspectableRegions;
+        signature = hashText(signature, child.signature);
+      } catch (_) {
+        uninspectableRegions += 1;
+      }
+    }
+    return { sensitiveFields, uninspectableRegions, signature };
+  };
+
+  let state = window[WATCH_KEY];
+  if (!FINISH) {
+    if (state) {
+      for (const observer of state.observers || []) observer.disconnect();
+    }
+    state = { changed: false, observers: [], signature: null };
+    window[WATCH_KEY] = state;
+  } else if (!state) {
+    return JSON.stringify({ sensitiveFields: 0, uninspectableRegions: 0, changed: true });
+  }
+
+  const result = scanRoot(document, document, window, state.observers, state);
+  if (!FINISH) {
+    state.signature = result.signature;
+  } else if (state.signature !== result.signature) {
+    state.changed = true;
+  }
+  if (FINISH) {
+    for (const observer of state.observers) observer.disconnect();
+    delete window[WATCH_KEY];
+  }
+  return JSON.stringify({
+    sensitiveFields: result.sensitiveFields,
+    uninspectableRegions: result.uninspectableRegions,
+    changed: Boolean(state.changed),
+  });
 })()
 "#;
 
@@ -1671,6 +2115,7 @@ const ACTION_SCRIPT: &str = r#"
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, limit);
+  __SENSITIVE_FIELD_POLICY__
   const roleFor = (element) => {
     const explicit = clean(element.getAttribute("role"), 60);
     if (explicit) return explicit;
@@ -1688,22 +2133,6 @@ const ACTION_SCRIPT: &str = r#"
     }
     if (element.isContentEditable) return "textbox";
     return tag || "element";
-  };
-  const nameFor = (element, doc) => {
-    const labelledBy = clean(element.getAttribute("aria-labelledby"), 200);
-    if (labelledBy) {
-      const value = labelledBy.split(/\s+/)
-        .map((id) => clean(doc.getElementById(id)?.textContent))
-        .filter(Boolean)
-        .join(" ");
-      if (value) return clean(value);
-    }
-    return clean(element.getAttribute("aria-label"))
-      || clean(element.labels && Array.from(element.labels).map((label) => label.textContent).join(" "))
-      || clean(element.getAttribute("alt"))
-      || clean(element.getAttribute("title"))
-      || clean(element.getAttribute("placeholder"))
-      || clean(element.innerText || element.textContent);
   };
   const result = (status, message) => JSON.stringify({
     status,
@@ -1728,26 +2157,20 @@ const ACTION_SCRIPT: &str = r#"
   if (element[payload.marker] !== payload.markerValue) {
     return result("stale_target", "The target element was replaced.");
   }
-  const isSensitive = (() => {
-    if (element.localName !== "input") return false;
-    const type = clean(element.getAttribute("type"), 40).toLowerCase();
-    const autocomplete = clean(element.getAttribute("autocomplete"), 100).toLowerCase();
-    return type === "password"
-      || type === "file"
-      || autocomplete.includes("one-time-code")
-      || autocomplete.includes("current-password")
-      || autocomplete.includes("new-password");
-  })();
+  const isSensitive = tidebreakIsSensitiveField(element, doc);
   const fresh = {
     tag: element.localName || "element",
     role: roleFor(element),
-    name: nameFor(element, doc),
+    name: isSensitive ? "Sensitive field" : tidebreakAccessibleName(element, doc),
     inputType: element.localName === "input"
       ? clean(element.getAttribute("type") || "text", 40).toLowerCase()
       : null,
     href: element.href ? clean(element.href, 2048) : null,
     sensitive: isSensitive,
   };
+  if (isSensitive) {
+    return result("human_takeover_required", "Password, file, and verification-code fields require human takeover.");
+  }
   if (JSON.stringify(fresh) !== JSON.stringify(payload.fingerprint)) {
     return result("stale_target", "The target's identifying content changed.");
   }
@@ -1840,7 +2263,7 @@ pub(crate) async fn browser_inject_inspect_overlay(
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
 
-    let _result: String = evaluate_json(&webview, INSPECT_OVERLAY_SCRIPT).await?;
+    let _result: String = evaluate_json(&webview, &inspect_overlay_script()).await?;
     Ok(())
 }
 
@@ -1906,6 +2329,30 @@ mod tests {
     }
 
     #[test]
+    fn page_text_cannot_replace_the_shared_policy_placeholder() {
+        let target = BrowserTargetRecord {
+            frame_path: vec![],
+            selector: "input:nth-of-type(1)".to_owned(),
+            marker: "__marker".to_owned(),
+            marker_value: "@e1".to_owned(),
+            fingerprint: BrowserTargetFingerprint {
+                tag: "input".to_owned(),
+                role: "textbox".to_owned(),
+                name: "__SENSITIVE_FIELD_POLICY__".to_owned(),
+                input_type: Some("text".to_owned()),
+                href: None,
+                sensitive: false,
+            },
+            sensitive: false,
+            consequential: false,
+        };
+
+        let script = action_script(&target, &BrowserSemanticAction::Focus).unwrap();
+        assert!(script.contains(r#"\"name\":\"__SENSITIVE_FIELD_POLICY__\""#));
+        assert_eq!(script.matches("const tidebreakIsSensitiveField").count(), 1);
+    }
+
+    #[test]
     fn snapshots_label_page_content_as_untrusted() {
         assert_eq!(
             serde_json::to_value(BrowserContentTrust::UntrustedPage).unwrap(),
@@ -1922,5 +2369,106 @@ mod tests {
         assert!(script.contains("if (!interactive && !text) continue"));
         assert!(script.contains("type === \"file\""));
         assert!(script.contains("const isConsequential"));
+    }
+
+    #[test]
+    fn every_browser_surface_uses_the_shared_sensitive_field_policy() {
+        let snapshot = snapshot_script(25, "__marker");
+        let inspect = inspect_overlay_script();
+        let screenshot = screenshot_privacy_script("__watch", false).unwrap();
+        let target = BrowserTargetRecord {
+            frame_path: vec![],
+            selector: "input:nth-of-type(1)".to_owned(),
+            marker: "__marker".to_owned(),
+            marker_value: "@e1".to_owned(),
+            fingerprint: BrowserTargetFingerprint {
+                tag: "input".to_owned(),
+                role: "textbox".to_owned(),
+                name: "Sensitive field".to_owned(),
+                input_type: Some("text".to_owned()),
+                href: None,
+                sensitive: true,
+            },
+            sensitive: true,
+            consequential: false,
+        };
+        let action = action_script(&target, &BrowserSemanticAction::Focus).unwrap();
+
+        for script in [snapshot, inspect, screenshot, action] {
+            assert!(script.contains("const tidebreakIsSensitiveField"));
+            assert!(script.contains("aria-describedby"));
+            assert!(script.contains("inputmode"));
+            assert!(!script.contains("__SENSITIVE_FIELD_POLICY__"));
+        }
+    }
+
+    #[test]
+    fn semantic_scripts_run_outside_the_page_javascript_world() {
+        let source = include_str!("browser_semantics.rs");
+        assert!(source.contains("TidebreakBrowserSemantics"));
+        assert!(source.contains("inContentWorld: content_world"));
+    }
+
+    #[test]
+    fn sensitive_snapshot_nodes_hide_values_labels_and_actions() {
+        let script = snapshot_script(25, "__marker");
+        assert!(script.contains("sensitive ? \"Sensitive field\""));
+        assert!(script.contains("const value = !interactive || sensitive"));
+        assert!(script.contains("text: sensitive ? null : (text || null)"));
+        assert!(script.contains("if (sensitive) return [\"human_takeover\"]"));
+    }
+
+    #[test]
+    fn actions_and_screenshots_fail_closed_for_sensitive_or_uninspectable_fields() {
+        let inspect = inspect_overlay_script();
+        let screenshot = screenshot_privacy_script("__watch", false).unwrap();
+        assert!(inspect.contains("attachShadow({ mode: \"closed\" })"));
+        assert!(inspect.contains("window.requestAnimationFrame(() =>"));
+        assert!(inspect.contains("new observed.win.MutationObserver(schedule)"));
+        assert!(inspect.contains("addMask(entries, frameRect"));
+        assert!(inspect.contains("Sensitive content · human takeover"));
+        assert!(screenshot.contains("tidebreakIsSensitiveField(element, doc)"));
+        assert!(screenshot.contains("if (tidebreakIsSensitiveField(element, doc))"));
+        assert!(screenshot.contains("uninspectableRegions += 1"));
+        assert!(screenshot.contains("state.changed = true"));
+
+        let target = BrowserTargetRecord {
+            frame_path: vec![],
+            selector: "input:nth-of-type(1)".to_owned(),
+            marker: "__marker".to_owned(),
+            marker_value: "@e1".to_owned(),
+            fingerprint: BrowserTargetFingerprint {
+                tag: "input".to_owned(),
+                role: "textbox".to_owned(),
+                name: "Sensitive field".to_owned(),
+                input_type: Some("text".to_owned()),
+                href: None,
+                sensitive: true,
+            },
+            sensitive: true,
+            consequential: false,
+        };
+        let action = action_script(&target, &BrowserSemanticAction::Focus).unwrap();
+        assert!(action.contains("human_takeover_required"));
+    }
+
+    #[test]
+    fn browser_fixture_covers_unannotated_codes_and_ordinary_numbers() {
+        let fixture = include_str!("../tests/browser-fixture/index.html");
+        for sensitive in [
+            "name=\"code\" inputmode=\"numeric\"",
+            "id=\"verification-code\" inputmode=\"numeric\"",
+            "placeholder=\"Recovery code\"",
+        ] {
+            assert!(fixture.contains(sensitive));
+        }
+        for ordinary in [
+            "name=\"quantity\" type=\"number\"",
+            "name=\"zipCode\" inputmode=\"numeric\"",
+            "name=\"year\" type=\"number\"",
+            "name=\"search\" inputmode=\"numeric\"",
+        ] {
+            assert!(fixture.contains(ordinary));
+        }
     }
 }
