@@ -316,6 +316,9 @@ export function noticeToAction(
         workspace: notice.workspace,
         session: notice.session,
         kind: notice.kind,
+        ...(notice.harness_kind !== undefined
+          ? { harness_kind: notice.harness_kind }
+          : {}),
         lifecycle: notice.lifecycle,
         attention: notice.attention,
         title: notice.title,

@@ -306,6 +306,31 @@ export const RunningSession: Story = {
   },
 };
 
+/** The workspace summary follows the running Claude session, not stopped Codex. */
+export const RunningClaudeAfterStoppedCodex: Story = {
+  args: {
+    digest: {
+      ...runningDigest,
+      session: "sess-claude",
+      harness_kind: "claude_code",
+      turn_count: 1,
+    },
+    session: {
+      ...codeSession,
+      id: "sess-codex",
+      harness_kind: "codex",
+      lifecycle: "ended",
+    },
+    active: true,
+    visibleMeta: { repoChip: true, branch: true },
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+};
+
 /** A live turn waiting on a command says so instead of implying generation. */
 export const ShellRunning: Story = {
   args: {

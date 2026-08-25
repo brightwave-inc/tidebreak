@@ -346,6 +346,55 @@ describe("WorkspaceCard", () => {
     expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
   });
 
+  it("shows the running digest's harness instead of a stopped sibling", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-claude",
+      kind: "interactive",
+      harness_kind: "claude_code",
+      lifecycle: "running",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 1,
+      activity: "agent",
+    };
+    const stoppedCodex: CodeSessionSnapshot = {
+      id: "sess-codex",
+      workspace_id: workspace.id,
+      kind: "interactive",
+      harness_kind: "codex",
+      permission_mode: "ask",
+      fast_mode: false,
+      lifecycle: "ended",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-14T00:00:00.000Z",
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={stoppedCodex}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: true }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
+    expect(screen.queryByTitle("Codex")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
+  });
+
   it("renders a watch task as its own clickable child row", async () => {
     const user = userEvent.setup();
     const onOpen = vi.fn();

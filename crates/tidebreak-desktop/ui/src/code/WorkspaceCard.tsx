@@ -360,9 +360,11 @@ function WorkspaceDetailPanel({
   onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
   const activity = workspaceActivitySummary(digest, session, terminalOpen);
+  const matchingSession =
+    !digest || session?.id === digest.session ? session : undefined;
   const stamp = archived
     ? (workspace.archived_at ?? workspace.created_at)
-    : (session?.created_at ?? workspace.created_at);
+    : (matchingSession?.created_at ?? workspace.created_at);
   const age = formatCompactAge(stamp);
   const model = pr ? workspaceWorkflowModel(null, pr) : null;
   const primary =
@@ -634,8 +636,11 @@ function WorkspaceActivityLine({
   if (!railDigest) return null;
 
   const activity = workspaceActivitySummary(railDigest, session, false);
-  const HarnessIcon = session ? HARNESS_ICONS[session.harness_kind] : null;
-  const stamp = session?.created_at ?? workspace.created_at;
+  const matchingSession =
+    session?.id === railDigest.session ? session : undefined;
+  const harnessKind = railDigest.harness_kind ?? matchingSession?.harness_kind;
+  const HarnessIcon = harnessKind ? HARNESS_ICONS[harnessKind] : null;
+  const stamp = matchingSession?.created_at ?? workspace.created_at;
   const age = formatCompactAge(stamp);
 
   if (!activity) return null;
@@ -649,10 +654,10 @@ function WorkspaceActivityLine({
           className={cn("size-3 shrink-0", STATUS_TEXT.critical)}
           aria-hidden
         />
-      ) : session && HarnessIcon ? (
+      ) : harnessKind && HarnessIcon ? (
         // A brand mark, so it keeps its own identity: the running tone goes
         // on the label beside it, never on the engine's logo.
-        <span title={HARNESS_LABELS[session.harness_kind]}>
+        <span title={HARNESS_LABELS[harnessKind]}>
           <HarnessIcon className="size-3 shrink-0" aria-hidden />
         </span>
       ) : activity.terminalOnly ? (

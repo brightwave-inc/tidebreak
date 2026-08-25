@@ -1435,7 +1435,13 @@ export type CodeSessionActivity = "agent" | "shell" | "monitor" | "subagents" | 
 /**
  * Cheap per-session digest on `/code/updates`.
  */
-export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, 
+/**
+ * Engine identity for list surfaces that collapse several sessions into
+ * one workspace row. Optional on the wire so a desktop can still read a
+ * digest from an older server during an update.
+ */
+harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
 /**
  * What the live turn is occupied with, while running.
  */
@@ -1592,7 +1598,11 @@ export type CodeUpdateNotice = { "type": "snapshot",
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, 
+/**
+ * Engine identity for the session represented by this digest.
+ */
+harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
 /**
  * What the live turn is occupied with, while running.
  */

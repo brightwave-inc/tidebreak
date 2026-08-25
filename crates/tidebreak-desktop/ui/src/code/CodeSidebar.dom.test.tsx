@@ -254,6 +254,60 @@ describe("CodeSidebar", () => {
     await waitFor(() => expect(card).toHaveFocus());
   });
 
+  it("brands the running digest instead of a stopped remembered sibling", async () => {
+    useCodeCatalogStore.getState().rememberSession({
+      id: "sess-codex",
+      workspace_id: "ws-1",
+      kind: "interactive",
+      harness_kind: "codex",
+      permission_mode: "ask",
+      fast_mode: false,
+      lifecycle: "ended",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      unrecognized_event_count: 0,
+      created_at: "2026-08-15T00:00:00.000Z",
+    });
+    client.openCodeUpdates.mockImplementationOnce((onNotice) => {
+      queueMicrotask(() =>
+        onNotice({
+          type: "snapshot",
+          sessions: [
+            {
+              workspace: "ws-1",
+              session: "sess-claude",
+              kind: "interactive",
+              harness_kind: "claude_code",
+              lifecycle: "running",
+              attention: {
+                state: { type: "working" },
+                source: "lifecycle",
+              },
+              title: "Fix login",
+              turn_count: 1,
+              activity: "agent",
+            },
+          ],
+        }),
+      );
+      return {
+        close() {},
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as WebSocket;
+    });
+
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(await screen.findByTitle("Claude Code")).toBeInTheDocument();
+    expect(screen.queryByTitle("Codex")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
+  });
+
   it("opens a harness subagent through the filtered workspace address", async () => {
     client.openCodeUpdates.mockImplementationOnce((onNotice) => {
       queueMicrotask(() =>

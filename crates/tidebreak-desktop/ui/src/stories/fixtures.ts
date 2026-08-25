@@ -436,6 +436,7 @@ export function codeDigest(
     workspace: "ws-1",
     session: "sess-1",
     kind: "interactive",
+    harness_kind: "claude_code",
     lifecycle: "running",
     attention: attentionWorking,
     title: "Scoped UI workshop",

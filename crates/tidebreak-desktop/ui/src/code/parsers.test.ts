@@ -687,6 +687,7 @@ describe("pull request state in live updates", () => {
     workspace: "ws-1",
     session: "sess-1",
     kind: "interactive",
+    harness_kind: "claude_code",
     lifecycle: "idle",
     attention: { state: { type: "working" }, source: "lifecycle" },
     title: "Fix login",
@@ -724,6 +725,16 @@ describe("pull request state in live updates", () => {
         type: "digest",
         ...digest,
         activity: "agents",
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects an unknown digest harness instead of showing the wrong brand", () => {
+    expect(
+      parseCodeUpdateNotice({
+        type: "digest",
+        ...digest,
+        harness_kind: "cursor",
       }),
     ).toBeNull();
   });
