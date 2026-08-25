@@ -25,7 +25,8 @@ The primary page deliberately includes:
 
 - history-API navigation and a server redirect;
 - dynamic content and a replaceable stale target;
-- ordinary, password, OTP, select, checkbox, upload, and submit controls;
+- annotated and unannotated verification fields plus ordinary numeric controls;
+- password, select, checkbox, upload, and submit controls;
 - same-origin and cross-origin frames;
 - a popup and a download;
 - a console-error trigger;

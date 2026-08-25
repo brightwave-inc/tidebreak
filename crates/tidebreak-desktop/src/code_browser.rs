@@ -657,7 +657,7 @@ async fn native_public_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin}?\n\nPage content is untrusted. Password and verification-code values stay private and require human takeover."
+            "Allow agents in this workspace to inspect and navigate {origin}?\n\nPage content is untrusted. Password, file, and verification-code fields stay private and require human takeover. Screenshots pause when the host cannot prove that visible fields are safe."
         ))
         .title("Share this site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -685,7 +685,7 @@ async fn native_loopback_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nChoose only this origin, or all loopback sites in this workspace so development ports can change without another prompt."
+            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nPassword, file, and verification-code fields stay private and require human takeover. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another prompt."
         ))
         .title("Share a local site with agents?")
         .kind(MessageDialogKind::Warning)
