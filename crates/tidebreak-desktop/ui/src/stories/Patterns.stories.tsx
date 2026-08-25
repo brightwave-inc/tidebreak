@@ -8,11 +8,11 @@ import {
   FolderOpen,
   Globe,
   Shield,
-  Sparkles,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ConfirmDialog";
 import {
   Empty,
   EmptyContent,
@@ -24,14 +24,58 @@ import {
 import { ToolCardShell } from "@/ToolCardShell";
 import { ApprovalCard } from "@/ApprovalCard";
 import { ChatStatusChip } from "@/ChatStatusChip";
-import {
-  SettingsPanel,
-  SettingsSection,
-  SettingsField,
-} from "@/settings/primitives";
+import { SettingsSection, SettingsField } from "@/settings/primitives";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { execPreview } from "./fixtures";
+
+function SettingsComposition() {
+  const { confirm, dialog } = useConfirm();
+  return (
+    <>
+      <SettingsSection
+        title="General"
+        description="Name and behavior for this workspace."
+      >
+        <SettingsField label="Workspace name">
+          <Input defaultValue="Acme Labs" />
+        </SettingsField>
+        <SettingsField
+          label="Automatic backups"
+          hint="Nightly snapshots of every project in this workspace."
+        >
+          <Switch defaultChecked />
+        </SettingsField>
+      </SettingsSection>
+      <SettingsSection title="Danger zone" description="Irreversible actions.">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">Delete this workspace</p>
+            <p className="text-xs text-muted-foreground">
+              Permanently removes Acme Labs and all of its projects.
+            </p>
+          </div>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() =>
+              void confirm({
+                title: "Delete this workspace?",
+                description:
+                  "Tidebreak removes Acme Labs and all of its projects. This cannot be undone.",
+                confirmLabel: "Delete workspace",
+                destructive: true,
+              })
+            }
+          >
+            Delete workspace
+          </Button>
+        </div>
+      </SettingsSection>
+      {dialog}
+    </>
+  );
+}
 
 function PatternsShowcase() {
   return (
@@ -42,47 +86,16 @@ function PatternsShowcase() {
             Settings composition
           </h2>
           <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-            A settings page is a stack of sections on a bounded column. Each
-            section groups related fields. Each field is a label and its
-            control. The page saves on change; there are no Save or Cancel
-            buttons.
+            A settings page is a stack of sections on a bounded column that
+            SettingsPanel owns. Each section groups related fields. Each field
+            is a label and its control. The page saves on change; there are no
+            Save or Cancel buttons. Destructive actions go through the shared
+            confirm dialog.
           </p>
         </div>
-        <SettingsPanel
-          title="Workspace"
-          description="Identity and defaults for this workspace."
-        >
-          <SettingsSection
-            title="General"
-            description="Name and behavior for this workspace."
-          >
-            <SettingsField label="Workspace name">
-              <Input defaultValue="Acme Labs" />
-            </SettingsField>
-            <SettingsField
-              label="Automatic backups"
-              hint="Nightly snapshots of every project in this workspace."
-            >
-              <Switch defaultChecked />
-            </SettingsField>
-          </SettingsSection>
-          <SettingsSection
-            title="Danger zone"
-            description="Irreversible actions."
-          >
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium">Delete this workspace</p>
-                <p className="text-xs text-muted-foreground">
-                  Permanently removes Acme Labs and all of its projects.
-                </p>
-              </div>
-              <Button variant="destructive" size="sm">
-                Delete workspace
-              </Button>
-            </div>
-          </SettingsSection>
-        </SettingsPanel>
+        <div className="max-w-2xl">
+          <SettingsComposition />
+        </div>
       </section>
 
       <section className="grid gap-4">
@@ -93,36 +106,65 @@ function PatternsShowcase() {
           <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
             The canonical expandable row for a tool call. Collapsed it is a
             single line with a small icon; expanded it shows the command,
-            output, and metadata. The transcript stays a conversation, not a
-            stack of panels.
+            output, and metadata. Expand only while work is still happening; a
+            settled card collapses to a single row.
           </p>
         </div>
-        <div className="max-w-prose">
-          <ToolCardShell
-            icon={<FileText className="size-3.5" aria-hidden="true" />}
-            title="pnpm test -- TaskPlanCard.dom.test.tsx"
-            label="Run the focused component tests"
-            badge={
-              <>
-                <Badge variant="outline">exec</Badge>
-                <Badge variant="success">Exit 0</Badge>
-              </>
-            }
-            trailing="1.2s"
-            defaultExpanded
-          >
-            <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-              <pre className="whitespace-pre-wrap">
-                {`$ pnpm test -- TaskPlanCard.dom.test.tsx
+        <div className="grid max-w-prose gap-3">
+          <div>
+            <p className="text-xs font-medium text-muted-foreground">
+              Running (expanded on mount)
+            </p>
+            <ToolCardShell
+              icon={<FileText className="size-3.5" aria-hidden="true" />}
+              title="pnpm test -- TaskPlanCard.dom.test.tsx"
+              label="Run the focused component tests"
+              badge={
+                <>
+                  <Badge variant="outline">exec</Badge>
+                  <Badge variant="info">Running</Badge>
+                </>
+              }
+              defaultExpanded
+            >
+              <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                <pre className="whitespace-pre-wrap">
+                  {`Running the focused component tests…
+
+$ pnpm test -- TaskPlanCard.dom.test.tsx`}
+                </pre>
+              </div>
+            </ToolCardShell>
+          </div>
+          <div>
+            <p className="text-xs font-medium text-muted-foreground">
+              Settled (collapsed)
+            </p>
+            <ToolCardShell
+              icon={<FileText className="size-3.5" aria-hidden="true" />}
+              title="pnpm test -- TaskPlanCard.dom.test.tsx"
+              label="Run the focused component tests"
+              badge={
+                <>
+                  <Badge variant="outline">exec</Badge>
+                  <Badge variant="success">Exit 0</Badge>
+                </>
+              }
+              trailing="1.2s"
+            >
+              <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                <pre className="whitespace-pre-wrap">
+                  {`$ pnpm test -- TaskPlanCard.dom.test.tsx
 
  ✓ TaskPlanCard renders the active step (12 ms)
  ✓ TaskPlanCard collapses settled steps (8 ms)
 
  Test Files  1 passed (1)
       Tests  2 passed (2)`}
-              </pre>
-            </div>
-          </ToolCardShell>
+                </pre>
+              </div>
+            </ToolCardShell>
+          </div>
         </div>
       </section>
 
@@ -225,28 +267,30 @@ function PatternsShowcase() {
             Empty states
           </h2>
           <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-            Low-density surfaces use an icon in a soft gray container.
-            High-density surfaces keep icons small and unboxed.
+            An empty index renders an icon in muted or identity ink at size-11
+            with no filled container behind it. The same variant is how Inbox,
+            Folders, Outputs, Plugins, Apps, and the Code pages read when they
+            have nothing to list. In high-density operational surfaces, icons
+            stay small and unboxed.
           </p>
         </div>
         <div className="grid gap-6 md:grid-cols-2">
           <div className="grid gap-2">
             <p className="text-xs font-medium text-muted-foreground">
-              Low density (welcome, onboarding)
+              Empty index
             </p>
             <Empty className="min-h-48 bg-background ring-1 ring-foreground/10">
               <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <Sparkles aria-hidden="true" />
+                <EmptyMedia variant="icon" className="text-icon-amber">
+                  <FolderOpen aria-hidden="true" />
                 </EmptyMedia>
-                <EmptyTitle>No review notes</EmptyTitle>
+                <EmptyTitle>No folders connected</EmptyTitle>
                 <EmptyDescription>
-                  Notes appear here when an agent finds a decision that needs
-                  your attention.
+                  Connect a folder so the agent can read and write files in it.
                 </EmptyDescription>
               </EmptyHeader>
               <EmptyContent>
-                <Button variant="outline">Review recent runs</Button>
+                <Button variant="outline">Connect a folder</Button>
               </EmptyContent>
             </Empty>
           </div>

@@ -180,7 +180,8 @@ step. The collapsed state is boxless: a transcript should read as a
 conversation with occasional notes about what ran, not as a stack of
 nested panels. Keep the icon small (`size-3.5`), align it with the primary
 text line, and keep the title on one line. Expand only while work is still
-happening; a settled card collapses to a single row.
+happening (`defaultExpanded` exists for that); a settled card collapses to
+a single row.
 
 `ApprovalCard` is the canonical consent surface. It leads with a short
 question, shows the exact action in a muted preview block, and lists
@@ -195,20 +196,23 @@ summary that duplicates outputs, folders, permissions, or agents.
 
 ### Empty states and welcome surfaces
 
-`Empty` is the canonical null-state container. Use `EmptyMedia variant="icon"`
-only for low-density surfaces: welcome screens, onboarding, and first-run
-experiences. The icon sits in a soft gray container (`size-11`, `text-muted-foreground`)
-and matches the surrounding type scale.
+`Empty` is the canonical null-state container, and `EmptyMedia variant="icon"`
+is how an empty index reads across the app: Inbox, Folders, Outputs, Plugins,
+Apps, and the Code pages all use it. The variant renders the icon at `size-11`
+in muted or identity ink (`text-muted-foreground`, `text-success`,
+`text-icon-violet`, and friends); it draws no filled container behind the
+icon. Give the empty state one useful next action when one exists.
 
-For high-density surfaces (menus, tables, repeated rows), do not place an
-icon in a circle, square, tint, or decorative container. Keep the icon
-small, outline-weight, and aligned to the primary text line. Render static
-attributes as plain text by default; reserve badge treatment for status
-indicators.
+Two first-run surfaces are their own compositions, not `Empty` variants:
+`WelcomeState` (logomark plus starter prompt cards) and `CodeRepoEmptyState`
+(the split layout with onboarding steps). `Modes/Null states` shows both. Do
+not rebuild them from `Empty`.
 
-`WelcomeState` and `CodeRepoEmptyState` are the canonical first-run
-surfaces. They use the icon-in-container pattern because they are low-density
-and orienting. Do not reuse that pattern for operational surfaces.
+In high-density operational surfaces (menus, tables, repeated rows), do not
+place an icon in a circle, square, tint, or decorative container. Keep the
+icon small, outline-weight, and aligned to the primary text line. Render
+static attributes as plain text by default; reserve badge treatment for
+status indicators.
 
 ### Icons
 
@@ -224,11 +228,13 @@ markers, not as decorative advertising.
   `--icon-*` family only for identity (file types, repository swatches,
   engine badges), never for status.
 - Do not place an icon in a colored or gray container on high-density
-  surfaces. The `EmptyMedia variant="icon"` container is the only allowed
-  exception, and only on low-density surfaces.
+  surfaces. `EmptyMedia variant="icon"` draws no container at all, and it is
+  the only icon treatment allowed on an empty surface.
 
 ### Destructive actions
 
-A destructive action opens a dialog. Require the user to type the name of
-the thing they are deleting before enabling the final button. Use the
-`destructive` button variant, which is the only chromatic button fill.
+A destructive action goes through `useConfirm`, which opens the shared
+`AlertDialog`: a title that asks the question, a description that names the
+consequence, a safe Cancel default, and the `destructive` action variant on
+the confirm button. `destructive` is the only chromatic button fill. Do not
+add type-to-confirm fields or a second confirmation shape.
