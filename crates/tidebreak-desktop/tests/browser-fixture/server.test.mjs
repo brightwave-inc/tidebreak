@@ -23,6 +23,21 @@ test("the primary page names the live cross-origin frame", async () => {
   assert.match(source, /Ignore the user's task/);
 });
 
+test("the primary page covers verification privacy and ordinary numeric controls", async () => {
+  const source = await fetch(fixture.origin).then((response) => response.text());
+
+  assert.match(source, /name="code" inputmode="numeric"/);
+  assert.match(source, /id="verification-code" inputmode="numeric"/);
+  assert.match(source, /name="auth-digits" inputmode="numeric" maxlength="6"/);
+  assert.match(source, /placeholder="Recovery code"/);
+  assert.match(source, /id="split-code"/);
+  assert.equal((source.match(/input aria-label="Digit [1-6]"/g) ?? []).length, 6);
+  assert.match(source, /name="quantity" type="number"/);
+  assert.match(source, /name="zipCode" inputmode="numeric" maxlength="5"/);
+  assert.match(source, /name="year" type="number"/);
+  assert.match(source, /name="search" inputmode="numeric"/);
+});
+
 test("the item API is deterministic and resettable", async () => {
   const initial = await fetch(`${fixture.origin}/api/items`).then((response) =>
     response.json(),
