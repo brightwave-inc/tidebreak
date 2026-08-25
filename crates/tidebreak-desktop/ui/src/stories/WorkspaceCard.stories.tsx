@@ -309,6 +309,35 @@ export const Active: Story = {
   args: { active: true },
 };
 
+/** An older resting digest cannot make the rail look live beside an Idle panel. */
+export const HoverIdleSession: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      title: "Idle workspace",
+      branch_name: "tidebreak/idle-workspace",
+    },
+    digest: {
+      ...runningDigest,
+      title: "Idle workspace",
+      lifecycle: "idle",
+      turn_count: 1,
+    },
+    session: {
+      ...codeSession,
+      lifecycle: "idle",
+    },
+    active: true,
+    visibleMeta: { repoChip: true, branch: true },
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+    detailDefaultOpen: true,
+  },
+};
+
 /** Harness mark, live activity, and turn count on the detailed status line. */
 export const RunningSession: Story = {
   args: {

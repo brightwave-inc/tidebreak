@@ -276,7 +276,7 @@ export function CodeCenterTabs({
                   <span className="max-w-40 truncate">
                     {conversation.label}
                   </span>
-                  {/* The dot is the agent's own state, not the tab's, so it
+                  {/* The mark is the agent's own state, not the tab's, so it
                       shows on the tabs the reader is not looking at too. */}
                   <AttentionBadge attention={conversation.attention} compact />
                 </button>

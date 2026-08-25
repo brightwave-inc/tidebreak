@@ -52,6 +52,7 @@ import {
 } from "./workspaceWorkflow";
 import { pullRequestReviewSummary } from "./pullRequestPresentation";
 import {
+  attentionMarkForDigest,
   digestStatusTone,
   STATUS_CHIP,
   STATUS_DOT,
@@ -128,6 +129,7 @@ export function WorkspaceCard({
   const pr = digest?.pr_state ?? workspace.pr;
   const archived = isPutAway(workspace);
   const creating = workspace.status === "creating";
+  const attentionMark = attentionMarkForDigest(digest);
   const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
   const watchActive = childSessions.some(
     (child) =>
@@ -184,7 +186,7 @@ export function WorkspaceCard({
                 onClick={onOpen}
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <AttentionBadge attention={digest?.attention} compact />
+                  <AttentionBadge attention={attentionMark} compact />
                   <span className="min-w-0 flex-1 truncate text-md font-medium leading-5">
                     {title}
                   </span>
@@ -204,12 +206,6 @@ export function WorkspaceCard({
                         )}
                       />
                     )}
-                    {digest?.attention.state.type === "needs_you" &&
-                      digest.attention.state.source === "structured" && (
-                        <CircleAlert
-                          className={cn("size-3", STATUS_MARK.critical)}
-                        />
-                      )}
                   </span>
                 </span>
                 {density === "detailed" &&
@@ -299,7 +295,7 @@ export function WorkspaceCard({
                 label={`Watch - ${watchRowLabel(child)}`}
                 ariaLabel={`Watch task for ${title}: ${watchRowLabel(child)}`}
                 icon={<Eye />}
-                attention={child.attention}
+                attention={attentionMarkForDigest(child)}
                 onClick={() => onOpenChildSession?.(child.session)}
               />
             ))}

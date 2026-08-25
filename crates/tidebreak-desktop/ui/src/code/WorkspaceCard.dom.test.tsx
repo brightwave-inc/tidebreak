@@ -265,6 +265,46 @@ describe("WorkspaceCard", () => {
     expect(screen.queryByTitle("Claude Code")).not.toBeInTheDocument();
   });
 
+  it("does not show live motion when an older idle digest still says Working", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 1,
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: true }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
+        detailDefaultOpen
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Working")).not.toBeInTheDocument();
+    expect(screen.getByText("Idle · 1 turn")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Fix login · Idle · app · tidebreak/fix-login",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("compact keeps the one-line read and the complete label", () => {
     renderCard({ density: "compact" });
 

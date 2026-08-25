@@ -394,6 +394,22 @@ describe("workspaceCardLabel", () => {
     ).toBe("Fix login · app · tidebreak/fix-login");
   });
 
+  it("announces lifecycle when an older resting row still says Working", () => {
+    const session = digest("ws-a", {
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+    });
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: session.attention,
+        session,
+      }),
+    ).toBe("Fix login · Idle · app · tidebreak/fix-login");
+  });
+
   it("announces queue membership instead of the open lifecycle", () => {
     expect(
       workspaceCardLabel({

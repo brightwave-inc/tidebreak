@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Attention, CodeSessionDigest } from "../api/types";
 import {
+  attentionMarkForDigest,
   attentionStatusTone,
   digestStatusTone,
   STATUS_MOTION,
@@ -68,5 +69,30 @@ describe("digestStatusTone", () => {
       "neutral",
     );
     expect(digestStatusTone(undefined)).toBe("neutral");
+  });
+});
+
+describe("attentionMarkForDigest", () => {
+  it("shows motion only while lifecycle also says the session is running", () => {
+    expect(
+      attentionMarkForDigest(digest({ type: "working" }, "running")),
+    ).toEqual({ state: { type: "working" }, source: "lifecycle" });
+    expect(
+      attentionMarkForDigest(digest({ type: "working" }, "idle")),
+    ).toBeUndefined();
+    expect(
+      attentionMarkForDigest(digest({ type: "working" }, "ended")),
+    ).toBeUndefined();
+  });
+
+  it("keeps attention that outranks lifecycle and leaves idle unmarked", () => {
+    const needsYou = digest(
+      { type: "needs_you", prompt: "Approve this?", source: "structured" },
+      "idle",
+    );
+    expect(attentionMarkForDigest(needsYou)).toEqual(needsYou.attention);
+    expect(
+      attentionMarkForDigest(digest({ type: "idle" }, "idle")),
+    ).toBeUndefined();
   });
 });

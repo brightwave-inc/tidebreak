@@ -137,3 +137,23 @@ export function digestStatusTone(
   }
   return digest.lifecycle === "running" ? "running" : "neutral";
 }
+
+/**
+ * The attention state that deserves a compact mark for one session digest.
+ *
+ * Older rows can still carry `Working` after their lifecycle settles. Motion
+ * must agree with lifecycle, or the same workspace reads as live in one place
+ * and idle in another. Idle itself has no mark because it asks for nothing.
+ */
+export function attentionMarkForDigest(
+  digest: Pick<CodeSessionDigest, "attention" | "lifecycle"> | undefined,
+): Attention | undefined {
+  if (!digest || digest.attention.state.type === "idle") return undefined;
+  if (
+    digest.attention.state.type === "working" &&
+    digest.lifecycle !== "running"
+  ) {
+    return undefined;
+  }
+  return digest.attention;
+}
