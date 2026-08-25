@@ -40,8 +40,9 @@ that list onto the board.
 ## Desktop UI workflow
 
 - Read [`crates/tidebreak-desktop/ui/DESIGN.md`](crates/tidebreak-desktop/ui/DESIGN.md)
-  before visual work. It defines the palette, type scale, and status
-  vocabulary; `src/stylesContract.test.ts` enforces the mechanical rules, so
+  before visual work. It defines the palette, type scale, status vocabulary,
+  and the canonical patterns for settings, cards, approvals, empty states, and
+  icons; `src/stylesContract.test.ts` enforces the mechanical rules, so
   arbitrary font sizes and raw Tailwind palette classes fail CI.
 - When adding or changing a reusable visual component or a meaningful UI state,
   add or update its Storybook story under
@@ -52,6 +53,31 @@ that list onto the board.
 - Run `scripts/storybook.sh` while developing UI, and run
   `pnpm --dir crates/tidebreak-desktop/ui storybook:build` before publishing
   relevant UI changes.
+
+## Design-system approach
+
+Tidebreak treats the design system as the product's memory, not just a
+component library. Tokens and primitives are necessary but not sufficient;
+the system must also carry the recurring judgment calls that make a screen
+feel like Tidebreak.
+
+- Classify every surface before building it. The four surfaces — Orienting,
+  Index, Bulk edit, Resource detail — decide density, interaction model, and
+  how much chrome is allowed. A surface is not a route; a settings page can
+  host an Index rail next to a Resource detail panel.
+- Use the canonical pattern for the surface. `SettingsPanel` owns the page
+  shape. `ToolCardShell` owns the expandable tool row. `ApprovalCard` owns
+  consent. `ChatStatusChip` owns activity summary. Do not invent a second
+  answer to a question the system already settled.
+- Keep icons subordinate. Lucide icons are lightweight recognition markers,
+  not decorative advertising. Size them to the surrounding text, align them
+  to the primary text line, and never place them in a gray container on
+  high-density surfaces. The `EmptyMedia variant="icon"` container is the
+  only allowed exception, and only on low-density surfaces.
+- Show the canonical answer in Storybook. Real product examples beat prose
+  principles. The `Foundations/Patterns` story shows the right way to
+  compose settings, cards, approvals, and empty states so the next builder
+  copies a trusted reference instead of inventing a plausible one.
 
 ## Pointers
 
