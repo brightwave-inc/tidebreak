@@ -24,7 +24,11 @@ import {
 import { ToolCardShell } from "@/ToolCardShell";
 import { ApprovalCard } from "@/ApprovalCard";
 import { ChatStatusChip } from "@/ChatStatusChip";
-import { SettingsPanel, SettingsSection, SettingsField } from "@/settings/primitives";
+import {
+  SettingsPanel,
+  SettingsSection,
+  SettingsField,
+} from "@/settings/primitives";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { execPreview } from "./fixtures";
@@ -128,9 +132,9 @@ function PatternsShowcase() {
             Approval card
           </h2>
           <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-            The canonical consent surface. It leads with a short question,
-            shows the exact action in a muted preview block, and lists
-            choices as numbered rows ordered narrowest grant first.
+            The canonical consent surface. It leads with a short question, shows
+            the exact action in a muted preview block, and lists choices as
+            numbered rows ordered narrowest grant first.
           </p>
         </div>
         <div className="max-w-2xl">
@@ -262,9 +266,14 @@ function PatternsShowcase() {
                     type="button"
                     className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted/50"
                   >
-                    <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    <Icon
+                      className="size-3.5 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
                     <span className="flex-1">{label}</span>
-                    <span className="text-xs text-muted-foreground">{time}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {time}
+                    </span>
                   </button>
                 ))}
               </div>
