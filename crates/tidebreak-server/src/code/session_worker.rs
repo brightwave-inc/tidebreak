@@ -27,7 +27,8 @@ use tidebreak_core::db::code::{
     accept_trigger_turn_delivery, append_event, bump_spawn_epoch, delete_queued_turn,
     get_open_turn, get_session, get_session_all_owners, insert_approval, insert_turn,
     next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
-    save_turn, set_queue_paused, set_session_subagents, CodeJournalError,
+    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
+    CodeJournalError,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -206,6 +207,12 @@ pub(crate) struct LiveSink {
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
+    /// Resume ref reported during engine startup but not yet proven durable.
+    ///
+    /// Codex creates a thread before it writes that thread to disk. The first
+    /// turn event promotes this candidate into the session row, so a restart
+    /// keeps real context without trying to resume an unused thread.
+    pending_resume_ref: std::sync::Mutex<Option<String>>,
     /// Where tests point `gh`; `None` outside tests. Snapshotted at attach so
     /// the post-turn fact detector confirms against the same binary every
     /// other gh call in the process resolves (decision 62).
@@ -236,6 +243,50 @@ impl LiveSink {
     fn take_unrecognized_delta(&self, total: u64) -> u64 {
         let flushed = self.flushed_unrecognized.swap(total, Ordering::SeqCst);
         total.saturating_sub(flushed)
+    }
+
+    /// Persist a reported resume ref after the engine proves a turn started.
+    async fn persist_pending_resume_ref(&self) {
+        let candidate = self
+            .pending_resume_ref
+            .lock()
+            .expect("code sink resume ref")
+            .clone();
+        let Some(candidate) = candidate else {
+            return;
+        };
+        match set_session_harness_resume_ref(
+            &self.db,
+            &self.owner,
+            self.session_id,
+            self.spawn_epoch,
+            &candidate,
+        )
+        .await
+        {
+            Ok(true) => {
+                let mut pending = self
+                    .pending_resume_ref
+                    .lock()
+                    .expect("code sink resume ref");
+                if pending.as_deref() == Some(candidate.as_str()) {
+                    *pending = None;
+                }
+            }
+            Ok(false) => {
+                // This worker no longer owns a running session. Do not retry
+                // the stale write on every later event.
+                *self
+                    .pending_resume_ref
+                    .lock()
+                    .expect("code sink resume ref") = None;
+            }
+            Err(error) => warn!(
+                session = %self.session_id,
+                error = %error,
+                "could not persist the code-session resume ref"
+            ),
+        }
     }
 
     /// Track subagent spans (decision 52): a top-level `Task` call opens one,
@@ -392,6 +443,32 @@ pub(crate) fn settle_running_subagents(
 #[async_trait]
 impl HarnessEventSink for LiveSink {
     async fn emit(&self, event: HarnessEvent) {
+        if let HarnessEvent::SessionStarted {
+            resume_ref: Some(resume_ref),
+            ..
+        } = &event
+        {
+            *self
+                .pending_resume_ref
+                .lock()
+                .expect("code sink resume ref") = Some(resume_ref.clone());
+        }
+        if matches!(
+            &event,
+            HarnessEvent::TurnStarted
+                | HarnessEvent::AssistantDelta { .. }
+                | HarnessEvent::AssistantMessage { .. }
+                | HarnessEvent::ReasoningDelta { .. }
+                | HarnessEvent::ToolStarted { .. }
+                | HarnessEvent::ToolCompleted { .. }
+                | HarnessEvent::FileChanged { .. }
+                | HarnessEvent::ApprovalRequested { .. }
+                | HarnessEvent::UserSteered { .. }
+                | HarnessEvent::TurnCompleted { .. }
+                | HarnessEvent::TurnInterrupted
+        ) {
+            self.persist_pending_resume_ref().await;
+        }
         if let HarnessEvent::ApprovalRequested { harness_ref, raw } = &event {
             self.record_approval(harness_ref, raw).await;
             return;
@@ -1803,6 +1880,7 @@ pub(crate) fn sink_for(
         session_id,
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
+        pending_resume_ref: std::sync::Mutex::new(None),
         gh_search_path,
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
@@ -2397,6 +2475,76 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sink_persists_a_resume_ref_only_after_turn_activity_starts() {
+        let (_directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+
+        sink.emit(HarnessEvent::SessionStarted {
+            harness_kind: HarnessKind::Codex,
+            harness_version: "0.147.0".into(),
+            resume_ref: Some("thread-1".into()),
+        })
+        .await;
+        assert_eq!(
+            get_session(&store, &owner, session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .harness_resume_ref,
+            None,
+            "an unused Codex thread is not a safe resume target"
+        );
+
+        sink.emit(HarnessEvent::TurnStarted).await;
+        assert_eq!(
+            get_session(&store, &owner, session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .harness_resume_ref
+                .as_deref(),
+            Some("thread-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_activity_persists_resume_refs_for_harnesses_without_turn_started() {
+        let (_directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut worker_session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker_session.harness_resume_ref, None);
+
+        sink.emit(HarnessEvent::SessionStarted {
+            harness_kind: HarnessKind::ClaudeCode,
+            harness_version: "2.1.237".into(),
+            resume_ref: Some("session-1".into()),
+        })
+        .await;
+        sink.emit(HarnessEvent::AssistantDelta {
+            text: "Working".into(),
+        })
+        .await;
+
+        // A child pid may arrive after the sink writes the resume ref. Mirror
+        // the real worker path and prove that its stale session copy keeps the
+        // ref instead of replacing it with NULL during the full-row save.
+        worker_session.child_pid = Some(4242);
+        assert!(save_session(&store, &worker_session).await.unwrap());
+        assert_eq!(
+            get_session(&store, &owner, session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .harness_resume_ref
+                .as_deref(),
+            Some("session-1")
+        );
     }
 
     #[cfg(unix)]

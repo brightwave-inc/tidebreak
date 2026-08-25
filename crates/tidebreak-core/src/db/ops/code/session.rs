@@ -209,9 +209,9 @@ pub async fn list_sessions_by_lifecycle_all_owners(
 }
 
 /// Persist mutable session fields. `id`, `workspace_id`, `created_at`,
-/// `attention`, and `subagents` stay as stored. Attention and subagents have
-/// targeted writes so a full-row save from a stale worker cannot clobber a
-/// concurrent structured update.
+/// `attention`, `subagents`, and a missing resume ref stay as stored. Attention,
+/// subagents, and resume-ref clearing have targeted writes so a full-row save
+/// from a stale worker cannot clobber a concurrent structured update.
 ///
 /// `spawn_epoch` must be non-decreasing, and `Ended` is terminal: a caller
 /// that is not `Ended` cannot overwrite that lifecycle. Returns `false` when
@@ -227,7 +227,7 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
                 .ne(CodeSessionLifecycle::Ended.as_str().to_owned()),
         );
     }
-    let result = entities::code_session::Entity::update_many()
+    let mut update = entities::code_session::Entity::update_many()
         .col_expr(
             entities::code_session::Column::HarnessKind,
             sea_orm::sea_query::Expr::value(session.harness_kind.as_str().to_owned()),
@@ -235,10 +235,6 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
         .col_expr(
             entities::code_session::Column::HarnessVersion,
             sea_orm::sea_query::Expr::value(session.harness_version.clone()),
-        )
-        .col_expr(
-            entities::code_session::Column::HarnessResumeRef,
-            sea_orm::sea_query::Expr::value(session.harness_resume_ref.clone()),
         )
         .col_expr(
             entities::code_session::Column::PermissionMode,
@@ -282,7 +278,14 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
         .col_expr(
             entities::code_session::Column::UnrecognizedEventCount,
             sea_orm::sea_query::Expr::value(session.unrecognized_event_count),
-        )
+        );
+    if let Some(resume_ref) = &session.harness_resume_ref {
+        update = update.col_expr(
+            entities::code_session::Column::HarnessResumeRef,
+            sea_orm::sea_query::Expr::value(Some(resume_ref.clone())),
+        );
+    }
+    let result = update
         .filter(predicate)
         .exec(&store.conn)
         .await
@@ -392,6 +395,64 @@ pub async fn set_session_subagents(
         )
         .filter(entities::code_session::Column::Id.eq(session_id.0))
         .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Record the engine-native resume ref once a running turn proves it is safe.
+///
+/// The event sink learns this value while the turn is still running. A
+/// targeted, epoch-fenced write makes it survive a hard restart without
+/// letting an outgoing worker restore a stale ref after a reap or relaunch.
+pub async fn set_session_harness_resume_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    resume_ref: &str,
+) -> Result<bool> {
+    let result = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::HarnessResumeRef,
+            sea_orm::sea_query::Expr::value(Some(resume_ref.to_owned())),
+        )
+        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session::Column::SpawnEpoch.eq(spawn_epoch))
+        .filter(
+            entities::code_session::Column::Lifecycle
+                .eq(CodeSessionLifecycle::Running.as_str().to_owned()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Clear a resume ref that the engine has explicitly rejected.
+///
+/// A missing ref on [`save_session`] means that the caller holds a stale copy,
+/// so only this epoch-fenced write may turn a stored ref back into `NULL`.
+pub async fn clear_session_harness_resume_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+) -> Result<bool> {
+    let result = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::HarnessResumeRef,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session::Column::SpawnEpoch.eq(spawn_epoch))
+        .filter(
+            entities::code_session::Column::Lifecycle
+                .ne(CodeSessionLifecycle::Ended.as_str().to_owned()),
+        )
         .exec(&store.conn)
         .await
         .map_err(store_err)?;

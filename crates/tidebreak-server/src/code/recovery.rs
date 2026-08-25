@@ -10,8 +10,9 @@ use std::io::ErrorKind;
 
 use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, get_open_turn, list_sessions_by_lifecycle_all_owners, replace_session_attention,
-    save_session, save_turn, set_session_subagents,
+    append_event, clear_session_harness_resume_ref, get_open_turn,
+    list_sessions_by_lifecycle_all_owners, replace_session_attention, save_session, save_turn,
+    set_session_subagents,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
@@ -73,6 +74,14 @@ pub(crate) async fn fence_session(
 ) -> Result<(), tidebreak_core::AgentError> {
     if matches!(reason, FenceReason::ResumeLost { .. }) {
         session.harness_resume_ref = None;
+        if !clear_session_harness_resume_ref(store, &session.owner, session.id, session.spawn_epoch)
+            .await?
+        {
+            return Err(tidebreak_core::AgentError::Store(format!(
+                "code session {} disappeared while clearing its rejected resume ref",
+                session.id
+            )));
+        }
     }
     session.lifecycle = CodeSessionLifecycle::Fenced;
     settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
@@ -595,6 +604,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        session.harness_resume_ref = Some("rejected-ref".into());
+        assert!(save_session(&store, &session).await.unwrap());
         let bus = crate::code::bus::CodeEventBus::default();
         fence_session(
             &store,
@@ -606,6 +617,14 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .harness_resume_ref,
+            None
+        );
         assert_subagent_failed(&store, session_id).await;
     }
 
