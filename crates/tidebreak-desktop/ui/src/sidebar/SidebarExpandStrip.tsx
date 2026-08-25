@@ -7,9 +7,9 @@ import { useUiStore } from "@/UiStore";
  * The way back when the rail is collapsed away.
  *
  * Collapsed means the sidebar is gone from the layout entirely, so the shell
- * owes the reader a control to return it. This strip pins one expand button
+ * owes the reader a control to return it. This row pins one expand button
  * beside the macOS traffic lights (at the plain left edge everywhere else),
- * and doubles as the window's drag region where the overlay titlebar sits.
+ * reserves their titlebar space, and keeps that space draggable.
  */
 export function SidebarExpandStrip({ macOverlay }: { macOverlay: boolean }) {
   const collapsed = useUiStore((state) => state.sidebarCollapsed);
