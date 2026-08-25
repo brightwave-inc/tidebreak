@@ -179,9 +179,9 @@ checked, such as a workspace URL.
 step. The collapsed state is boxless: a transcript should read as a
 conversation with occasional notes about what ran, not as a stack of
 nested panels. Keep the icon small (`size-3.5`), align it with the primary
-text line, and keep the title on one line. Expand only while work is still
-happening (`defaultExpanded` exists for that); a settled card collapses to
-a single row.
+text line, and keep the title on one line. Expand while work is still
+happening, and expand a failed card so the error is one click away; a
+settled, successful card collapses to a single row.
 
 `ApprovalCard` is the canonical consent surface. It leads with a short
 question, shows the exact action in a muted preview block, and lists

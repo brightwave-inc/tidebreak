@@ -469,7 +469,7 @@ export function WorkspaceWorkflowControl({
             <div className="flex items-start gap-2.5 border-b border-border-subtle px-3 py-3">
               <span
                 className={cn(
-                  "mt-0.5 grid size-6 shrink-0 place-items-center rounded-md bg-muted/60",
+                  "mt-0.5 grid size-6 shrink-0 place-items-center",
                   STATUS_MARK[model.tone],
                 )}
               >
