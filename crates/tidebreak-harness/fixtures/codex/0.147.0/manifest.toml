@@ -19,6 +19,9 @@ observed_auth = "Logged in using ChatGPT"
 # prompts, throwaway git repo as cwd.
 # `hook-lifecycle` is a supplemental capture from Tidebreak's attached desktop
 # profile, where real user hooks were enabled. The hook path was redacted.
+# `collab-agents` is a later capture (2026-08-25) from the same pinned 0.147.0
+# binary with `[features] multi_agent = true` in the isolated $CODEX_HOME. It
+# is the only capture where one connection carries two threads.
 
 integration_path = "app-server-stdio"
 model = "gpt-5.6-luna"
@@ -32,6 +35,7 @@ scenarios = [
   "resume",
   "interrupt",
   "error",
+  "collab-agents",
 ]
 
 [permission_mode_mapping]
@@ -60,6 +64,12 @@ verified = [
   "turn/completed status: completed | interrupted | failed",
   "commandExecution status: inProgress | completed | declined",
   "generated non-experimental schema: turn/steer {threadId, expectedTurnId, input:[{type:text,text}], clientUserMessageId} => {turnId}",
+  "every inbound notification about a thread carries params.threadId, so a collab subagent's items, turns, and token counters are separable from the parent's on one connection",
+  "collabAgentToolCall item: tool = spawnAgent | sendInput | resumeAgent | wait | closeAgent; status = inProgress | completed | failed",
+  "spawnAgent names no thread while inProgress; receiverThreadIds and model arrive on item/completed",
+  "agentsStates rides every collab result and repeats a terminal state on each later call (wait reports it, closeAgent repeats it)",
+  "CollabAgentStatus: pendingInit | running | interrupted | completed | errored | shutdown | notFound",
+  "a subagent thread runs its own turn/started and turn/completed inside the parent's turn",
 ]
 not_verified = [
   "codex exec --json event vocabulary (probed via --help only; not captured)",
@@ -69,4 +79,8 @@ not_verified = [
   "live turn/steer capture (wire contract is verified from generated schema, not a captured engine run)",
   "native file-change events (turn/diff/updated, item/fileChange/*)",
   "collaborationMode plan (Plan is mapped to sandbox=read-only instead)",
+  "subAgentActivity item type (declared in the generated schema; never emitted in the collab-agents capture)",
+  "sendInput and resumeAgent collab tools (the capture only spawns, waits, and closes)",
+  "a collab call addressing more than one receiver thread",
+  "a subagent that errors, is interrupted, or is reported notFound",
 ]

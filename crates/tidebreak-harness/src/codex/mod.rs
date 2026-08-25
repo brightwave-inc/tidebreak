@@ -489,6 +489,111 @@ mod tests {
         )));
     }
 
+    /// One app-server connection carries the parent thread and every collab
+    /// subagent it spawns. This capture is the only fixture where that
+    /// happens, so it pins both halves: the child's work lands under its
+    /// `Task` span, and the child's turn and counters leave the parent's
+    /// alone (decision 52).
+    #[test]
+    fn fixture_replay_collab_agents() {
+        const CHILD: &str = "01a039e7-283b-7213-b24c-3378305ba24d";
+        let (events, unrecognized) = replay("collab-agents");
+        assert_eq!(unrecognized, 0, "collab frames are known protocol state");
+
+        let spans = events
+            .iter()
+            .filter(
+                |event| matches!(event, HarnessEvent::ToolStarted { name, .. } if name == "Task"),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(spans.len(), 1, "the capture spawns one subagent");
+        assert!(matches!(
+            spans[0],
+            HarnessEvent::ToolStarted {
+                call_id,
+                detail,
+                parent_call_id: None,
+                ..
+            } if call_id == CHILD && detail.subject().contains("cat note.txt")
+        ));
+
+        // The child publishes its own items on its own thread, so the span
+        // needs no correlation table to claim them.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted {
+                name,
+                parent_call_id: Some(parent),
+                ..
+            } if name == "commandExecution" && parent == CHILD
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted {
+                name,
+                parent_call_id: Some(parent),
+                ..
+            } if name == "WaitAgent" && parent == CHILD
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::AssistantMessage {
+                text,
+                parent_call_id: Some(parent),
+            } if text == "alpha" && parent == CHILD
+        )));
+
+        // `agentsStates` repeats a terminal state on every later collab call,
+        // and the child's own `turn/completed` reports it again.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCompleted { call_id, .. } if call_id == CHILD
+                ))
+                .count(),
+            1,
+            "a repeated terminal state settles the span once"
+        );
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnStarted))
+                .count(),
+            1,
+            "the child's turn must not start a second Tidebreak turn"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+                .count(),
+            1,
+            "the child's turn must not close the parent's turn"
+        );
+        // A transient delta carries no attribution, so the child's is dropped
+        // and only the parent's reaches the transcript.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HarnessEvent::AssistantDelta { text } if text == "alpha"
+                ))
+                .count(),
+            1,
+            "the child's delta must not stream into the parent transcript"
+        );
+
+        // The parent's counters, not the sum of both threads'.
+        let usage = completed_usage(&events);
+        assert_eq!(usage.input_tokens, 17_612);
+        assert_eq!(usage.cache_read_input_tokens, 89_856);
+        assert_eq!(usage.context_tokens, 23_449);
+    }
+
     #[test]
     fn fixture_replay_approval_approve() {
         let (events, _) = replay("approval-approve");
