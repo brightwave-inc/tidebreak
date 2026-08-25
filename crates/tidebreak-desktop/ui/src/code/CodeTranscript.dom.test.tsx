@@ -134,6 +134,117 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
   });
 
+  it("puts one copy action on the turn's closing assistant message", () => {
+    const progressTurn: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "assistant",
+        id: "progress-1",
+        turnId: "t1",
+        parentCallId: null,
+        text: "I’m checking the transcript reducer.",
+        streaming: false,
+      },
+      {
+        ...run("succeeded")[0],
+        id: "progress-tool-1",
+        callId: "progress-call-1",
+      },
+      {
+        kind: "assistant",
+        id: "progress-2",
+        turnId: "t1",
+        parentCallId: null,
+        text: "The reducer preserves each completed progress update.",
+        streaming: false,
+      },
+      {
+        ...run("succeeded")[1],
+        id: "progress-tool-2",
+        callId: "progress-call-2",
+      },
+      {
+        kind: "assistant",
+        id: "answer",
+        turnId: "t1",
+        parentCallId: null,
+        text: "Only this final answer should offer Copy.",
+        streaming: false,
+      },
+      items[4],
+    ];
+
+    render(<CodeTranscript items={progressTurn} />);
+
+    const assistants = screen.getAllByRole("article", { name: "Assistant" });
+    expect(assistants).toHaveLength(3);
+    expect(
+      within(assistants[0]).queryByRole("button", { name: "Copy" }),
+    ).toBeNull();
+    expect(
+      within(assistants[1]).queryByRole("button", { name: "Copy" }),
+    ).toBeNull();
+    expect(
+      within(assistants[2]).getByRole("button", { name: "Copy" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1);
+  });
+
+  it("withholds the copy action until an active turn ends", () => {
+    render(
+      <CodeTranscript
+        busy
+        items={[
+          items[0],
+          {
+            kind: "assistant",
+            id: "progress",
+            turnId: "t1",
+            parentCallId: null,
+            text: "I’m still working.",
+            streaming: false,
+          },
+          run("running")[0],
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+  });
+
+  it("keeps one copy action on a settled subagent transcript", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "assistant",
+            id: "child-progress",
+            turnId: "t1",
+            parentCallId: "task-1",
+            text: "I found the relevant parser.",
+            streaming: false,
+          },
+          {
+            ...run("succeeded")[0],
+            id: "child-tool",
+            callId: "child-call",
+            parentCallId: "task-1",
+          },
+          {
+            kind: "assistant",
+            id: "child-answer",
+            turnId: "t1",
+            parentCallId: "task-1",
+            text: "The parser is sound.",
+            streaming: false,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1);
+  });
+
   it("shows the command beside the verb, without its worktree cd prefix", () => {
     const item: CodeTranscriptItem = {
       kind: "tool",
