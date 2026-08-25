@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
@@ -385,16 +386,17 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
         }),
       } as never),
     );
+    const user = userEvent.setup();
     fireEvent.click(
       await screen.findByRole("option", { name: /GitHub repository/ }),
     );
-    fireEvent.click(
+    await user.click(
       await screen.findByRole("combobox", { name: "Repository" }),
     );
     expect(
       await screen.findByRole("option", { name: /mira-chen\/notes/ }),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("option", { name: /mira-chen\/notes/ }));
+    await user.click(screen.getByRole("option", { name: /mira-chen\/notes/ }));
     expect(
       screen.getByRole("combobox", { name: "Repository" }),
     ).toHaveTextContent("mira-chen/notes");
@@ -436,13 +438,14 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
         }),
       } as never),
     );
+    const user = userEvent.setup();
     fireEvent.click(
       await screen.findByRole("option", { name: /GitHub repository/ }),
     );
-    fireEvent.click(
+    await user.click(
       await screen.findByRole("combobox", { name: "Repository" }),
     );
-    fireEvent.click(
+    await user.click(
       await screen.findByRole("option", { name: /mira-chen\/notes/ }),
     );
     fireEvent.keyDown(screen.getByRole("dialog"), {
