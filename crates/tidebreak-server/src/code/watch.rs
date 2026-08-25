@@ -25,9 +25,9 @@ use tidebreak_core::db::code::{
     list_pull_request_facts_for_repo, list_sessions_for_workspace, save_watch,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CodeSessionKind, CodeSessionLifecycle, CodeWatch, CodeWatchId,
-    CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, PullRequestDigest,
-    WorkspaceId,
+    Attention, AttentionSource, AttentionState, CodeSessionKind, CodeSessionLifecycle, CodeWatch,
+    CodeWatchId, CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode,
+    PullRequestDigest, WorkspaceId,
 };
 
 use super::attention::{apply_attention, emit_workspace_digests};
@@ -513,10 +513,22 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         }
         WatchAssessment::NeedsUser(reason) => park_watch(runtime.as_ref(), watch, reason).await,
         WatchAssessment::Waiting => {
+            let settled_attention = settled_watch_block_attention(watch, &session.attention);
             if watch.state != CodeWatchState::Watching || watch.detail.is_some() {
                 watch.state = CodeWatchState::Watching;
                 watch.detail = None;
                 persist_watch(runtime.as_ref(), watch).await?;
+            }
+            if let Some(attention) = settled_attention {
+                let _ = apply_attention(
+                    &runtime.db,
+                    &runtime.bus,
+                    &owner,
+                    watch.session_id,
+                    attention,
+                    false,
+                )
+                .await;
             }
             Ok(())
         }
@@ -548,11 +560,23 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                 )
                 .await;
             }
+            let settled_attention = settled_watch_block_attention(watch, &session.attention);
             watch.state = CodeWatchState::Fixing;
             watch.detail = Some(format!("fixing {}", reason.describe()));
             watch.last_fix_head = pr.head_sha.clone();
             watch.cycles = watch.cycles.saturating_add(1);
             persist_watch(runtime.as_ref(), watch).await?;
+            if let Some(attention) = settled_attention {
+                let _ = apply_attention(
+                    &runtime.db,
+                    &runtime.bus,
+                    &owner,
+                    watch.session_id,
+                    attention,
+                    false,
+                )
+                .await;
+            }
             let instruction = fix_turn_instruction(reason, &pr);
             let session_id = watch.session_id;
             let task_runtime = Arc::clone(runtime);
@@ -600,11 +624,42 @@ async fn fresh_stored_digest(
     )
     .await
     .ok()??;
+    fresh_workspace_digest(stored, &fact, Utc::now())
+}
+
+/// Return the workspace's write-through digest when the fact row confirms
+/// that its live tier is fresh.
+///
+/// The hot refresher can observe a merge before the slower reconcile pass
+/// updates the fact snapshot. Rebuilding from that snapshot would reopen the
+/// pull request for the watch until the next reconcile tick.
+fn fresh_workspace_digest(
+    stored: &PullRequestDigest,
+    fact: &tidebreak_core::CodePullRequestFact,
+    now: chrono::DateTime<Utc>,
+) -> Option<PullRequestDigest> {
     let live = fact.live.as_ref()?;
-    if !super::reconcile::live_tier_is_fresh(live, Utc::now()) {
+    super::reconcile::live_tier_is_fresh(live, now).then(|| stored.clone())
+}
+
+/// Clear only the `NeedsYou` marker that this watch's previous blocked state
+/// created. Approval and engine-failure attention belongs to the session and
+/// must remain visible.
+fn settled_watch_block_attention(watch: &CodeWatch, current: &Attention) -> Option<Attention> {
+    if watch.state != CodeWatchState::Blocked {
         return None;
     }
-    Some(super::pr_facts::digest_from_fact(&fact))
+    let reason = watch.detail.as_deref()?;
+    match &current.state {
+        AttentionState::NeedsYou {
+            prompt,
+            source: AttentionSource::Structured,
+        } if prompt == reason => Some(Attention::new(
+            AttentionState::Idle,
+            AttentionSource::Lifecycle,
+        )),
+        _ => None,
+    }
 }
 
 /// The open pull request this workspace's pull request is stacked on, when
@@ -724,7 +779,10 @@ impl Drop for WatchSweepGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket};
+    use tidebreak_core::{
+        CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
+        PullRequestCheck, PullRequestCheckBucket,
+    };
 
     fn base_pr() -> PullRequestDigest {
         PullRequestDigest {
@@ -764,6 +822,76 @@ mod tests {
         let mut pr = base_pr();
         pr.state = "closed".to_owned();
         assert_eq!(assess(&pr), WatchAssessment::Closed);
+    }
+
+    #[test]
+    fn fresh_workspace_digest_keeps_a_newer_terminal_state() {
+        let now = Utc::now();
+        let mut stored = base_pr();
+        stored.state = "merged".to_owned();
+        stored.merged = Some(true);
+        stored.auto_merge_enabled = Some(false);
+        let fact = CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: OwnerId::local(),
+            host: "github.com".to_owned(),
+            repo_owner: "example".to_owned(),
+            repo_name: "demo".to_owned(),
+            number: stored.number,
+            url: stored.url.clone().unwrap(),
+            title: stored.title.clone().unwrap(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".to_owned(),
+            base_branch: "main".to_owned(),
+            head_sha: stored.head_sha.clone(),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: Some(CodePullRequestLiveState::from_digest(&stored, now)),
+        };
+
+        assert_eq!(fresh_workspace_digest(&stored, &fact, now), Some(stored));
+    }
+
+    #[test]
+    fn resuming_a_watch_clears_only_its_own_block_attention() {
+        let now = Utc::now();
+        let reason = "the pull request needs a review approval";
+        let watch = CodeWatch {
+            id: CodeWatchId::new(),
+            owner: OwnerId::local(),
+            workspace_id: WorkspaceId::new(),
+            session_id: tidebreak_core::CodeSessionId::new(),
+            pr_number: 12,
+            state: CodeWatchState::Blocked,
+            detail: Some(reason.to_owned()),
+            last_fix_head: None,
+            cycles: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(
+            settled_watch_block_attention(
+                &watch,
+                &Attention::needs_you(reason, AttentionSource::Structured),
+            ),
+            Some(Attention::new(
+                AttentionState::Idle,
+                AttentionSource::Lifecycle,
+            ))
+        );
+        assert_eq!(
+            settled_watch_block_attention(
+                &watch,
+                &Attention::needs_you("an approval is waiting", AttentionSource::Structured),
+            ),
+            None
+        );
     }
 
     #[test]
