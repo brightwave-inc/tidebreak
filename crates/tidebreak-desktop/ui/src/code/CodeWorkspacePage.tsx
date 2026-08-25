@@ -71,7 +71,7 @@ import {
   type ShellShortcutAction,
 } from "@/ShellShortcuts";
 import { AttentionBadge } from "./AttentionBadge";
-import { STATUS_MARK } from "./statusTone";
+import { attentionMarkForDigest, STATUS_MARK } from "./statusTone";
 import {
   codeBrowserIds,
   codeTerminalIds,
@@ -884,12 +884,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       conversations[0]?.id ??
       null);
   const conversationTabs = useMemo<CodeConversationTab[]>(() => {
-    const tabs: CodeConversationTab[] = conversations.map((entry, index) => ({
-      id: entry.id,
-      label: conversationTabLabel(entry, index, conversations),
-      harness: entry.harness_kind,
-      attention: conversationDigests[entry.id]?.attention,
-    }));
+    const tabs: CodeConversationTab[] = conversations.map((entry, index) => {
+      const digest = conversationDigests[entry.id];
+      return {
+        id: entry.id,
+        label: conversationTabLabel(entry, index, conversations),
+        harness: entry.harness_kind,
+        attention: attentionMarkForDigest(digest),
+      };
+    });
     // A draft has no engine yet, so it wears the generic agent glyph. It is
     // also the one closable tab: nothing is running behind it. A workspace
     // with no agents at all still gets one, so the strip always names the

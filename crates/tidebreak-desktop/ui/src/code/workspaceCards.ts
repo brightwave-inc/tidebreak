@@ -390,6 +390,8 @@ export function workspaceCardLabel(input: {
   }
   if (input.session?.lifecycle === "running") {
     parts.push(sessionActivityLabel(input.session));
+  } else if (input.session && input.attention?.state.type === "working") {
+    parts.push(LIFECYCLE_LABELS[input.session.lifecycle]);
   }
   if (input.pr) {
     parts.push(`Pull request #${input.pr.number} ${prStatusLabel(input.pr)}`);

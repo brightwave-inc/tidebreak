@@ -47,6 +47,7 @@ export function AttentionBadge({
   className?: string;
 }) {
   if (!attention) return null;
+  if (attention.state.type === "idle") return null;
   if (attention.state.type === "working" && !compact) return null;
   const label = attentionLabel(attention);
   const tooltip = attentionTooltip(attention);
@@ -100,6 +101,8 @@ function CompactAttentionMark({
       return <Ban className={className} aria-hidden="true" />;
     case "done_unreviewed":
       return <CircleCheck className={className} aria-hidden="true" />;
+    case "idle":
+      return null;
     case "manual":
       return <Pin className={className} aria-hidden="true" />;
   }

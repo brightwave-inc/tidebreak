@@ -77,6 +77,16 @@ describe("AttentionBadge", () => {
     expect(mark.querySelector(".animate-spin")).not.toBeNull();
   });
 
+  it("renders no mark for Idle", () => {
+    const { container } = render(
+      <AttentionBadge
+        compact
+        attention={{ state: { type: "idle" }, source: "lifecycle" }}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it.each(cases)(
     "renders $type with its label",
     ({ attention, label, type }) => {
