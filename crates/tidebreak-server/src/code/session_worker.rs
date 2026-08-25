@@ -213,6 +213,12 @@ pub(crate) struct LiveSink {
     /// turn event promotes this candidate into the session row, so a restart
     /// keeps real context without trying to resume an unused thread.
     pending_resume_ref: std::sync::Mutex<Option<String>>,
+    /// Resume ref already written to the session row by this sink.
+    ///
+    /// The worker owns a separate `CodeSession` value. Before that value makes
+    /// a full-row save, it adopts this ref so a child-pid update cannot restore
+    /// the stale value that preceded the turn.
+    persisted_resume_ref: std::sync::Mutex<Option<String>>,
     /// Where tests point `gh`; `None` outside tests. Snapshotted at attach so
     /// the post-turn fact detector confirms against the same binary every
     /// other gh call in the process resolves (decision 62).
@@ -245,6 +251,18 @@ impl LiveSink {
         total.saturating_sub(flushed)
     }
 
+    /// Copy the resume ref this sink persisted onto the worker's session copy.
+    fn adopt_persisted_resume_ref(&self, session: &mut CodeSession) {
+        if let Some(resume_ref) = self
+            .persisted_resume_ref
+            .lock()
+            .expect("code sink persisted resume ref")
+            .clone()
+        {
+            session.harness_resume_ref = Some(resume_ref);
+        }
+    }
+
     /// Persist a reported resume ref after the engine proves a turn started.
     async fn persist_pending_resume_ref(&self) {
         let candidate = self
@@ -265,6 +283,10 @@ impl LiveSink {
         .await
         {
             Ok(true) => {
+                *self
+                    .persisted_resume_ref
+                    .lock()
+                    .expect("code sink persisted resume ref") = Some(candidate.clone());
                 let mut pending = self
                     .pending_resume_ref
                     .lock()
@@ -1335,6 +1357,7 @@ async fn drive_turn_inner(
             pid = next_child_pid(pid_changes.as_mut()) => {
                 if session.child_pid != pid {
                     session.child_pid = pid;
+                    sink.adopt_persisted_resume_ref(session);
                     let _ = save_session(db, session).await;
                 }
             }
@@ -1368,6 +1391,7 @@ async fn drive_turn_inner(
         None
     };
 
+    sink.adopt_persisted_resume_ref(session);
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
     } else {
@@ -1881,6 +1905,7 @@ pub(crate) fn sink_for(
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
         pending_resume_ref: std::sync::Mutex::new(None),
+        persisted_resume_ref: std::sync::Mutex::new(None),
         gh_search_path,
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
@@ -2486,6 +2511,11 @@ mod tests {
     async fn assistant_activity_persists_resume_refs_for_harnesses_without_turn_started() {
         let (_directory, store, sink, session_id) = seeded_sink().await;
         let owner = OwnerId::local();
+        let mut worker_session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker_session.harness_resume_ref, None);
 
         sink.emit(HarnessEvent::SessionStarted {
             harness_kind: HarnessKind::ClaudeCode,
@@ -2498,6 +2528,12 @@ mod tests {
         })
         .await;
 
+        // A child pid may arrive after the sink writes the resume ref. Mirror
+        // the real worker path and prove that its stale session copy keeps the
+        // ref instead of replacing it with NULL during the full-row save.
+        worker_session.child_pid = Some(4242);
+        sink.adopt_persisted_resume_ref(&mut worker_session);
+        assert!(save_session(&store, &worker_session).await.unwrap());
         assert_eq!(
             get_session(&store, &owner, session_id)
                 .await
