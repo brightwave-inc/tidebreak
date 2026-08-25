@@ -51,7 +51,7 @@ import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { openExternal } from "@/host";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { useCodeUiStore } from "./CodeUiStore";
-import { DiffOverview } from "./DiffOverview";
+import { DiffOverviewContent, useChangedFilesResource } from "./DiffOverview";
 import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
@@ -116,6 +116,12 @@ export function CodeInspector({
   const [tab, setTab] = useState<InspectorTab>(scope ? "source" : "files");
   const [file, setFile] = useState<string | undefined>();
   const turnId = scope?.turnId;
+  const changedFiles = useChangedFilesResource({
+    client,
+    workspaceId,
+    turnId,
+    contentRevision,
+  });
 
   useEffect(() => {
     if (!scope) return;
@@ -180,6 +186,7 @@ export function CodeInspector({
               label="Source control"
               displayLabel="Changes"
               selected={tab === "source"}
+              count={changedFiles.data?.stat.files}
             >
               <GitBranch className="size-3.5" />
             </InspectorTabTrigger>
@@ -244,13 +251,11 @@ export function CodeInspector({
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <DiffOverview
-              client={client}
-              workspaceId={workspaceId}
+            <DiffOverviewContent
+              resource={changedFiles}
               turnId={turnId}
               turnLabel={scope?.label}
               selected={file}
-              contentRevision={contentRevision}
               onOpenFile={openDiff}
             />
           </div>
@@ -278,12 +283,14 @@ function InspectorTabTrigger({
   label,
   displayLabel,
   selected,
+  count,
   children,
 }: {
   value: InspectorTab;
   label: string;
   displayLabel: string;
   selected: boolean;
+  count?: number;
   children: ReactNode;
 }) {
   return (
@@ -294,6 +301,16 @@ function InspectorTabTrigger({
     >
       {children}
       <span>{displayLabel}</span>
+      {count !== undefined && (
+        <Badge
+          variant="secondary"
+          size="sm"
+          className="h-4 min-w-4 justify-center px-1 font-mono text-2xs font-medium tabular-nums"
+          aria-label={`${count} changed ${count === 1 ? "file" : "files"}`}
+        >
+          {count}
+        </Badge>
+      )}
     </TabsTrigger>
   );
 }

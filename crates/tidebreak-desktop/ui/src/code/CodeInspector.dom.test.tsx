@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -575,6 +581,36 @@ it("gives the active inspector tab a selected fill idle tabs do not share", asyn
   await userEvent.setup().keyboard("{ArrowRight}");
   expect(pr).toHaveAttribute("data-state", "active");
   expect(pr).toHaveFocus();
+});
+
+it("shows the changed-file count in the Changes tab", async () => {
+  const client = makeClient();
+  vi.mocked(client.listCodeWorkspaceFiles).mockResolvedValue({
+    files: [
+      {
+        path: "src/login.rs",
+        kind: "modified",
+        insertions: 3,
+        deletions: 1,
+      },
+    ],
+    truncated: true,
+    stat: { files: 12, insertions: 30, deletions: 10, truncated: true },
+  });
+
+  render(
+    <CodeInspector
+      client={client as never}
+      workspaceId="ws-1"
+      workspace={WORKSPACE}
+      contentRevision={0}
+    />,
+  );
+
+  const source = screen.getByRole("tab", { name: "Source control" });
+  expect(
+    await within(source).findByLabelText("12 changed files"),
+  ).toHaveTextContent("12");
 });
 
 it("closes the review sidebar from its own chrome", async () => {

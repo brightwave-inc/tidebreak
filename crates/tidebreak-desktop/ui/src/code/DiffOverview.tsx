@@ -3,14 +3,18 @@ import { useCallback, useMemo, useState } from "react";
 import { ChevronRight, Folder, FolderOpen } from "lucide-react";
 
 import type { ApiClient } from "../api/client";
-import type { CodeFileChange, FileChangeKind } from "../api/types";
+import type {
+  CodeFileChange,
+  CodeWorkspaceFiles,
+  FileChangeKind,
+} from "../api/types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { CodeFileIcon } from "./CodeFileIcon";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
-import { useLiveResource } from "./useLiveContent";
+import { type LiveResource, useLiveResource } from "./useLiveContent";
 
 const FILE_KIND: Record<
   FileChangeKind,
@@ -61,20 +65,65 @@ export function DiffOverview({
   contentRevision?: number;
   onOpenFile: (path: string) => void;
 }) {
+  const resource = useChangedFilesResource({
+    client,
+    workspaceId,
+    turnId,
+    contentRevision,
+  });
+
+  return (
+    <DiffOverviewContent
+      resource={resource}
+      turnId={turnId}
+      turnLabel={turnLabel}
+      selected={selected}
+      onOpenFile={onOpenFile}
+    />
+  );
+}
+
+export function useChangedFilesResource({
+  client,
+  workspaceId,
+  turnId,
+  contentRevision = 0,
+}: {
+  client: Pick<ApiClient, "listCodeWorkspaceFiles">;
+  workspaceId: string;
+  turnId?: string;
+  contentRevision?: number;
+}): LiveResource<CodeWorkspaceFiles> {
   const load = useCallback(
     () => client.listCodeWorkspaceFiles(workspaceId, turnId),
     [client, workspaceId, turnId],
   );
-  const {
-    data: payload,
-    error,
-    refreshing,
-  } = useLiveResource({
+  return useLiveResource({
     key: `${workspaceId}:${turnId ?? "workspace"}`,
     revision: contentRevision,
     load,
     errorMessage: "Could not load changed files",
   });
+}
+
+export function DiffOverviewContent({
+  resource,
+  turnId,
+  turnLabel,
+  selected,
+  onOpenFile,
+}: {
+  resource: Pick<
+    LiveResource<CodeWorkspaceFiles>,
+    "data" | "error" | "refreshing"
+  >;
+  turnId?: string;
+  /** Ordinal label for the scoped turn. Never a raw id. */
+  turnLabel?: string;
+  selected?: string;
+  onOpenFile: (path: string) => void;
+}) {
+  const { data: payload, error, refreshing } = resource;
 
   const scopeCaption = turnId
     ? (turnLabel ?? "This turn")
