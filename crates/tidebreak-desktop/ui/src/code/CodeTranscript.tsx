@@ -168,6 +168,7 @@ export function CodeTranscript({
       break;
     }
   }
+  const copyOwnerIds = assistantCopyOwnerIds(items, busy);
   return (
     <div className="messages" ref={scrollRef} onScroll={onScroll}>
       <div className="messages-column" ref={contentRef}>
@@ -184,10 +185,16 @@ export function CodeTranscript({
               )
             : isolatedCard(
                 row.item.id,
-                itemSignature(row.item, decidingId, approvalError),
+                itemSignature(
+                  row.item,
+                  decidingId,
+                  approvalError,
+                  copyOwnerIds.has(row.item.id),
+                ),
                 <TranscriptItem
                   item={row.item}
                   animateStreaming={animateStreaming}
+                  ownsCopyAction={copyOwnerIds.has(row.item.id)}
                   approval={
                     row.item.kind === "approval"
                       ? approvals[row.item.approvalId]
@@ -297,6 +304,51 @@ export function shouldShowCodeWorking(
   if (last.kind === "tool") return last.status !== "running";
   if (last.kind === "approval") return last.state !== "pending";
   return true;
+}
+
+/**
+ * The assistant rows that own a copy action.
+ *
+ * Harnesses emit a complete assistant message before each tool phase. Those
+ * messages remain useful progress in the transcript, but the copy action
+ * belongs to the turn, so each terminal boundary claims only the last
+ * assistant row that preceded it. A settled filtered transcript, such as one
+ * subagent's view, has no boundary of its own and falls back to its last row.
+ */
+export function assistantCopyOwnerIds(
+  items: readonly CodeTranscriptItem[],
+  busy: boolean,
+): ReadonlySet<string> {
+  const owners = new Set<string>();
+  const latestByTurn = new Map<string | null, string>();
+  let trailingAssistant: { id: string; turnId: string | null } | null = null;
+
+  for (const item of items) {
+    if (item.kind === "user") {
+      trailingAssistant = null;
+      continue;
+    }
+    if (item.kind === "assistant") {
+      latestByTurn.set(item.turnId, item.id);
+      trailingAssistant = { id: item.id, turnId: item.turnId };
+      continue;
+    }
+    if (item.kind !== "turn_boundary") continue;
+
+    const owner = latestByTurn.get(item.turnId) ?? trailingAssistant?.id;
+    if (owner) owners.add(owner);
+    latestByTurn.delete(item.turnId);
+    if (
+      trailingAssistant &&
+      (trailingAssistant.id === owner ||
+        trailingAssistant.turnId === item.turnId)
+    ) {
+      trailingAssistant = null;
+    }
+  }
+
+  if (!busy && trailingAssistant) owners.add(trailingAssistant.id);
+  return owners;
 }
 
 /**
@@ -410,6 +462,7 @@ function itemSignature(
   item: CodeTranscriptItem,
   decidingId?: string | null,
   approvalError?: string,
+  ownsCopyAction = false,
 ): string {
   switch (item.kind) {
     case "tool":
@@ -419,6 +472,7 @@ function itemSignature(
     case "turn_boundary":
       return `${item.status}:${item.diffstat?.files ?? -1}`;
     case "assistant":
+      return `${item.streaming}:${ownsCopyAction}`;
     case "reasoning":
       return String(item.streaming);
     case "file_activity":
@@ -442,6 +496,7 @@ function itemSignature(
 const TranscriptItem = memo(function TranscriptItem({
   item,
   animateStreaming,
+  ownsCopyAction = false,
   approval,
   attached = false,
   deciding,
@@ -455,6 +510,8 @@ const TranscriptItem = memo(function TranscriptItem({
 }: {
   item: CodeTranscriptItem;
   animateStreaming: boolean;
+  /** This is the final assistant row in a settled turn or filtered run. */
+  ownsCopyAction?: boolean;
   approval?: CodeApprovalSnapshot;
   /** This approval parks the tool line directly above it. */
   attached?: boolean;
@@ -520,6 +577,7 @@ const TranscriptItem = memo(function TranscriptItem({
             role="assistant"
             text={item.text}
             settled={!item.streaming}
+            sequenceEnd={ownsCopyAction}
           />
         </article>
       );
