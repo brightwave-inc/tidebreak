@@ -6,8 +6,9 @@ import {
   type CodeSessionStore,
 } from "./CodeSessionStore";
 import {
-  applyAcceptedTurn,
+  applyCodeTurnSnapshot,
   hydrateCodeTurns,
+  reconcilePendingCodeTurns,
   type CodeSessionDeps,
 } from "./CodeSessionReducer";
 
@@ -70,13 +71,16 @@ function createController(
       .then((turns) => {
         const turn = turns.find((candidate) => candidate.id === turnId);
         if (!turn) return;
-        store.getState().update((session) => applyAcceptedTurn(session, turn));
+        store
+          .getState()
+          .update((session) => applyCodeTurnSnapshot(session, turn));
       })
       .catch(() => {
         // The prompt lands on the next open. The turn itself still streams.
       });
   };
-  return new CodeSessionController({
+  let controller: CodeSessionController;
+  controller = new CodeSessionController({
     openSocket,
     getAfter: () => store.getState().lastSeq,
     onEvents: (frames, initialViewSettled) => {
@@ -84,11 +88,15 @@ function createController(
       // only when the turn ends, and a queued follow-up is never answered
       // with a turn at all. Pull the snapshot so the transcript shows what
       // the engine is working on while it works.
-      for (const effect of store
+      const effects = store
         .getState()
-        .applyEvents(frames, deps, initialViewSettled)) {
+        .applyEvents(frames, deps, initialViewSettled);
+      let turnSnapshotNeeded = false;
+      for (const effect of effects) {
         if (effect.type === "turn_began") fillPrompt(effect.turnId);
+        if (effect.type === "turn_snapshot_needed") turnSnapshotNeeded = true;
       }
+      if (turnSnapshotNeeded) controller.requestTurnRefresh();
     },
     onConnectionState: (connectionState) => {
       store.getState().setConnectionState(connectionState);
@@ -98,7 +106,26 @@ function createController(
       store.getState().update((session) => hydrateCodeTurns(session, turns));
       onTurnsHydrated();
     },
+    refreshTurns: hydrateTurns,
+    onTurnRefresh: (turns, requested) => {
+      store
+        .getState()
+        .update((session) =>
+          reconcilePendingCodeTurns(session, turns, requested),
+        );
+    },
+    getPendingTurnRefreshes: () => {
+      const state = store.getState();
+      return [...state.pendingTerminalReconciliations.values()].map(
+        (pending) => ({
+          turnId: pending.turnId,
+          eventSeq: pending.eventSeq,
+          observedSeq: state.lastSeq,
+        }),
+      );
+    },
   });
+  return controller;
 }
 
 function retainCodeSession(sessionId: string): void {
@@ -124,12 +151,14 @@ export function acquireCodeSession(
     if (existing.refCount === 0) {
       retainedSessionIds.delete(sessionId);
       existing.refCount = 1;
+      const pendingTerminalReconciliation =
+        existing.store.getState().pendingTerminalReconciliations.size > 0;
       existing.controller = createController(
         existing.store,
         openSocket,
         deps,
         hydrateTurns,
-        !existing.turnsHydrated,
+        !existing.turnsHydrated || pendingTerminalReconciliation,
         () => {
           existing.turnsHydrated = true;
         },

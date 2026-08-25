@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SequencedCodeEventFrame } from "../api/types";
-import { CodeSessionController } from "./CodeSessionController";
+import {
+  CodeSessionController,
+  INITIAL_RECONNECT_DELAY_MS,
+  MAX_RECONNECT_DELAY_MS,
+} from "./CodeSessionController";
 
 class FakeSocket {
   onopen: (() => void) | null = null;
@@ -154,6 +158,103 @@ describe("CodeSessionController", () => {
       },
     ]);
 
+    controller.dispose();
+  });
+
+  it("keeps a capped-window marker while compacting adjacent replay deltas", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const batches: (readonly SequencedCodeEventFrame[])[] = [];
+    const controller = new CodeSessionController({
+      openSocket: (_after, onFrame) => {
+        const socket = new FakeSocket(onFrame);
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      getAfter: () => 0,
+      onEvents: (events) => batches.push(events),
+      onConnectionState: () => undefined,
+    });
+    controller.start();
+
+    sockets[0]?.emit({
+      seq: 2_000,
+      replayed: true,
+      truncated: true,
+      event: { type: "reasoning_delta", text: "First " },
+    });
+    sockets[0]?.emit({
+      seq: 2_001,
+      replayed: true,
+      event: { type: "reasoning_delta", text: "retained thought" },
+    });
+
+    await vi.runAllTimersAsync();
+
+    expect(batches).toEqual([
+      [
+        {
+          seq: 2_001,
+          replayed: true,
+          truncated: true,
+          event: {
+            type: "reasoning_delta",
+            text: "First retained thought",
+          },
+        },
+      ],
+    ]);
+
+    controller.dispose();
+  });
+
+  it("retries pending turn snapshots with bounded backoff", async () => {
+    vi.useFakeTimers();
+    let pending = false;
+    let attempts = 0;
+    const refreshTurns = vi.fn(async () => {
+      attempts += 1;
+      if (attempts < 8) throw new Error("offline");
+      return [];
+    });
+    const controller = new CodeSessionController({
+      openSocket: (_after, onFrame) =>
+        new FakeSocket(onFrame) as unknown as WebSocket,
+      getAfter: () => 0,
+      onEvents: () => undefined,
+      onConnectionState: () => undefined,
+      refreshTurns,
+      onTurnRefresh: () => {
+        pending = false;
+      },
+      getPendingTurnRefreshes: () =>
+        pending ? [{ turnId: "t1", eventSeq: 1, observedSeq: 1 }] : [],
+    });
+    controller.start();
+    pending = true;
+    controller.requestTurnRefresh();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(refreshTurns).toHaveBeenCalledTimes(1);
+    const delays = [
+      INITIAL_RECONNECT_DELAY_MS,
+      500,
+      1_000,
+      2_000,
+      4_000,
+      MAX_RECONNECT_DELAY_MS,
+      MAX_RECONNECT_DELAY_MS,
+    ];
+    for (const [index, delay] of delays.entries()) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(refreshTurns).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(refreshTurns).toHaveBeenCalledTimes(index + 2);
+    }
+
+    expect(pending).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
     controller.dispose();
   });
 });

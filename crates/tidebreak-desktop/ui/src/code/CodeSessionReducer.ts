@@ -134,7 +134,27 @@ export type CodeSessionState = {
   items: CodeTranscriptItem[];
   busy: boolean;
   activeTurnId: string | null;
+  /** Turn established by a journal `turn_started` frame. */
+  journalTurnId: string | null;
   turnStartedAt: string | null;
+  /** Whether this store observed the active turn start as a live frame. */
+  turnStartObservedLive: boolean;
+  /** Boundaries whose timing came from durable turn snapshots. */
+  durableBoundaryTurnIds: ReadonlySet<string>;
+  /** Durable turn order, used to place boundaries recovered after later turns render. */
+  turnOrdinals: ReadonlyMap<string, number>;
+  /**
+   * Replayed terminals that still need an authoritative turn snapshot.
+   *
+   * This state lives with the retained transcript instead of one controller,
+   * so a failed read survives workspace close and reopen. The event sequence
+   * is the key because a capped replay may contain several terminals before
+   * the first retained `turn_started` frame establishes any turn identity.
+   */
+  pendingTerminalReconciliations: ReadonlyMap<
+    number,
+    PendingTerminalReconciliation
+  >;
   assistantBuffer: string;
   reasoningBuffer: string;
   harnessKind: HarnessKind | null;
@@ -158,7 +178,8 @@ export type CodeSessionState = {
 
 export type CodeSessionEffect =
   | { type: "turn_began"; turnId: string }
-  | { type: "turn_resolved" };
+  | { type: "turn_resolved" }
+  | { type: "turn_snapshot_needed"; turnId: string | null };
 
 export type CodeSessionTransition = {
   state: CodeSessionState;
@@ -170,6 +191,21 @@ export type CodeSessionDeps = {
   now: () => string;
 };
 
+export type PendingTerminalReconciliation = {
+  eventSeq: number;
+  /** Exact when a retained `turn_started` established the terminal's turn. */
+  turnId: string | null;
+  /** Snapshot activity is only an ordering hint. It is never identity proof. */
+  candidateTurnId: string | null;
+  /** The first retained start after an unassigned terminal, when one appears. */
+  nextTurnId: string | null;
+  status: Exclude<CodeTurnStatus, "running">;
+  usage: CodeUsage | null;
+  error: string | null;
+  diffstat: Diffstat | null;
+  previousUsage: CodeUsage | null;
+};
+
 export function initialCodeSessionState(): CodeSessionState {
   return {
     lastSeq: 0,
@@ -178,7 +214,12 @@ export function initialCodeSessionState(): CodeSessionState {
     items: [],
     busy: false,
     activeTurnId: null,
+    journalTurnId: null,
     turnStartedAt: null,
+    turnStartObservedLive: false,
+    durableBoundaryTurnIds: new Set(),
+    turnOrdinals: new Map(),
+    pendingTerminalReconciliations: new Map(),
     assistantBuffer: "",
     reasoningBuffer: "",
     harnessKind: null,
@@ -238,14 +279,402 @@ export function markCodeSessionHydrated(
   return state.hydrated ? state : { ...state, hydrated: true };
 }
 
-/**
- * Record a turn the server accepted. Create and hydrate share this so a
- * reopen and a live send produce the same turn-keyed user item.
- */
+/** Record a turn that a live submit received before its journal start. */
 export function applyAcceptedTurn(
   state: CodeSessionState,
   turn: CodeTurnSnapshot,
 ): CodeSessionState {
+  const next = upsertTurnPrompt(state, turn);
+  if (turn.status !== "running") return next;
+  const continuesObservedTurn =
+    state.activeTurnId === turn.id && state.turnStartObservedLive;
+  return {
+    ...next,
+    busy: true,
+    activeTurnId: turn.id,
+    turnStartedAt: turn.started_at,
+    turnStartObservedLive: continuesObservedTurn,
+    lifecycle: "running",
+  };
+}
+
+/**
+ * Apply one fetched turn without letting the snapshot choose live activity.
+ *
+ * Prompt fetches race the journal. Their durable user item and completed
+ * boundary remain useful, but a running response may already be stale by the
+ * time it arrives and must not reopen a turn or replace a newer active turn.
+ */
+export function applyCodeTurnSnapshot(
+  state: CodeSessionState,
+  turn: CodeTurnSnapshot,
+): CodeSessionState {
+  const next = upsertTurnPrompt(state, turn);
+  if (turn.status === "running") return next;
+  const durableBoundaryTurnIds = new Set(next.durableBoundaryTurnIds);
+  durableBoundaryTurnIds.add(turn.id);
+  return {
+    ...next,
+    durableBoundaryTurnIds,
+    items: upsertTurnBoundary(
+      next.items,
+      {
+        turnId: turn.id,
+        status: turn.status,
+        durationMs: durationMs(turn.started_at, turn.ended_at ?? null),
+        usage: turn.usage ?? null,
+        error: null,
+        diffstat: turn.diffstat ?? null,
+      },
+      next.turnOrdinals,
+    ),
+  };
+}
+
+/**
+ * Reconcile one requested turn after replay exposed an uncertain terminal.
+ *
+ * A completed snapshot may settle only that same active turn. If another turn
+ * started while the request was in flight, the snapshot still fills durable
+ * transcript data but leaves the newer activity untouched.
+ */
+export function reconcileCodeTurnSnapshot(
+  state: CodeSessionState,
+  turn: CodeTurnSnapshot,
+): CodeSessionState {
+  const pending = latestPendingForTurn(state, turn.id);
+  return reconcileCodeTurnSnapshotWithPending(state, turn, pending);
+}
+
+function reconcileCodeTurnSnapshotWithPending(
+  state: CodeSessionState,
+  turn: CodeTurnSnapshot,
+  pending: PendingTerminalReconciliation | undefined,
+): CodeSessionState {
+  if (turn.status === "running") {
+    return applyCodeTurnSnapshot(state, turn);
+  }
+
+  let next = applyCodeTurnSnapshot(state, turn);
+  if (pending) {
+    const terminalMatches = pending.status === turn.status;
+    next = {
+      ...next,
+      items: replaceTurnBoundary(
+        next.items,
+        {
+          turnId: turn.id,
+          status: turn.status,
+          durationMs: durationMs(turn.started_at, turn.ended_at ?? null),
+          usage: turn.usage ?? (terminalMatches ? pending.usage : null),
+          error: terminalMatches ? pending.error : null,
+          diffstat:
+            turn.diffstat ?? (terminalMatches ? pending.diffstat : null),
+        },
+        next.turnOrdinals,
+      ),
+    };
+    next = withoutPendingTerminalReconciliation(next, pending.eventSeq);
+  }
+  if (
+    state.activeTurnId !== turn.id ||
+    (state.journalTurnId !== null && state.journalTurnId !== turn.id)
+  ) {
+    return next;
+  }
+  const terminalMatches = pending?.status === turn.status;
+  return {
+    ...next,
+    busy: false,
+    activeTurnId: null,
+    journalTurnId: null,
+    turnStartedAt: null,
+    turnStartObservedLive: false,
+    assistantBuffer: "",
+    reasoningBuffer: "",
+    items: finalizeStreaming(
+      finalizeStreaming(next.items, "assistant"),
+      "reasoning",
+    ),
+    lastUsage:
+      turn.usage ??
+      (terminalMatches ? pending?.usage : null) ??
+      (pending && !terminalMatches ? pending.previousUsage : next.lastUsage),
+    lifecycle:
+      next.lifecycle === "running" ? "idle" : (next.lifecycle ?? "idle"),
+    contentRevision: next.contentRevision + 1,
+  };
+}
+
+/** Reconcile every pending terminal that appears in one authoritative read. */
+export function reconcilePendingCodeTurns(
+  state: CodeSessionState,
+  turns: readonly CodeTurnSnapshot[],
+  requested?: readonly {
+    turnId: string | null;
+    eventSeq: number;
+    observedSeq?: number;
+  }[],
+): CodeSessionState {
+  const orderedTurns = [...turns].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  );
+  let next = withTurnOrdinals(state, orderedTurns);
+  const requests =
+    requested ??
+    [...state.pendingTerminalReconciliations.values()].map((pending) => ({
+      turnId: pending.turnId,
+      eventSeq: pending.eventSeq,
+    }));
+  const currentPending = requests.flatMap((request) => {
+    const pending = next.pendingTerminalReconciliations.get(request.eventSeq);
+    if (!pending || pending.turnId !== request.turnId) return [];
+    return [pending];
+  });
+  const usedTurnIds = new Set<string>();
+  const assignments = new Map<string, PendingTerminalReconciliation>();
+
+  for (const pending of currentPending) {
+    if (pending.turnId === null) continue;
+    const turn = orderedTurns.find(
+      (candidate) => candidate.id === pending.turnId,
+    );
+    if (!turn) continue;
+    usedTurnIds.add(turn.id);
+    assignments.set(turn.id, pending);
+  }
+
+  for (const [pending, turn] of assignUnattributedTerminals(
+    orderedTurns,
+    currentPending.filter((candidate) => candidate.turnId === null),
+    usedTurnIds,
+  )) {
+    assignments.set(turn.id, pending);
+  }
+
+  for (const turn of orderedTurns) {
+    const pending = assignments.get(turn.id);
+    next = pending
+      ? reconcileCodeTurnSnapshotWithPending(next, turn, pending)
+      : applyCodeTurnSnapshot(next, turn);
+  }
+
+  const observedSeqs = requested
+    ?.map((request) => request.observedSeq)
+    .filter((seq): seq is number => seq !== undefined);
+  const responseMatchesCurrentJournal =
+    requested === undefined ||
+    (observedSeqs !== undefined &&
+      observedSeqs.length > 0 &&
+      observedSeqs.every((seq) => seq === next.lastSeq));
+  if (orderedTurns.length > 0 && responseMatchesCurrentJournal) {
+    next = applyAuthoritativeTurnActivity(next, orderedTurns);
+  }
+  return next;
+}
+
+function withPendingTerminalReconciliation(
+  state: CodeSessionState,
+  pending: PendingTerminalReconciliation,
+): CodeSessionState {
+  const pendingTerminalReconciliations = new Map(
+    state.pendingTerminalReconciliations,
+  );
+  if (pending.turnId !== null) {
+    for (const [eventSeq, current] of pendingTerminalReconciliations) {
+      if (current.turnId === pending.turnId) {
+        pendingTerminalReconciliations.delete(eventSeq);
+      }
+    }
+  }
+  pendingTerminalReconciliations.set(pending.eventSeq, pending);
+  return { ...state, pendingTerminalReconciliations };
+}
+
+function withoutPendingTerminalReconciliation(
+  state: CodeSessionState,
+  eventSeq: number,
+): CodeSessionState {
+  if (!state.pendingTerminalReconciliations.has(eventSeq)) return state;
+  const pendingTerminalReconciliations = new Map(
+    state.pendingTerminalReconciliations,
+  );
+  pendingTerminalReconciliations.delete(eventSeq);
+  return { ...state, pendingTerminalReconciliations };
+}
+
+function latestPendingForTurn(
+  state: CodeSessionState,
+  turnId: string,
+): PendingTerminalReconciliation | undefined {
+  return [...state.pendingTerminalReconciliations.values()]
+    .filter((pending) => pending.turnId === turnId)
+    .sort((left, right) => right.eventSeq - left.eventSeq)[0];
+}
+
+function anchorUnattributedTerminals(
+  state: CodeSessionState,
+  nextTurnId: string,
+): CodeSessionState {
+  let changed = false;
+  const pendingTerminalReconciliations = new Map(
+    [...state.pendingTerminalReconciliations.entries()].map(
+      ([eventSeq, pending]) => {
+        if (pending.turnId !== null || pending.nextTurnId !== null) {
+          return [eventSeq, pending] as const;
+        }
+        changed = true;
+        return [eventSeq, { ...pending, nextTurnId }] as const;
+      },
+    ),
+  );
+  return changed ? { ...state, pendingTerminalReconciliations } : state;
+}
+
+function withTurnOrdinals(
+  state: CodeSessionState,
+  turns: readonly CodeTurnSnapshot[],
+): CodeSessionState {
+  if (turns.length === 0) return state;
+  const turnOrdinals = new Map(state.turnOrdinals);
+  let changed = false;
+  for (const turn of turns) {
+    if (turnOrdinals.get(turn.id) === turn.ordinal) continue;
+    turnOrdinals.set(turn.id, turn.ordinal);
+    changed = true;
+  }
+  return changed ? { ...state, turnOrdinals } : state;
+}
+
+function assignUnattributedTerminals(
+  turns: readonly CodeTurnSnapshot[],
+  pending: readonly PendingTerminalReconciliation[],
+  usedTurnIds: ReadonlySet<string>,
+): Array<[PendingTerminalReconciliation, CodeTurnSnapshot]> {
+  const assignments: Array<[PendingTerminalReconciliation, CodeTurnSnapshot]> =
+    [];
+  const claimed = new Set(usedTurnIds);
+  const groups = new Map<string | null, PendingTerminalReconciliation[]>();
+  for (const item of pending) {
+    const group = groups.get(item.nextTurnId) ?? [];
+    group.push(item);
+    groups.set(item.nextTurnId, group);
+  }
+
+  for (const [nextTurnId, group] of groups) {
+    group.sort((left, right) => left.eventSeq - right.eventSeq);
+    let anchor: number;
+    if (nextTurnId !== null) {
+      anchor = turns.findIndex((turn) => turn.id === nextTurnId);
+      if (anchor === -1) continue;
+    } else {
+      if (turns.some((turn) => turn.status === "running")) continue;
+      const candidateTurnId = group.at(-1)?.candidateTurnId;
+      if (
+        candidateTurnId &&
+        !turns.some((turn) => turn.id === candidateTurnId)
+      ) {
+        continue;
+      }
+      anchor = turns.length;
+    }
+    if (anchor < group.length) continue;
+
+    const proposed: Array<[PendingTerminalReconciliation, CodeTurnSnapshot]> =
+      [];
+    let valid = true;
+    for (let offset = 0; offset < group.length; offset += 1) {
+      const item = group[group.length - 1 - offset];
+      const turn = turns[anchor - 1 - offset];
+      if (
+        !item ||
+        !turn ||
+        turn.status === "running" ||
+        turn.status !== item.status ||
+        claimed.has(turn.id)
+      ) {
+        valid = false;
+        break;
+      }
+      proposed.push([item, turn]);
+    }
+    if (!valid) continue;
+    for (const assignment of proposed.reverse()) {
+      claimed.add(assignment[1].id);
+      assignments.push(assignment);
+    }
+  }
+  return assignments;
+}
+
+function applyAuthoritativeTurnActivity(
+  state: CodeSessionState,
+  turns: readonly CodeTurnSnapshot[],
+): CodeSessionState {
+  const open = [...turns]
+    .reverse()
+    .find(
+      (turn) =>
+        turn.status === "running" && !latestPendingForTurn(state, turn.id),
+    );
+  const lastUsage = latestTurnUsage(state, turns);
+  if (open) {
+    return {
+      ...state,
+      lastUsage,
+      busy: true,
+      activeTurnId: open.id,
+      journalTurnId:
+        state.activeTurnId === open.id ? state.journalTurnId : null,
+      turnStartedAt: open.started_at,
+      turnStartObservedLive:
+        state.activeTurnId === open.id && state.turnStartObservedLive,
+      lifecycle: "running",
+    };
+  }
+  return {
+    ...state,
+    lastUsage,
+    busy: false,
+    activeTurnId: null,
+    journalTurnId: null,
+    turnStartedAt: null,
+    turnStartObservedLive: false,
+    assistantBuffer: "",
+    reasoningBuffer: "",
+    items: finalizeStreaming(
+      finalizeStreaming(state.items, "assistant"),
+      "reasoning",
+    ),
+    lifecycle:
+      state.lifecycle === "running" ? "idle" : (state.lifecycle ?? "idle"),
+  };
+}
+
+function latestTurnUsage(
+  state: CodeSessionState,
+  turns: readonly CodeTurnSnapshot[],
+): CodeUsage | null {
+  for (const turn of [...turns].reverse()) {
+    if (turn.status === "running") continue;
+    if (turn.usage) return turn.usage;
+    if (!state.durableBoundaryTurnIds.has(turn.id)) continue;
+    const boundary = state.items.find(
+      (item) => item.kind === "turn_boundary" && item.turnId === turn.id,
+    );
+    if (boundary?.kind === "turn_boundary" && boundary.usage) {
+      return boundary.usage;
+    }
+  }
+  return state.lastUsage;
+}
+
+function upsertTurnPrompt(
+  state: CodeSessionState,
+  turn: CodeTurnSnapshot,
+): CodeSessionState {
+  const turnOrdinals = new Map(state.turnOrdinals);
+  turnOrdinals.set(turn.id, turn.ordinal);
   const user: CodeTranscriptItem = {
     kind: "user",
     id: userItemId(turn.id),
@@ -263,16 +692,8 @@ export function applyAcceptedTurn(
     ? state.items.map((item) =>
         item.kind === "user" && item.turnId === turn.id ? user : item,
       )
-    : insertUserBeforeTurn(state.items, user, turn.id);
-  const running = turn.status === "running";
-  return {
-    ...state,
-    items,
-    busy: running || state.busy,
-    activeTurnId: running ? turn.id : state.activeTurnId,
-    turnStartedAt: running ? turn.started_at : state.turnStartedAt,
-    lifecycle: running ? "running" : state.lifecycle,
-  };
+    : insertUserBeforeTurn(state.items, user, turn.id, turnOrdinals);
+  return { ...state, items, turnOrdinals };
 }
 
 /** Snapshot of durable turns, applied before the journal replays. */
@@ -280,40 +701,7 @@ export function hydrateCodeTurns(
   state: CodeSessionState,
   turns: readonly CodeTurnSnapshot[],
 ): CodeSessionState {
-  let next = state;
-  for (const turn of turns) {
-    next = applyAcceptedTurn(next, turn);
-    if (turn.status !== "running") {
-      next = {
-        ...next,
-        items: upsertTurnBoundary(next.items, {
-          turnId: turn.id,
-          status: turn.status,
-          durationMs: durationMs(turn.started_at, turn.ended_at ?? null),
-          usage: turn.usage ?? null,
-          error: null,
-          diffstat: turn.diffstat ?? null,
-        }),
-      };
-    }
-  }
-  const lastUsage =
-    [...turns].reverse().find((turn) => turn.usage)?.usage ?? next.lastUsage;
-  const open = [...turns].reverse().find((turn) => turn.status === "running");
-  if (open) {
-    return {
-      ...next,
-      lastUsage,
-      busy: true,
-      activeTurnId: open.id,
-      turnStartedAt: open.started_at,
-      lifecycle: "running",
-    };
-  }
-  if (turns.length > 0) {
-    return { ...next, lastUsage, lifecycle: next.lifecycle ?? "idle" };
-  }
-  return next;
+  return reconcilePendingCodeTurns(state, turns);
 }
 
 export function reduceCodeSessionEvent(
@@ -328,10 +716,15 @@ export function reduceCodeSessionEvent(
   // current assistant tail, so it replaces the buffer instead of appending.
   const transient = framed.transient === true;
   if (!transient && framed.seq <= state.lastSeq) return { state, effects: [] };
+  const cappedReplayStart =
+    framed.replayed === true && framed.truncated === true;
   state = {
     ...state,
     lastSeq: transient ? state.lastSeq : framed.seq,
     animateStreaming: framed.replayed !== true,
+    journalTurnId: cappedReplayStart ? null : state.journalTurnId,
+    assistantBuffer: cappedReplayStart ? "" : state.assistantBuffer,
+    reasoningBuffer: cappedReplayStart ? "" : state.reasoningBuffer,
     items:
       framed.truncated === true
         ? withTruncationNotice(state.items)
@@ -339,6 +732,10 @@ export function reduceCodeSessionEvent(
   };
   const event = framed.event;
   const effects: CodeSessionEffect[] = [];
+  // Snapshot activity can be stale across a retained close. Historical rows
+  // stay unassigned until replay itself establishes their turn.
+  const attributedTurnId =
+    framed.replayed === true ? state.journalTurnId : state.activeTurnId;
 
   switch (event.type) {
     case "session_started":
@@ -353,12 +750,34 @@ export function reduceCodeSessionEvent(
 
     case "turn_started": {
       effects.push({ type: "turn_began", turnId: event.turn_id });
+      const anchored = anchorUnattributedTerminals(state, event.turn_id);
+      if (anchored !== state) {
+        effects.push({ type: "turn_snapshot_needed", turnId: null });
+        state = anchored;
+      }
+      const durableStartedAt = acceptedTurnStartedAt(
+        state.items,
+        event.turn_id,
+      );
+      const observedStartedAt =
+        state.activeTurnId === event.turn_id ? state.turnStartedAt : null;
+      const continuesObservedTurn =
+        state.journalTurnId === event.turn_id && state.turnStartObservedLive;
       return {
         state: {
           ...state,
           busy: true,
           activeTurnId: event.turn_id,
-          turnStartedAt: state.turnStartedAt ?? deps.now(),
+          journalTurnId: event.turn_id,
+          // Hydration carries the server's accepted timestamp. Keep it when
+          // replay walks the same turn, and never invent a start for history
+          // that the client did not observe live.
+          turnStartedAt:
+            durableStartedAt ??
+            observedStartedAt ??
+            (framed.replayed === true ? null : deps.now()),
+          turnStartObservedLive:
+            framed.replayed !== true || continuesObservedTurn,
           assistantBuffer: "",
           reasoningBuffer: "",
           lifecycle: "running",
@@ -383,7 +802,7 @@ export function reduceCodeSessionEvent(
             finalizeStreaming(state.items, "reasoning"),
             "assistant",
             assistantBuffer,
-            state.activeTurnId,
+            attributedTurnId,
             null,
             deps.nextId,
           ),
@@ -407,7 +826,7 @@ export function reduceCodeSessionEvent(
               state.items,
               "assistant",
               event.text,
-              state.activeTurnId,
+              attributedTurnId,
               parentCallId,
               deps.nextId,
             ),
@@ -429,7 +848,7 @@ export function reduceCodeSessionEvent(
             state.items,
             "reasoning",
             reasoningBuffer,
-            state.activeTurnId,
+            attributedTurnId,
             null,
             deps.nextId,
           ),
@@ -453,10 +872,10 @@ export function reduceCodeSessionEvent(
           ...state,
           assistantBuffer: parentCallId === null ? "" : state.assistantBuffer,
           reasoningBuffer: parentCallId === null ? "" : state.reasoningBuffer,
-          items: insertBeforeTurnBoundary(opened, state.activeTurnId, {
+          items: insertBeforeTurnBoundary(opened, attributedTurnId, {
             kind: "tool",
             id: deps.nextId(),
-            turnId: state.activeTurnId,
+            turnId: attributedTurnId,
             callId: event.call_id,
             parentCallId,
             name: event.name,
@@ -506,7 +925,7 @@ export function reduceCodeSessionEvent(
           ...state,
           items: existing
             ? state.items
-            : insertBeforeTurnBoundary(state.items, state.activeTurnId, {
+            : insertBeforeTurnBoundary(state.items, attributedTurnId, {
                 kind: "approval",
                 id: `approval:${approvalId}`,
                 approvalId,
@@ -537,7 +956,7 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          items: insertBeforeTurnBoundary(state.items, state.activeTurnId, {
+          items: insertBeforeTurnBoundary(state.items, attributedTurnId, {
             kind: "notice",
             id: deps.nextId(),
             level: event.level,
@@ -563,10 +982,10 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          items: insertBeforeTurnBoundary(state.items, state.activeTurnId, {
+          items: insertBeforeTurnBoundary(state.items, attributedTurnId, {
             kind: "steer",
             id: deps.nextId(),
-            turnId: state.activeTurnId,
+            turnId: attributedTurnId,
             text: event.text,
           }),
         },
@@ -590,7 +1009,7 @@ export function reduceCodeSessionEvent(
           ...state,
           items: upsertFileActivity(
             state.items,
-            state.activeTurnId,
+            attributedTurnId,
             event.path,
             event.kind,
             event.diffstat,
@@ -604,7 +1023,6 @@ export function reduceCodeSessionEvent(
     case "turn_completed":
     case "turn_failed":
     case "turn_interrupted": {
-      effects.push({ type: "turn_resolved" });
       const status =
         event.type === "turn_completed"
           ? "completed"
@@ -617,7 +1035,76 @@ export function reduceCodeSessionEvent(
         event.type === "turn_completed"
           ? (event.checkpoint?.diffstat ?? null)
           : null;
-      const turnId = state.activeTurnId;
+      const turnId =
+        state.journalTurnId ??
+        (framed.replayed === true ? null : state.activeTurnId);
+      // Terminal rows carry no turn id. A replay may start after the matching
+      // `turn_started`, so snapshot activity alone cannot safely attribute it.
+      if (turnId === null) {
+        if (framed.replayed === true) {
+          state = withPendingTerminalReconciliation(state, {
+            eventSeq: framed.seq,
+            turnId: null,
+            candidateTurnId: state.activeTurnId,
+            nextTurnId: null,
+            status,
+            usage,
+            error,
+            diffstat,
+            previousUsage: state.lastUsage,
+          });
+          effects.push({
+            type: "turn_snapshot_needed",
+            turnId: null,
+          });
+          effects.push({ type: "turn_resolved" });
+          return {
+            state: {
+              ...state,
+              contentRevision: state.contentRevision + 1,
+            },
+            effects,
+          };
+        }
+        // A reader can attach after the matching start. The terminal still
+        // proves that the worktree may have changed, even when no transcript
+        // turn can be named safely.
+        effects.push({ type: "turn_resolved" });
+        return {
+          state: { ...state, contentRevision: state.contentRevision + 1 },
+          effects,
+        };
+      }
+      effects.push({ type: "turn_resolved" });
+      const hasDurableBoundary = state.durableBoundaryTurnIds.has(turnId);
+      const needsSnapshot = framed.replayed === true && !hasDurableBoundary;
+      if (needsSnapshot) {
+        state = withPendingTerminalReconciliation(state, {
+          eventSeq: framed.seq,
+          turnId,
+          candidateTurnId: turnId,
+          nextTurnId: null,
+          status,
+          usage,
+          error,
+          diffstat,
+          previousUsage: state.lastUsage,
+        });
+        effects.push({ type: "turn_snapshot_needed", turnId });
+      } else {
+        const pending = latestPendingForTurn(state, turnId);
+        if (pending) {
+          state = withoutPendingTerminalReconciliation(state, pending.eventSeq);
+        }
+      }
+      const canMeasureTurn =
+        state.activeTurnId === turnId &&
+        state.turnStartedAt !== null &&
+        (framed.replayed !== true || state.turnStartObservedLive);
+      const turnDuration =
+        canMeasureTurn && !hasDurableBoundary
+          ? durationMs(state.turnStartedAt, deps.now())
+          : null;
       const finalized = finalizeStreaming(
         finalizeStreaming(state.items, "assistant"),
         "reasoning",
@@ -626,21 +1113,32 @@ export function reduceCodeSessionEvent(
         state: {
           ...state,
           busy: false,
-          lastUsage: usage ?? state.lastUsage,
+          lastUsage: needsSnapshot
+            ? state.lastUsage
+            : (usage ?? state.lastUsage),
           assistantBuffer: "",
           reasoningBuffer: "",
           items: turnId
-            ? upsertTurnBoundary(finalized, {
-                turnId,
-                status,
-                durationMs: durationMs(state.turnStartedAt, deps.now()),
-                usage,
-                error,
-                diffstat,
-              })
+            ? upsertTurnBoundary(
+                finalized,
+                {
+                  turnId,
+                  status,
+                  // A snapshot boundary owns completed timing. Replayed or
+                  // duplicate terminal frames can enrich it, but cannot
+                  // replace its server-derived duration with client time.
+                  durationMs: turnDuration,
+                  usage,
+                  error,
+                  diffstat,
+                },
+                state.turnOrdinals,
+              )
             : finalized,
           activeTurnId: null,
+          journalTurnId: null,
           turnStartedAt: null,
+          turnStartObservedLive: false,
           lifecycle: "idle",
           // A failed or interrupted turn still leaves whatever the engine
           // wrote before it stopped, so every resolution is a content change.
@@ -813,12 +1311,33 @@ function insertUserBeforeTurn(
   items: CodeTranscriptItem[],
   user: Extract<CodeTranscriptItem, { kind: "user" }>,
   turnId: string,
+  turnOrdinals: ReadonlyMap<string, number>,
 ): CodeTranscriptItem[] {
-  const index = items.findIndex(
+  let index = items.findIndex(
     (item) => "turnId" in item && item.turnId === turnId,
   );
+  if (index === -1) {
+    const ordinal = turnOrdinals.get(turnId);
+    if (ordinal !== undefined) {
+      index = items.findIndex((item) => {
+        if (!("turnId" in item) || item.turnId === null) return false;
+        const itemOrdinal = turnOrdinals.get(item.turnId);
+        return itemOrdinal !== undefined && itemOrdinal > ordinal;
+      });
+    }
+  }
   if (index === -1) return [...items, user];
   return [...items.slice(0, index), user, ...items.slice(index)];
+}
+
+function acceptedTurnStartedAt(
+  items: readonly CodeTranscriptItem[],
+  turnId: string,
+): string | null {
+  const user = items.find(
+    (item) => item.kind === "user" && item.turnId === turnId,
+  );
+  return user?.kind === "user" ? user.createdAt : null;
 }
 
 function upsertTurnBoundary(
@@ -831,6 +1350,7 @@ function upsertTurnBoundary(
     error: string | null;
     diffstat: Diffstat | null;
   },
+  turnOrdinals: ReadonlyMap<string, number>,
 ): CodeTranscriptItem[] {
   const item: CodeTranscriptItem = {
     kind: "turn_boundary",
@@ -847,7 +1367,9 @@ function upsertTurnBoundary(
       candidate.kind === "turn_boundary" &&
       candidate.turnId === boundary.turnId,
   );
-  if (index === -1) return [...items, item];
+  if (index === -1) {
+    return insertTurnBoundary(items, item, turnOrdinals);
+  }
   const existing = items[index];
   if (existing && existing.kind === "turn_boundary") {
     return [
@@ -863,6 +1385,57 @@ function upsertTurnBoundary(
     ];
   }
   return items;
+}
+
+function replaceTurnBoundary(
+  items: CodeTranscriptItem[],
+  boundary: {
+    turnId: string;
+    status: Exclude<CodeTurnStatus, "running">;
+    durationMs: number | null;
+    usage: CodeUsage | null;
+    error: string | null;
+    diffstat: Diffstat | null;
+  },
+  turnOrdinals: ReadonlyMap<string, number>,
+): CodeTranscriptItem[] {
+  const item: CodeTranscriptItem = {
+    kind: "turn_boundary",
+    id: boundaryItemId(boundary.turnId),
+    turnId: boundary.turnId,
+    status: boundary.status,
+    durationMs: boundary.durationMs,
+    usage: boundary.usage,
+    error: boundary.error,
+    diffstat: boundary.diffstat,
+  };
+  const index = items.findIndex(
+    (candidate) =>
+      candidate.kind === "turn_boundary" &&
+      candidate.turnId === boundary.turnId,
+  );
+  if (index === -1) {
+    return insertTurnBoundary(items, item, turnOrdinals);
+  }
+  return [...items.slice(0, index), item, ...items.slice(index + 1)];
+}
+
+function insertTurnBoundary(
+  items: CodeTranscriptItem[],
+  boundary: Extract<CodeTranscriptItem, { kind: "turn_boundary" }>,
+  turnOrdinals: ReadonlyMap<string, number>,
+): CodeTranscriptItem[] {
+  const ordinal = boundary.turnId
+    ? turnOrdinals.get(boundary.turnId)
+    : undefined;
+  if (ordinal === undefined) return [...items, boundary];
+  const index = items.findIndex((item) => {
+    if (!("turnId" in item) || item.turnId === null) return false;
+    const itemOrdinal = turnOrdinals.get(item.turnId);
+    return itemOrdinal !== undefined && itemOrdinal > ordinal;
+  });
+  if (index === -1) return [...items, boundary];
+  return [...items.slice(0, index), boundary, ...items.slice(index)];
 }
 
 function applyDiffstat(

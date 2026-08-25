@@ -7,6 +7,13 @@ import {
 
 export type CodeConnectionState = "live" | "reconnecting";
 
+export type CodeTurnRefreshRequest = {
+  turnId: string | null;
+  eventSeq: number;
+  /** Journal cursor captured when this refresh generation started. */
+  observedSeq: number;
+};
+
 /** A brief quiet window means the initial journal burst has reached its tail. */
 export const CODE_REPLAY_SETTLE_MS = 40;
 
@@ -38,6 +45,13 @@ export type CodeSessionControllerOptions = {
    */
   hydrateTurns?: () => Promise<CodeTurnSnapshot[]>;
   onHydrate?: (turns: CodeTurnSnapshot[]) => void;
+  /** Read durable turns again when replay leaves a terminal unresolved. */
+  refreshTurns?: () => Promise<CodeTurnSnapshot[]>;
+  onTurnRefresh?: (
+    turns: CodeTurnSnapshot[],
+    requested: readonly CodeTurnRefreshRequest[],
+  ) => void;
+  getPendingTurnRefreshes?: () => readonly CodeTurnRefreshRequest[];
 };
 
 /**
@@ -63,11 +77,16 @@ export class CodeSessionController {
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+  private turnRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private turnRefreshInFlight = false;
+  private turnRefreshRequested = false;
+  private turnRefreshDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private replayFrames: SequencedCodeEventFrame[] = [];
   private replayDelta: {
     type: "assistant_delta" | "reasoning_delta";
     seq: number;
     chunks: string[];
+    truncated: boolean;
   } | null = null;
   private replayFlush: ReturnType<typeof setTimeout> | null = null;
   private initialViewSettled = false;
@@ -90,17 +109,101 @@ export class CodeSessionController {
       }
     }
     this.connect();
+    if (this.pendingTurnRefreshes().length > 0) this.scheduleTurnRefresh();
+  }
+
+  /** Try pending terminal reconciliation now, then retry with bounded backoff. */
+  requestTurnRefresh(): void {
+    if (
+      this.disposed ||
+      !this.options.refreshTurns ||
+      this.pendingTurnRefreshes().length === 0
+    ) {
+      return;
+    }
+    this.turnRefreshDelayMs = INITIAL_RECONNECT_DELAY_MS;
+    if (this.turnRefreshInFlight) {
+      this.turnRefreshRequested = true;
+      return;
+    }
+    if (this.turnRefreshTimer !== null) {
+      clearTimeout(this.turnRefreshTimer);
+      this.turnRefreshTimer = null;
+    }
+    this.refreshTurnsNow();
+  }
+
+  private refreshTurnsNow(): void {
+    if (
+      this.disposed ||
+      this.turnRefreshInFlight ||
+      !this.options.refreshTurns ||
+      this.pendingTurnRefreshes().length === 0
+    ) {
+      return;
+    }
+    const requested = this.pendingTurnRefreshes();
+    const refreshTurns = this.options.refreshTurns;
+    this.turnRefreshInFlight = true;
+    void Promise.resolve()
+      .then(() => refreshTurns())
+      .then((turns) => {
+        if (this.disposed) return;
+        this.options.onTurnRefresh?.(turns, requested);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.turnRefreshInFlight = false;
+        if (this.disposed) return;
+        if (this.pendingTurnRefreshes().length === 0) {
+          this.turnRefreshRequested = false;
+          this.turnRefreshDelayMs = INITIAL_RECONNECT_DELAY_MS;
+        } else if (this.turnRefreshRequested) {
+          this.turnRefreshRequested = false;
+          this.turnRefreshDelayMs = INITIAL_RECONNECT_DELAY_MS;
+          this.refreshTurnsNow();
+        } else {
+          this.scheduleTurnRefresh();
+        }
+      });
+  }
+
+  private pendingTurnRefreshes(): readonly CodeTurnRefreshRequest[] {
+    return this.options.getPendingTurnRefreshes?.() ?? [];
+  }
+
+  private scheduleTurnRefresh(): void {
+    if (
+      this.disposed ||
+      this.turnRefreshTimer !== null ||
+      this.turnRefreshInFlight ||
+      !this.options.refreshTurns ||
+      this.pendingTurnRefreshes().length === 0
+    ) {
+      return;
+    }
+    const delay = this.turnRefreshDelayMs;
+    this.turnRefreshDelayMs = nextReconnectDelay(this.turnRefreshDelayMs);
+    this.turnRefreshTimer = setTimeout(() => {
+      this.turnRefreshTimer = null;
+      this.refreshTurnsNow();
+    }, delay);
   }
 
   /** Close the socket and silence every callback and pending timer, forever. */
   dispose(): void {
     this.disposed = true;
+    this.turnRefreshRequested = false;
     this.cancelReplayFlush();
     this.replayFrames = [];
     this.replayDelta = null;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.turnRefreshTimer !== null) {
+      clearTimeout(this.turnRefreshTimer);
+      this.turnRefreshTimer = null;
     }
     if (this.socket) {
       this.socket.close();
@@ -129,12 +232,14 @@ export class CodeSessionController {
       ) {
         previous.seq = frame.seq;
         previous.chunks.push(frame.event.text);
+        previous.truncated ||= frame.truncated === true;
       } else {
         this.flushReplayDelta();
         this.replayDelta = {
           type: frame.event.type,
           seq: frame.seq,
           chunks: [frame.event.text],
+          truncated: frame.truncated === true,
         };
       }
     } else {
@@ -164,6 +269,7 @@ export class CodeSessionController {
     this.replayFrames.push({
       seq: delta.seq,
       replayed: true,
+      ...(delta.truncated ? { truncated: true } : {}),
       event: { type: delta.type, text: delta.chunks.join("") },
     });
     this.replayDelta = null;
