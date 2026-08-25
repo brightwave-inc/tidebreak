@@ -21,46 +21,32 @@ import {
 import { useGuidedMenu } from "./FirstTaskWalkthrough";
 import { cn } from "@/lib/utils";
 
-/**
- * Every mode in ascending order of autonomy, with its menu copy.
- *
- * The descriptions state the decision order the server actually applies:
- * saved allowlists run without asking in every mode, and the mode governs
- * only the calls no grant covers.
- */
+/** Every mode in ascending order of autonomy. */
 const ASK_PERMISSION_MODE_OPTION = {
   value: "ask",
   label: "Ask",
-  description:
-    "Ask before edits and actions that leave the workspace. Allowlists you've saved still run without asking.",
   icon: ShieldCheck,
 } as const;
 
 const PERMISSION_MODE_SCALE: {
   value: PermissionMode;
   label: string;
-  description: string;
   icon: typeof ShieldCheck;
 }[] = [
   {
     value: "plan",
     label: "Plan",
-    description:
-      "Read-only: the agent explores and proposes a plan. Nothing is edited or run until you switch modes.",
     icon: Eye,
   },
   ASK_PERMISSION_MODE_OPTION,
   {
     value: "auto",
     label: "Auto",
-    description:
-      "Workspace edits run on their own; anything that leaves the workspace still asks.",
     icon: Zap,
   },
   {
     value: "allow",
     label: "Allow all",
-    description: "Everything runs without asking, in this work only.",
     icon: ShieldOff,
   },
 ];
@@ -206,7 +192,7 @@ export function PermissionModeMenu({
       <DropdownMenuContent
         align="end"
         side="top"
-        className="w-72"
+        className="w-64"
         data-first-task-target="permissions-menu"
         onEscapeKeyDown={guided.onEscapeKeyDown}
       >
@@ -223,7 +209,10 @@ export function PermissionModeMenu({
                 if (selected) return;
                 void selectMode(option.value);
               }}
-              className="flex flex-col items-start gap-0.5 py-3"
+              className={cn(
+                "py-2",
+                (locked || unoffered) && "flex-col items-start gap-0.5 py-2.5",
+              )}
               data-first-task-target={
                 option.value === "ask" ? "permissions-ask" : undefined
               }
@@ -246,13 +235,13 @@ export function PermissionModeMenu({
                   selected && <Check className="size-4" />
                 )}
               </div>
-              <span className="text-muted-foreground pl-6 text-xs">
-                {locked
-                  ? "Locked by your organization's policy."
-                  : unoffered
-                    ? "This harness can't honor this mode."
-                    : option.description}
-              </span>
+              {(locked || unoffered) && (
+                <span className="text-muted-foreground pl-6 text-xs">
+                  {locked
+                    ? "Locked by your organization's policy."
+                    : "This harness can't honor this mode."}
+                </span>
+              )}
             </DropdownMenuItem>
           );
         })}

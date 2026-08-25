@@ -443,13 +443,11 @@ describe("NewWorkspaceDialog", () => {
         screen.getByRole("button", { name: "Model: GPT 5.6 Sol" }),
       ).toBeEnabled(),
     );
-    // Allow is the default where the engine honors it, and it says so.
+    // Allow is the default where the engine honors it.
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeEnabled();
-    expect(
-      screen.getByText(/every action runs without asking/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/runs without asking/)).toBeNull();
 
     fireEvent.keyDown(screen.getByRole("dialog"), {
       key: "Enter",

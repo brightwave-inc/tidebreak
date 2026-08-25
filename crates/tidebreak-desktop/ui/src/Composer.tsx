@@ -322,6 +322,8 @@ export type ComposerProps = {
   draft: string;
   /** Prior user messages, newest first, for terminal-style Up/Down recall. */
   history?: readonly string[];
+  /** Engine picker for a draft that starts a new code session. */
+  harnessMenu?: ReactNode;
   modelMenu?: ReactNode;
   /** Sits immediately to the right of `modelMenu` when the surface offers one. */
   effortMenu?: ReactNode;
@@ -372,6 +374,8 @@ export type ComposerProps = {
   steerError: string | null;
   steerPending: boolean;
   steerStatus: string | null;
+  /** Quiet status or guidance that belongs to this composer setup. */
+  footerNote?: ReactNode;
 };
 
 export function Composer({
@@ -382,6 +386,7 @@ export function Composer({
   disabled,
   draft,
   history = [],
+  harnessMenu,
   modelMenu,
   effortMenu,
   fastModeToggle,
@@ -408,6 +413,7 @@ export function Composer({
   steerError,
   steerPending,
   steerStatus,
+  footerNote,
 }: ComposerProps) {
   const contextTriggerId = useId();
   const contextLabelId = `${contextTriggerId}-label`;
@@ -1236,6 +1242,7 @@ export function Composer({
                 : undefined
             }
           />
+          {harnessMenu}
           {modelMenu}
           {fastModeToggle}
           {effortMenu}
@@ -1371,6 +1378,7 @@ export function Composer({
           {steerStatus}
         </span>
       )}
+      {footerNote}
       {steerTooLong && (
         <span className="text-xs text-destructive" role="alert">
           Guidance is too long.

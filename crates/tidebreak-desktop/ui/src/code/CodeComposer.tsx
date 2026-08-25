@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  useEffect,
+  type ReactNode,
+} from "react";
 import {
   Check,
   ChevronDown,
@@ -264,7 +271,7 @@ export function HarnessModelMenu({
         className={
           variant === "field"
             ? "h-10 w-full justify-between px-3 font-normal"
-            : "h-8 max-w-56 min-w-0 gap-2"
+            : "h-8 max-w-56 min-w-0 shrink gap-2"
         }
         disabled
         aria-label={loading ? "Loading models" : "Model: Default"}
@@ -311,7 +318,7 @@ export function HarnessModelMenu({
           className={
             variant === "field"
               ? "h-10 w-full justify-between px-3 font-normal"
-              : "h-8 max-w-56 min-w-0 gap-2"
+              : "h-8 max-w-56 min-w-0 shrink gap-2"
           }
           disabled={locked}
           aria-label={`Model: ${current.label}`}
@@ -614,6 +621,8 @@ export function CodeComposer({
   model,
   modelOptions,
   modelLoading = false,
+  harnessMenu,
+  footerNote,
   promptScope,
   sessionId,
   history,
@@ -641,6 +650,10 @@ export function CodeComposer({
   model?: string;
   modelOptions?: readonly CodeModelOption[];
   modelLoading?: boolean;
+  /** Engine picker shown before the model control when starting a session. */
+  harnessMenu?: ReactNode;
+  /** Setup status shown inside the composer after its controls. */
+  footerNote?: ReactNode;
   /** Workspace identity used to route header actions to the matching composer. */
   promptScope?: string;
   sessionId?: string;
@@ -940,6 +953,7 @@ export function CodeComposer({
         disabled={Boolean(disabled)}
         draft={draft}
         history={history}
+        harnessMenu={harnessMenu}
         modelMenu={
           harness && ((modelOptions?.length ?? 0) > 0 || modelLoading) ? (
             <HarnessModelMenu
@@ -1032,6 +1046,7 @@ export function CodeComposer({
         steerError={steerError}
         steerPending={steerPending}
         steerStatus={steerStatus}
+        footerNote={footerNote}
       />
       {sessionId && (
         <input

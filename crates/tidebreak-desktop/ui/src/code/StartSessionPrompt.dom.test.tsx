@@ -15,7 +15,6 @@ import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
-import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
@@ -135,7 +134,7 @@ describe("StartSessionPrompt", () => {
     expect(document.querySelector('input[type="file"][accept]')).toBeNull();
   });
 
-  it("defaults to the widest mode the engine honors, says so, and starts on Cmd+Enter", async () => {
+  it("defaults to the widest mode the engine honors and starts on Cmd+Enter", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
@@ -153,7 +152,10 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
+    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    expect(
+      screen.getByRole("combobox", { name: "Harness" }).closest("form"),
+    ).toHaveClass("chat-composer");
     const field = screen.getByRole("textbox", { name: "Message" });
     await user.type(field, "list the files");
     await user.keyboard("{Meta>}{Enter}{/Meta}");
@@ -202,7 +204,7 @@ describe("StartSessionPrompt", () => {
     );
   });
 
-  it("switches an Auto-only engine to unsupervised Auto and says so", async () => {
+  it("switches an Auto-only engine to Auto without extra permission copy", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
@@ -224,14 +226,13 @@ describe("StartSessionPrompt", () => {
         />,
       ),
     );
-    expect(screen.queryByText(UNSUPERVISED_AUTO_NOTE)).toBeNull();
     await user.click(screen.getByRole("combobox", { name: "Harness" }));
     await user.click(screen.getByRole("option", { name: /Grok CLI/ }));
     // The selected Ask is not honorable here; the mode follows the engine.
     expect(
       screen.getByRole("button", { name: "Permissions: Auto" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
+    expect(screen.queryByText(/runs without asking/)).toBeNull();
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
       "list the files",

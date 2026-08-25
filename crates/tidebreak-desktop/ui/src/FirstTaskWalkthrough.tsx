@@ -51,7 +51,7 @@ const STEPS: readonly WalkthroughStep[] = [
     surface: "permissions",
     targets: ["permissions-ask", "permissions-menu"],
     title: "Choose a permission level",
-    body: "The permission menu is open. Plan stays read-only, Ask confirms actions, Auto handles routine workspace work, and Allow all runs without asking in this work. Ask is a balanced place to start.",
+    body: "The permission menu is open. Choose a level for this work.",
   },
   {
     id: "attachments",

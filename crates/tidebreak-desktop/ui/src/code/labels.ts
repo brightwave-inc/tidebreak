@@ -99,14 +99,6 @@ export const PERMISSION_MODE_UNAVAILABLE_REASON =
 export const SESSION_PERMISSION_MODE_LOCKED =
   "Set when the session started — start a new session to change it";
 
-/** Stated wherever unsupervised Auto is offered (decision 0038). */
-export const UNSUPERVISED_AUTO_NOTE =
-  "This engine has no approval channel: in Auto, every action runs without asking.";
-
-/** Stated wherever Allow is offered (decision 0039). */
-export const ALLOW_ALL_NOTE =
-  "This engine's permission system is off: every action runs without asking.";
-
 /** The capability flags the mode policy reads. */
 export type ModeCaps = Pick<
   HarnessCaps,
