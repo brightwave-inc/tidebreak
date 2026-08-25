@@ -7,12 +7,13 @@ use crate::code::{
     CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
-    append_event, bump_spawn_epoch, delete_queued_turn, delete_session_queued_turns,
-    enqueue_queued_turn, get_approval, get_repo, get_repo_by_root_path, get_session, get_turn,
-    get_workspace, insert_approval, insert_repo, insert_session, insert_turn, insert_workspace,
-    list_approvals, list_events, list_queued_turns, list_repos, list_sessions, list_turn_metrics,
-    list_turns, mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
-    replace_session_attention, save_session, save_turn, set_queue_paused, set_session_subagents,
+    append_event, bump_spawn_epoch, clear_session_harness_resume_ref, delete_queued_turn,
+    delete_session_queued_turns, enqueue_queued_turn, get_approval, get_repo,
+    get_repo_by_root_path, get_session, get_turn, get_workspace, insert_approval, insert_repo,
+    insert_session, insert_turn, insert_workspace, list_approvals, list_events, list_queued_turns,
+    list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
+    promote_queued_turn, queue_paused, queued_turn_head, replace_session_attention, save_session,
+    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
     set_turn_narrative, set_workspace_title_if, update_queued_turn, CodeJournalError,
     MAX_REPLAY_EVENTS,
 };
@@ -268,6 +269,52 @@ async fn session_subagents_round_trip_through_the_targeted_write() {
     )
     .await
     .unwrap());
+}
+
+/// A worker can learn its resume ref after it snapshots the session row. A
+/// later pid save from that stale copy must preserve the targeted write, while
+/// an engine rejection still needs an explicit way to clear the ref.
+#[tokio::test]
+async fn stale_session_saves_preserve_resume_refs_until_an_explicit_clear() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut stale = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    stale.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &stale).await.unwrap());
+    assert!(
+        set_session_harness_resume_ref(&store, &owner, session_id, 0, "session-ref")
+            .await
+            .unwrap()
+    );
+
+    stale.child_pid = Some(4242);
+    assert!(save_session(&store, &stale).await.unwrap());
+    assert_eq!(
+        get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .harness_resume_ref
+            .as_deref(),
+        Some("session-ref")
+    );
+
+    assert!(
+        clear_session_harness_resume_ref(&store, &owner, session_id, 0)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .harness_resume_ref,
+        None
+    );
 }
 
 /// A full session save may carry attention read before a trigger notification.

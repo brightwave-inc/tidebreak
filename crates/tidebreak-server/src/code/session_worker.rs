@@ -198,12 +198,6 @@ pub(crate) struct QueuedFollowUp {
     pub queued_row: Option<Box<CodeQueuedTurn>>,
 }
 
-#[derive(Default)]
-struct ResumeRefState {
-    pending: Option<String>,
-    persisted: Option<String>,
-}
-
 pub(crate) struct LiveSink {
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
@@ -213,14 +207,12 @@ pub(crate) struct LiveSink {
     session_id: CodeSessionId,
     spawn_epoch: i64,
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
-    /// Resume ref reported during engine startup and its durable promotion.
+    /// Resume ref reported during engine startup but not yet proven durable.
     ///
     /// Codex creates a thread before it writes that thread to disk. The first
     /// turn event promotes this candidate into the session row, so a restart
-    /// keeps real context without trying to resume an unused thread. The same
-    /// lock covers mid-turn full-row saves, so no save can land between the
-    /// targeted write and the worker adopting its result.
-    resume_ref: tokio::sync::Mutex<ResumeRefState>,
+    /// keeps real context without trying to resume an unused thread.
+    pending_resume_ref: std::sync::Mutex<Option<String>>,
     /// Where tests point `gh`; `None` outside tests. Snapshotted at attach so
     /// the post-turn fact detector confirms against the same binary every
     /// other gh call in the process resolves (decision 62).
@@ -253,33 +245,13 @@ impl LiveSink {
         total.saturating_sub(flushed)
     }
 
-    async fn note_resume_ref(&self, resume_ref: String) {
-        self.resume_ref.lock().await.pending = Some(resume_ref);
-    }
-
-    /// Copy the resume ref this sink persisted onto the worker's session copy.
-    async fn adopt_persisted_resume_ref(&self, session: &mut CodeSession) {
-        if let Some(resume_ref) = self.resume_ref.lock().await.persisted.clone() {
-            session.harness_resume_ref = Some(resume_ref);
-        }
-    }
-
-    /// Persist a full session row without racing the targeted resume-ref write.
-    async fn save_session_with_resume_ref(
-        &self,
-        session: &mut CodeSession,
-    ) -> Result<bool, tidebreak_core::AgentError> {
-        let resume_ref = self.resume_ref.lock().await;
-        if let Some(persisted) = resume_ref.persisted.clone() {
-            session.harness_resume_ref = Some(persisted);
-        }
-        save_session(&self.db, session).await
-    }
-
     /// Persist a reported resume ref after the engine proves a turn started.
     async fn persist_pending_resume_ref(&self) {
-        let mut resume_ref = self.resume_ref.lock().await;
-        let candidate = resume_ref.pending.clone();
+        let candidate = self
+            .pending_resume_ref
+            .lock()
+            .expect("code sink resume ref")
+            .clone();
         let Some(candidate) = candidate else {
             return;
         };
@@ -293,15 +265,21 @@ impl LiveSink {
         .await
         {
             Ok(true) => {
-                resume_ref.persisted = Some(candidate.clone());
-                if resume_ref.pending.as_deref() == Some(candidate.as_str()) {
-                    resume_ref.pending = None;
+                let mut pending = self
+                    .pending_resume_ref
+                    .lock()
+                    .expect("code sink resume ref");
+                if pending.as_deref() == Some(candidate.as_str()) {
+                    *pending = None;
                 }
             }
             Ok(false) => {
                 // This worker no longer owns a running session. Do not retry
                 // the stale write on every later event.
-                resume_ref.pending = None;
+                *self
+                    .pending_resume_ref
+                    .lock()
+                    .expect("code sink resume ref") = None;
             }
             Err(error) => warn!(
                 session = %self.session_id,
@@ -470,7 +448,10 @@ impl HarnessEventSink for LiveSink {
             ..
         } = &event
         {
-            self.note_resume_ref(resume_ref.clone()).await;
+            *self
+                .pending_resume_ref
+                .lock()
+                .expect("code sink resume ref") = Some(resume_ref.clone());
         }
         if matches!(
             &event,
@@ -1354,7 +1335,7 @@ async fn drive_turn_inner(
             pid = next_child_pid(pid_changes.as_mut()) => {
                 if session.child_pid != pid {
                     session.child_pid = pid;
-                    let _ = sink.save_session_with_resume_ref(session).await;
+                    let _ = save_session(db, session).await;
                 }
             }
         }
@@ -1387,7 +1368,6 @@ async fn drive_turn_inner(
         None
     };
 
-    sink.adopt_persisted_resume_ref(session).await;
     if let Some(pid) = engine.child_pid() {
         session.child_pid = Some(pid);
     } else {
@@ -1900,7 +1880,7 @@ pub(crate) fn sink_for(
         session_id,
         spawn_epoch,
         turn_id: std::sync::Mutex::new(turn_id),
-        resume_ref: tokio::sync::Mutex::new(ResumeRefState::default()),
+        pending_resume_ref: std::sync::Mutex::new(None),
         gh_search_path,
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
@@ -2527,10 +2507,7 @@ mod tests {
         // the real worker path and prove that its stale session copy keeps the
         // ref instead of replacing it with NULL during the full-row save.
         worker_session.child_pid = Some(4242);
-        assert!(sink
-            .save_session_with_resume_ref(&mut worker_session)
-            .await
-            .unwrap());
+        assert!(save_session(&store, &worker_session).await.unwrap());
         assert_eq!(
             get_session(&store, &owner, session_id)
                 .await
