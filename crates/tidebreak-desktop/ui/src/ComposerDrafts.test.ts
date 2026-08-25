@@ -42,12 +42,18 @@ describe("composer draft attachments", () => {
     const store = useComposerDrafts.getState();
     store.setImages("chat-1", [READY_IMAGE, QUEUED_IMAGE]);
     store.setFiles("chat-1", [IMPORTED_FILE]);
+    store.setPastedTexts("chat-1", [
+      { id: "paste-1", text: "A long pasted source" },
+    ]);
     store.setFolders("chat-1", ["root-1"]);
 
     // A fresh store is what the next load of the page gets.
     const restored =
       createComposerDraftStore().getState().attachments["chat-1"];
     expect(restored.files).toEqual([IMPORTED_FILE]);
+    expect(restored.pastedTexts).toEqual([
+      { id: "paste-1", text: "A long pasted source" },
+    ]);
     expect(restored.folders).toEqual(["root-1"]);
     // The published image re-sends as-is; the queued one was a promise to
     // move bytes no storage can hold, so no chip comes back for it.

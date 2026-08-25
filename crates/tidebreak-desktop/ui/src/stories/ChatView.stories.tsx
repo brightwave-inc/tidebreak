@@ -41,6 +41,7 @@ import {
   useComposerDrafts,
   type ComposerAttachmentDraft,
 } from "@/ComposerDrafts";
+import { messageWithPastedText } from "@/PastedText";
 import type {
   ComposerFiles,
   ComposerFolders,
@@ -692,6 +693,9 @@ function seedScenario(scenario: StoryScenario): void {
     .setFiles(CHAT_ID, scenario.attachments?.files ?? []);
   useComposerDrafts
     .getState()
+    .setPastedTexts(CHAT_ID, scenario.attachments?.pastedTexts ?? []);
+  useComposerDrafts
+    .getState()
     .setSkills(CHAT_ID, scenario.attachments?.skills ?? []);
   useComposerDrafts
     .getState()
@@ -789,7 +793,9 @@ function StoryChat({
     useComposerDrafts.getState().setDraft(CHAT_ID, value);
   };
   const submitDraft = async () => {
-    const text = draftRef.current.trim();
+    const pastedTexts =
+      useComposerDrafts.getState().attachments[CHAT_ID]?.pastedTexts ?? [];
+    const text = messageWithPastedText(draftRef.current, pastedTexts);
     if (!text) return;
     useChatSessionStore.getState().update((session) => ({
       ...session,
@@ -804,12 +810,16 @@ function StoryChat({
       ],
     }));
     updateDraft("");
+    useComposerDrafts.getState().setPastedTexts(CHAT_ID, []);
   };
   const queueDraft = async () => {
-    const text = draftRef.current.trim();
+    const pastedTexts =
+      useComposerDrafts.getState().attachments[CHAT_ID]?.pastedTexts ?? [];
+    const text = messageWithPastedText(draftRef.current, pastedTexts);
     if (!text) return;
     client.enqueue(text);
     updateDraft("");
+    useComposerDrafts.getState().setPastedTexts(CHAT_ID, []);
   };
   const retryTurn = (turn: RetryableTurn) => updateDraft(turn.text);
 
@@ -824,7 +834,6 @@ function StoryChat({
             hydrated
             nativeHost={scenario.nativeHost ?? false}
             deletingChat={false}
-            draftRef={draftRef}
             composerModelMenu={
               <ModelMenu
                 models={storyModels}
@@ -947,6 +956,32 @@ export const AttachmentsAndDraft: Story = {
     const composer = await canvas.findByRole("textbox", { name: "Message" });
     await userEvent.click(composer);
     await expect(composer).toHaveFocus();
+  },
+};
+
+export const PastedTextAndDraft: Story = {
+  args: {
+    scenario: {
+      id: "pasted-text-and-draft",
+      messages: baseMessages,
+      draft:
+        "Summarize the pasted release notes and call out breaking changes.",
+      attachments: {
+        pastedTexts: [
+          {
+            id: "paste-storybook",
+            text: "Release notes for desktop synchronization\n\nThe client now restores unfinished uploads after restart. Existing sessions keep their original attachment identifiers.",
+          },
+        ],
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByText("Pasted text")).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Remove pasted text" }),
+    ).toBeVisible();
   },
 };
 

@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
@@ -56,12 +55,9 @@ function noFiles() {
 }
 
 /**
- * The pane with the draft wired up the way the root wires it: the store slice
- * the pane subscribes to, and a ref for reading it at the moment guidance is
- * sent.
+ * The pane with the draft wired up through the store slice it subscribes to.
  */
 function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
-  const draftRef = useRef("");
   return (
     <ChatView
       client={client}
@@ -69,7 +65,6 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       hydrated
       nativeHost={false}
       deletingChat={false}
-      draftRef={draftRef}
       composerModelMenu={null}
       composerPermissionMenu={null}
       composerImages={noImages()}
@@ -77,10 +72,9 @@ function DraftingChatView(overrides: Partial<ChatViewProps> = {}) {
       voiceInputUsed={false}
       onVoiceInputAccepted={vi.fn()}
       attachError={null}
-      onDraftChange={(value) => {
-        draftRef.current = value;
-        useComposerDrafts.getState().setDraft(chat.id, value);
-      }}
+      onDraftChange={(value) =>
+        useComposerDrafts.getState().setDraft(chat.id, value)
+      }
       onSelectPrompt={vi.fn()}
       onSend={vi.fn(async () => {})}
       {...overrides}
@@ -95,7 +89,6 @@ function chatViewProps(overrides: Partial<ChatViewProps> = {}): ChatViewProps {
     hydrated: true,
     nativeHost: false,
     deletingChat: false,
-    draftRef: { current: "" },
     composerModelMenu: null,
     composerPermissionMenu: null,
     composerImages: noImages(),
@@ -386,6 +379,38 @@ describe("ChatView", () => {
     await waitFor(() =>
       expect(screen.queryByText("Guidance sent")).not.toBeInTheDocument(),
     );
+  });
+
+  it("sends and clears pasted text used as guidance", async () => {
+    vi.mocked(client.steer).mockResolvedValue(undefined);
+    useChatSessionStore.getState().update((session) => ({
+      ...session,
+      busy: true,
+      activeTurnId: "turn-1",
+    }));
+    useComposerDrafts
+      .getState()
+      .setPastedTexts(chat.id, [
+        { id: "paste-1", text: "First source line\nSecond source line" },
+      ]);
+    await renderWithRouter(<DraftingChatView />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Steer active response" }),
+    );
+
+    await waitFor(() =>
+      expect(client.steer).toHaveBeenCalledWith(
+        "chat-1",
+        "turn-1",
+        expect.any(String),
+        "<pasted_text>\nFirst source line\nSecond source line\n</pasted_text>",
+        true,
+        false,
+        [],
+      ),
+    );
+    expect(screen.queryByText("Pasted text")).toBeNull();
   });
 
   it("retires the redirect failure the reader is answering by retyping", async () => {
