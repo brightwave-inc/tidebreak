@@ -784,6 +784,10 @@ jobs:
         run: >-
           cargo test -p tidebreak-core --no-default-features --features postgres
           --test postgres_code_owner --locked
+      - name: Exercise released schema upgrades on PostgreSQL
+        run: >-
+          cargo test -p tidebreak-core --no-default-features --features postgres
+          --test postgres_release_upgrade --locked
 
   self-host-build:
     name: self-host server build

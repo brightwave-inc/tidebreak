@@ -52,8 +52,243 @@ impl MigratorTrait for Migrator {
             Box::new(CodePullRequestLiveTier),
             Box::new(CodePullRequestEtags),
             Box::new(CodeTurnModelSnapshot),
+            Box::new(PrePinCodeLifecycleRepair),
         ]
     }
+}
+
+/// Close the known self-host gap left by the last mutable baseline.
+///
+/// Tidebreak v0.60.0 added repository removal and clone provenance, workspace
+/// release state, session reasoning effort, and wider state vocabularies by
+/// editing the baseline in place. A PostgreSQL database created by v0.58.0 or
+/// v0.59.0 had already recorded that baseline name, so SeaORM never ran those
+/// statements. Later migrations repaired added tables, but not changed tables.
+///
+/// The baseline is frozen now, so this is the one historical repair. Every
+/// later schema change already has to append its own migration.
+struct PrePinCodeLifecycleRepair;
+
+impl MigrationName for PrePinCodeLifecycleRepair {
+    fn name(&self) -> &str {
+        "m20260825_000015_pre_pin_code_lifecycle_repair"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for PrePinCodeLifecycleRepair {
+    fn use_transaction(&self) -> Option<bool> {
+        Some(true)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        add_pre_pin_code_columns(manager).await?;
+        replace_code_repo_registration_index(manager).await?;
+
+        if manager.get_database_backend() == DbBackend::Postgres {
+            widen_pre_pin_postgres_checks(manager).await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The frozen baseline declares this schema. Removing any part of it
+        // would leave both fresh and upgraded databases below that contract.
+        Ok(())
+    }
+}
+
+async fn add_pre_pin_code_columns(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    if !manager.has_column("code_repo", "removed_at").await? {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::CodeRepo::Table)
+                    .add_column(
+                        ColumnDef::new(idens::CodeRepo::RemovedAt).timestamp_with_time_zone(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+    }
+    if !manager.has_column("code_repo", "cloned_from").await? {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::CodeRepo::Table)
+                    .add_column(ColumnDef::new(idens::CodeRepo::ClonedFrom).text())
+                    .to_owned(),
+            )
+            .await?;
+    }
+    if !manager.has_column("code_workspace", "released_at").await? {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::CodeWorkspace::Table)
+                    .add_column(
+                        ColumnDef::new(idens::CodeWorkspace::ReleasedAt).timestamp_with_time_zone(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+    }
+    if !manager.has_column("code_workspace", "released_tip").await? {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::CodeWorkspace::Table)
+                    .add_column(ColumnDef::new(idens::CodeWorkspace::ReleasedTip).text())
+                    .to_owned(),
+            )
+            .await?;
+    }
+    if !manager.has_column("code_workspace", "bundle_bytes").await? {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::CodeWorkspace::Table)
+                    .add_column(ColumnDef::new(idens::CodeWorkspace::BundleBytes).big_integer())
+                    .to_owned(),
+            )
+            .await?;
+    }
+    if !manager
+        .has_column("code_session", "reasoning_effort")
+        .await?
+    {
+        let mut column = ColumnDef::new(idens::CodeSession::ReasoningEffort);
+        column.text();
+        if manager.get_database_backend() == DbBackend::Sqlite {
+            column.check(
+                Expr::col(idens::CodeSession::ReasoningEffort)
+                    .is_null()
+                    .or(Expr::col(idens::CodeSession::ReasoningEffort)
+                        .is_in(["none", "low", "medium", "high", "xhigh", "max", "ultra"])),
+            );
+        }
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(idens::CodeSession::Table)
+                    .add_column(column)
+                    .to_owned(),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn replace_code_repo_registration_index(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .drop_index(
+            Index::drop()
+                .name("idx_code_repo_owner_root_path")
+                .table(idens::CodeRepo::Table)
+                .if_exists()
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_code_repo_owner_root_path")
+                .table(idens::CodeRepo::Table)
+                .col(idens::CodeRepo::Owner)
+                .col(idens::CodeRepo::RootPath)
+                .unique()
+                .and_where(Expr::col(idens::CodeRepo::RemovedAt).is_null())
+                .to_owned(),
+        )
+        .await
+}
+
+async fn widen_pre_pin_postgres_checks(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    manager
+        .get_connection()
+        .execute_unprepared(
+            r#"
+DO $repair$
+DECLARE
+    old_constraint text;
+BEGIN
+    FOR old_constraint IN
+        SELECT constraint_row.conname
+        FROM pg_constraint AS constraint_row
+        JOIN pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conrelid = 'code_workspace'::regclass
+          AND constraint_row.contype = 'c'
+          AND attribute_row.attname = 'status'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE "code_workspace" DROP CONSTRAINT %I',
+            old_constraint
+        );
+    END LOOP;
+END
+$repair$;
+ALTER TABLE "code_workspace"
+    ADD CONSTRAINT "code_workspace_status_check"
+    CHECK ("status" IN ('creating', 'setup_failed', 'active', 'archived', 'released'));
+
+DO $repair$
+DECLARE
+    old_constraint text;
+BEGIN
+    FOR old_constraint IN
+        SELECT constraint_row.conname
+        FROM pg_constraint AS constraint_row
+        JOIN pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conrelid = 'code_session'::regclass
+          AND constraint_row.contype = 'c'
+          AND attribute_row.attname = 'reasoning_effort'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE "code_session" DROP CONSTRAINT %I',
+            old_constraint
+        );
+    END LOOP;
+END
+$repair$;
+ALTER TABLE "code_session"
+    ADD CONSTRAINT "code_session_reasoning_effort_check"
+    CHECK (
+        "reasoning_effort" IS NULL
+        OR "reasoning_effort" IN ('none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+    );
+
+DO $repair$
+DECLARE
+    old_constraint text;
+BEGIN
+    FOR old_constraint IN
+        SELECT constraint_row.conname
+        FROM pg_constraint AS constraint_row
+        JOIN pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conrelid = 'code_approval'::regclass
+          AND constraint_row.contype = 'c'
+          AND attribute_row.attname = 'state'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE "code_approval" DROP CONSTRAINT %I',
+            old_constraint
+        );
+    END LOOP;
+END
+$repair$;
+ALTER TABLE "code_approval"
+    ADD CONSTRAINT "code_approval_state_check"
+    CHECK ("state" IN ('pending', 'approved', 'denied', 'abandoned'));
+"#,
+        )
+        .await?;
+    Ok(())
 }
 
 /// Model and service-tier identity captured when a code turn starts.
@@ -1706,6 +1941,7 @@ mod tests {
                 "m20260824_000012_code_pull_request_live_tier",
                 "m20260824_000013_code_pull_request_etags",
                 "m20260824_000014_code_turn_model_snapshot",
+                "m20260825_000015_pre_pin_code_lifecycle_repair",
             ]
         );
         assert!(db
@@ -1809,6 +2045,82 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.try_get::<String>("", "owner").unwrap(), "local");
+    }
+
+    /// The first hosted machine ran v0.58.0, whose recorded baseline lacked
+    /// repository lifecycle columns. The repair keeps its row and replaces
+    /// the old all-rows uniqueness with the soft-removal contract.
+    #[tokio::test]
+    async fn a_v058_code_repo_gains_the_pre_pin_lifecycle_schema() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE app (
+                id TEXT PRIMARY KEY NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'local',
+                name TEXT NOT NULL,
+                current_revision_id TEXT NOT NULL,
+                revision_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE TABLE code_repo (
+                id TEXT PRIMARY KEY NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'local',
+                root_path TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                default_base_ref TEXT NOT NULL,
+                branch_prefix TEXT NOT NULL,
+                setup_script TEXT,
+                archive_script TEXT,
+                quick_actions TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX idx_code_repo_owner_root_path
+                ON code_repo (owner, root_path);
+            INSERT INTO code_repo (
+                id, owner, root_path, display_name, default_base_ref,
+                branch_prefix, quick_actions, created_at
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000011', 'local', '/srv/pre-pin',
+                'pre-pin', 'main', 'tidebreak/', '[]', '2026-08-20T12:00:00Z'
+            )",
+        )
+        .await
+        .unwrap();
+
+        Migrator::up(&db, None).await.unwrap();
+
+        db.execute_unprepared(
+            "UPDATE code_repo
+             SET removed_at = '2026-08-25T12:00:00Z'
+             WHERE id = '00000000-0000-0000-0000-000000000011';
+             INSERT INTO code_repo (
+                 id, owner, root_path, display_name, default_base_ref,
+                 branch_prefix, quick_actions, created_at
+             ) VALUES (
+                 '00000000-0000-0000-0000-000000000012', 'local', '/srv/pre-pin',
+                 'pre-pin-again', 'main', 'tidebreak/', '[]',
+                 '2026-08-25T12:00:00Z'
+             )",
+        )
+        .await
+        .unwrap();
+
+        let rows = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT count(*) AS repo_count,
+                        sum(cloned_from IS NULL) AS null_clone_count
+                 FROM code_repo
+                 WHERE owner = 'local' AND root_path = '/srv/pre-pin'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows.try_get::<i64>("", "repo_count").unwrap(), 2);
+        assert_eq!(rows.try_get::<i64>("", "null_clone_count").unwrap(), 2);
     }
 
     #[tokio::test]

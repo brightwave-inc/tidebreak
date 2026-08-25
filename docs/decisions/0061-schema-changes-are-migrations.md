@@ -84,12 +84,12 @@ the epoch deleted the rows. It no longer does. A journal payload change now
 either stays readable from the shape already on disk, or migrates the rows that
 hold it. The two journal fixtures' failure messages say so.
 
-**Self-host keeps the gap it already has, and it is now bounded.** Nothing here
-repairs a PostgreSQL database created before the pin — the tables it is missing
-depend on the day it first ran, which nothing recorded. What changes is that
-every schema change from here reaches it. Closing the pre-pin gap is tracked
-separately (#2490); it needs a schema pin inside the database, which SQLite got
-as a sidecar file and PostgreSQL never got at all.
+**Self-host repairs the known pre-pin shapes.** The ordered chain creates tables
+that older PostgreSQL databases lack. The historical lifecycle repair also adds
+columns and widens checks that `v0.60.0` put into the recorded baseline. Each
+repair checks the live catalog, preserves existing rows, and records its own
+migration name. Versioned PostgreSQL upgrade tests keep the released shapes on
+this path.
 
 Deliberately excluded: the product-major guard stays. A `1.0.0` binary still
 refuses to open a local profile until the rest of the 1.0 checklist is done,
@@ -138,9 +138,9 @@ into `Result<Vec<_>>`, so a single unreadable row fails a whole chat's history
 rather than one message. The fixtures make the change visible; they cannot make
 it compatible.
 
-The pre-pin self-host gap is unchanged and now stated. Anyone running a
-PostgreSQL deployment created before this lands should recreate it; #2490 is
-what removes the "should".
+An existing PostgreSQL deployment upgrades in place. The repair covers the
+released pre-pin schemas, including the `v0.58.0` shape that first ran on the
+hosted machine. Operators do not need to recreate the database.
 
 `reset_pre_v1_state` stays reachable, for profiles below the pin and for a
 database with no marker at all. It stops being reachable when those profiles
@@ -169,6 +169,11 @@ stopped at the baseline and later took the rest of the chain describes the same
 schema as one built in a single pass. Without it the chain and the baseline can
 disagree with nothing to notice, because each database is internally
 consistent.
+
+`postgres_v058_upgrade_repairs_the_pre_pin_code_schema` starts from the exact
+released lifecycle shape, keeps seeded rows, verifies every repaired column and
+check, and confirms that SeaORM records the repair once. The required
+PostgreSQL CI lane runs this test on every workspace change.
 
 `the_schema_baseline_is_pinned` fails on any baseline edit, on both backends,
 and its message says to append a migration instead of regenerating the fixture.
