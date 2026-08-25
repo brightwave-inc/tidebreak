@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -102,6 +103,11 @@ import {
   type PullRequestListGroup,
 } from "./pullRequestPresentation";
 import { arrangeStackLanes, type StackedRow } from "./pullRequestStacks";
+import {
+  deliveryPullRequestDigest,
+  deliveryRepositoryHasMergeQueue,
+  prDirectMergeAction,
+} from "./prActions";
 import {
   STATUS_DOT,
   STATUS_MARK,
@@ -805,6 +811,8 @@ function PullRequestsSurface({
 }) {
   const { client } = useApp();
   const navigate = useNavigate();
+  const { confirm, dialog } = useConfirm();
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [items, setItems] = useState<CodeDeliveryPullRequestSummary[]>([]);
   const [errors, setErrors] = useState<CodeDeliverySourceError[]>([]);
   const [loading, setLoading] = useState(true);
@@ -841,6 +849,51 @@ function PullRequestsSurface({
   const targetKey = target
     ? `${codeDeliveryRepositoryKey(target.repository)}:pull-request:${target.number}`
     : null;
+
+  const refreshList = () => {
+    forceRefresh.current = true;
+    setRevision((value) => value + 1);
+  };
+
+  const runListMerge = async (item: CodeDeliveryPullRequestSummary) => {
+    const action = prDirectMergeAction(deliveryPullRequestDigest(item), {
+      hasMergeQueue: deliveryRepositoryHasMergeQueue(items, item.repository),
+    });
+    if (!action || !item.head_sha || busyId) return;
+    if (action.kind === "merge") {
+      const ok = await confirm({
+        title: `Merge #${item.number}?`,
+        description: `The pull request is squash-merged into ${item.base_branch} on GitHub.`,
+        confirmLabel: "Merge",
+      });
+      if (!ok) return;
+    }
+    setBusyId(item.id);
+    try {
+      const result = await client.runCodeDeliveryPullRequestAction({
+        target: {
+          repository: codeDeliveryRepositoryTarget(item.repository),
+          number: item.number,
+        },
+        action: {
+          type: "merge",
+          method: "squash",
+          auto: action.auto,
+          admin: false,
+          expected_head_sha: item.head_sha,
+        },
+      });
+      if (result.success) toast.success(result.message);
+      else toast.warning(result.message);
+      refreshList();
+    } catch (caught) {
+      toast.error(
+        friendlyErrorMessage(caught, "The pull request action failed."),
+      );
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   useEffect(() => {
     routeSelectionFenced.current = false;
@@ -1000,6 +1053,7 @@ function PullRequestsSurface({
 
   return (
     <div className="flex min-h-0 flex-1">
+      {dialog}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         {error && (
           <InlineLoadError message={error} onRetry={() => void query()} />
@@ -1010,10 +1064,7 @@ function PullRequestsSurface({
           loading={loading}
           count={items.length}
           noun="pull request"
-          onRefresh={() => {
-            forceRefresh.current = true;
-            setRevision((value) => value + 1);
-          }}
+          onRefresh={refreshList}
         />
         {loading && items.length === 0 ? (
           <DeliveryListSkeleton />
@@ -1035,7 +1086,9 @@ function PullRequestsSurface({
               items={items}
               grouping={grouping}
               selectedId={selectedId}
+              busyId={busyId}
               onSelect={selectItem}
+              onMerge={runListMerge}
               scrollRef={scrollRef}
             />
             {nextCursor && (
@@ -1072,16 +1125,17 @@ function PullRequestsSurface({
           key={selected.id}
           client={client}
           summary={selected}
+          hasMergeQueue={deliveryRepositoryHasMergeQueue(
+            items,
+            selected.repository,
+          )}
           initialDetail={
             targetDetailState?.detail?.summary.id === selected.id
               ? targetDetailState.detail
               : undefined
           }
           onClose={closeDetail}
-          onChanged={() => {
-            forceRefresh.current = true;
-            setRevision((value) => value + 1);
-          }}
+          onChanged={refreshList}
           onOpenWorkspace={(workspaceId) =>
             void navigate({
               to: "/code/w/$workspaceId",
@@ -1447,7 +1501,8 @@ function PendingDetailSheet({
 const PR_ROW_HEIGHT = 62;
 const PR_GROUP_HEIGHT = 38;
 const RUN_ROW_HEIGHT = 62;
-const PR_GRID = "grid-cols-[minmax(280px,1fr)_150px_110px_105px_95px]";
+const PR_GRID =
+  "grid-cols-[minmax(280px,1fr)_150px_110px_105px_minmax(8.75rem,auto)_95px]";
 const RUN_GRID = "grid-cols-[minmax(260px,1fr)_150px_140px_110px]";
 
 /**
@@ -1613,13 +1668,17 @@ function PullRequestList({
   items,
   grouping,
   selectedId,
+  busyId,
   onSelect,
+  onMerge,
   scrollRef,
 }: {
   items: CodeDeliveryPullRequestSummary[];
   grouping: PullRequestGrouping;
   selectedId: string | null;
+  busyId: string | null;
   onSelect: (id: string) => void;
+  onMerge: (item: CodeDeliveryPullRequestSummary) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const rows = useMemo(
@@ -1627,7 +1686,7 @@ function PullRequestList({
     [grouping, items],
   );
   return (
-    <div role="list" aria-label="Pull requests" className="min-w-[900px]">
+    <div role="list" aria-label="Pull requests" className="min-w-[1040px]">
       <div
         className={cn(
           "sticky top-0 z-10 grid gap-4 border-b border-border-subtle bg-background/95 px-5 py-2 text-xs font-medium text-muted-foreground backdrop-blur",
@@ -1638,6 +1697,7 @@ function PullRequestList({
         <span>Status</span>
         <span>Checks</span>
         <span>Comments</span>
+        <span>Action</span>
         <span className="text-right">Updated</span>
       </div>
       <VirtualRows
@@ -1657,7 +1717,13 @@ function PullRequestList({
               stackedOn={entry.row.stackedOn}
               showRepository={entry.showRepository}
               active={selectedId === entry.row.item.id}
+              busy={busyId === entry.row.item.id}
+              hasMergeQueue={deliveryRepositoryHasMergeQueue(
+                items,
+                entry.row.item.repository,
+              )}
               onSelect={() => onSelect(entry.row.item.id)}
+              onMerge={() => onMerge(entry.row.item)}
             />
           )
         }
@@ -1820,23 +1886,32 @@ function PullRequestRow({
   stackedOn,
   showRepository,
   active,
+  busy,
+  hasMergeQueue,
   onSelect,
+  onMerge,
 }: {
   item: CodeDeliveryPullRequestSummary;
   depth: number;
   stackedOn?: number;
   showRepository: boolean;
   active: boolean;
+  busy: boolean;
+  hasMergeQueue: boolean;
   onSelect: () => void;
+  onMerge: () => void;
 }) {
   const lifecycle = pullRequestLifecycle(item);
   const status = pullRequestListStatus(item);
   const checks = checkSummary(checkCounts(item.checks));
   const comments = item.comment_count;
+  const mergeAction = item.head_sha
+    ? prDirectMergeAction(deliveryPullRequestDigest(item), { hasMergeQueue })
+    : null;
   return (
-    <button
-      type="button"
+    <div
       role="listitem"
+      tabIndex={0}
       data-active={active || undefined}
       data-depth={depth}
       data-status-group={status.group}
@@ -1845,6 +1920,13 @@ function PullRequestRow({
         PR_GRID,
       )}
       onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
     >
       <span
         className="min-w-0"
@@ -1921,10 +2003,27 @@ function PullRequestRow({
               : `${comments} ${comments === 1 ? "comment" : "comments"}`}
         </span>
       </span>
+      <span className="flex items-center">
+        {mergeAction ? (
+          <Button
+            type="button"
+            size="xs"
+            variant={mergeAction.kind === "merge" ? "default" : "outline"}
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation();
+              onMerge();
+            }}
+          >
+            {busy && <LoaderCircle className="animate-spin" />}
+            {mergeAction.label}
+          </Button>
+        ) : null}
+      </span>
       <span className="flex items-center justify-end text-xs text-muted-foreground">
         {relativeTime(item.updated_at)}
       </span>
-    </button>
+    </div>
   );
 }
 

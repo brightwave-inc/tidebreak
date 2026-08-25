@@ -404,6 +404,77 @@ describe("delivery pull request list", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers one host merge action per live row", async () => {
+    renderList();
+    expect(
+      within(await rowFor("Make workspace deep links durable")).getByRole(
+        "button",
+        { name: "Merge" },
+      ),
+    ).toBeEnabled();
+    expect(
+      within(await rowFor("Build the delivery center")).getByRole("button", {
+        name: "Enable auto-merge",
+      }),
+    ).toBeEnabled();
+    expect(
+      within(
+        await rowFor("Let the catalog say which scopes a server accepts"),
+      ).getByRole("button", { name: "Merge when ready" }),
+    ).toBeEnabled();
+    expect(
+      within(
+        await rowFor("Ask a hosted MCP server which scopes it accepts"),
+      ).queryByRole("button", {
+        name: /Merge|Enable auto-merge|Merge when ready/,
+      }),
+    ).toBeNull();
+    expect(
+      within(
+        await rowFor("Cache the workspace digest between polls"),
+      ).queryByRole("button", {
+        name: /Merge|Enable auto-merge|Merge when ready/,
+      }),
+    ).toBeNull();
+  });
+
+  it("merges a ready row through the delivery API after confirm", async () => {
+    const user = userEvent.setup();
+    const runAction = vi.fn(async (_body: unknown) => ({
+      success: true,
+      message: "Pull request #2247 merged",
+    }));
+    renderList(
+      deliveryClient({
+        runCodeDeliveryPullRequestAction: runAction,
+      }),
+    );
+
+    await user.click(
+      within(await rowFor("Make workspace deep links durable")).getByRole(
+        "button",
+        { name: "Merge" },
+      ),
+    );
+    expect(runAction).not.toHaveBeenCalled();
+    await user.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "Merge",
+      }),
+    );
+    await waitFor(() => expect(runAction).toHaveBeenCalledTimes(1));
+    expect(runAction.mock.calls[0]![0]).toMatchObject({
+      target: { number: 2247 },
+      action: {
+        type: "merge",
+        auto: false,
+        admin: false,
+        expected_head_sha: "73fc201",
+      },
+    });
+    expect(toast.success).toHaveBeenCalled();
+  });
+
   it("shows comment counts without opening the pull request", async () => {
     renderList();
     expect(

@@ -67,6 +67,7 @@ import { MiddleTruncate } from "./MiddleTruncate";
 import {
   deliveryPullRequestDigest,
   prAgentQuickActions,
+  prDirectMergeAction,
   prFreshAgentPrompt,
   prWorkflowPrompt,
   type PrPromptAction,
@@ -155,6 +156,7 @@ export function PullRequestDetailSheet({
   client,
   summary,
   initialDetail,
+  hasMergeQueue = false,
   onClose,
   onChanged,
   onOpenWorkspace,
@@ -167,6 +169,8 @@ export function PullRequestDetailSheet({
     | "writeCodeCheckLogs"
   >;
   summary: CodeDeliveryPullRequestSummary;
+  /** True when this repository already uses a merge queue. */
+  hasMergeQueue?: boolean;
   initialDetail?: CodeDeliveryPullRequestDetail;
   onClose: () => void;
   onChanged: () => void;
@@ -422,6 +426,7 @@ export function PullRequestDetailSheet({
                 <PrActions
                   detail={detail}
                   summary={current}
+                  hasMergeQueue={hasMergeQueue}
                   busy={busy}
                   mergeMethod={mergeMethod}
                   onMergeMethodChange={setMergeMethod}
@@ -763,6 +768,7 @@ function freshAgentWorkspaceTitle(
 function PrActions({
   detail,
   summary,
+  hasMergeQueue,
   busy,
   mergeMethod,
   onMergeMethodChange,
@@ -775,6 +781,7 @@ function PrActions({
 }: {
   detail: CodeDeliveryPullRequestDetail;
   summary: CodeDeliveryPullRequestSummary;
+  hasMergeQueue: boolean;
   busy: string | null;
   mergeMethod: MergeMethod;
   onMergeMethodChange: (method: MergeMethod) => void;
@@ -786,11 +793,18 @@ function PrActions({
   onAdminMergeConfirm: () => void;
 }) {
   const blocked = mergeBlockedReason(summary);
+  const mergeAction =
+    detail.can_merge && summary.head_sha
+      ? prDirectMergeAction(deliveryPullRequestDigest(summary), {
+          hasMergeQueue,
+        })
+      : null;
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;
   const canAdminMerge = detail.can_merge && Boolean(summary.head_sha);
   const anyAction =
     detail.can_mark_ready ||
-    detail.can_merge ||
+    mergeAction !== null ||
+    canAdminMerge ||
     detail.can_close ||
     detail.can_reopen ||
     canRerun;
@@ -810,7 +824,7 @@ function PrActions({
             Mark ready
           </Button>
         )}
-        {detail.can_merge && summary.head_sha && (
+        {mergeAction && summary.head_sha && (
           <>
             <Select
               value={mergeMethod}
@@ -830,42 +844,23 @@ function PrActions({
             <Button
               type="button"
               size="sm"
-              disabled={Boolean(busy) || Boolean(blocked)}
+              variant={mergeAction.kind === "merge" ? "default" : "outline"}
+              disabled={Boolean(busy)}
               onClick={() =>
-                onRun("merge", {
+                onRun(mergeAction.kind, {
                   type: "merge",
                   method: mergeMethod,
-                  auto: false,
+                  auto: mergeAction.auto,
                   admin: false,
                   expected_head_sha: summary.head_sha!,
                 })
               }
             >
-              {busy === "merge" && <LoaderCircle className="animate-spin" />}
-              <GitMerge />
-              Merge
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={Boolean(busy) || summary.auto_merge_enabled}
-              onClick={() =>
-                onRun("auto-merge", {
-                  type: "merge",
-                  method: mergeMethod,
-                  auto: true,
-                  admin: false,
-                  expected_head_sha: summary.head_sha!,
-                })
-              }
-            >
-              {busy === "auto-merge" && (
+              {busy === mergeAction.kind && (
                 <LoaderCircle className="animate-spin" />
               )}
-              {summary.auto_merge_enabled
-                ? "Auto-merge on"
-                : "Enable auto-merge"}
+              {mergeAction.kind === "merge" ? <GitMerge /> : null}
+              {mergeAction.label}
             </Button>
           </>
         )}
@@ -972,7 +967,7 @@ function PrActions({
           </div>
         </div>
       )}
-      {blocked && detail.can_merge && (
+      {blocked && detail.can_merge && mergeAction === null && (
         <p className="mt-2.5 flex items-start gap-1.5 border-t border-border-subtle pt-2.5 text-xs text-warning-foreground">
           <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
           {blocked}

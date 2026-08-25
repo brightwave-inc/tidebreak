@@ -472,7 +472,7 @@ export const PullRequestRunningCheck: Story = {
   },
 };
 
-/** A running check blocks the merge without inventing a review requirement. */
+/** A running check on a merge-queue repo offers merge when ready, not a blocked Merge. */
 export const PullRequestRunningCheckDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -483,11 +483,12 @@ export const PullRequestRunningCheckDetail: Story = {
       ),
     );
     await expect(
-      await body.findByText("Wait for the running check before merging."),
-    ).toBeVisible();
+      await body.findByRole("button", { name: "Merge when ready" }),
+    ).toBeEnabled();
+    await expect(body.queryByRole("button", { name: "Merge" })).toBeNull();
     await expect(
-      await body.findByRole("button", { name: "Merge" }),
-    ).toBeDisabled();
+      body.queryByRole("button", { name: "Enable auto-merge" }),
+    ).toBeNull();
     await expect(
       body.queryByText(/required review|review approval/i),
     ).not.toBeInTheDocument();
@@ -669,8 +670,9 @@ export const PullRequestAdminMerge: Story = {
     const body = within(canvasElement.ownerDocument.body);
     await userEvent.click(await canvas.findByText("Build the delivery center"));
     await expect(
-      await body.findByRole("button", { name: "Merge" }),
-    ).toBeDisabled();
+      await body.findByRole("button", { name: "Enable auto-merge" }),
+    ).toBeEnabled();
+    await expect(body.queryByRole("button", { name: "Merge" })).toBeNull();
     await userEvent.click(
       await body.findByRole("button", { name: "More pull request actions" }),
     );
@@ -819,7 +821,7 @@ export const DraftPullRequestDetail: Story = {
   },
 };
 
-/** Conflicting: the merge button says why it is disabled. */
+/** Conflicting: no host merge action, and the card says why. */
 export const BlockedMergePullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -832,9 +834,10 @@ export const BlockedMergePullRequestDetail: Story = {
         "Resolve the conflicts with the base branch first.",
       ),
     ).toBeVisible();
+    await expect(body.queryByRole("button", { name: "Merge" })).toBeNull();
     await expect(
-      await body.findByRole("button", { name: "Merge" }),
-    ).toBeDisabled();
+      body.queryByRole("button", { name: "Enable auto-merge" }),
+    ).toBeNull();
   },
 };
 

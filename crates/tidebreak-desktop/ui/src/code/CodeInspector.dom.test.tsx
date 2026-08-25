@@ -362,8 +362,14 @@ it("only enables direct merge for an affirmatively ready PR", async () => {
     screen.getByRole("button", { name: "Squash and merge" }),
   ).toBeEnabled();
   expect(
-    screen.getByRole("button", { name: "Enable auto-merge instead" }),
-  ).toBeEnabled();
+    screen.queryByRole("button", { name: "Enable auto-merge" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Enable auto-merge instead" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Merge when ready" }),
+  ).not.toBeInTheDocument();
 });
 
 it("routes manual refresh through the shared serialized PR resource", async () => {

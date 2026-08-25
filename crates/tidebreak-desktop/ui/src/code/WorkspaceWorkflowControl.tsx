@@ -33,7 +33,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { openExternal } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { fetchFixErrorsLogs } from "./checkLogs";
-import { prWorkflowPrompt, type PrPromptAction } from "./prActions";
+import {
+  prDirectMergeAction,
+  prWorkflowPrompt,
+  type PrPromptAction,
+} from "./prActions";
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import {
@@ -267,12 +271,32 @@ export function WorkspaceWorkflowControl({
         : method === "rebase"
           ? ["rebased and merged", "rebases and merges"]
           : ["merged", "merges"];
+    const action = prDirectMergeAction(pr);
+    const kind = auto
+      ? action?.kind === "merge_when_ready"
+        ? "merge_when_ready"
+        : "enable_auto_merge"
+      : "merge";
+    const confirmLabel =
+      kind === "merge_when_ready"
+        ? "Merge when ready"
+        : kind === "enable_auto_merge"
+          ? "Enable auto-merge"
+          : "Merge";
     const ok = await confirm({
-      title: auto ? `Auto-merge #${pr.number}?` : `Merge #${pr.number}?`,
-      description: auto
-        ? `GitHub ${lands} the pull request into ${base} once the remaining requirements pass.`
-        : `The pull request is ${landed} into ${base} on GitHub.`,
-      confirmLabel: auto ? "Enable auto-merge" : "Merge",
+      title:
+        kind === "merge_when_ready"
+          ? `Merge #${pr.number} when ready?`
+          : kind === "enable_auto_merge"
+            ? `Enable auto-merge on #${pr.number}?`
+            : `Merge #${pr.number}?`,
+      description:
+        kind === "merge"
+          ? `The pull request is ${landed} into ${base} on GitHub.`
+          : kind === "merge_when_ready"
+            ? `GitHub adds the pull request to the merge queue and ${lands} it into ${base} once the remaining requirements pass.`
+            : `GitHub ${lands} the pull request into ${base} once the remaining requirements pass.`,
+      confirmLabel,
     });
     if (!ok) return;
     try {
@@ -282,7 +306,13 @@ export function WorkspaceWorkflowControl({
       );
       if (!next) return;
       resource.adopt(next);
-      toast.success(auto ? "Auto-merge enabled" : "Merged");
+      toast.success(
+        kind === "merge_when_ready"
+          ? "Merge when ready armed"
+          : kind === "enable_auto_merge"
+            ? "Auto-merge enabled"
+            : "Merged",
+      );
     } catch (err) {
       // The host's own refusal is the useful sentence here, so it goes to the
       // status line rather than being flattened into a generic failure.
