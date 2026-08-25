@@ -8,9 +8,11 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 
-import type { CodeForkTranscript } from "@/api/types";
+import { AppContextProvider, type AppContextValue } from "@/AppContext";
+import type { CodeForkTranscript, HarnessKind } from "@/api/types";
 import { useCodeUiStore } from "@/code/CodeUiStore";
 import { forkFraming, forkTranscriptFile } from "@/code/fork";
+import type { ParsedHarnessModel } from "@/code/parsers";
 import { StartSessionPrompt } from "@/code/StartSessionPrompt";
 import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 
@@ -19,6 +21,88 @@ import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
  * and the first message. Mode lists must follow each engine's declared
  * capabilities — Grok's honest refusals leave it Auto-only.
  */
+const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
+  claude_code: [
+    {
+      id: "claude-fable-5",
+      label: "Claude Fable 5",
+      default: true,
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+  ],
+  codex: [
+    {
+      id: "gpt-5.6",
+      label: "GPT 5.6",
+      default: true,
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+  ],
+  opencode: [
+    {
+      id: "gpt-5.6",
+      label: "GPT 5.6",
+      default: true,
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+  ],
+  grok: [
+    {
+      id: "grok-4.6",
+      label: "Grok 4.6",
+      default: true,
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+  ],
+};
+
+const client = {
+  listCodeHarnessModels: async (kind: HarnessKind) => ({
+    kind,
+    models: models[kind] ?? [],
+    reasoning_efforts: [],
+  }),
+};
+
+function appContext(): AppContextValue {
+  return {
+    client: client as never,
+    models: [],
+    defaultModelKey: null,
+    providers: [],
+    refreshCatalog: async () => {},
+    refreshChats: async () => {},
+    status: "",
+    setStatus: () => {},
+    newChat: () => {},
+    deleteChat: () => {},
+    startRename: () => {},
+    commitRename: () => {},
+    cancelRename: () => {},
+    newProject: async () => false,
+    deleteProject: () => {},
+    startProjectRename: () => {},
+    commitProjectRename: () => {},
+    cancelProjectRename: () => {},
+    newChatInProject: () => {},
+    moveChatToProject: () => {},
+    updateState: { status: "idle", version: null, error: null, enabled: false },
+    updateUpToDate: false,
+    checkForUpdate: async () => ({
+      status: "idle",
+      version: null,
+      error: null,
+      enabled: false,
+    }),
+    attachment: "local",
+    restartForUpdate: async () => {},
+  };
+}
+
 function withRouter(children: ReactNode) {
   const rootRoute = createRootRoute({ component: () => children });
   const router = createRouter({
@@ -44,17 +128,24 @@ function StartSession({
     useCodeUiStore.getState().offerComposerPrompt("ws-1", forkFraming(fork));
   }, [fork]);
   return (
-    <StartSessionPrompt
-      workspaceId="ws-1"
-      harnesses={harnesses}
-      starting={starting}
-      selectedMode={null}
-      onSelectMode={fn()}
-      onStart={fn()}
-      workspaceFiles={
-        fork ? { items: [forkTranscriptFile(fork)], onRemove: fn() } : undefined
-      }
-    />
+    <AppContextProvider value={appContext()}>
+      <div className="flex h-full flex-col">
+        <StartSessionPrompt
+          workspaceId="ws-1"
+          harnesses={harnesses}
+          starting={starting}
+          selectedMode={null}
+          onSelectMode={fn()}
+          onStart={fn()}
+          client={client}
+          workspaceFiles={
+            fork
+              ? { items: [forkTranscriptFile(fork)], onRemove: fn() }
+              : undefined
+          }
+        />
+      </div>
+    </AppContextProvider>
   );
 }
 
@@ -62,10 +153,9 @@ const meta = {
   title: "Code/Start session",
   component: StartSession,
   args: { harnesses: harnessDoctor.harnesses },
+  parameters: { layout: "fullscreen" },
   decorators: [
-    (Story) => (
-      <div className="mx-auto max-w-xl pt-8">{withRouter(<Story />)}</div>
-    ),
+    (Story) => <div className="h-screen w-full">{withRouter(<Story />)}</div>,
   ],
 } satisfies Meta<typeof StartSession>;
 

@@ -130,4 +130,22 @@ describe("HarnessPicker", () => {
     await user.click(grokRow);
     expect(onChange).toHaveBeenCalledWith("grok");
   });
+
+  it("does not add a settings button beside the composer control", async () => {
+    await renderWithRouter(
+      <HarnessPicker
+        harnesses={[
+          entry({ kind: "claude_code" }),
+          entry({ kind: "opencode", found: false, installable: false }),
+        ]}
+        value="claude_code"
+        onChange={vi.fn()}
+        variant="composer"
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Coding harnesses" }),
+    ).not.toBeInTheDocument();
+  });
 });

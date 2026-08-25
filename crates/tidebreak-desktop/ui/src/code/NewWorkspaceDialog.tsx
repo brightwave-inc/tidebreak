@@ -49,7 +49,6 @@ import { HarnessInstallNote } from "./HarnessInstallNote";
 import { useWarmHarnessInstall } from "./useHarnessInstall";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
-  autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
   gatewayCodeModels,
@@ -58,8 +57,6 @@ import {
   preferredCodeModels,
   requiresHarnessModelIds,
   HARNESS_LABELS,
-  ALLOW_ALL_NOTE,
-  UNSUPERVISED_AUTO_NOTE,
   type CodeModelOption,
 } from "./labels";
 
@@ -84,10 +81,9 @@ import {
  * The title is optional: left blank, the server generates a two-word name and
  * later replaces it with one derived from the first turn, the same way chats
  * are named. Permission mode defaults to the most autonomous posture the
- * engine honors (decision 0039, amended); whichever posture is armed, the
- * note under the message states it. The engine menu lists every doctor entry —
- * ready rows are selectable; unusable ones stay visible, dimmed, with the
- * reason.
+ * engine honors (decision 0039, amended). The engine menu lists every doctor
+ * entry — ready rows are selectable; unusable ones stay visible, dimmed, with
+ * the reason.
  */
 
 /** The repo this reader worked on last: newest workspace, then storage. */
@@ -277,14 +273,6 @@ export function NewWorkspaceDialog({
   const canCreate = Boolean(
     repoId && selectedRepo && selectedHarness && installed,
   );
-  const modeNote =
-    postedMode === "auto" &&
-    selectedHarness &&
-    autoIsUnsupervised(selectedHarness.caps)
-      ? UNSUPERVISED_AUTO_NOTE
-      : postedMode === "allow"
-        ? ALLOW_ALL_NOTE
-        : null;
   const installNote = install && (!install.done || install.error);
 
   useEffect(() => {
@@ -752,12 +740,9 @@ export function NewWorkspaceDialog({
               void create();
             }}
           />
-          {(installNote || modeNote) && (
+          {installNote && (
             <div className="flex flex-col gap-1 px-4 pb-1.5">
               <HarnessInstallNote install={install} />
-              {modeNote && (
-                <p className="text-muted-foreground text-xs">{modeNote}</p>
-              )}
             </div>
           )}
           <div className="flex min-w-0 items-center gap-1 px-3 pb-3">

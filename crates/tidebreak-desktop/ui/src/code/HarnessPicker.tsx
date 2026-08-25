@@ -50,11 +50,14 @@ export function HarnessPicker({
   value,
   onChange,
   disabled,
+  variant = "field",
 }: {
   harnesses: HarnessDoctorEntry[];
   value: HarnessKind | null;
   onChange: (kind: HarnessKind) => void;
   disabled?: boolean;
+  /** Field fills a form row; composer sits beside model and mode controls. */
+  variant?: "field" | "composer";
 }) {
   const navigate = useNavigate();
   const harnessesPath: string = "/settings/coding-harnesses";
@@ -63,13 +66,26 @@ export function HarnessPicker({
   const anyUnusable = harnesses.some((entry) => harnessUnusableReason(entry));
 
   return (
-    <div className="flex flex-col gap-1">
+    <div
+      className={
+        variant === "composer"
+          ? "flex min-w-0 items-center gap-1"
+          : "flex flex-col gap-1"
+      }
+    >
       <Select
         value={value ?? undefined}
         onValueChange={(next) => onChange(next as HarnessKind)}
         disabled={disabled || harnesses.length === 0}
       >
-        <SelectTrigger aria-label="Harness">
+        <SelectTrigger
+          aria-label="Harness"
+          className={
+            variant === "composer"
+              ? "h-8 w-auto max-w-44 min-w-0 shrink-0 gap-2 border-transparent px-2 hover:bg-accent hover:text-accent-foreground"
+              : undefined
+          }
+        >
           <SelectValue placeholder="No harness detected">
             {selected && SelectedIcon && (
               <span className="flex items-center gap-2">
@@ -111,7 +127,7 @@ export function HarnessPicker({
           })}
         </SelectContent>
       </Select>
-      {anyUnusable && (
+      {anyUnusable && variant === "field" && (
         <button
           type="button"
           className="text-muted-foreground w-fit cursor-pointer text-xs underline-offset-2 hover:underline"

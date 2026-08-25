@@ -29,6 +29,8 @@ it("applies the chosen mode and closes", async () => {
   await userEvent.click(
     screen.getByRole("button", { name: "Permissions: Ask" }),
   );
+  expect(screen.queryByText(/without asking/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/read-only/)).not.toBeInTheDocument();
   await userEvent.click(
     await screen.findByRole("menuitem", { name: /Allow all/ }),
   );

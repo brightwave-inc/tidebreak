@@ -18,7 +18,6 @@ import {
   useWarmHarnessInstall,
 } from "./useHarnessInstall";
 import {
-  autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
   gatewayCodeModels,
@@ -27,8 +26,6 @@ import {
   preferredCodeModels,
   requiresHarnessModelIds,
   type CodeModelOption,
-  ALLOW_ALL_NOTE,
-  UNSUPERVISED_AUTO_NOTE,
 } from "./labels";
 
 const NO_CATALOG_MODELS: ModelInfo[] = [];
@@ -38,13 +35,13 @@ const NO_CATALOG_MODELS: ModelInfo[] = [];
  *
  * The harness dropdown defaults to the first engine that can start now; the
  * mode list and default follow the selected engine's own capability flags, so
- * start always posts a mode that engine can honor, and an unsupervised one
- * says so before the session exists (decisions 0038, 0039).
+ * start always posts a mode that engine can honor (decisions 0038, 0039).
  *
- * An engine this machine has not downloaded yet is still on offer. Picking it
- * starts the download and the note under the picker says so; start stays
- * disabled until the pin lands, because create would otherwise sit on the
- * same npm install with nothing on screen.
+ * The harness sits in the composer beside the model so it stays next to the
+ * draft it controls. An engine this machine has not downloaded yet is still
+ * on offer. Picking it starts the download and the composer says so; start
+ * stays disabled until the pin lands, because create would otherwise sit on
+ * the same npm install with nothing on screen.
  *
  * Cmd+Enter starts from anywhere on this surface, matching the new-workspace
  * dialog. The draft lives in the composer, so the shortcut goes through the
@@ -195,27 +192,8 @@ export function StartSessionPrompt({
         send.click();
       }}
     >
-      <div className="flex flex-col gap-3 px-4 py-6">
+      <div className="px-4 py-6">
         <p className="text-sm">Start a session on this workspace.</p>
-        <HarnessPicker
-          harnesses={harnesses}
-          value={selected?.kind ?? null}
-          disabled={starting}
-          onChange={(next) => {
-            setModelOptions([]);
-            setModelLoading(true);
-            setPicked(next);
-          }}
-        />
-        <HarnessInstallNote install={install} />
-        {mode === "auto" && selected && autoIsUnsupervised(selected.caps) && (
-          <p className="text-muted-foreground text-xs">
-            {UNSUPERVISED_AUTO_NOTE}
-          </p>
-        )}
-        {mode === "allow" && (
-          <p className="text-muted-foreground text-xs">{ALLOW_ALL_NOTE}</p>
-        )}
       </div>
       <div className="mt-auto">
         <CodeComposer
@@ -227,6 +205,20 @@ export function StartSessionPrompt({
           model={model}
           modelOptions={modelOptions}
           modelLoading={modelLoading}
+          harnessMenu={
+            <HarnessPicker
+              harnesses={harnesses}
+              value={selected?.kind ?? null}
+              disabled={starting}
+              variant="composer"
+              onChange={(next) => {
+                setModelOptions([]);
+                setModelLoading(true);
+                setPicked(next);
+              }}
+            />
+          }
+          footerNote={<HarnessInstallNote install={install} />}
           promptScope={workspaceId}
           workspaceFiles={workspaceFiles}
           onModelChange={(next) => {
