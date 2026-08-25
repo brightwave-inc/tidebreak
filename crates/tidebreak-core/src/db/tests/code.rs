@@ -592,7 +592,7 @@ async fn an_exact_publication_retry_cancels_a_new_retirement_episode() {
         BlobRetirementStatus::Queued
     );
 
-    assert!(!store
+    assert!(store
         .publish_code_session_image(&OwnerId::local(), session_id, &image, now())
         .await
         .unwrap());

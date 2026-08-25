@@ -10,9 +10,7 @@
 //! resolution can check the bytes still match what was reserved rather than
 //! trusting a client to restate it.
 
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait, TryInsertResult,
-};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
 use crate::code::{CodeSessionId, CodeSessionLifecycle};
 use crate::error::Result;
@@ -29,8 +27,9 @@ use super::acquire_code_session_write_lock;
 /// same `(session_id, blob_id)` is refused rather than silently replacing what
 /// an earlier turn may already reference. The session fence serializes this
 /// reservation with session ending. The reservation and retirement
-/// cancellation commit together, including on exact retries. Returns whether a
-/// new row was written.
+/// cancellation commit together, including on exact retries. Returns `true`
+/// when the image is published, including an exact retry, and `false` when the
+/// session lifecycle fence refuses publication.
 pub async fn publish_session_image(
     store: &DbStore,
     owner: &OwnerId,
@@ -58,21 +57,20 @@ pub async fn publish_session_image(
         return Ok(false);
     }
 
-    let inserted =
-        entities::code_session_image::Entity::insert(entities::code_session_image::ActiveModel {
-            session_id: Set(session_id.0),
-            blob_id: Set(image.blob_id),
-            owner: Set(owner.as_str().to_owned()),
-            media_type: Set(image.media_type.as_str().to_owned()),
-            width: Set(i32::try_from(image.width).unwrap_or(i32::MAX)),
-            height: Set(i32::try_from(image.height).unwrap_or(i32::MAX)),
-            byte_len: Set(i64::try_from(image.byte_len).unwrap_or(i64::MAX)),
-            created_at: Set(created_at),
-        })
-        .on_conflict_do_nothing()
-        .exec_without_returning(&transaction)
-        .await
-        .map_err(store_err)?;
+    entities::code_session_image::Entity::insert(entities::code_session_image::ActiveModel {
+        session_id: Set(session_id.0),
+        blob_id: Set(image.blob_id),
+        owner: Set(owner.as_str().to_owned()),
+        media_type: Set(image.media_type.as_str().to_owned()),
+        width: Set(i32::try_from(image.width).unwrap_or(i32::MAX)),
+        height: Set(i32::try_from(image.height).unwrap_or(i32::MAX)),
+        byte_len: Set(i64::try_from(image.byte_len).unwrap_or(i64::MAX)),
+        created_at: Set(created_at),
+    })
+    .on_conflict_do_nothing()
+    .exec_without_returning(&transaction)
+    .await
+    .map_err(store_err)?;
     if let Some(existing) =
         get_published_session_image_on(&transaction, owner, session_id, image.blob_id).await?
     {
@@ -92,7 +90,7 @@ pub async fn publish_session_image(
     }
     blob_ops::cancel_on(&transaction, image.blob_id).await?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(matches!(inserted, TryInsertResult::Inserted(1)))
+    Ok(true)
 }
 
 /// Resolve one image only when it was explicitly published to this session by
