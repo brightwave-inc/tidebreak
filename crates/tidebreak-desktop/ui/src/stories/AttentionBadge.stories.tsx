@@ -12,8 +12,8 @@ import {
 
 /**
  * The server-computed attention vocabulary, as list surfaces wear it. Working
- * deliberately renders nothing; every other state must stay tellable at a
- * glance in both the labeled badge and the rail's compact dot.
+ * deliberately renders no full pill; every state stays tellable at a glance
+ * in the rail's compact mark without relying on color alone.
  */
 const meta = {
   title: "Code/Attention badge",
@@ -55,11 +55,12 @@ export const ManualPin: Story = {
   args: { attention: attentionManual },
 };
 
-/** The rail's dot form for every visible state, side by side. */
-export const CompactDots: Story = {
+/** The rail, tab, and card marks for every state, side by side. */
+export const CompactMarks: Story = {
   args: { attention: attentionNeedsYou, compact: true },
   render: () => (
     <>
+      <AttentionBadge attention={attentionWorking} compact />
       <AttentionBadge attention={attentionNeedsYou} compact />
       <AttentionBadge attention={attentionStalled} compact />
       <AttentionBadge attention={attentionDoneUnreviewed} compact />

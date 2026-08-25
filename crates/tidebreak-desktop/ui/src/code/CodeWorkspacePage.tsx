@@ -54,7 +54,6 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { Skeleton } from "@/components/ui/skeleton";
-import { WithTooltip } from "@/components/ui/tooltip";
 import { PanelLayout } from "@/panel/PanelLayout";
 import type { LayoutState, PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
@@ -160,6 +159,7 @@ import { StartSessionPrompt } from "./StartSessionPrompt";
 import { TerminalPane } from "./TerminalPane";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useCodeContentRevision } from "./useLiveContent";
+import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import {
   WorkspaceOverflowMenu,
@@ -173,10 +173,8 @@ import {
   gatewayCodeModels,
   harnessCodeModels,
   HARNESS_LABELS,
-  LIFECYCLE_LABELS,
   preferredCodeModels,
   requiresHarnessModelIds,
-  sessionLifecycleTooltip,
 } from "./labels";
 
 /**
@@ -1345,7 +1343,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 fallback={digest?.attention ?? session.attention}
               />
               <PendingApprovalBadge sessionId={session.id} client={client} />
-              <SessionLifecycleMark
+              <SessionLifecycleIndicator
                 lifecycle={digest?.lifecycle ?? session.lifecycle}
                 harness={session.harness_kind}
                 version={session.harness_version}
@@ -1600,66 +1598,11 @@ function SessionAttentionBadge({
 }) {
   const store = useRegisteredCodeSession(sessionId, client);
   const live = store((state) => state.attention);
-  return <AttentionBadge compact attention={live ?? fallback} />;
-}
-
-/**
- * The adapter could not classify part of the engine stream. Saying so where
- * the session is read is the point of counting it at all — a silently
- * degraded transcript looks exactly like a complete one (decision 0031). The
- * count comes from the session row, so it settles at the end of a turn rather
- * than mid-stream and remains historical after the adapter is updated.
- */
-function SessionLifecycleMark({
-  lifecycle,
-  harness,
-  version,
-  unrecognizedEventCount,
-  runningLabel,
-}: {
-  lifecycle: CodeSessionSnapshot["lifecycle"];
-  harness: CodeSessionSnapshot["harness_kind"];
-  version?: string;
-  unrecognizedEventCount: number;
-  runningLabel?: string;
-}) {
-  const tooltip = sessionLifecycleTooltip({
-    lifecycle,
-    harness,
-    version,
-    unrecognizedEventCount,
-    runningLabel,
-  });
-  const label =
-    lifecycle === "running" && runningLabel
-      ? runningLabel
-      : LIFECYCLE_LABELS[lifecycle];
-  return (
-    <WithTooltip label={tooltip}>
-      {/*
-        The tooltip carries the engine version and the dropped-event warning,
-        and neither is anywhere else on the page. A span cannot be tabbed to,
-        so without a tab stop the whole explanation is hover-only.
-      */}
-      <span
-        tabIndex={0}
-        className={cn(
-          "text-muted-foreground inline-flex items-center gap-1.5 rounded-sm text-xs",
-          FOCUS_RING,
-        )}
-      >
-        {unrecognizedEventCount > 0 && (
-          <span
-            data-testid="unrecognized-event-dot"
-            className="bg-warning-foreground-muted inline-block size-2 shrink-0 rounded-full"
-            role="img"
-            aria-label={`${unrecognizedEventCount} unrecognized engine ${unrecognizedEventCount === 1 ? "event" : "events"} recorded in this session`}
-          />
-        )}
-        <span>{label}</span>
-      </span>
-    </WithTooltip>
-  );
+  const attention = live ?? fallback;
+  // The lifecycle indicator owns live motion in this header. Keep the
+  // attention mark for states that carry separate information.
+  if (attention?.state.type === "working") return null;
+  return <AttentionBadge compact attention={attention} />;
 }
 
 function PendingApprovalBadge({

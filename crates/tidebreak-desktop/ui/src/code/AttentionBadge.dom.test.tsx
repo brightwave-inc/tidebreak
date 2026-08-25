@@ -63,18 +63,18 @@ describe("AttentionBadge", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  // A compact dot is often a row's only state. Working drawing as nothing here
+  // A compact mark is often a row's only state. Working drawing as nothing here
   // made a busy agent look idle, which is the one confusion worth a test.
-  it("renders a moving dot for Working when compact", () => {
+  it("renders a spinner for Working when compact", () => {
     render(
       <AttentionBadge
         compact
         attention={{ state: { type: "working" }, source: "lifecycle" }}
       />,
     );
-    const dot = screen.getByLabelText("Working");
-    expect(dot).toHaveAttribute("data-attention", "working");
-    expect(dot).toHaveClass("animate-pulse");
+    const mark = screen.getByLabelText("Working");
+    expect(mark).toHaveAttribute("data-attention", "working");
+    expect(mark.querySelector(".animate-spin")).not.toBeNull();
   });
 
   it.each(cases)(
@@ -86,7 +86,7 @@ describe("AttentionBadge", () => {
     },
   );
 
-  it("uses a compact mark with the same label", () => {
+  it("uses a compact icon with the same label", () => {
     render(
       <AttentionBadge
         compact
