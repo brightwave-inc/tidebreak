@@ -234,12 +234,20 @@ pub struct CallToolResult {
     pub is_error: bool,
 }
 
-/// A content block in a tool result. Only text today.
+/// A content block in a tool result.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum Content {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image {
+        /// Standard base64 of the image bytes.
+        data: String,
+        /// The validated IANA media type for `data`.
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
 }
 
 #[cfg(test)]
@@ -270,5 +278,23 @@ mod tests {
         assert!(s.contains("\"error\""));
         assert!(!s.contains("\"result\""));
         assert!(s.contains("-32601"));
+    }
+
+    #[test]
+    fn image_content_uses_the_mcp_wire_shape() {
+        let value = serde_json::to_value(Content::Image {
+            data: "cGl4ZWxz".to_string(),
+            mime_type: "image/png".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "image",
+                "data": "cGl4ZWxz",
+                "mimeType": "image/png",
+            })
+        );
     }
 }

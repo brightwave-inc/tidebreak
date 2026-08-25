@@ -16,10 +16,12 @@ use std::sync::{
     Arc,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 use tidebreak_core::{
-    ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, ChatId, StandingGrants,
-    ToolActionPreview, ToolApprovalKind, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
+    ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, ChatId, DocumentBlob,
+    ImageAttachments, ImageMediaType, ImageRef, StandingGrants, ToolActionPreview,
+    ToolApprovalKind, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
 };
 
 use crate::protocol::{
@@ -31,6 +33,11 @@ use crate::protocol::{
 const SESSION_UNINITIALIZED: u8 = 0;
 const SESSION_AWAITING_INITIALIZED: u8 = 1;
 const SESSION_READY: u8 = 2;
+/// Keep image-bearing results inside the shared 2 MiB JSON-RPC frame after
+/// base64 expansion and the response envelope.
+const MAX_TOOL_RESULT_IMAGE_BYTES: usize = 1024 * 1024;
+/// Match the mounted MCP client and exec preview image-count ceiling.
+const MAX_TOOL_RESULT_IMAGES: usize = 3;
 
 /// An MCP server exposing a tool registry over the Model Context Protocol.
 ///
@@ -373,12 +380,26 @@ impl McpServer {
 
 /// Encode a [`ToolOutput`] as a `tools/call` result value.
 fn tool_result(output: ToolOutput) -> Result<Value, RpcError> {
-    let result = CallToolResult {
-        content: vec![Content::Text {
-            text: output.content,
-        }],
-        structured_content: output.data,
-        is_error: output.is_error,
+    let result = match image_contents(&output.images, &output.image_data) {
+        Ok(images) => {
+            let mut content = Vec::with_capacity(images.len() + 1);
+            content.push(Content::Text {
+                text: output.content,
+            });
+            content.extend(images);
+            CallToolResult {
+                content,
+                structured_content: output.data,
+                is_error: output.is_error,
+            }
+        }
+        Err(reason) => CallToolResult {
+            content: vec![Content::Text {
+                text: format!("Tool result image could not be returned: {reason}"),
+            }],
+            structured_content: None,
+            is_error: true,
+        },
     };
     serde_json::to_value(result).map_err(|e| {
         RpcError::new(
@@ -386,6 +407,104 @@ fn tool_result(output: ToolOutput) -> Result<Value, RpcError> {
             format!("failed to encode tool result: {e}"),
         )
     })
+}
+
+/// Validate and encode every ephemeral tool image for the MCP response.
+///
+/// MCP clients cannot recover pixels from Tidebreak's durable image reference.
+/// If the bytes are absent or disagree with that reference, fail the call rather
+/// than returning the text summary as if the screenshot reached the model.
+fn image_contents(
+    images: &[ImageRef],
+    attachments: &ImageAttachments,
+) -> Result<Vec<Content>, String> {
+    if images.len() > MAX_TOOL_RESULT_IMAGES {
+        return Err(format!(
+            "image count {} exceeds the limit {MAX_TOOL_RESULT_IMAGES}",
+            images.len()
+        ));
+    }
+
+    let total_bytes = images.iter().try_fold(0_usize, |total, image| {
+        let byte_len = usize::try_from(image.byte_len)
+            .map_err(|_| image_encoding_error(image, "byte length exceeds usize"))?;
+        total
+            .checked_add(byte_len)
+            .ok_or_else(|| image_encoding_error(image, "total byte length overflowed"))
+    })?;
+    if total_bytes > MAX_TOOL_RESULT_IMAGE_BYTES {
+        return Err(format!(
+            "image bytes {total_bytes} exceed the limit {MAX_TOOL_RESULT_IMAGE_BYTES}"
+        ));
+    }
+
+    images
+        .iter()
+        .map(|image| image_content(image, attachments))
+        .collect()
+}
+
+fn image_content(image: &ImageRef, attachments: &ImageAttachments) -> Result<Content, String> {
+    image
+        .validate()
+        .map_err(|reason| image_encoding_error(image, reason))?;
+
+    let data = attachments
+        .get(image.blob_id)
+        .ok_or_else(|| image_encoding_error(image, "pixel bytes are missing"))?;
+    if data.media_type() != image.media_type {
+        return Err(image_encoding_error(
+            image,
+            format!(
+                "pixel bytes declare {}, expected {}",
+                data.media_type().as_str(),
+                image.media_type.as_str()
+            ),
+        ));
+    }
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) != image.byte_len {
+        return Err(image_encoding_error(
+            image,
+            "pixel byte length does not match the descriptor",
+        ));
+    }
+    if ImageMediaType::sniff(data.bytes()) != Some(image.media_type) {
+        return Err(image_encoding_error(
+            image,
+            format!("pixel bytes do not match {}", image.media_type.as_str()),
+        ));
+    }
+    if DocumentBlob::from_bytes(data.bytes()).id != image.blob_id {
+        return Err(image_encoding_error(
+            image,
+            "pixel bytes do not match the content address",
+        ));
+    }
+
+    let format = match image.media_type {
+        ImageMediaType::Png => image::ImageFormat::Png,
+        ImageMediaType::Jpeg => image::ImageFormat::Jpeg,
+        ImageMediaType::Webp => image::ImageFormat::WebP,
+        ImageMediaType::Gif => image::ImageFormat::Gif,
+    };
+    let dimensions = image::ImageReader::with_format(std::io::Cursor::new(data.bytes()), format)
+        .into_dimensions()
+        .map_err(|_| image_encoding_error(image, "image dimensions could not be read"))?;
+    if dimensions != (image.width, image.height) {
+        return Err(image_encoding_error(
+            image,
+            "image dimensions do not match the descriptor",
+        ));
+    }
+
+    Ok(Content::Image {
+        data: BASE64.encode(data.bytes()),
+        mime_type: image.media_type.as_str().to_string(),
+    })
+}
+
+fn image_encoding_error(image: &ImageRef, reason: impl std::fmt::Display) -> String {
+    format!("image {}: {reason}", image.blob_id)
 }
 
 fn request_id_is_valid(id: &Value) -> bool {
@@ -410,8 +529,8 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use tidebreak_core::{
-        ApprovalClass, AutoApproveGate, GrantLevel, RefuseGate, StandingGrant, Tool, ToolOutput,
-        ToolSpec,
+        ApprovalClass, AutoApproveGate, DocumentBlob, GrantLevel, ImageData, RefuseGate,
+        StandingGrant, Tool, ToolOutput, ToolSpec,
     };
 
     /// A tool that echoes its `text` argument, or errors when asked.
@@ -441,6 +560,84 @@ mod tests {
                 _ => Ok(ToolOutput::text(format!("echo: {text}"))),
             }
         }
+    }
+
+    struct ImageTool;
+
+    #[async_trait]
+    impl Tool for ImageTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "image".into(),
+                description: "Return image pixels.".into(),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &ToolCtx,
+            _args: Value,
+        ) -> tidebreak_core::Result<ToolOutput> {
+            Ok(
+                ToolOutput::text("Captured two PNG screenshots.").with_images([
+                    png_attachment(1, 1, [1, 2, 3]),
+                    png_attachment(2, 1, [4, 5, 6]),
+                ]),
+            )
+        }
+    }
+
+    struct MissingImageBytesTool;
+
+    #[async_trait]
+    impl Tool for MissingImageBytesTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "missing_image_bytes".into(),
+                description: "Return an image descriptor without pixels.".into(),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+
+        fn approval_class(&self) -> ApprovalClass {
+            ApprovalClass::ReadOnly
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &ToolCtx,
+            _args: Value,
+        ) -> tidebreak_core::Result<ToolOutput> {
+            let (image, _) = png_attachment(1, 1, [1, 2, 3]);
+            let mut output = ToolOutput::text("Screenshot captured.");
+            output.images.push(image);
+            Ok(output)
+        }
+    }
+
+    fn png_attachment(width: u32, height: u32, color: [u8; 3]) -> (ImageRef, ImageData) {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb(color),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+        let bytes = encoded.into_inner();
+        let image = ImageRef {
+            blob_id: DocumentBlob::from_bytes(&bytes).id,
+            media_type: ImageMediaType::Png,
+            width,
+            height,
+            byte_len: u64::try_from(bytes.len()).unwrap(),
+        };
+        (image, ImageData::new(ImageMediaType::Png, bytes))
     }
 
     struct ClassifiedTool {
@@ -941,6 +1138,126 @@ mod tests {
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["type"], "text");
         assert_eq!(result["content"][0]["text"], "echo: hi");
+    }
+
+    #[tokio::test]
+    async fn tools_call_keeps_text_and_serializes_every_png_image() {
+        let server = server_with(ToolRegistry::new().with(Box::new(ImageTool)));
+        initialize_session(&server).await;
+
+        let response = server
+            .handle(request(
+                3,
+                "tools/call",
+                json!({"name": "image", "arguments": {}}),
+            ))
+            .await
+            .unwrap();
+        let wire = serde_json::to_value(response).unwrap();
+        assert!(wire.get("error").is_none());
+        let content = wire["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Captured two PNG screenshots.");
+
+        for (block, expected_dimensions) in content[1..].iter().zip([(1, 1), (2, 1)]) {
+            assert_eq!(block["type"], "image");
+            assert_eq!(block["mimeType"], "image/png");
+            let bytes = BASE64.decode(block["data"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                image::guess_format(&bytes).unwrap(),
+                image::ImageFormat::Png
+            );
+            let dimensions = image::ImageReader::with_format(
+                std::io::Cursor::new(bytes),
+                image::ImageFormat::Png,
+            )
+            .into_dimensions()
+            .unwrap();
+            assert_eq!(dimensions, expected_dimensions);
+        }
+    }
+
+    #[tokio::test]
+    async fn tools_call_fails_when_an_image_cannot_be_represented() {
+        let server = server_with(ToolRegistry::new().with(Box::new(MissingImageBytesTool)));
+        initialize_session(&server).await;
+
+        let response = server
+            .handle(request(
+                3,
+                "tools/call",
+                json!({"name": "missing_image_bytes", "arguments": {}}),
+            ))
+            .await
+            .unwrap();
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pixel bytes are missing"));
+        assert!(!result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Screenshot captured"));
+    }
+
+    #[test]
+    fn tool_result_rejects_mismatched_image_data() {
+        let (mut image, data) = png_attachment(1, 1, [1, 2, 3]);
+        image.media_type = ImageMediaType::Jpeg;
+        let non_png = ToolOutput::text("Screenshot captured.").with_images([(
+            image,
+            ImageData::new(ImageMediaType::Jpeg, data.bytes().to_vec()),
+        )]);
+        assert_eq!(tool_result(non_png).unwrap()["isError"], true);
+
+        let (mut image, data) = png_attachment(1, 1, [1, 2, 3]);
+        image.byte_len += 1;
+        let wrong_length = ToolOutput::text("Screenshot captured.").with_images([(image, data)]);
+        assert_eq!(tool_result(wrong_length).unwrap()["isError"], true);
+
+        let (mut image, data) = png_attachment(1, 1, [1, 2, 3]);
+        image.width = 2;
+        let wrong_dimensions =
+            ToolOutput::text("Screenshot captured.").with_images([(image, data)]);
+        assert_eq!(tool_result(wrong_dimensions).unwrap()["isError"], true);
+
+        let (mut image, data) = png_attachment(1, 1, [1, 2, 3]);
+        image.blob_id = DocumentBlob::from_bytes(b"different pixels").id;
+        let wrong_identity = ToolOutput::text("Screenshot captured.").with_images([(image, data)]);
+        assert_eq!(tool_result(wrong_identity).unwrap()["isError"], true);
+    }
+
+    #[test]
+    fn tool_result_rejects_more_images_than_the_outbound_limit() {
+        let images = (0..=MAX_TOOL_RESULT_IMAGES)
+            .map(|index| png_attachment(1, 1, [u8::try_from(index).unwrap(), 2, 3]));
+        let output = ToolOutput::text("Screenshots captured.").with_images(images);
+
+        let result = tool_result(output).unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("image count"));
+    }
+
+    #[test]
+    fn tool_result_rejects_image_bytes_past_the_outbound_limit() {
+        let (mut image, _) = png_attachment(1, 1, [1, 2, 3]);
+        image.byte_len = u64::try_from(MAX_TOOL_RESULT_IMAGE_BYTES + 1).unwrap();
+        let mut output = ToolOutput::text("Screenshot captured.");
+        output.images.push(image);
+
+        let result = tool_result(output).unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("image bytes"));
     }
 
     #[tokio::test]
