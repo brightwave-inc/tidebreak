@@ -156,12 +156,10 @@ export function AppsView({
                       className="group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       onClick={() => onOpen(app.id)}
                     >
-                      <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border-subtle bg-muted/35">
-                        <LayoutGrid
-                          className="size-4 text-icon-blue"
-                          aria-hidden="true"
-                        />
-                      </span>
+                      <LayoutGrid
+                        className="size-4 shrink-0 text-icon-blue"
+                        aria-hidden="true"
+                      />
                       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                         <span className="truncate text-sm font-medium">
                           {app.name}

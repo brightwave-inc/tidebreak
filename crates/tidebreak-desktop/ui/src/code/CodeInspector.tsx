@@ -630,7 +630,7 @@ export function PrTab({
       {open && (
         <div className="border-border-subtle flex flex-col gap-2.5 rounded-xl border bg-background/45 p-2.5">
           <div className="flex min-w-0 items-start gap-2">
-            <span className="bg-muted text-muted-foreground mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg">
+            <span className="mt-0.5 grid size-7 shrink-0 place-items-center text-muted-foreground">
               <GitMerge className="size-3.5" />
             </span>
             <div className="min-w-0 flex-1">

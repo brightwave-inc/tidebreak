@@ -130,3 +130,111 @@ a `Badge` variant, and a swatch row in `Foundations/Palette`. A new scale
 rung is a `--text-*` pair in `styles.css` plus its row here and in
 `Foundations/Typography`. If a rule in this file and the code disagree, fix
 one of them in the same change.
+
+## Patterns
+
+A component library gives you parts. These rules carry the decisions that
+make a screen feel like Tidebreak. When you build a surface, classify it
+first, then reach for the pattern that owns that kind of work.
+
+### Surface classification
+
+Every region is one of four surfaces. The surface decides the density,
+the interaction model, and how much chrome is allowed.
+
+| Surface | Work | Interaction model | Chrome |
+| --- | --- | --- | --- |
+| **Orienting** | "What needs my attention right now?" | Scanning, launching | Spacious, expressive |
+| **Index** | Locating or comparing many records | Sorting, filtering, opening | Dense rows, compact controls |
+| **Bulk edit** | Mass-entering or mass-editing values | Inline editing, keyboard flow | Compact, stable row rhythm |
+| **Resource detail** | Reading and editing one record | Focused editing in a sheet | Single-column, bounded width |
+
+A surface is not a route. A settings page can host an Index surface
+(the rail) next to a Resource detail surface (the panel). A chat transcript
+is an Orienting surface that embeds Approval cards (Resource detail
+interactions).
+
+### Settings pages
+
+`SettingsPanel` owns the page shape: title, description, bounded column,
+and the rhythm between sections. Do not set a different page width or
+header layout. Do not use tabs or a card per setting.
+
+`SettingsSection` groups related fields. Put identity or account details
+first. Put destructive actions last, in a section named "Danger zone" or
+equivalent.
+
+`SettingsField` is a label and its control in one `label` element. The
+control sits below the label and spans the full width, because selects,
+text inputs, and editors read badly squeezed against the right edge.
+
+Save each field when its value changes. Do not add Save or Cancel buttons.
+Use a `Switch` for binary toggles and a `Select` for short lists. Use
+`ValidatedInput` (or an async validation pattern) for text that must be
+checked, such as a workspace URL.
+
+### Cards and rows
+
+`ToolCardShell` is the canonical expandable row for a tool call or agent
+step. The collapsed state is boxless: a transcript should read as a
+conversation with occasional notes about what ran, not as a stack of
+nested panels. Keep the icon small (`size-3.5`), align it with the primary
+text line, and keep the title on one line. Expand while work is still
+happening, and expand a failed card so the error is one click away; a
+settled, successful card collapses to a single row.
+
+`ApprovalCard` is the canonical consent surface. It leads with a short
+question, shows the exact action in a muted preview block, and lists
+choices as numbered rows ordered narrowest grant first. Destructive or
+irreversible actions open a dialog instead; do not use an approval card
+for a delete confirmation.
+
+`ChatStatusChip` is the canonical activity summary for a conversation.
+It shows live work first, outputs otherwise, and collapses to a compact
+pill when a side panel is using the canvas. Do not build a second activity
+summary that duplicates outputs, folders, permissions, or agents.
+
+### Empty states and welcome surfaces
+
+`Empty` is the canonical null-state container, and `EmptyMedia variant="icon"`
+is how an empty index reads across the app: Inbox, Folders, Outputs, Plugins,
+Apps, and the Code pages all use it. The variant renders the icon at `size-11`
+in muted or identity ink (`text-muted-foreground`, `text-success`,
+`text-icon-violet`, and friends); it draws no filled container behind the
+icon. Give the empty state one useful next action when one exists.
+
+Two first-run surfaces are their own compositions, not `Empty` variants:
+`WelcomeState` (logomark plus starter prompt cards) and `CodeRepoEmptyState`
+(the split layout with onboarding steps). `Modes/Null states` shows both. Do
+not rebuild them from `Empty`.
+
+In high-density operational surfaces (menus, tables, repeated rows), do not
+place an icon in a circle, square, tint, or decorative container. Keep the
+icon small, outline-weight, and aligned to the primary text line. Render
+static attributes as plain text by default; reserve badge treatment for
+status indicators.
+
+### Icons
+
+Lucide icons are the only icon set. Use them as lightweight recognition
+markers, not as decorative advertising.
+
+- Size the icon to match the surrounding text: `size-3.5` for dense rows,
+  `size-4` for controls and labels, `size-7` only for low-density empty states.
+- Keep the icon close to the label it identifies.
+- Align the icon to the primary text line, not the vertical midpoint of a
+  title and metadata stack.
+- Use `text-muted-foreground` for icon ink in operational surfaces. Use the
+  `--icon-*` family only for identity (file types, repository swatches,
+  engine badges), never for status.
+- Do not place an icon in a colored or gray container on high-density
+  surfaces. `EmptyMedia variant="icon"` draws no container at all, and it is
+  the only icon treatment allowed on an empty surface.
+
+### Destructive actions
+
+A destructive action goes through `useConfirm`, which opens the shared
+`AlertDialog`: a title that asks the question, a description that names the
+consequence, a safe Cancel default, and the `destructive` action variant on
+the confirm button. `destructive` is the only chromatic button fill. Do not
+add type-to-confirm fields or a second confirmation shape.
