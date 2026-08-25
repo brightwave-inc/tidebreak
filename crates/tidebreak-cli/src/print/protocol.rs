@@ -19,11 +19,6 @@ use crate::api::wire::{GrantRung, PendingPlan, PendingQuestions};
 /// Version tag stamped on every event this module emits.
 pub const PROTOCOL_VERSION: &str = "v1";
 
-/// The reason recorded against an approval rejected by standing policy — no
-/// driver was attached to answer it. It reaches the model, which is what lets
-/// it choose another route rather than retry.
-pub const REJECTION_REASON: &str = "non-interactive print mode";
-
 /// Something the turn parked on, waiting for an answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Interaction {
@@ -155,15 +150,14 @@ impl Interaction {
         event
     }
 
-    /// What happens when no driver answers: the standing, documented policy.
+    /// What happens when no driver answers.
     pub fn undriven(&self) -> Undriven {
         match self {
-            // Rejecting keeps the turn moving: the model can pick another
-            // route instead of waiting for a human who is not there.
-            Self::Approval { .. } => Undriven::Decide(Decision::Approval {
-                approve: false,
-                reason: REJECTION_REASON.to_owned(),
-                grant: None,
+            Self::Approval { call_id, .. } => Undriven::Halt(Halt {
+                reason: HaltReason::ApprovalDriverUnavailable,
+                call_id: Some(*call_id),
+                message: "the turn requested approval and no driver is attached to decide it"
+                    .to_owned(),
             }),
             Self::Plan { call_id, .. } => Undriven::Halt(Halt {
                 reason: HaltReason::PlanUndriven,
@@ -182,12 +176,10 @@ impl Interaction {
     }
 }
 
-/// The standing answer to an interaction nobody is driving.
+/// The outcome for an interaction nobody is driving.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Undriven {
-    /// Policy can answer this one on its own.
-    Decide(Decision),
-    /// Policy has no answer; the turn ends, loudly.
+    /// The turn ends because no caller can answer the interaction.
     Halt(Halt),
 }
 
@@ -213,6 +205,7 @@ pub enum Decision {
 /// Why an unattended run gave up, in a form a caller can branch on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HaltReason {
+    ApprovalDriverUnavailable,
     PlanUndriven,
     QuestionsUndriven,
     DecisionFailed,
@@ -231,6 +224,7 @@ pub enum HaltReason {
 impl HaltReason {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ApprovalDriverUnavailable => "approval_driver_unavailable",
             Self::PlanUndriven => "plan_undriven",
             Self::QuestionsUndriven => "questions_undriven",
             Self::DecisionFailed => "decision_failed",
@@ -240,14 +234,16 @@ impl HaltReason {
         }
     }
 
-    /// The process exit status this halt produces. Both undriven reasons share
+    /// The process exit status this halt produces. The undriven reasons share
     /// one code — they are the same fact ("nobody was there to answer") and the
     /// `reason` field separates them. The three failure reasons share one for
     /// the same reason: the run reached something it had to settle and could
     /// not carry it through.
     pub fn exit_code(self) -> i32 {
         match self {
-            Self::PlanUndriven | Self::QuestionsUndriven => super::EXIT_INTERACTION_UNDRIVEN,
+            Self::ApprovalDriverUnavailable | Self::PlanUndriven | Self::QuestionsUndriven => {
+                super::EXIT_INTERACTION_UNDRIVEN
+            }
             Self::DecisionFailed | Self::PendingLookupFailed | Self::FolderDeclineFailed => {
                 super::EXIT_DECISION_FAILED
             }

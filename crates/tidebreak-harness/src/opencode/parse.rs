@@ -17,8 +17,8 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use tidebreak_core::{
-    BoundedError, CodeUsage, HarnessKind, ToolDetail, ToolOutcome, MAX_EVENT_TEXT_CHARS,
-    MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    BoundedError, CodeUsage, Diffstat, FileChangeKind, HarnessKind, ToolDetail, ToolOutcome,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
 use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
@@ -38,7 +38,9 @@ pub struct OpencodeStreamParser {
     started_tools: HashSet<String>,
     completed_tools: HashSet<String>,
     resolved_approvals: HashSet<String>,
+    changed_files: HashSet<String>,
     last_usage: CodeUsage,
+    first_call_context_tokens: Option<u64>,
 }
 
 /// Result of parsing a whole fixture or a finished stream.
@@ -125,6 +127,9 @@ impl OpencodeStreamParser {
         let path = value.get("path").and_then(Value::as_str).unwrap_or("");
         if method == "POST" && path.contains("/prompt_async") {
             self.turn_terminal = false;
+            self.changed_files.clear();
+            self.last_usage = CodeUsage::default();
+            self.first_call_context_tokens = None;
             return Vec::new();
         }
         if method == "POST" && path.contains("/permission/") && path.ends_with("/reply") {
@@ -218,12 +223,15 @@ impl OpencodeStreamParser {
             }
             "permission.asked" => self.parse_permission_asked(&props),
             "permission.replied" => self.parse_permission_replied(&props),
+            "file.edited" => self.parse_file_edited(&props),
             "server.connected"
             | "server.heartbeat"
             | "catalog.updated"
             | "integration.updated"
             | "plugin.added"
             | "reference.updated"
+            | "project.directories.updated"
+            | "file.watcher.updated"
             | "session.diff"
             | "session.updated" => {
                 // Known catalog/session broadcasts with no normalized
@@ -249,6 +257,9 @@ impl OpencodeStreamParser {
                 }
                 self.turn_open = true;
                 self.turn_terminal = false;
+                self.changed_files.clear();
+                self.last_usage = CodeUsage::default();
+                self.first_call_context_tokens = None;
                 vec![HarnessEvent::TurnStarted]
             }
             "idle" => self.emit_turn_completed(),
@@ -347,6 +358,7 @@ impl OpencodeStreamParser {
                 Vec::new()
             }
             Some("step-start") => Vec::new(),
+            Some("patch") => self.parse_patch_part(&part),
             Some(other) => {
                 self.count_unrecognized(&format!("message.part.updated/{other}"), &part);
                 Vec::new()
@@ -356,6 +368,61 @@ impl OpencodeStreamParser {
                 Vec::new()
             }
         }
+    }
+
+    fn parse_file_edited(&mut self, props: &Value) -> Vec<HarnessEvent> {
+        let path = first_path(props);
+        self.emit_file_changed(path, FileChangeKind::Modified, None)
+    }
+
+    fn parse_patch_part(&mut self, part: &Value) -> Vec<HarnessEvent> {
+        let paths = part
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| first_path(value))
+            })
+            .chain(first_path(part))
+            .collect::<Vec<_>>();
+        let diff = part
+            .get("patch")
+            .or_else(|| part.get("diff"))
+            .and_then(Value::as_str);
+        let mut events = Vec::new();
+        for path in paths {
+            events.extend(self.emit_file_changed(Some(path), file_kind_from_diff(diff), diff));
+        }
+        events
+    }
+
+    fn emit_file_changed(
+        &mut self,
+        path: Option<String>,
+        kind: FileChangeKind,
+        diff: Option<&str>,
+    ) -> Vec<HarnessEvent> {
+        let Some(path) = path.filter(|path| !path.trim().is_empty()) else {
+            return Vec::new();
+        };
+        if !self.changed_files.insert(path.clone()) {
+            return Vec::new();
+        }
+        let (insertions, deletions) = diff.map(diff_counts).unwrap_or((0, 0));
+        vec![HarnessEvent::FileChanged {
+            path,
+            kind,
+            diffstat: Diffstat {
+                files: 1,
+                insertions,
+                deletions,
+                truncated: false,
+            },
+        }]
     }
 
     fn parse_tool_part(&mut self, part: &Value) -> Vec<HarnessEvent> {
@@ -567,6 +634,12 @@ impl OpencodeStreamParser {
             .pointer("/cache/write")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let context_tokens = input_tokens
+            .saturating_add(cache_read_input_tokens)
+            .saturating_add(cache_creation_input_tokens);
+        if self.first_call_context_tokens.is_none() && context_tokens > 0 {
+            self.first_call_context_tokens = Some(context_tokens);
+        }
         self.last_usage = CodeUsage {
             input_tokens,
             output_tokens: tokens.get("output").and_then(Value::as_u64).unwrap_or(0),
@@ -577,9 +650,8 @@ impl OpencodeStreamParser {
             // and the session-level `session.updated` row carries their 5390
             // sum, which this parser does not read. So the snapshot standing
             // when the turn ends is the last call's prompt.
-            context_tokens: input_tokens
-                .saturating_add(cache_read_input_tokens)
-                .saturating_add(cache_creation_input_tokens),
+            context_tokens,
+            first_call_context_tokens: self.first_call_context_tokens,
         };
     }
 
@@ -635,6 +707,41 @@ fn permission_id_from_path(path: &str) -> Option<String> {
 /// Whether a view of a call still says nothing about its arguments.
 fn arguments_pending(input: &Value) -> bool {
     input.as_object().is_none_or(serde_json::Map::is_empty)
+}
+
+fn first_path(value: &Value) -> Option<String> {
+    value
+        .get("path")
+        .or_else(|| value.get("file"))
+        .or_else(|| value.get("filePath"))
+        .or_else(|| value.pointer("/info/path"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn file_kind_from_diff(diff: Option<&str>) -> FileChangeKind {
+    let Some(diff) = diff else {
+        return FileChangeKind::Modified;
+    };
+    if diff.contains("--- /dev/null") {
+        FileChangeKind::Added
+    } else if diff.contains("+++ /dev/null") {
+        FileChangeKind::Deleted
+    } else {
+        FileChangeKind::Modified
+    }
+}
+
+fn diff_counts(diff: &str) -> (u32, u32) {
+    diff.lines().fold((0, 0), |(insertions, deletions), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (insertions.saturating_add(1), deletions)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (insertions, deletions.saturating_add(1))
+        } else {
+            (insertions, deletions)
+        }
+    })
 }
 
 fn tool_detail(name: &str, input: &Value) -> ToolDetail {
@@ -734,5 +841,97 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["started", "completed"]);
+    }
+
+    #[test]
+    fn watcher_broadcasts_are_known_noops() {
+        let input = r#"
+{"type":"project.directories.updated","properties":{}}
+{"type":"file.watcher.updated","properties":{}}
+"#;
+        let out = OpencodeStreamParser::parse_ndjson(input);
+        assert_eq!(out.unrecognized, 0);
+        assert!(out.events.is_empty());
+    }
+
+    #[test]
+    fn file_events_normalize_once_per_path_with_patch_counts() {
+        let input = r#"
+{"dir":"out","msg":{"kind":"http","method":"POST","path":"/session/ses_abc/prompt_async","body":{}}}
+{"type":"file.edited","properties":{"file":"docs/exercise.md"}}
+{"type":"message.part.updated","properties":{"part":{"type":"patch","files":[{"path":"docs/exercise.md"},{"path":"src/lib.rs"}],"diff":"--- a/file\n+++ b/file\n-old\n+new\n+more"}}}
+"#;
+        let out = OpencodeStreamParser::parse_ndjson(input);
+        assert_eq!(out.unrecognized, 0);
+        let changes = out
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::FileChanged {
+                    path,
+                    kind,
+                    diffstat,
+                } => Some((
+                    path.as_str(),
+                    *kind,
+                    diffstat.insertions,
+                    diffstat.deletions,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changes,
+            vec![
+                ("docs/exercise.md", FileChangeKind::Modified, 0, 0),
+                ("src/lib.rs", FileChangeKind::Modified, 2, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_keeps_the_first_and_last_call_contexts() {
+        let input = r#"
+{"dir":"out","msg":{"kind":"http","method":"POST","path":"/session/ses_abc/prompt_async","body":{}}}
+{"type":"session.status","properties":{"status":{"type":"busy"}}}
+{"type":"message.part.updated","properties":{"part":{"type":"step-finish","tokens":{"input":4000,"output":1,"cache":{"read":2000,"write":0}}}}}
+{"type":"message.part.updated","properties":{"part":{"type":"step-finish","tokens":{"input":100,"output":1,"cache":{"read":7000,"write":0}}}}}
+{"type":"session.idle","properties":{"sessionID":"ses_abc"}}
+"#;
+        let out = OpencodeStreamParser::parse_ndjson(input);
+        let usage = out.events.iter().find_map(|event| match event {
+            HarnessEvent::TurnCompleted { usage } => Some(usage),
+            _ => None,
+        });
+        assert_eq!(
+            usage.and_then(|usage| usage.first_call_context_tokens),
+            Some(6_000)
+        );
+        assert_eq!(usage.map(|usage| usage.context_tokens), Some(7_100));
+    }
+
+    #[test]
+    fn a_new_turn_does_not_inherit_the_previous_turns_usage() {
+        let input = r#"
+{"type":"session.status","properties":{"status":{"type":"busy"}}}
+{"type":"message.part.updated","properties":{"part":{"type":"step-finish","tokens":{"input":4000,"output":1,"cache":{"read":2000,"write":0}}}}}
+{"type":"session.idle","properties":{"sessionID":"ses_abc"}}
+{"dir":"out","msg":{"kind":"http","method":"POST","path":"/session/ses_abc/prompt_async","body":{}}}
+{"type":"session.status","properties":{"status":{"type":"busy"}}}
+{"type":"session.idle","properties":{"sessionID":"ses_abc"}}
+"#;
+        let out = OpencodeStreamParser::parse_ndjson(input);
+        let completed = out
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::TurnCompleted { usage } => Some(usage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0].context_tokens, 6_000);
+        assert_eq!(completed[1], &CodeUsage::default());
     }
 }

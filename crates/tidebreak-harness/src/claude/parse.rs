@@ -252,7 +252,7 @@ impl ClaudeStreamParser {
                 Some(key) => self.close_tool_block(&key),
                 None => Vec::new(),
             },
-            "message_start" | "message_delta" | "message_stop" => Vec::new(),
+            "message_start" | "message_delta" | "message_stop" | "ping" => Vec::new(),
             other => {
                 self.count_unrecognized(&format!("stream_event/{other}"), event);
                 Vec::new()
@@ -672,6 +672,7 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
             .and_then(Value::as_u64)
             .unwrap_or(0),
         context_tokens: context_tokens_from(value),
+        first_call_context_tokens: first_call_context_tokens_from(value),
     }
 }
 
@@ -694,6 +695,28 @@ fn context_tokens_from(usage: &Value) -> u64 {
     field("input_tokens")
         .saturating_add(field("cache_read_input_tokens"))
         .saturating_add(field("cache_creation_input_tokens"))
+}
+
+fn first_call_context_tokens_from(usage: &Value) -> Option<u64> {
+    let call = usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .and_then(|iterations| iterations.first())?;
+    let tokens = call
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(
+            call.get("cache_read_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+        .saturating_add(
+            call.get("cache_creation_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        );
+    (tokens > 0).then_some(tokens)
 }
 
 fn bound(text: &str, max: usize) -> String {
@@ -730,6 +753,7 @@ mod tests {
         let parsed = usage_from(Some(&usage));
 
         assert_eq!(parsed.context_tokens, 49_603);
+        assert_eq!(parsed.first_call_context_tokens, Some(49_335));
         // The four spend counts keep the turn totals they already carried.
         assert_eq!(parsed.cache_read_input_tokens, 142_916);
         assert_eq!(parsed.output_tokens, 196);
@@ -770,6 +794,14 @@ mod tests {
             Some(HarnessEvent::TurnCompleted { .. })
         ));
         assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn stream_ping_is_a_known_noop() {
+        let out =
+            ClaudeStreamParser::parse_ndjson(r#"{"type":"stream_event","event":{"type":"ping"}}"#);
+        assert_eq!(out.unrecognized, 0);
+        assert!(out.events.is_empty());
     }
 
     /// The captured streams repeat a finished block on an `assistant` line

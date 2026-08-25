@@ -70,6 +70,7 @@ pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
         }
     };
     let mut candidates = Vec::new();
+    let mut unsupported = Vec::new();
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -84,6 +85,7 @@ pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
             continue;
         }
         if preview_media_type_from_extension(&name).is_none() {
+            unsupported.push(name);
             continue;
         }
         candidates.push(Candidate { name });
@@ -93,6 +95,14 @@ pub fn scan_preview_directory(preview_dir: &Path) -> PreviewScan {
             .cmp(&preview_priority(&right.name))
             .then_with(|| alphabetical(&left.name, &right.name))
     });
+    unsupported.sort_by(|left, right| alphabetical(left, right));
+
+    if !unsupported.is_empty() {
+        scan.notes.push(format!(
+            "unsupported preview file(s): {}. preview/ accepts PNG, JPEG, or WebP images. Keep SVG and other source files in output/, and write a raster copy to preview/ for visual review.",
+            unsupported.join(", ")
+        ));
+    }
 
     let mut rejected = Vec::new();
     let mut omitted = Vec::new();
@@ -339,5 +349,23 @@ mod tests {
         write_png(dir.path(), "actually-png.jpg", 24, 12);
         let scan = scan_preview_directory(dir.path());
         assert_eq!(scan.images[0].0.media_type, ImageMediaType::Png);
+    }
+
+    #[test]
+    fn unsupported_preview_files_produce_an_actionable_note() {
+        let preview = tempfile::tempdir().unwrap();
+        std::fs::write(
+            preview.path().join("palette.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#,
+        )
+        .unwrap();
+
+        let scan = scan_preview_directory(preview.path());
+
+        assert!(scan.images.is_empty());
+        assert_eq!(scan.notes.len(), 1);
+        assert!(scan.notes[0].contains("palette.svg"));
+        assert!(scan.notes[0].contains("PNG, JPEG, or WebP"));
+        assert!(scan.notes[0].contains("output/"));
     }
 }

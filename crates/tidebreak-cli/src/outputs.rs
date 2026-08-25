@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use tidebreak_core::{
-    AgentError, ChatId, OutputId, OutputRevisionId, Result, MAX_MESSAGE_ATTACHMENTS,
+    AgentError, ChatId, DocumentId, OutputId, OutputRevisionId, Result, MAX_MESSAGE_ATTACHMENTS,
 };
 use uuid::Uuid;
 
@@ -267,6 +267,7 @@ pub async fn attach(chat: ChatId, path: PathBuf, server: Server) -> Result<()> {
             .attach_document(chat, &title, &media_type, bytes)
             .await
             .map_err(|error| local_import_error(client, error))?;
+        record_pending_document(chat, document_id)?;
         println!("{document_id}");
         eprintln!("tidebreak: attached {title} as {media_type}");
     }
@@ -311,18 +312,50 @@ pub(crate) fn clear_pending_image_attachments(chat: ChatId) -> Result<()> {
     }
 }
 
+/// Document ids `tidebreak attach` published for `chat` that the next `-p`
+/// turn has not yet submitted.
+pub(crate) fn pending_document_attachments(chat: ChatId) -> Result<Vec<DocumentId>> {
+    read_pending_ids(&pending_documents_path(chat)?, "document", chat)
+}
+
+pub(crate) fn clear_pending_document_attachments(chat: ChatId) -> Result<()> {
+    clear_pending_ids(&pending_documents_path(chat)?, "document", chat)
+}
+
 fn record_pending_image(chat: ChatId, attachment_id: &Uuid) -> Result<()> {
     let mut ids = pending_image_attachments(chat)?;
     if ids.contains(attachment_id) {
         return Ok(());
     }
-    if ids.len() >= MAX_MESSAGE_ATTACHMENTS {
+    if ids
+        .len()
+        .saturating_add(pending_document_attachments(chat)?.len())
+        >= MAX_MESSAGE_ATTACHMENTS
+    {
         return Err(AgentError::msg(format!(
-            "a message may carry at most {MAX_MESSAGE_ATTACHMENTS} image attachments"
+            "a message may carry at most {MAX_MESSAGE_ATTACHMENTS} attachments"
         )));
     }
     ids.push(*attachment_id);
     write_pending_images(chat, &ids)
+}
+
+fn record_pending_document(chat: ChatId, document_id: DocumentId) -> Result<()> {
+    let mut ids = pending_document_attachments(chat)?;
+    if ids.contains(&document_id) {
+        return Ok(());
+    }
+    if ids
+        .len()
+        .saturating_add(pending_image_attachments(chat)?.len())
+        >= MAX_MESSAGE_ATTACHMENTS
+    {
+        return Err(AgentError::msg(format!(
+            "a message may carry at most {MAX_MESSAGE_ATTACHMENTS} attachments"
+        )));
+    }
+    ids.push(document_id);
+    write_pending_ids(&pending_documents_path(chat)?, &ids, "document", chat)
 }
 
 fn write_pending_images(chat: ChatId, ids: &[Uuid]) -> Result<()> {
@@ -357,4 +390,67 @@ fn pending_images_path(chat: ChatId) -> Result<PathBuf> {
         .data_dir
         .join("pending-image-attachments")
         .join(chat.to_string()))
+}
+
+fn pending_documents_path(chat: ChatId) -> Result<PathBuf> {
+    Ok(crate::profile_config()?
+        .data_dir
+        .join("pending-document-attachments")
+        .join(chat.to_string()))
+}
+
+fn read_pending_ids<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    kind: &str,
+    chat: ChatId,
+) -> Result<Vec<T>> {
+    let Some(bytes) = std::fs::read(path).ok() else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AgentError::msg(format!(
+            "could not read pending {kind} attachments for {chat}: {error}"
+        ))
+    })
+}
+
+fn clear_pending_ids(path: &Path, kind: &str, chat: ChatId) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AgentError::msg(format!(
+            "could not clear pending {kind} attachments for {chat}: {error}"
+        ))),
+    }
+}
+
+fn write_pending_ids<T: serde::Serialize>(
+    path: &Path,
+    ids: &[T],
+    kind: &str,
+    chat: ChatId,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AgentError::msg(format!(
+                "could not write pending {kind} attachments for {chat}: {error}"
+            ))
+        })?;
+    }
+    let encoded = serde_json::to_vec(ids).map_err(|error| {
+        AgentError::msg(format!(
+            "could not write pending {kind} attachments for {chat}: {error}"
+        ))
+    })?;
+    let temporary = path.with_extension("tmp");
+    let write =
+        std::fs::write(&temporary, encoded).and_then(|()| std::fs::rename(&temporary, path));
+    if write.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write.map_err(|error| {
+        AgentError::msg(format!(
+            "could not write pending {kind} attachments for {chat}: {error}"
+        ))
+    })
 }

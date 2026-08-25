@@ -74,7 +74,8 @@
       "output_tokens": 22,
       "cache_read_input_tokens": 33,
       "cache_creation_input_tokens": 44,
-      "context_tokens": 88
+      "context_tokens": 88,
+      "first_call_context_tokens": 55
     },
     "checkpoint": {
       "checkpoint_ref": "refs/tidebreak/checkpoints/ws/1",

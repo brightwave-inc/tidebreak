@@ -23,6 +23,7 @@
 //! in shell history, and a per-launch bearer token is full authority over the
 //! profile.
 
+use std::path::PathBuf;
 use tidebreak_core::{AgentError, Result};
 
 use crate::api::client::Client;
@@ -42,6 +43,10 @@ pub enum Server {
         base: String,
         token: String,
         local_import_token: Option<String>,
+        /// Data directory whose `listen.json` should be re-read after a
+        /// dropped connection. Explicit `--server` attachments leave this
+        /// unset because their endpoint is fixed by the caller.
+        listen_data_dir: Option<PathBuf>,
     },
 }
 
@@ -77,6 +82,7 @@ impl Server {
                 base,
                 token: endpoint.token,
                 local_import_token: Some(endpoint.local_import_token),
+                listen_data_dir: Some(config.data_dir),
             });
         }
         let url = match url_flag {
@@ -110,6 +116,7 @@ impl Server {
             base,
             token,
             local_import_token: None,
+            listen_data_dir: None,
         })
     }
 }
@@ -177,11 +184,13 @@ impl Session {
                 base,
                 token,
                 local_import_token,
+                listen_data_dir,
             } => Ok(Self {
-                client: Client::attach_with_local_import(
+                client: Client::attach_with_reconnect_source(
                     base.clone(),
                     token,
                     local_import_token.as_deref(),
+                    listen_data_dir.clone(),
                 )?,
                 serve: None,
                 client_executor_token: None,

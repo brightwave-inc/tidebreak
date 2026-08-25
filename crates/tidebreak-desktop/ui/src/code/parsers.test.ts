@@ -410,6 +410,16 @@ describe("parseCodeTurnList", () => {
     expect(parsed?.usage).toEqual({ ...older, context_tokens: 0 });
   });
 
+  it("keeps optional first-call context and accepts older usage without it", () => {
+    expect(
+      parseCodeTurn({
+        ...TURN,
+        usage: { ...USAGE, first_call_context_tokens: 9_500 },
+      })?.usage,
+    ).toEqual({ ...USAGE, first_call_context_tokens: 9_500 });
+    expect(parseCodeTurn({ ...TURN, usage: USAGE })?.usage).toEqual(USAGE);
+  });
+
   it("rejects a non-array or a row the turn parser would drop", () => {
     expect(parseCodeTurnList({ turns: [TURN] })).toBeNull();
     expect(parseCodeTurnList([{ ...TURN, status: "paused" }])).toBeNull();

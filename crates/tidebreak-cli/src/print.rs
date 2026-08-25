@@ -11,10 +11,9 @@
 //! a proposed plan, a question. Two things answer those. A **driver** — another
 //! process holding this one's stdin, opted in with `--output-format json` — is
 //! asked over the NDJSON protocol in [`protocol`]. With no driver attached, the
-//! standing policy answers instead: approvals are rejected, so the model can
-//! choose another route rather than hang, and a plan or a question ends the run
-//! with a distinct exit status and a machine-readable reason. Nothing is ever
-//! cancelled silently.
+//! missing driver ends the run with a distinct exit status and a
+//! machine-readable reason. The parked turn is cancelled so the model cannot
+//! reinterpret an unavailable decision as a user rejection or retry it.
 //!
 //! A request for another host folder is deliberately **not** one of those.
 //! Folder access is host-machine consent, and the driving protocol has no way
@@ -46,7 +45,9 @@ use tidebreak_core::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::api::client::{Client, ClientExecutionOutcome, EventSocket};
+use crate::api::client::{
+    Client, ClientExecutionOutcome, DurableTurn, DurableTurnStatus, EventSocket,
+};
 use crate::api::wire::{ChatFrame, ClientEvent, ToolCallStatus};
 
 mod driver;
@@ -70,8 +71,16 @@ const EXIT_INTERRUPTED: i32 = 130;
 /// Attempts to re-open the event socket after it closes mid-turn before giving
 /// up. The retries cover a transient hiccup — an accept-loop stumble when the
 /// server is in-process, a dropped connection when it is not.
-const RECONNECT_ATTEMPTS: usize = 3;
-const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+const RECONNECT_DELAYS: [std::time::Duration; 8] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(6),
+    std::time::Duration::from_secs(6),
+];
 
 /// How often a folder refusal asks whether its call has become claimable, and
 /// the ceiling that interval backs off to.
@@ -121,7 +130,7 @@ pub async fn run(
     // keeps an embedded engine alive — dropping it aborts the accept loop and
     // with it the turn worker.
     let session = crate::connect::Session::open(&server).await?;
-    let client = session.client().clone();
+    let mut client = session.client().clone();
     // Present only when this process is the server. Answering a client-owned
     // tool call is the trusted surface's job, and an attached run is not it.
     let executor_token = session.client_executor_token().map(str::to_owned);
@@ -179,7 +188,7 @@ pub async fn run(
     };
 
     let outcome = one_turn(
-        &client,
+        &mut client,
         executor_token.as_deref(),
         chat,
         &prompt,
@@ -202,7 +211,7 @@ impl Drop for FolderExecutorTask {
 
 /// Post the message and follow the event stream until the turn ends.
 async fn one_turn(
-    client: &Client,
+    client: &mut Client,
     executor_token: Option<&str>,
     chat: ChatId,
     prompt: &str,
@@ -214,11 +223,15 @@ async fn one_turn(
     // socket's replay only reaches back to the cursor it was opened at.
     let mut stream = Stream::open(client, chat).await?;
     let attachments = crate::outputs::pending_image_attachments(chat)?;
+    let file_attachments = crate::outputs::pending_document_attachments(chat)?;
     client
-        .post_message(chat, turn_id, prompt, &attachments)
+        .post_message(chat, turn_id, prompt, &attachments, &file_attachments)
         .await?;
     if !attachments.is_empty() {
         let _ = crate::outputs::clear_pending_image_attachments(chat);
+    }
+    if !file_attachments.is_empty() {
+        let _ = crate::outputs::clear_pending_document_attachments(chat);
     }
     // Installed once the turn exists, and not before. Installing it earlier
     // would swallow signals over the handshake and the post — neither of which
@@ -233,7 +246,7 @@ async fn one_turn(
 
     let outcome = loop {
         let frame = tokio::select! {
-            frame = stream.next(client, chat) => frame?,
+            frame = stream.next(client, chat, turn_id) => frame?,
             () = interrupt.fired() => {
                 break halted(client, chat, turn_id, &interrupted(), &mut printer).await;
             }
@@ -253,8 +266,18 @@ async fn one_turn(
             },
         };
 
-        let Some((raw, event)) = frame else {
-            continue;
+        let (raw, event) = match frame {
+            StreamNext::Frame(raw, event) => (raw, event),
+            StreamNext::Ignore => continue,
+            StreamNext::Durable(turn) => {
+                printer.reconciled(turn_id, &turn);
+                break match turn.status {
+                    DurableTurnStatus::Completed => 0,
+                    DurableTurnStatus::Failed | DurableTurnStatus::Cancelled => {
+                        EXIT_TURN_UNSUCCESSFUL
+                    }
+                };
+            }
         };
         if !ours {
             if !matches!(&event, ClientEvent::TurnStarted { turn_id: id } if *id == turn_id) {
@@ -313,8 +336,8 @@ async fn one_turn(
                     break halted(client, chat, turn_id, &halt, &mut printer).await;
                 }
             }
-            // Neither can be answered from the standing policy, so both reach
-            // for the driver first and end the run loudly if there is none.
+            // Neither can be answered without a driver, so both end the run
+            // loudly if there is none.
             ClientEvent::PlanProposed { call_id } => {
                 match pending_plan(client, chat, call_id).await {
                     Ok(Some(interaction)) => {
@@ -381,8 +404,8 @@ async fn one_turn(
     Ok(outcome)
 }
 
-/// Settle one parked interaction: ask the driver, fall back to the standing
-/// policy, and carry the decision out. `Some(halt)` ends the run.
+/// Settle one parked interaction: ask the driver and carry the decision out.
+/// If no driver answers, the undriven policy halts the run.
 ///
 /// The interrupt is watched here too. A driven run waiting on a decision line
 /// receives no further frames — the turn is parked on this very answer — so an
@@ -405,16 +428,10 @@ async fn settle(
     };
     let decision = match answered {
         Some(decision) => decision,
-        None => match interaction.undriven() {
-            Undriven::Decide(decision) => {
-                printer.notice(&format!(
-                    "no driver attached; {} answered by standing policy",
-                    interaction.kind()
-                ));
-                decision
-            }
-            Undriven::Halt(halt) => return Some(halt),
-        },
+        None => {
+            let Undriven::Halt(halt) = interaction.undriven();
+            return Some(halt);
+        }
     };
     apply(client, chat, interaction, decision, printer).await
 }
@@ -886,6 +903,12 @@ struct Stream {
     last_seq: i64,
 }
 
+enum StreamNext {
+    Frame(String, ClientEvent),
+    Durable(DurableTurn),
+    Ignore,
+}
+
 impl Stream {
     async fn open(client: &Client, chat: ChatId) -> Result<Self> {
         Ok(Self {
@@ -894,39 +917,55 @@ impl Stream {
         })
     }
 
-    /// The next journaled frame: its raw JSON text and its decoded event.
-    /// `Ok(None)` is a frame with nothing to act on (metadata, a ping, an
-    /// undecodable payload), so the caller simply asks again.
+    /// The next journaled frame, a durable terminal fallback, or an ignorable
+    /// payload such as metadata, a ping, or undecodable text.
     async fn next(
         &mut self,
-        client: &Client,
+        client: &mut Client,
         chat: ChatId,
-    ) -> Result<Option<(String, ClientEvent)>> {
+        turn_id: TurnId,
+    ) -> Result<StreamNext> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => {
                 let Ok(ChatFrame::Event(frame)) = serde_json::from_str::<ChatFrame>(&text) else {
-                    return Ok(None);
+                    return Ok(StreamNext::Ignore);
                 };
                 self.last_seq = frame.seq;
-                Ok(Some((text.to_string(), frame.event)))
+                Ok(StreamNext::Frame(text.to_string(), frame.event))
             }
-            Some(Ok(_)) => Ok(None),
-            Some(Err(_)) | None => {
-                self.reconnect(client, chat).await?;
-                Ok(None)
-            }
+            Some(Ok(_)) => Ok(StreamNext::Ignore),
+            Some(Err(_)) | None => match self.reconnect(client, chat, turn_id).await? {
+                Some(turn) => Ok(StreamNext::Durable(turn)),
+                None => Ok(StreamNext::Ignore),
+            },
         }
     }
 
-    async fn reconnect(&mut self, client: &Client, chat: ChatId) -> Result<()> {
+    async fn reconnect(
+        &mut self,
+        client: &mut Client,
+        chat: ChatId,
+        turn_id: TurnId,
+    ) -> Result<Option<DurableTurn>> {
         let mut last = None;
-        for _ in 0..RECONNECT_ATTEMPTS {
-            tokio::time::sleep(RECONNECT_DELAY).await;
+        for delay in RECONNECT_DELAYS {
+            tokio::time::sleep(delay).await;
+            if let Err(error) = client.refresh_attach_endpoint() {
+                last = Some(error);
+                continue;
+            }
             match client.open_events(chat, self.last_seq).await {
                 Ok(socket) => {
                     self.socket = socket;
-                    return Ok(());
+                    return Ok(None);
                 }
+                Err(error) => last = Some(error),
+            }
+        }
+        if client.refresh_attach_endpoint().is_ok() {
+            match client.durable_turn(chat, turn_id).await {
+                Ok(Some(turn)) => return Ok(Some(turn)),
+                Ok(None) => {}
                 Err(error) => last = Some(error),
             }
         }
@@ -944,6 +983,7 @@ struct Printer {
     /// Whether stdout's last text ended without a newline, so the final flush
     /// can leave the shell prompt on its own line.
     dangling_line: bool,
+    assistant_text: String,
 }
 
 impl Printer {
@@ -952,6 +992,7 @@ impl Printer {
             format,
             tools: HashMap::new(),
             dangling_line: false,
+            assistant_text: String::new(),
         }
     }
 
@@ -969,7 +1010,11 @@ impl Printer {
     }
 
     fn text(&mut self, text: &str) {
-        if self.format != OutputFormat::Text || text.is_empty() {
+        if text.is_empty() {
+            return;
+        }
+        self.assistant_text.push_str(text);
+        if self.format != OutputFormat::Text {
             return;
         }
         let mut stdout = std::io::stdout().lock();
@@ -977,6 +1022,33 @@ impl Printer {
         // Unbuffered: a caller reading the pipe should see the answer form.
         let _ = stdout.flush();
         self.dangling_line = !text.ends_with('\n');
+    }
+
+    fn reconciled(&mut self, turn_id: TurnId, turn: &DurableTurn) {
+        self.notice("the live event stream was unavailable; recovered the terminal turn from the durable transcript");
+        if self.format == OutputFormat::Text {
+            if let Some(suffix) = turn.content.strip_prefix(&self.assistant_text) {
+                self.text(suffix);
+            } else if !turn.content.is_empty() {
+                if !self.assistant_text.is_empty() && !self.assistant_text.ends_with('\n') {
+                    self.text("\n");
+                }
+                self.text(&turn.content);
+            }
+            return;
+        }
+        self.control(serde_json::json!({
+            "tidebreak": protocol::PROTOCOL_VERSION,
+            "type": "turn_reconciled",
+            "turn_id": turn_id,
+            "status": match turn.status {
+                DurableTurnStatus::Completed => "completed",
+                DurableTurnStatus::Failed => "failed",
+                DurableTurnStatus::Cancelled => "cancelled",
+            },
+            "content": turn.content,
+            "last_event_seq": turn.last_event_seq,
+        }));
     }
 
     fn tool_started(&mut self, call_id: CallId, name: String) {

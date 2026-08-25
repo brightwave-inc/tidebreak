@@ -3458,12 +3458,22 @@ function parseUsage(value: unknown): CodeUsage | null {
   if (contextTokens !== undefined && !isFiniteNumber(contextTokens)) {
     return null;
   }
+  const firstCallContextTokens = value.first_call_context_tokens;
+  if (
+    firstCallContextTokens !== undefined &&
+    !isFiniteNumber(firstCallContextTokens)
+  ) {
+    return null;
+  }
   return {
     input_tokens: value.input_tokens,
     output_tokens: value.output_tokens,
     cache_read_input_tokens: value.cache_read_input_tokens,
     cache_creation_input_tokens: value.cache_creation_input_tokens,
     context_tokens: contextTokens ?? 0,
+    ...(firstCallContextTokens === undefined
+      ? {}
+      : { first_call_context_tokens: firstCallContextTokens }),
   };
 }
 
