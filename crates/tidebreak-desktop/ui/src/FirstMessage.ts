@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import type { ImageAttachment } from "./ImageAttachments";
 import type { ImportedDocument } from "./documents";
+import type { PastedTextAttachment } from "./PastedText";
 
 export type PendingFirstMessage = {
   text: string;
   images: ImageAttachment[];
   files: ImportedDocument[];
+  pastedTexts: PastedTextAttachment[];
   /** Skills picked on home, which only the chat route can actually post. */
   skills: string[];
   /** Whether voice transcription contributed to this message's text. */
@@ -37,7 +39,13 @@ export function createFirstMessageStore() {
     hold: (chatId, pending) => set({ chatId, pending }),
     take: (chatId) => {
       const { chatId: heldFor, pending } = get();
-      if (heldFor !== chatId || !pending?.text) return null;
+      if (
+        heldFor !== chatId ||
+        !pending ||
+        (!pending.text && pending.pastedTexts.length === 0)
+      ) {
+        return null;
+      }
       set({ chatId: null, pending: null });
       return pending;
     },

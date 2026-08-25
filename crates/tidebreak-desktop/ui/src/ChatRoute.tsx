@@ -87,6 +87,7 @@ import { useDeliverableCatalog } from "./useDeliverableCatalog";
 import { backgroundAgentSpawnKeys, useAgentRuns } from "./useAgentRuns";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
+import { messageWithPastedText, type PastedTextAttachment } from "./PastedText";
 
 const CodeBrowserTab = lazy(async () => {
   const module = await import("./code/browser/CodeBrowserTab");
@@ -141,6 +142,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const [hydrated, setHydrated] = useState(false);
   const composerAttachments = useComposerAttachments(chatId);
   const files = composerAttachments.files;
+  const pastedTexts = composerAttachments.pastedTexts;
   const pendingFolderIds = composerAttachments.folders;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -205,12 +207,14 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     const pending = firstMessageActions.take(chatId);
     if (pending) {
       if (pending.voiceInputUsed) voice.markInputUsed();
+      composerDraftActions.setPastedTexts(chatId, pending.pastedTexts);
       void sendMessage(
         pending.text,
         pending.images,
         pending.files,
         pending.skills,
         pending.voiceInputUsed,
+        pending.pastedTexts,
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -390,7 +394,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   }
 
   async function onSend() {
-    await sendMessage(draftRef.current.trim());
+    await sendMessage(draftRef.current);
   }
 
   /**
@@ -399,8 +403,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * the tray above the composer shows and manages the rows.
    */
   async function onQueue() {
-    const content = draftRef.current.trim();
+    const content = messageWithPastedText(draftRef.current, pastedTexts);
     if (!chat || !content) return;
+    const queuedPastedTextIds = new Set(pastedTexts.map((item) => item.id));
     await queueComposerMessage(
       () =>
         client.postMessage(
@@ -416,6 +421,12 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       () => {
         setComposerDraft("");
         images.clear();
+        const current =
+          useComposerDrafts.getState().attachments[chatId]?.pastedTexts ?? [];
+        composerDraftActions.setPastedTexts(
+          chatId,
+          current.filter((item) => !queuedPastedTextIds.has(item.id)),
+        );
         composerDraftActions.setFolders(chatId, []);
         voice.resetInputUsed();
       },
@@ -433,9 +444,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     fileItems: readonly ImportedDocument[] = files,
     skillNames: readonly string[] = invokedSkills(),
     voiceInputUsed = voice.inputUsed,
+    pastedTextItems: readonly PastedTextAttachment[] = pastedTexts,
   ) {
+    const message = messageWithPastedText(content, pastedTextItems);
     await postTurn({
-      content,
+      content: message,
+      composerDraft: content.trim(),
+      pastedTextIds: pastedTextItems.map((item) => item.id),
       attachments: readyImageAttachmentIds(imageItems),
       transcriptImages: readyTranscriptImageAttachments(imageItems),
       documentIds: fileItems.map((file) => file.documentId),
@@ -489,6 +504,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    */
   async function postTurn({
     content,
+    composerDraft,
+    pastedTextIds = [],
     attachments,
     transcriptImages,
     documentIds,
@@ -498,6 +515,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     fromComposer,
   }: {
     content: string;
+    composerDraft?: string;
+    pastedTextIds?: readonly string[];
     attachments: readonly string[];
     transcriptImages: readonly TranscriptImageAttachment[];
     documentIds: readonly string[];
@@ -549,6 +568,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       // files, skills, and folders wait so a refused send can still retry.
       if (fromComposer) {
         setComposerFiles(() => []);
+        const sentPastedTextIds = new Set(pastedTextIds);
+        const current =
+          useComposerDrafts.getState().attachments[chatId]?.pastedTexts ?? [];
+        composerDraftActions.setPastedTexts(
+          chatId,
+          current.filter((item) => !sentPastedTextIds.has(item.id)),
+        );
         composerDraftActions.setSkills(chatId, []);
         composerDraftActions.setFolders(chatId, []);
         voice.resetInputUsed();
@@ -568,7 +594,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           { id: nextId(), role: "error", text: String(err) },
         ],
       }));
-      if (!draftRef.current) setComposerDraft(content);
+      if (!draftRef.current) setComposerDraft(composerDraft ?? content);
       signalTurnLifecycle("resolved");
     }
   }
@@ -798,7 +824,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
           hydrated={hydrated}
           nativeHost={nativeHost}
           deletingChat={deletingChatId !== null}
-          draftRef={draftRef}
           attachError={attachError}
           files={{
             items: files,

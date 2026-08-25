@@ -92,6 +92,13 @@ import { useUiStore } from "./UiStore";
 import type { ConnectedFolder } from "./host";
 import type { TranscriptFileAttachment } from "./TranscriptFileAttachments";
 import type { ChatFolderAccess } from "./useChatFolderAttachments";
+import {
+  messageWithPastedText,
+  pastedTextLineCount,
+  pastedTextPreview,
+  shouldAttachPastedText,
+  type PastedTextAttachment,
+} from "./PastedText";
 
 const MIN_COMPOSER_LINES = 1;
 export const MAX_COMPOSER_LINES = 6;
@@ -205,6 +212,12 @@ export type ComposerFiles = {
   /** Put one of `recent` back on the next message. */
   onReattach?: (file: TranscriptFileAttachment) => void;
   onRemove: (documentId: string) => void;
+};
+
+export type ComposerPastedTexts = {
+  items: readonly PastedTextAttachment[];
+  onPaste: (text: string) => void;
+  onRemove: (id: string) => void;
 };
 
 /**
@@ -344,6 +357,7 @@ export type ComposerProps = {
   slash?: ComposerSlash;
   images?: ComposerImages;
   files?: ComposerFiles;
+  pastedTexts?: ComposerPastedTexts;
   /** Paths the agent can already read, shown as chips and named on send. */
   workspaceFiles?: ComposerWorkspaceFiles;
   folders?: ComposerFolders;
@@ -393,6 +407,7 @@ export function Composer({
   slash,
   images,
   files,
+  pastedTexts,
   workspaceFiles,
   folders,
   pathMentions,
@@ -452,10 +467,11 @@ export function Composer({
   const active = busy && activeTurnId !== null;
   const sendMode = useUiStore((state) => state.activeTurnSendMode);
   const queueAvailable = onQueue !== undefined;
-  const hasDraft = Boolean(draft.trim());
-  const steerHasUnsupportedCharacter = active && draft.includes("\0");
+  const submissionText = messageWithPastedText(draft, pastedTexts?.items ?? []);
+  const hasDraft = Boolean(submissionText.trim());
+  const steerHasUnsupportedCharacter = active && submissionText.includes("\0");
   const steerTooLong =
-    active && [...draft.trim()].length > MAX_STEER_CHARACTERS;
+    active && [...submissionText.trim()].length > MAX_STEER_CHARACTERS;
   const imageBlocker = imageSendBlocker(images);
   const voiceWorking = voice?.state !== undefined && voice.state !== "idle";
   const canSubmit =
@@ -488,12 +504,14 @@ export function Composer({
   const contextItemCount =
     (images?.items.length ?? 0) +
     (files?.items.length ?? 0) +
+    (pastedTexts?.items.length ?? 0) +
     (workspaceFiles?.items.length ?? 0) +
     folderChips.length +
     invokedSkills.length;
   const contextSummary = [
     contextCountLabel(images?.items.length ?? 0, "image"),
     contextCountLabel(files?.items.length ?? 0, "file"),
+    contextCountLabel(pastedTexts?.items.length ?? 0, "pasted text"),
     contextCountLabel(workspaceFiles?.items.length ?? 0, "workspace file"),
     contextCountLabel(folderChips.length, "folder"),
     contextCountLabel(invokedSkills.length, "skill"),
@@ -881,7 +899,25 @@ export function Composer({
   }
 
   function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    if (acceptTransfer(event.clipboardData)) event.preventDefault();
+    if (acceptTransfer(event.clipboardData)) {
+      event.preventDefault();
+      return;
+    }
+    const text =
+      typeof event.clipboardData.getData === "function"
+        ? event.clipboardData.getData("text/plain")
+        : "";
+    if (!pastedTexts || !shouldAttachPastedText(text)) return;
+    event.preventDefault();
+    const field = event.currentTarget;
+    if (field.selectionStart !== field.selectionEnd) {
+      const start = field.selectionStart;
+      moveCaret(
+        `${draft.slice(0, start)}${draft.slice(field.selectionEnd)}`,
+        start,
+      );
+    }
+    pastedTexts.onPaste(text);
   }
 
   /** Terminal-style recall, claimed only at the start/end of the textarea. */
@@ -1046,6 +1082,20 @@ export function Composer({
                       key={file.documentId}
                       file={file}
                       onRemove={() => files.onRemove(file.documentId)}
+                    />
+                  ))}
+                </ul>
+              )}
+              {pastedTexts && pastedTexts.items.length > 0 && (
+                <ul
+                  className="m-0 flex list-none flex-wrap gap-2 p-0"
+                  aria-label="Pasted text"
+                >
+                  {pastedTexts.items.map((item) => (
+                    <PastedTextChip
+                      key={item.id}
+                      item={item}
+                      onRemove={() => pastedTexts.onRemove(item.id)}
                     />
                   ))}
                 </ul>
@@ -1581,6 +1631,42 @@ function WorkspaceFileChip({
         type="button"
         className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${name}`}
+        onClick={onRemove}
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+    </li>
+  );
+}
+
+function PastedTextChip({
+  item,
+  onRemove,
+}: {
+  item: PastedTextAttachment;
+  onRemove: () => void;
+}) {
+  const lines = pastedTextLineCount(item.text);
+  const characters = [...item.text].length;
+  const detail = `${lines.toLocaleString()} ${lines === 1 ? "line" : "lines"} · ${characters.toLocaleString()} characters`;
+  const preview = pastedTextPreview(item.text);
+  return (
+    <li className="relative flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-muted/50 py-1.5 pl-2 pr-7 text-muted-foreground">
+      <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-background">
+        <FileText className="size-4" aria-hidden="true" />
+      </span>
+      <span className="grid min-w-0 gap-px">
+        <strong className="text-xs font-semibold text-foreground">
+          Pasted text
+        </strong>
+        <small className="max-w-[18rem] truncate text-2xs" title={preview}>
+          {preview} · {detail}
+        </small>
+      </span>
+      <button
+        type="button"
+        className="absolute right-0.5 top-0.5 inline-flex items-center justify-center rounded-full border-0 bg-transparent p-0.5 text-inherit hover:bg-accent hover:text-foreground"
+        aria-label="Remove pasted text"
         onClick={onRemove}
       >
         <X size={14} aria-hidden="true" />

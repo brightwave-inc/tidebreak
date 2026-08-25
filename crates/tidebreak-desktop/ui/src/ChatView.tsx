@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type ReactNode,
-  type RefObject,
 } from "react";
 import type { ApiClient, Chat } from "./api";
 import type { ContextUsageReading } from "./ContextUsageIndicator";
@@ -22,6 +21,7 @@ import {
   type ComposerFiles,
   type ComposerFolders,
   type ComposerImages,
+  type ComposerPastedTexts,
   type ComposerVoice,
 } from "./Composer";
 import type { SlashCommandName } from "./ComposerCommands";
@@ -56,6 +56,7 @@ import {
   TranscriptNavigation,
   transcriptNavigationEntries,
 } from "./TranscriptNavigation";
+import { messageWithPastedText } from "./PastedText";
 
 export type ChatViewProps = {
   client: ApiClient;
@@ -63,8 +64,6 @@ export type ChatViewProps = {
   hydrated: boolean;
   nativeHost: boolean;
   deletingChat: boolean;
-  /** The composer draft, readable synchronously — see [useTurnControls]. */
-  draftRef: RefObject<string>;
   composerModelMenu: ReactNode;
   composerPermissionMenu: ReactNode;
   /** Context-window reading the composer shows beside its own controls. */
@@ -106,7 +105,6 @@ export function ChatView({
   hydrated,
   nativeHost,
   deletingChat,
-  draftRef,
   composerModelMenu,
   composerPermissionMenu,
   contextUsage,
@@ -135,7 +133,11 @@ export function ChatView({
   // reloading its engine mid-typing.
   const draft = useComposerDraft(chat.id);
   const composerPlugins = useComposerPlugins(client);
-  const invokedSkills = useComposerAttachments(chat.id).skills;
+  const composerAttachments = useComposerAttachments(chat.id);
+  const invokedSkills = composerAttachments.skills;
+  const pastedTexts = composerAttachments.pastedTexts;
+  const steerDraftRef = useRef("");
+  steerDraftRef.current = messageWithPastedText(draft, pastedTexts);
   const folderAccess = useFolderAccessRequests(client, chat.id);
   const outputWritebacks = useOutputWritebackRequests(client, chat.id);
   const userQuestions = useUserQuestions(client, chat.id);
@@ -148,7 +150,7 @@ export function ChatView({
   const turnControls = useTurnControls(
     client,
     chat.id,
-    draftRef,
+    steerDraftRef,
     () => {
       onDraftChange("");
       // Pills go with the text they were attached to: accepted guidance has
@@ -157,6 +159,7 @@ export function ChatView({
       // draft context; the grants stay on the chat.
       useComposerDrafts.getState().setSkills(chat.id, []);
       useComposerDrafts.getState().setFolders(chat.id, []);
+      useComposerDrafts.getState().setPastedTexts(chat.id, []);
       onVoiceInputAccepted();
     },
     voiceInputUsed,
@@ -201,6 +204,29 @@ export function ChatView({
     }),
     [files, messages],
   );
+  const composerPastedTexts: ComposerPastedTexts = {
+    items: pastedTexts,
+    onPaste: (text) => {
+      turnControls.clearSteerFeedback();
+      const current =
+        useComposerDrafts.getState().attachments[chat.id]?.pastedTexts ?? [];
+      useComposerDrafts
+        .getState()
+        .setPastedTexts(chat.id, [
+          ...current,
+          { id: crypto.randomUUID(), text },
+        ]);
+    },
+    onRemove: (id) => {
+      turnControls.clearSteerFeedback();
+      const current =
+        useComposerDrafts.getState().attachments[chat.id]?.pastedTexts ?? [];
+      useComposerDrafts.getState().setPastedTexts(
+        chat.id,
+        current.filter((item) => item.id !== id),
+      );
+    },
+  };
   const composerHistory = useMemo(
     () =>
       messages
@@ -632,6 +658,7 @@ export function ChatView({
               }}
               images={composerImages}
               files={composerFiles}
+              pastedTexts={composerPastedTexts}
               folders={folders}
               voice={voice}
               nativeDropTarget={nativeDropTarget}

@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { ImportedDocument } from "./documents";
 import type { ImageAttachment } from "./ImageAttachments";
+import type { PastedTextAttachment } from "./PastedText";
 
 const KEY_PREFIX = "composer_";
 const ATTACHMENTS_PREFIX = "composer_attachments_";
@@ -58,6 +59,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export type ComposerAttachmentDraft = {
   images: ImageAttachment[];
   files: ImportedDocument[];
+  pastedTexts: PastedTextAttachment[];
   /** Skills the next message will invoke, by catalog name, in pick order. */
   skills: string[];
   /**
@@ -71,6 +73,7 @@ export type ComposerAttachmentDraft = {
 export const EMPTY_ATTACHMENT_DRAFT: ComposerAttachmentDraft = {
   images: [],
   files: [],
+  pastedTexts: [],
   skills: [],
   folders: [],
   pendingChatId: null,
@@ -80,6 +83,7 @@ function isEmptyAttachmentDraft(draft: ComposerAttachmentDraft): boolean {
   return (
     draft.images.length === 0 &&
     draft.files.length === 0 &&
+    draft.pastedTexts.length === 0 &&
     draft.skills.length === 0 &&
     draft.folders.length === 0 &&
     draft.pendingChatId === null
@@ -104,6 +108,7 @@ function storableDraft(
       )
       .map((image) => ({ ...image, previewUrl: null })),
     files: draft.files,
+    pastedTexts: draft.pastedTexts,
     skills: draft.skills,
     folders: draft.folders,
     pendingChatId: draft.pendingChatId,
@@ -130,9 +135,18 @@ function parseStoredAttachmentDraft(
         typeof file.documentId === "string" &&
         typeof file.displayName === "string",
     );
+    const pastedTexts = (
+      Array.isArray(parsed.pastedTexts) ? parsed.pastedTexts : []
+    ).filter(
+      (item): item is PastedTextAttachment =>
+        isRecord(item) &&
+        typeof item.id === "string" &&
+        typeof item.text === "string",
+    );
     return {
       images,
       files,
+      pastedTexts,
       skills: (Array.isArray(parsed.skills) ? parsed.skills : []).filter(
         (skill): skill is string => typeof skill === "string",
       ),
@@ -210,6 +224,7 @@ export type ComposerDraftStore = {
   clearDraft: (key: string) => void;
   setImages: (key: string, images: ImageAttachment[]) => void;
   setFiles: (key: string, files: ImportedDocument[]) => void;
+  setPastedTexts: (key: string, items: PastedTextAttachment[]) => void;
   setSkills: (key: string, skills: string[]) => void;
   setFolders: (key: string, folders: string[]) => void;
   setPendingChatId: (key: string, chatId: string | null) => void;
@@ -253,6 +268,8 @@ export function createComposerDraftStore() {
         updateAttachments(key, (current) => ({ ...current, images })),
       setFiles: (key, files) =>
         updateAttachments(key, (current) => ({ ...current, files })),
+      setPastedTexts: (key, pastedTexts) =>
+        updateAttachments(key, (current) => ({ ...current, pastedTexts })),
       setSkills: (key, skills) =>
         updateAttachments(key, (current) => ({ ...current, skills })),
       setFolders: (key, folders) =>

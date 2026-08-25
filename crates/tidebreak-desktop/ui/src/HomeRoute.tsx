@@ -36,6 +36,7 @@ import { MAX_IMAGE_ATTACHMENTS } from "./ImageAttachments";
 import { useImageAttachments } from "./useImageAttachments";
 import { appendTranscript, useVoiceComposer } from "./useVoiceComposer";
 import { useVoiceInputStore, voiceSelectionReady } from "./VoiceInputStore";
+import { messageWithPastedText } from "./PastedText";
 import {
   FirstTaskWalkthrough,
   shouldOfferFirstTaskWalkthrough,
@@ -173,6 +174,7 @@ export function HomeRoute() {
   const pendingChatId = attachments.pendingChatId;
   const pendingImages = attachments.images;
   const pendingFiles = attachments.files;
+  const pendingPastedTexts = attachments.pastedTexts;
   const pendingSkills = attachments.skills;
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -348,7 +350,7 @@ export function HomeRoute() {
   }
 
   async function startChat() {
-    const content = draft.trim();
+    const content = messageWithPastedText(draft, pendingPastedTexts);
     if (!content || creatingChat) return;
     chatListActions.setCreatingChat(true);
     setError(null);
@@ -378,9 +380,10 @@ export function HomeRoute() {
         });
       }
       firstMessageActions.hold(chatId, {
-        text: content,
+        text: draft.trim(),
         images: pendingImages,
         files: pendingFiles,
+        pastedTexts: pendingPastedTexts,
         skills: pendingSkills,
         voiceInputUsed: voice.inputUsed,
       });
@@ -506,6 +509,27 @@ export function HomeRoute() {
                   setPendingFiles((current) =>
                     current.filter((file) => file.documentId !== documentId),
                   ),
+              }}
+              pastedTexts={{
+                items: pendingPastedTexts,
+                onPaste: (text) => {
+                  const current =
+                    useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]
+                      ?.pastedTexts ?? [];
+                  composerDraftActions.setPastedTexts(HOME_DRAFT_KEY, [
+                    ...current,
+                    { id: crypto.randomUUID(), text },
+                  ]);
+                },
+                onRemove: (id) => {
+                  const current =
+                    useComposerDrafts.getState().attachments[HOME_DRAFT_KEY]
+                      ?.pastedTexts ?? [];
+                  composerDraftActions.setPastedTexts(
+                    HOME_DRAFT_KEY,
+                    current.filter((item) => item.id !== id),
+                  );
+                },
               }}
               nativeDropTarget={
                 <DocumentDropTarget

@@ -7,6 +7,7 @@ describe("first message handover", () => {
     text: "summarise the filing",
     images: [],
     files: [],
+    pastedTexts: [],
     skills: [],
     voiceInputUsed: false,
   };
@@ -41,5 +42,17 @@ describe("first message handover", () => {
     const store = createFirstMessageStore();
 
     expect(store.getState().take("chat-1")).toBeNull();
+  });
+
+  it("hands over pasted text without requiring typed text", () => {
+    const store = createFirstMessageStore();
+    const pastedOnly = {
+      ...pending,
+      text: "",
+      pastedTexts: [{ id: "paste-1", text: "source material" }],
+    };
+    store.getState().hold("chat-1", pastedOnly);
+
+    expect(store.getState().take("chat-1")).toEqual(pastedOnly);
   });
 });

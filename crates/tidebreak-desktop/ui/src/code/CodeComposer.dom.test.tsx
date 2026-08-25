@@ -89,6 +89,38 @@ const QUEUED = {
 };
 
 describe("CodeComposer", () => {
+  it("sends a long paste as held message context", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const pasted = `First source line\n${"x".repeat(1_000)}`;
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        files: [],
+        getData: (type: string) => (type === "text/plain" ? pasted : ""),
+      },
+    });
+
+    fireEvent(box, event);
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        `<pasted_text>\n${pasted}\n</pasted_text>`,
+      ),
+    );
+    expect(screen.queryByText("Pasted text")).toBeNull();
+  });
+
   it("inserts a pending inspector prompt into the draft", async () => {
     useCodeUiStore
       .getState()

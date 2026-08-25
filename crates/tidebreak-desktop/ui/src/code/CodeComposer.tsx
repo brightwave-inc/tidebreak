@@ -23,6 +23,10 @@ import {
   readyImageAttachmentIds,
 } from "../ImageAttachments";
 import { useImageAttachments } from "../useImageAttachments";
+import {
+  messageWithPastedText,
+  type PastedTextAttachment,
+} from "../PastedText";
 import { reasoningEffortOptions } from "../ModelMenu";
 import { familyForModelId } from "../modelFamilies";
 import { PermissionModeMenu } from "../PermissionModeMenu";
@@ -690,6 +694,7 @@ export function CodeComposer({
   const { client } = useApp();
   const composerPromptScope = promptScope ?? sessionId ?? "code";
   const [draft, setDraft] = useState("");
+  const [pastedTexts, setPastedTexts] = useState<PastedTextAttachment[]>([]);
   const [selectedModel, setSelectedModel] = useState(model ?? "");
   // Optimistic: the picker moves on click and the session row catches up when
   // the route answers. A refusal is surfaced by the caller, which owns the
@@ -703,6 +708,7 @@ export function CodeComposer({
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const draftRef = useRef("");
+  const pastedTextsRef = useRef<PastedTextAttachment[]>([]);
   const steerRequestRef = useRef(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const images = useImageAttachments(
@@ -759,6 +765,16 @@ export function CodeComposer({
     draftRef.current = draft;
   }, [draft]);
 
+  function updatePastedTexts(
+    update: (
+      current: readonly PastedTextAttachment[],
+    ) => PastedTextAttachment[],
+  ) {
+    const next = update(pastedTextsRef.current);
+    pastedTextsRef.current = next;
+    setPastedTexts(next);
+  }
+
   useEffect(() => {
     steerRequestRef.current += 1;
     setSteerPending(false);
@@ -801,7 +817,9 @@ export function CodeComposer({
   }, [fastMode, sessionId]);
 
   async function submit() {
-    const typed = draft.trim();
+    const submittedDraft = draft;
+    const submittedPastedTexts = pastedTextsRef.current;
+    const typed = messageWithPastedText(submittedDraft, submittedPastedTexts);
     if (!typed || disabled) return;
     // The chips ride out with the message: the engine reads the paths from
     // its own working directory, so nothing is uploaded.
@@ -832,7 +850,10 @@ export function CodeComposer({
       },
     );
     const held = images.attachments;
+    draftRef.current = "";
     setDraft("");
+    pastedTextsRef.current = [];
+    setPastedTexts([]);
     setNotice(null);
     // Chips leave with the draft, not after the server answers. Waiting made
     // a sent turn look like it had failed to take the images.
@@ -847,6 +868,13 @@ export function CodeComposer({
       }
     } catch (err) {
       images.restore(held);
+      updatePastedTexts((current) => [
+        ...submittedPastedTexts,
+        ...current.filter(
+          (item) =>
+            !submittedPastedTexts.some((submitted) => submitted.id === item.id),
+        ),
+      ]);
       setNotice({
         text:
           err instanceof HttpError && err.kind === "queue_full"
@@ -855,7 +883,11 @@ export function CodeComposer({
               ? err.message
               : "Could not send that turn",
       });
-      setDraft((current) => (current.length === 0 ? message : current));
+      setDraft((current) => {
+        if (current.length > 0) return current;
+        draftRef.current = submittedDraft;
+        return submittedDraft;
+      });
     }
   }
 
@@ -899,7 +931,8 @@ export function CodeComposer({
 
   async function steer() {
     const submittedDraft = draftRef.current;
-    const message = submittedDraft.trim();
+    const submittedPastedTexts = pastedTextsRef.current;
+    const message = messageWithPastedText(submittedDraft, submittedPastedTexts);
     if (!message || disabled) return;
     if (!onSteer) {
       setSteerStatus(null);
@@ -916,9 +949,14 @@ export function CodeComposer({
     try {
       await onSteer(message);
       if (steerRequestRef.current !== request) return;
-      if (draftRef.current === submittedDraft) {
+      if (
+        draftRef.current === submittedDraft &&
+        pastedTextsRef.current === submittedPastedTexts
+      ) {
         draftRef.current = "";
         setDraft("");
+        pastedTextsRef.current = [];
+        setPastedTexts([]);
       }
       setSteerStatus("Guidance sent");
     } catch (err) {
@@ -1012,6 +1050,22 @@ export function CodeComposer({
                 attaching: false,
                 onAttach: () => imageInputRef.current?.click(),
                 onRemove: () => undefined,
+              }
+            : undefined
+        }
+        pastedTexts={
+          sessionId
+            ? {
+                items: pastedTexts,
+                onPaste: (text) =>
+                  updatePastedTexts((current) => [
+                    ...current,
+                    { id: crypto.randomUUID(), text },
+                  ]),
+                onRemove: (id) =>
+                  updatePastedTexts((current) =>
+                    current.filter((item) => item.id !== id),
+                  ),
               }
             : undefined
         }
