@@ -1,6 +1,8 @@
 import { FolderGit2, MessageSquare } from "lucide-react";
+import { useEffect } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 
+import { storeAppMode } from "@/appMode";
 import { SegmentedControl } from "@/components/ui/segmented";
 import { isCodeRoute } from "./routes";
 
@@ -19,6 +21,10 @@ export function CodeModeSwitch() {
   });
   const value: Mode = isCodeRoute(pathname) ? "code" : "chat";
 
+  useEffect(() => {
+    storeAppMode(value === "code" ? "code" : "work");
+  }, [value]);
+
   return (
     <div className="px-2">
       <SegmentedControl
@@ -26,6 +32,7 @@ export function CodeModeSwitch() {
         value={value}
         onValueChange={(next) => {
           if (next === value) return;
+          storeAppMode(next === "code" ? "code" : "work");
           void navigate({ to: next === "code" ? "/code" : "/" });
         }}
         options={[
