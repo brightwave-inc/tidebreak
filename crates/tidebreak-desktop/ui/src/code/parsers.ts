@@ -137,6 +137,8 @@ import type {
   CodeCloneDefaults as WireCodeCloneDefaults,
   CodeRepoSource as WireCodeRepoSource,
   CodeRepoSources as WireCodeRepoSources,
+  CodeGithubRepositories as WireCodeGithubRepositories,
+  CodeGithubRepository as WireCodeGithubRepository,
   CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   CodeWorktreeRoot as WireCodeWorktreeRoot,
@@ -1651,6 +1653,50 @@ export function parseCodeRepoSources(value: unknown): CodeRepoSources | null {
     sources.push(source);
   }
   return { sources, chooses_destination: value.chooses_destination };
+}
+
+function parseCodeGithubRepository(
+  value: unknown,
+): WireCodeGithubRepository | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeGithubRepository>(value, [
+      "full_name",
+      "private",
+      "description",
+    ]) ||
+    typeof value.full_name !== "string" ||
+    typeof value.private !== "boolean" ||
+    !optionalString(value.description)
+  ) {
+    return null;
+  }
+  return {
+    full_name: value.full_name,
+    private: value.private,
+    ...(value.description !== undefined
+      ? { description: value.description }
+      : {}),
+  };
+}
+
+export function parseCodeGithubRepositories(
+  value: unknown,
+): WireCodeGithubRepositories | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeGithubRepositories>(value, ["repositories"]) ||
+    !Array.isArray(value.repositories)
+  ) {
+    return null;
+  }
+  const repositories: WireCodeGithubRepository[] = [];
+  for (const entry of value.repositories) {
+    const repository = parseCodeGithubRepository(entry);
+    if (!repository) return null;
+    repositories.push(repository);
+  }
+  return { repositories };
 }
 
 export function parseCodeForkTranscript(

@@ -89,6 +89,7 @@ function storyClient(scenario: HomeScenario): ApiClient {
       gh_authenticated: true,
       gh_remediation: "",
     }),
+    listCodeGithubRepositories: async () => ({ repositories: [] }),
     getCodeRepoSources: async () => ({
       sources: [
         { kind: "local", available: true },

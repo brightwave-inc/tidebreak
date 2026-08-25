@@ -140,6 +140,12 @@ impl ScopedCode {
         self.runtime.repo_sources(&self.owner).await
     }
 
+    pub(crate) async fn list_github_repositories(
+        &self,
+    ) -> Result<crate::routes::code::CodeGithubRepositories, ServerError> {
+        self.runtime.list_github_repositories(&self.owner).await
+    }
+
     pub(crate) async fn start_clone(
         &self,
         request: CloneRequest,

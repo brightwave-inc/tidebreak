@@ -180,6 +180,8 @@ import {
   type CodeCloneDefaults as WireCodeCloneDefaults,
   type CodeRepoSource as WireCodeRepoSource,
   type CodeRepoSources as WireCodeRepoSources,
+  type CodeGithubRepositories as WireCodeGithubRepositories,
+  type CodeGithubRepository as WireCodeGithubRepository,
   type CodeCloneJobSnapshot as WireCodeCloneJobSnapshot,
   type CodeHarnessInstallSnapshot as WireCodeHarnessInstallSnapshot,
   type CodeWorktreeRoot as WireCodeWorktreeRoot,
@@ -1229,6 +1231,8 @@ export type CodeUpdateNotice = WireCodeUpdateNotice;
 export type CodeCloneDefaults = WireCodeCloneDefaults;
 export type CodeRepoSource = WireCodeRepoSource;
 export type CodeRepoSources = WireCodeRepoSources;
+export type CodeGithubRepositories = WireCodeGithubRepositories;
+export type CodeGithubRepository = WireCodeGithubRepository;
 export type CodeCloneJobSnapshot = WireCodeCloneJobSnapshot;
 /** Where the warm install of one pinned engine stands. */
 export type CodeHarnessInstallSnapshot = WireCodeHarnessInstallSnapshot;

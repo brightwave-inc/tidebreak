@@ -1333,6 +1333,16 @@ export type CodeGitHubRepositoryRef = { host: string, owner: string, name: strin
 export type CodeGitHubRepositoryTarget = { host: string, owner: string, name: string, };
 
 /**
+ * `GET /code/repos/github`: repositories this caller can clone.
+ */
+export type CodeGithubRepositories = { repositories: Array<CodeGithubRepository>, };
+
+/**
+ * One GitHub repository the add-repository picker can offer.
+ */
+export type CodeGithubRepository = { full_name: string, private: boolean, description?: string, };
+
+/**
  * State of one warm harness install, returned by
  * `POST /code/harnesses/{kind}/install` and restated on the live bus.
  *

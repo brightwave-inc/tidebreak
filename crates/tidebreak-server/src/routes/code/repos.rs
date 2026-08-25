@@ -9,8 +9,8 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 
 use super::types::{
-    CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSnapshot, CodeRepoSources,
-    CreateRepoBody, PatchRepoBody, RemoveRepoQuery,
+    CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories,
+    CodeRepoSnapshot, CodeRepoSources, CreateRepoBody, PatchRepoBody, RemoveRepoQuery,
 };
 use tidebreak_core::RepoId;
 
@@ -113,6 +113,12 @@ pub async fn clone_defaults(code: ScopedCode) -> Result<Json<CodeCloneDefaults>,
 
 pub async fn repo_sources(code: ScopedCode) -> Result<Json<CodeRepoSources>, ServerError> {
     Ok(Json(code.repo_sources().await?))
+}
+
+pub async fn list_github_repositories(
+    code: ScopedCode,
+) -> Result<Json<CodeGithubRepositories>, ServerError> {
+    Ok(Json(code.list_github_repositories().await?))
 }
 
 pub async fn start_clone(

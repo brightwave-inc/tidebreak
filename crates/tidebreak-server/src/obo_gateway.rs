@@ -199,6 +199,14 @@ pub(crate) enum GitForgeAttribution {
     },
 }
 
+/// One repository the gateway list offers (decision 70).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitHubRepository {
+    pub full_name: String,
+    pub private: bool,
+    pub description: Option<String>,
+}
+
 /// One borrowed, repository-scoped forge credential (decision 63).
 ///
 /// Held for the length of a single git operation and dropped. Deliberately
@@ -268,6 +276,8 @@ pub(crate) struct OboGateway {
     git_credential_url: reqwest::Url,
     /// The no-mint git-forge availability probe beside it.
     git_forge_url: reqwest::Url,
+    /// The repository list beside the probe (gateway ADR 0091).
+    git_repositories_url: reqwest::Url,
     /// This machine's `tidebreak:<sha256>` resource, named in every
     /// git-credential request so the gateway verifies the token lives in
     /// exactly this machine's resource.
@@ -331,6 +341,7 @@ impl OboGateway {
         let catalog_url = join_below(&base, "api/v1/me/catalog")?;
         let git_credential_url = join_below(&base, "api/v1/tidebreak/git-credential")?;
         let git_forge_url = join_below(&base, "api/v1/tidebreak/git-forge")?;
+        let git_repositories_url = join_below(&base, "api/v1/tidebreak/git-repositories")?;
         let gateway_base_url = base.as_str().trim_end_matches('/').to_owned();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -344,6 +355,7 @@ impl OboGateway {
             catalog_url,
             git_credential_url,
             git_forge_url,
+            git_repositories_url,
             resource,
             gateway_base_url,
             client,
@@ -773,6 +785,70 @@ impl OboGateway {
         })
     }
 
+    /// Repositories this caller can clone, listed by the gateway so this
+    /// machine never holds a token for the read (decision 70).
+    pub(crate) async fn list_repositories(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<GitHubRepository>, GitForgeError> {
+        let Some(slot) = self.slot_for(owner)? else {
+            return Err(GitForgeError::SignInRequired(
+                "this machine holds no live Model Gateway session for you; sign in again".into(),
+            ));
+        };
+        let subject = subject_of(&slot)?;
+        let response = self
+            .client
+            .get(self.git_repositories_url.clone())
+            .query(&[
+                ("resource", self.resource.as_str()),
+                ("attribution", "person"),
+            ])
+            .bearer_auth(subject.as_ref())
+            .send()
+            .await
+            .map_err(|error| {
+                GitForgeError::Unavailable(format!(
+                    "the Model Gateway git-repositories request failed: {error}"
+                ))
+            })?;
+        let status = response.status();
+        let body = read_bounded(response, RESPONSE_LIMIT)
+            .await
+            .map_err(|error| GitForgeError::Unavailable(error.to_string()))?;
+        if !status.is_success() {
+            return Err(git_refusal(status, &body));
+        }
+        #[derive(serde::Deserialize)]
+        struct ListAnswer {
+            #[serde(default)]
+            repositories: Vec<RepoAnswer>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RepoAnswer {
+            full_name: String,
+            #[serde(default)]
+            private: bool,
+            #[serde(default)]
+            description: Option<String>,
+        }
+        let answer: ListAnswer = serde_json::from_slice(&body).map_err(|error| {
+            GitForgeError::Unavailable(format!(
+                "the Model Gateway returned an unreadable git-repositories answer: {error}"
+            ))
+        })?;
+        Ok(answer
+            .repositories
+            .into_iter()
+            .filter(|repo| !repo.full_name.is_empty() && repo.full_name.contains('/'))
+            .map(|repo| GitHubRepository {
+                full_name: repo.full_name,
+                private: repo.private,
+                description: repo.description.filter(|value| !value.is_empty()),
+            })
+            .collect())
+    }
+
     /// One probe of the gateway's git-forge surface with the caller's
     /// machine-bound token.
     ///
@@ -1036,6 +1112,12 @@ pub(crate) trait GitCredentialLender: Send + Sync {
         owner: &OwnerId,
         repository: &str,
     ) -> Result<GitCredential, GitForgeError>;
+
+    /// Repositories this caller can clone (decision 70).
+    async fn list_repositories(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<GitHubRepository>, GitForgeError>;
 }
 
 #[async_trait]
@@ -1051,6 +1133,13 @@ impl GitCredentialLender for OboGateway {
     ) -> Result<GitCredential, GitForgeError> {
         OboGateway::git_credential(self, owner, repository).await
     }
+
+    async fn list_repositories(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<GitHubRepository>, GitForgeError> {
+        OboGateway::list_repositories(self, owner).await
+    }
 }
 
 /// Scripted git-forge lending for code-mode tests.
@@ -1065,6 +1154,7 @@ pub(crate) mod test_support {
         pub(crate) identity: std::sync::Mutex<Result<GitForgeIdentity, GitForgeError>>,
         pub(crate) mint_refusal: std::sync::Mutex<Option<GitForgeError>>,
         pub(crate) minted: std::sync::Mutex<Vec<String>>,
+        pub(crate) listed: std::sync::Mutex<Result<Vec<GitHubRepository>, GitForgeError>>,
     }
 
     impl FakeLender {
@@ -1079,6 +1169,7 @@ pub(crate) mod test_support {
                 })),
                 mint_refusal: std::sync::Mutex::new(None),
                 minted: std::sync::Mutex::new(Vec::new()),
+                listed: std::sync::Mutex::new(Ok(Vec::new())),
             }
         }
 
@@ -1096,6 +1187,11 @@ pub(crate) mod test_support {
                 })),
                 mint_refusal: std::sync::Mutex::new(None),
                 minted: std::sync::Mutex::new(Vec::new()),
+                listed: std::sync::Mutex::new(Ok(vec![GitHubRepository {
+                    full_name: format!("{login}/notes"),
+                    private: true,
+                    description: Some("scratch".into()),
+                }])),
             }
         }
 
@@ -1103,8 +1199,9 @@ pub(crate) mod test_support {
         pub(crate) fn refusing(error: GitForgeError) -> Self {
             Self {
                 identity: std::sync::Mutex::new(Err(error.clone())),
-                mint_refusal: std::sync::Mutex::new(Some(error)),
+                mint_refusal: std::sync::Mutex::new(Some(error.clone())),
                 minted: std::sync::Mutex::new(Vec::new()),
+                listed: std::sync::Mutex::new(Err(error)),
             }
         }
 
@@ -1139,6 +1236,13 @@ pub(crate) mod test_support {
                     secret: "ghs_fake_borrowed".to_owned(),
                 }),
             }
+        }
+
+        async fn list_repositories(
+            &self,
+            _owner: &OwnerId,
+        ) -> Result<Vec<GitHubRepository>, GitForgeError> {
+            self.listed.lock().expect("listed").clone()
         }
     }
 }
@@ -1516,6 +1620,42 @@ mod tests {
                                 "secret": format!("ghs_fake_{serial}_for_{repository}"),
                                 "expires_at": "2027-01-01T00:00:00Z",
                                 "app_id": "0193a1c0-0000-7000-8000-000000000001",
+                            }))
+                            .into_response()
+                        }
+                    },
+                ),
+            );
+            let list_state = self.clone();
+            let app = app.route(
+                "/api/v1/tidebreak/git-repositories",
+                axum::routing::get(
+                    move |headers: axum::http::HeaderMap,
+                          query: axum::extract::Query<HashMap<String, String>>| {
+                        let state = list_state.clone();
+                        async move {
+                            let bearer = machine_bound_bearer(&headers);
+                            assert!(
+                                bearer.starts_with("mg_at_"),
+                                "the list must present the machine-bound subject, got {bearer:?}"
+                            );
+                            assert_eq!(
+                                query.get("resource").map(String::as_str),
+                                Some(TEST_RESOURCE)
+                            );
+                            assert_eq!(
+                                query.get("attribution").map(String::as_str),
+                                Some("person")
+                            );
+                            if let Some(refused) = state.next_git_refusal() {
+                                return refused;
+                            }
+                            Json(serde_json::json!({
+                                "repositories": [{
+                                    "full_name": "acme/ship",
+                                    "private": true,
+                                    "description": "the product",
+                                }]
                             }))
                             .into_response()
                         }

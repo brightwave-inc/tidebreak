@@ -876,12 +876,13 @@ export function NewWorkspaceDialog({
               className="h-8 shrink-0"
             >
               Create
-              <kbd
-                className="font-sans text-2xs font-medium opacity-60"
+              <span
+                className="ml-1 inline-flex items-center gap-0.5 text-2xs font-medium opacity-60"
                 aria-hidden="true"
               >
-                ↩
-              </kbd>
+                <kbd className="font-sans">{command ? "⌘" : "Ctrl"}</kbd>
+                <kbd className="font-sans">↩</kbd>
+              </span>
             </Button>
           </div>
         </form>

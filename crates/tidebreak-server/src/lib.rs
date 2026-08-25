@@ -802,6 +802,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::create_repo).get(routes::code::list_repos),
         )
         .route("/code/repos/sources", get(routes::code::repo_sources))
+        .route(
+            "/code/repos/github",
+            get(routes::code::list_github_repositories),
+        )
         .route("/code/repos/clone", post(routes::code::start_clone))
         .route("/code/repos/clone/{job}", get(routes::code::get_clone_job))
         .route(
@@ -1846,7 +1850,7 @@ async fn bind_inner(
         state.mcp.set_host_folders(host.clone());
     }
     state.host_folders = host_folders;
-    let code = Arc::new(code::CodeRuntime::new(
+    let runtime = code::CodeRuntime::new(
         db,
         state.config.data_dir.clone(),
         state.config.code_worktree_root_default.clone(),
@@ -1860,7 +1864,16 @@ async fn bind_inner(
             .on_behalf_of_gateway
             .clone()
             .map(|gateway| gateway as Arc<dyn obo_gateway::GitCredentialLender>),
-    ));
+    );
+    // A self-host machine owns its filesystem. Clones land under the data
+    // directory unless an operator set a destination (decision 70).
+    let runtime = match state.config.profile {
+        Profile::SelfHost => {
+            runtime.with_clone_parent_default(state.config.data_dir.join("code").join("src"))
+        }
+        Profile::Desktop => runtime,
+    };
+    let code = Arc::new(runtime);
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.
     state.code = Some(code.clone());

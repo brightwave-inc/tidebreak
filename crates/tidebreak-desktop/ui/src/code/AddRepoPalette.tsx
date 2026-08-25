@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { Folder, GitBranch, Link2 } from "lucide-react";
+import { ChevronDown, Folder, GitBranch, Link2 } from "lucide-react";
 
 import type {
   CodeCloneDefaults,
   CodeCloneJobSnapshot,
+  CodeGithubRepository,
   CodeRepoSources,
 } from "../api/types";
 import { useApp } from "@/AppContext";
@@ -21,13 +22,24 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Progress } from "@/components/ui/progress";
-import { hasLocalHostAuthority, pickCodeDirectory } from "@/host";
-import { friendlyErrorMessage } from "@/lib/utils";
+import {
+  attachedRemotely,
+  hasLocalHostAuthority,
+  pickCodeDirectory,
+} from "@/host";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
@@ -82,6 +94,9 @@ export function AddRepoPalette({
   const [cloneName, setCloneName] = useState("");
   const [defaults, setDefaults] = useState<CodeCloneDefaults | null>(null);
   const [sources, setSources] = useState<CodeRepoSources | null>(null);
+  const [githubRepos, setGithubRepos] = useState<CodeGithubRepository[] | null>(
+    null,
+  );
   const [jobId, setJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +106,8 @@ export function AddRepoPalette({
   // is the host's, resolving is the machine's, and they are the same computer
   // only when the window is not attached elsewhere.
   const canBrowse = hasLocalHostAuthority();
+  const attached = attachedRemotely();
+  const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
   // The machine places clones itself when its operator configured a
   // destination, which is what lets someone who cannot see its filesystem
   // clone at all. Until the probe answers, assume it does not, so a desktop
@@ -100,12 +117,17 @@ export function AddRepoPalette({
     // Before the probe answers, offer everything: the machine is the
     // authority, and a dialog that showed nothing while asking would read as
     // a broken dialog rather than a pending one.
-    if (!sources) return SOURCES;
+    if (!sources) {
+      return attached ? SOURCES.filter((row) => row.key !== "local") : SOURCES;
+    }
     const available = new Map(
       sources.sources.map((source) => [source.kind, source] as const),
     );
-    return SOURCES.filter((row) => available.get(row.key)?.available !== false);
-  }, [sources]);
+    return SOURCES.filter((row) => {
+      if (row.key === "local" && attached) return false;
+      return available.get(row.key)?.available !== false;
+    });
+  }, [sources, attached]);
   const rows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return offered;
@@ -150,10 +172,15 @@ export function AddRepoPalette({
     setBusy(false);
     setError(null);
     setSources(null);
+    setGithubRepos(null);
     void client
       .getCodeRepoSources()
       .then(setSources)
       .catch(() => setSources(null));
+    void client
+      .listCodeGithubRepositories()
+      .then((next) => setGithubRepos(next.repositories))
+      .catch(() => setGithubRepos([]));
     // Administrator-only, and the person adding a repo on a shared machine
     // usually is not one. A refusal leaves the remembered destination unknown,
     // which the machine fills in for itself.
@@ -275,10 +302,42 @@ export function AddRepoPalette({
     if (row.key === "github") setStage("github");
   }
 
+  function submitForm() {
+    if (stage === "local") {
+      void registerLocal();
+      return;
+    }
+    if (stage === "git_url") {
+      void startClone({
+        url,
+        parent_dir: parentDir,
+        name: cloneName,
+      });
+      return;
+    }
+    if (stage === "github") {
+      void startClone({
+        github,
+        parent_dir: parentDir,
+        name: cloneName,
+      });
+    }
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
       onOpenChange(false);
+      return;
+    }
+    if (
+      event.key === "Enter" &&
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      !event.shiftKey
+    ) {
+      event.preventDefault();
+      submitForm();
       return;
     }
     if (event.key === "Backspace") {
@@ -394,6 +453,7 @@ export function AddRepoPalette({
             canBrowse={canBrowse}
             onBrowse={() => void pickDirectory("path")}
             onSubmit={() => void registerLocal()}
+            command={command}
           />
         )}
 
@@ -408,6 +468,7 @@ export function AddRepoPalette({
             onParentDir={setParentDir}
             onName={setCloneName}
             canBrowse={canBrowse}
+            attached={attached}
             machineChoosesDestination={machineChoosesDestination}
             onBrowse={() => void pickDirectory("parent")}
             onSubmit={() =>
@@ -417,6 +478,7 @@ export function AddRepoPalette({
                 name: cloneName,
               })
             }
+            command={command}
           />
         )}
 
@@ -427,12 +489,14 @@ export function AddRepoPalette({
             name={cloneName}
             defaults={defaults}
             hint={githubHint}
+            repositories={githubRepos}
             busy={busy}
             error={error}
             onGithub={setGithub}
             onParentDir={setParentDir}
             onName={setCloneName}
             canBrowse={canBrowse}
+            attached={attached}
             machineChoosesDestination={machineChoosesDestination}
             onBrowse={() => void pickDirectory("parent")}
             onSubmit={() =>
@@ -442,6 +506,7 @@ export function AddRepoPalette({
                 name: cloneName,
               })
             }
+            command={command}
           />
         )}
 
@@ -458,8 +523,12 @@ export function AddRepoPalette({
         )}
 
         <footer className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-          <Hint keys={["↑", "↓"]} label="Navigate" />
-          <Hint keys={["Enter"]} label="Select" />
+          {stage === "sources" && (
+            <>
+              <Hint keys={["↑", "↓"]} label="Navigate" />
+              <Hint keys={["Enter"]} label="Select" />
+            </>
+          )}
           <Hint keys={["Backspace"]} label="Back" />
           <Hint keys={["Esc"]} label="Close" />
         </footer>
@@ -478,6 +547,7 @@ function LocalStage({
   canBrowse,
   onBrowse,
   onSubmit,
+  command,
 }: {
   path: string;
   displayName: string;
@@ -489,6 +559,7 @@ function LocalStage({
   canBrowse: boolean;
   onBrowse: () => void;
   onSubmit: () => void;
+  command: boolean;
 }) {
   return (
     <form
@@ -531,13 +602,13 @@ function LocalStage({
         />
       </label>
       {error && <p className="text-sm text-critical">{error}</p>}
-      <Button
-        type="submit"
-        disabled={busy || !path.trim()}
-        className="self-start"
-      >
-        {busy ? "Registering…" : "Register"}
-      </Button>
+      <FormSubmit
+        busy={busy}
+        disabled={!path.trim()}
+        busyLabel="Registering…"
+        label="Register"
+        command={command}
+      />
     </form>
   );
 }
@@ -552,9 +623,11 @@ function GitUrlStage({
   onParentDir,
   onName,
   canBrowse,
+  attached,
   machineChoosesDestination,
   onBrowse,
   onSubmit,
+  command,
 }: {
   url: string;
   parentDir: string;
@@ -565,10 +638,13 @@ function GitUrlStage({
   onParentDir: (value: string) => void;
   onName: (value: string) => void;
   canBrowse: boolean;
+  attached: boolean;
   machineChoosesDestination: boolean;
   onBrowse: () => void;
   onSubmit: () => void;
+  command: boolean;
 }) {
+  const destinationBlocked = attached && !machineChoosesDestination;
   return (
     <form
       className="flex flex-col gap-3"
@@ -592,6 +668,7 @@ function GitUrlStage({
           value={parentDir}
           busy={busy}
           canBrowse={canBrowse}
+          blocked={destinationBlocked}
           onChange={onParentDir}
           onBrowse={onBrowse}
         />
@@ -606,17 +683,17 @@ function GitUrlStage({
         />
       </label>
       {error && <p className="text-sm text-critical">{error}</p>}
-      <Button
-        type="submit"
+      <FormSubmit
+        busy={busy}
         disabled={
-          busy ||
           !url.trim() ||
+          destinationBlocked ||
           (!machineChoosesDestination && !parentDir.trim())
         }
-        className="self-start"
-      >
-        {busy ? "Starting…" : "Clone"}
-      </Button>
+        busyLabel="Starting…"
+        label="Clone"
+        command={command}
+      />
     </form>
   );
 }
@@ -627,15 +704,18 @@ function GithubStage({
   name,
   defaults,
   hint,
+  repositories,
   busy,
   error,
   onGithub,
   onParentDir,
   onName,
   canBrowse,
+  attached,
   machineChoosesDestination,
   onBrowse,
   onSubmit,
+  command,
 }: {
   github: string;
   parentDir: string;
@@ -643,15 +723,18 @@ function GithubStage({
   defaults: CodeCloneDefaults | null;
   /** The machine's note about GitHub, when it still offers it. */
   hint: string | null;
+  repositories: CodeGithubRepository[] | null;
   busy: boolean;
   error: string | null;
   onGithub: (value: string) => void;
   onParentDir: (value: string) => void;
   onName: (value: string) => void;
   canBrowse: boolean;
+  attached: boolean;
   machineChoosesDestination: boolean;
   onBrowse: () => void;
   onSubmit: () => void;
+  command: boolean;
 }) {
   // The machine's own note first; the administrator-only defaults read is
   // the fallback for a profile whose probe predates this field.
@@ -660,6 +743,7 @@ function GithubStage({
     (defaults && (!defaults.gh_found || defaults.gh_authenticated === false)
       ? defaults.gh_remediation
       : null);
+  const destinationBlocked = attached && !machineChoosesDestination;
   return (
     <form
       className="flex flex-col gap-3"
@@ -668,22 +752,20 @@ function GithubStage({
         onSubmit();
       }}
     >
-      <label className="flex flex-col gap-1 text-sm">
-        <span className="font-medium">Repository</span>
-        <Input
-          value={github}
-          onChange={(event) => onGithub(event.target.value)}
-          placeholder="owner/repo"
-          disabled={busy}
-          autoFocus
-        />
-      </label>
+      <GithubRepoField
+        value={github}
+        repositories={repositories}
+        busy={busy}
+        onChange={onGithub}
+      />
       {ghHint && (
         <p
           className="text-muted-foreground text-xs"
           data-testid="gh-absent-hint"
         >
-          {ghHint} You can still clone over HTTPS.
+          {ghHint}
+          {!ghHint.startsWith("Clones and pushes") &&
+            " You can still clone over HTTPS."}
         </p>
       )}
       {!machineChoosesDestination && (
@@ -691,6 +773,7 @@ function GithubStage({
           value={parentDir}
           busy={busy}
           canBrowse={canBrowse}
+          blocked={destinationBlocked}
           onChange={onParentDir}
           onBrowse={onBrowse}
         />
@@ -705,18 +788,179 @@ function GithubStage({
         />
       </label>
       {error && <p className="text-sm text-critical">{error}</p>}
-      <Button
-        type="submit"
+      <FormSubmit
+        busy={busy}
         disabled={
-          busy ||
           !github.trim() ||
+          destinationBlocked ||
           (!machineChoosesDestination && !parentDir.trim())
         }
-        className="self-start"
-      >
-        {busy ? "Starting…" : "Clone"}
-      </Button>
+        busyLabel="Starting…"
+        label="Clone"
+        command={command}
+      />
     </form>
+  );
+}
+
+function GithubRepoField({
+  value,
+  repositories,
+  busy,
+  onChange,
+}: {
+  value: string;
+  repositories: CodeGithubRepository[] | null;
+  busy: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const listed = repositories ?? [];
+  const needle = query.trim().toLowerCase();
+  const matches = listed.filter((repository) => {
+    if (!needle) return true;
+    return (
+      repository.full_name.toLowerCase().includes(needle) ||
+      (repository.description ?? "").toLowerCase().includes(needle)
+    );
+  });
+  const typed = query.trim();
+  const typedIsNew =
+    typed.includes("/") &&
+    !listed.some(
+      (repository) =>
+        repository.full_name.toLowerCase() === typed.toLowerCase(),
+    );
+
+  return (
+    <label className="flex flex-col gap-1 text-sm">
+      <span className="font-medium">Repository</span>
+      {listed.length === 0 && repositories !== null ? (
+        <Input
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="owner/repo"
+          disabled={busy}
+          autoFocus
+        />
+      ) : (
+        <Popover
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (next) setQuery(value);
+          }}
+        >
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              role="combobox"
+              aria-expanded={open}
+              aria-label="Repository"
+              disabled={busy}
+              className={cn(
+                "h-9 w-full justify-between font-normal",
+                !value && "text-muted-foreground",
+              )}
+            >
+              <span className="truncate">{value || "Select a repository"}</span>
+              <ChevronDown className="size-4 shrink-0 opacity-50" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            className="w-[var(--radix-popover-trigger-width)] p-0"
+          >
+            <Command shouldFilter={false} label="Repositories">
+              <CommandInput
+                value={query}
+                onValueChange={setQuery}
+                placeholder="Search or type owner/repo"
+                aria-label="Search repositories"
+              />
+              <CommandList className="max-h-56">
+                <CommandEmpty className="px-3 py-2 text-xs text-muted-foreground">
+                  {repositories === null
+                    ? "Loading repositories…"
+                    : "Nothing matches. Type owner/repo to clone it."}
+                </CommandEmpty>
+                {typedIsNew && (
+                  <CommandGroup heading="Use this name">
+                    <CommandItem
+                      value={typed}
+                      onSelect={() => {
+                        onChange(typed);
+                        setOpen(false);
+                      }}
+                    >
+                      <span className="truncate">{typed}</span>
+                    </CommandItem>
+                  </CommandGroup>
+                )}
+                {matches.length > 0 && (
+                  <CommandGroup heading="Your repositories">
+                    {matches.slice(0, 50).map((repository) => (
+                      <CommandItem
+                        key={repository.full_name}
+                        value={repository.full_name}
+                        onSelect={() => {
+                          onChange(repository.full_name);
+                          setOpen(false);
+                        }}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">
+                            {repository.full_name}
+                          </span>
+                          {repository.description && (
+                            <span className="text-muted-foreground truncate text-xs">
+                              {repository.description}
+                            </span>
+                          )}
+                        </span>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                )}
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
+      )}
+    </label>
+  );
+}
+
+function FormSubmit({
+  busy,
+  disabled,
+  busyLabel,
+  label,
+  command,
+}: {
+  busy: boolean;
+  disabled: boolean;
+  busyLabel: string;
+  label: string;
+  command: boolean;
+}) {
+  return (
+    <DialogFooter>
+      <Button type="submit" disabled={busy || disabled}>
+        {busy ? busyLabel : label}
+        {!busy && (
+          <span
+            className="ml-1 inline-flex items-center gap-0.5 text-2xs font-medium opacity-60"
+            aria-hidden="true"
+          >
+            <kbd className="font-sans">{command ? "⌘" : "Ctrl"}</kbd>
+            <kbd className="font-sans">↩</kbd>
+          </span>
+        )}
+      </Button>
+    </DialogFooter>
   );
 }
 
@@ -724,15 +968,28 @@ function ParentDirField({
   value,
   busy,
   canBrowse,
+  blocked,
   onChange,
   onBrowse,
 }: {
   value: string;
   busy: boolean;
   canBrowse: boolean;
+  blocked: boolean;
   onChange: (value: string) => void;
   onBrowse: () => void;
 }) {
+  if (blocked) {
+    return (
+      <p
+        className="text-sm text-critical"
+        data-testid="clone-destination-missing"
+      >
+        This machine has no clone destination configured. An administrator sets
+        one on the machine.
+      </p>
+    );
+  }
   return (
     <label className="flex flex-col gap-1 text-sm">
       <span className="font-medium">Destination folder</span>
