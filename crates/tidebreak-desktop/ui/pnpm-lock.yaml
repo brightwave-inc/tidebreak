@@ -170,8 +170,8 @@ importers:
         specifier: 6.0.0
         version: 6.0.0
       ag-grid-community:
-        specifier: 35.0.1
-        version: 35.0.1
+        specifier: 36.1.0
+        version: 36.1.0
       ag-grid-react:
         specifier: 35.0.1
         version: 35.0.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -3023,14 +3023,23 @@ packages:
   ag-charts-types@13.0.1:
     resolution: {integrity: sha512-qg9adyiAaeUaDtWZEEPF45dv55kdJTe6Ghi0EQXCS79h/7KvOd6dxhqGZjPL1zeFl/L9qEXuYgb+LkGStq4mgQ==}
 
+  ag-charts-types@14.1.0:
+    resolution: {integrity: sha512-mmzkng88c0l+Z9PvCMowMilhVeNgDU/iMuMemcOQD4BG/qO4vbkxWvyQO0iqju8Dx7YOY81PNzC/RmElQNiVkA==}
+
   ag-grid-community@35.0.1:
     resolution: {integrity: sha512-fYYZdymWKsN9/tZv+R6uZRnuiWYEQr+GHl85ZrB0ixbFcE8opYK4NJI29NnMc9ShYiCBnAO9hj54IFa+FI4aDA==}
+
+  ag-grid-community@36.1.0:
+    resolution: {integrity: sha512-WnvSQ4csRs8gv/b1B0lPHykQXvUJVgi2u5mpY0Aa6dv3pvhDVVqCT8dwUyOeCog4JNPptaXGrOrZ8qP2XoJzVA==}
 
   ag-grid-react@35.0.1:
     resolution: {integrity: sha512-NvrrgWUm+DsnsZVFho16srlyBNKSl9nqeSadk63HpHYerq4S4vN/2JCxdNtfqns7SpbYx7GbasbMFCXKYj7Qaw==}
     peerDependencies:
       react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
       react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  ag-stack@36.1.0:
+    resolution: {integrity: sha512-Kmkf5iRZmyduNx2KtW450j6GbCdJ4ejacSpb1AWl0yrdquRmScLRc1SlLolx6lyCbTBSJGo4tRraKbBzre+GlQ==}
 
   ansi-regex@5.0.1:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
@@ -8166,9 +8175,16 @@ snapshots:
 
   ag-charts-types@13.0.1: {}
 
+  ag-charts-types@14.1.0: {}
+
   ag-grid-community@35.0.1:
     dependencies:
       ag-charts-types: 13.0.1
+
+  ag-grid-community@36.1.0:
+    dependencies:
+      ag-charts-types: 14.1.0
+      ag-stack: 36.1.0
 
   ag-grid-react@35.0.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
     dependencies:
@@ -8176,6 +8192,8 @@ snapshots:
       prop-types: 15.8.1
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)
+
+  ag-stack@36.1.0: {}
 
   ansi-regex@5.0.1: {}
 
