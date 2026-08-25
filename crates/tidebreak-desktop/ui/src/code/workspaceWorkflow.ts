@@ -247,7 +247,7 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
       return {
         ...common,
         stage: "queued",
-        tone: "pending",
+        tone: "warning",
         summary: `#${pr.number} · Queued`,
         title: `Pull request #${pr.number} is queued`,
         detail: "GitHub will merge it when the queue requirements pass.",

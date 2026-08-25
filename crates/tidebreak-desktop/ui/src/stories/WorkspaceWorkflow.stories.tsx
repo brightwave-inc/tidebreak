@@ -14,6 +14,7 @@ import {
   fixingPrGit,
   needsApprovalPrGit,
   openPrGit,
+  queuedPrGit,
   readyForPrGit,
   watchingPrGit,
 } from "./fixtures";
@@ -101,6 +102,11 @@ export const ReadyForPullRequest: Story = {
 };
 
 export const PullRequestOpen: Story = {};
+
+/** GitHub's merge queue uses the shared orange status treatment. */
+export const MergeQueued: Story = {
+  args: { snapshot: queuedPrGit },
+};
 
 /** Checks are green; GitHub still wants a review approval (decision 66). */
 export const NeedsApproval: Story = {

@@ -195,6 +195,33 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1");
 });
 
+it("replaces open and auto-merge labels with the merge-queue state", async () => {
+  const queued = {
+    ...OPEN_PR,
+    auto_merge_enabled: true,
+    in_merge_queue: true,
+  };
+  render(
+    <CodeInspector
+      client={makeClient() as never}
+      workspaceId="ws-1"
+      workspace={{ ...WORKSPACE, pr: queued } as never}
+      contentRevision={0}
+    />,
+  );
+
+  await userEvent
+    .setup()
+    .click(screen.getByRole("tab", { name: "Pull request" }));
+
+  expect(screen.getByText("Queued")).toHaveClass("bg-warning-background");
+  expect(screen.getByText("In merge queue")).toHaveClass(
+    "text-warning-foreground",
+  );
+  expect(screen.queryByText("Auto-merge on")).not.toBeInTheDocument();
+  expect(screen.queryByText("Auto-merge is enabled")).not.toBeInTheDocument();
+});
+
 it.each([
   [
     "unknown mergeability",

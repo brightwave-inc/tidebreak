@@ -13,6 +13,7 @@ import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
 type InspectorScenario =
   | "ready"
   | "merge-ready"
+  | "merge-queued"
   | "multi-pr"
   | "truncated"
   | "empty"
@@ -311,7 +312,13 @@ function InspectorStory({
             bucket: "pass" as const,
           })),
         }
-      : pullRequest;
+      : scenario === "merge-queued"
+        ? {
+            ...pullRequest,
+            auto_merge_enabled: true,
+            in_merge_queue: true,
+          }
+        : pullRequest;
   const storyWorkspace =
     scenario === "empty" ? workspace : { ...workspace, pr: storyPr };
   const storySnapshot = { ...prSnapshot, pr: storyPr };
@@ -374,6 +381,17 @@ export const Review: Story = {
 /** The same compact merge card when GitHub says the PR can land now. */
 export const ReviewReadyToMerge: Story = {
   args: { tab: "pr", scenario: "merge-ready" },
+};
+
+/** The review tab and detail header use GitHub's orange queue mark. */
+export const ReviewMergeQueued: Story = {
+  args: { tab: "pr", scenario: "merge-queued" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Queued")).toBeVisible();
+    await expect(canvas.getByText("In merge queue")).toBeVisible();
+    await expect(canvas.queryByText("Auto-merge is enabled")).toBeNull();
+  },
 };
 
 /**

@@ -370,9 +370,14 @@ export function PrCardView({
 function GitStateChips({ snapshot }: { snapshot: CodeWorkspacePrSnapshot }) {
   const chips: ReactNode[] = [];
   if (snapshot.pr) {
+    const queued = snapshot.pr.in_merge_queue === true;
     chips.push(
-      <Badge key="pr" variant={prStateVariant(snapshot.pr.state)} size="sm">
-        {snapshot.pr.state}
+      <Badge
+        key="pr"
+        variant={queued ? "warning" : prStateVariant(snapshot.pr.state)}
+        size="sm"
+      >
+        {queued ? "Queued" : snapshot.pr.state}
       </Badge>,
     );
   }

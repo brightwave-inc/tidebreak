@@ -13,6 +13,8 @@ import {
   listArchivedWorkspaces,
   middleTruncate,
   prChipTone,
+  prStatusLabel,
+  prStatusTone,
   sessionActivityLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
@@ -51,6 +53,18 @@ function workspace(
 }
 
 const working: Attention = { state: { type: "working" }, source: "lifecycle" };
+
+describe("prStatusTone", () => {
+  it("uses the host merge-queue color before the open lifecycle color", () => {
+    expect(
+      prStatusTone({ state: "open", draft: false, in_merge_queue: true }),
+    ).toBe("warning");
+    expect(prStatusTone({ state: "open", draft: false })).toBe("ready");
+    expect(
+      prStatusLabel({ state: "open", draft: false, in_merge_queue: true }),
+    ).toBe("Queued");
+  });
+});
 
 function digest(
   workspaceId: string,
@@ -378,6 +392,17 @@ describe("workspaceCardLabel", () => {
         attention: { state: { type: "working" }, source: "lifecycle" },
       }),
     ).toBe("Fix login · app · tidebreak/fix-login");
+  });
+
+  it("announces queue membership instead of the open lifecycle", () => {
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        pr: { number: 12, state: "open", in_merge_queue: true },
+      }),
+    ).toContain("Pull request #12 Queued");
   });
 });
 

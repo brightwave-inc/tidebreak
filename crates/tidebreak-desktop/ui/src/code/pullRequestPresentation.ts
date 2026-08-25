@@ -146,7 +146,7 @@ export function pullRequestListStatus(
   if (item.in_merge_queue === true) {
     return {
       label: "In merge queue",
-      tone: "pending",
+      tone: "warning",
       group: "handed_off",
     };
   }

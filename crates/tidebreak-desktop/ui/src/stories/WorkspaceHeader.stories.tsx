@@ -26,6 +26,7 @@ import {
   attentionWorking,
   dirtyGit,
   openPrGit,
+  queuedPrGit,
   watchingPrGit,
 } from "./fixtures";
 
@@ -158,6 +159,11 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const PullRequestOpen: Story = {};
+
+/** The workflow mark matches GitHub's orange merge-queue state. */
+export const MergeQueued: Story = {
+  args: { snapshot: queuedPrGit },
+};
 
 export const LocalChanges: Story = {
   args: { snapshot: dirtyGit },

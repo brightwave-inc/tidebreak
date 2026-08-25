@@ -112,6 +112,20 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("toggle-terminal");
   });
 
+  it("announces a queued pull request and uses its orange chip", () => {
+    renderCard({
+      pr: { ...pr, in_merge_queue: true },
+      detailDefaultOpen: true,
+    });
+
+    expect(
+      screen.getByRole("button", { name: /Pull request #184 Queued/ }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Queued")[0]).toHaveClass(
+      "bg-warning-background",
+    );
+  });
+
   it("keeps only the PR glyph in the row and puts its action in the hover detail", async () => {
     const user = userEvent.setup();
     const { onOpen, onCommand } = renderCard({
