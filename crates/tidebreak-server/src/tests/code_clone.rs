@@ -463,7 +463,9 @@ async fn a_self_host_default_places_clones_without_being_given_a_destination() {
         let db = std::sync::Arc::new(store);
         let store_trait: std::sync::Arc<dyn Store> = db.clone();
         let mut registry = AdapterRegistry::new();
-        registry.register(std::sync::Arc::new(ScriptedAdapter::new(plain_text_script())));
+        registry.register(std::sync::Arc::new(ScriptedAdapter::new(
+            plain_text_script(),
+        )));
         let default = dir.path().join("code").join("src");
         let runtime = std::sync::Arc::new(
             CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry)
