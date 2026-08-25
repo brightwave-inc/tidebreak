@@ -374,14 +374,18 @@ export const routeTree = rootRoute.addChildren([
  * server behind it to rewrite unknown paths onto the document. A path history
  * would work until the first reload of a deep link.
  */
-export const router = createRouter({
-  routeTree,
-  history: createHashHistory(),
-  defaultPreload: false,
-});
+export function createAppRouter() {
+  return createRouter({
+    routeTree,
+    history: createHashHistory(),
+    defaultPreload: false,
+  });
+}
+
+export type AppRouter = ReturnType<typeof createAppRouter>;
 
 declare module "@tanstack/react-router" {
   interface Register {
-    router: typeof router;
+    router: AppRouter;
   }
 }

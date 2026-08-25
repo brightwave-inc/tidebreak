@@ -9,6 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { APP_MODE_STORAGE_KEY, restoreStoredAppMode } from "./appMode";
 import { useChatListStore } from "./ChatListStore";
 import { useCodeCatalogStore } from "./code/CodeCatalogStore";
 import { useCodeUiStore } from "./code/CodeUiStore";
@@ -329,6 +330,7 @@ vi.mock("react-resizable-panels", () => ({
 
 async function mountApp({ at }: { at?: string } = {}) {
   if (at) window.location.hash = `#${at}`;
+  restoreStoredAppMode();
   const { createHashHistory, createRouter, RouterProvider } = await import(
     "@tanstack/react-router"
   );
@@ -477,6 +479,30 @@ describe("app shell", () => {
     // Home used to create a chat on every cold start, leaving an empty one
     // behind whenever the reader did not use it.
     expect(createChat).not.toHaveBeenCalled();
+  });
+
+  it("opens in the last selected app mode", {
+    timeout: 15000,
+  }, async () => {
+    window.localStorage.setItem(APP_MODE_STORAGE_KEY, "code");
+
+    const { router } = await mountApp();
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
+    expect(await screen.findByRole("radio", { name: "Code" })).toBeChecked();
+  });
+
+  it("remembers each app mode selection", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountApp({ at: "/code" });
+
+    await user.click(await screen.findByRole("radio", { name: "Work" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/"));
+    expect(window.localStorage.getItem(APP_MODE_STORAGE_KEY)).toBe("work");
+
+    await user.click(screen.getByRole("radio", { name: "Code" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
+    expect(window.localStorage.getItem(APP_MODE_STORAGE_KEY)).toBe("code");
   });
 
   it("lists recent conversations to pick up again", async () => {
