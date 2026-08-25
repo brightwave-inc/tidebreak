@@ -1,10 +1,13 @@
 //! One print-mode child per turn (`--prompt-file` + `--output-format streaming-json`).
 
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
@@ -35,6 +38,7 @@ pub struct GrokSession {
     permission_mode: Mutex<PermissionMode>,
     resume_ref: Mutex<Option<String>>,
     version: String,
+    prompt_directory: Mutex<Option<PromptDirectory>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
     pid: ChildPid,
     /// Exit status of a child [`HarnessSession::interrupt`] already reaped.
@@ -53,6 +57,7 @@ impl GrokSession {
             permission_mode: Mutex::new(permission_mode),
             resume_ref: Mutex::new(resume_ref),
             version,
+            prompt_directory: Mutex::new(None),
             child: AsyncMutex::new(None),
             pid: ChildPid::new(),
             reaped: Mutex::new(None),
@@ -82,6 +87,66 @@ impl GrokSession {
     /// The mode in force right now.
     fn permission_mode(&self) -> PermissionMode {
         *self.permission_mode.lock().expect("grok permission mode")
+    }
+
+    fn write_prompt_file(&self, text: &str) -> Result<PromptFile, HarnessError> {
+        let mut slot = self.prompt_directory.lock().expect("grok prompt directory");
+        if slot.is_none() {
+            *slot = Some(PromptDirectory::new()?);
+        }
+        slot.as_ref()
+            .expect("grok prompt directory initialized")
+            .write(text)
+    }
+}
+
+/// Session-private storage for prompt files passed to the Grok child.
+struct PromptDirectory {
+    directory: tempfile::TempDir,
+}
+
+impl PromptDirectory {
+    fn new() -> Result<Self, HarnessError> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("tidebreak-grok-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let directory = builder.tempdir()?;
+        Ok(Self { directory })
+    }
+
+    fn write(&self, text: &str) -> Result<PromptFile, HarnessError> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("prompt-").suffix(".txt");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        let mut file = builder.tempfile_in(self.directory.path())?;
+        file.as_file_mut().write_all(text.as_bytes())?;
+        file.as_file_mut().flush()?;
+        Ok(PromptFile { file })
+    }
+
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Deletes the prompt file on every Rust exit path, including cancellation
+/// and panic unwinding.
+struct PromptFile {
+    file: tempfile::NamedTempFile,
+}
+
+impl PromptFile {
+    fn path(&self) -> &Path {
+        self.file.path()
     }
 }
 
@@ -256,17 +321,14 @@ impl HarnessSession for GrokSession {
         } else {
             input.text
         };
-        let prompt_file = write_prompt_file(&prompt_text)?;
-        let plan =
-            match self.compose_plan(&prompt_file, input.model.as_deref(), input.reasoning_effort) {
-                Ok(plan) => plan,
-                Err(err) => {
-                    let _ = std::fs::remove_file(&prompt_file);
-                    return Err(err);
-                }
-            };
+        let prompt_file = self.write_prompt_file(&prompt_text)?;
+        let plan = self.compose_plan(
+            prompt_file.path(),
+            input.model.as_deref(),
+            input.reasoning_effort,
+        )?;
         let result = self.spawn_and_read(&plan).await;
-        let _ = std::fs::remove_file(&prompt_file);
+        drop(prompt_file);
         result
     }
 
@@ -322,6 +384,10 @@ impl HarnessSession for GrokSession {
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.terminate().await;
         }
+        self.prompt_directory
+            .lock()
+            .expect("grok prompt directory")
+            .take();
         Ok(())
     }
 }
@@ -430,16 +496,6 @@ impl GrokSession {
     }
 }
 
-fn write_prompt_file(text: &str) -> Result<PathBuf, HarnessError> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("tidebreak-grok-prompt-{stamp}.txt"));
-    std::fs::write(&path, text)?;
-    Ok(path)
-}
-
 async fn emit_parsed(
     spec: &SessionSpec,
     parser: &mut GrokStreamParser,
@@ -489,6 +545,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn spec(bridge: &str) -> BrowserChannelSpec {
         BrowserChannelSpec::new(
@@ -505,6 +562,123 @@ mod tests {
         // Browser-present behavior is verified by the other tests below.
         let browser: Option<&BrowserChannelSpec> = None;
         assert!(browser.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prompt_storage_is_private_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = PromptDirectory::new().unwrap();
+        let prompt = directory.write("private prompt").unwrap();
+        let directory_mode = std::fs::metadata(directory.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(prompt.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(directory_mode & 0o077, 0);
+        assert_eq!(file_mode & 0o077, 0);
+    }
+
+    #[test]
+    fn prompt_paths_are_unique_under_concurrent_creation() {
+        let directory = PromptDirectory::new().unwrap();
+        let prompts = std::thread::scope(|scope| {
+            let handles = (0..64)
+                .map(|index| {
+                    let directory = &directory;
+                    scope.spawn(move || directory.write(&format!("prompt {index}")).unwrap())
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let paths = prompts
+            .iter()
+            .map(|prompt| prompt.path().to_owned())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(paths.len(), prompts.len());
+        assert!(paths
+            .iter()
+            .all(|path| path.parent() == Some(directory.path())));
+    }
+
+    #[test]
+    fn prompt_guard_removes_file_on_drop() {
+        let directory = PromptDirectory::new().unwrap();
+        let prompt = directory.write("private prompt").unwrap();
+        let path = prompt.path().to_owned();
+        assert!(path.exists());
+
+        drop(prompt);
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn prompt_guard_removes_file_during_panic_unwind() {
+        let directory = PromptDirectory::new().unwrap();
+        let path = std::sync::Mutex::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let prompt = directory.write("private prompt").unwrap();
+            *path.lock().unwrap() = Some(prompt.path().to_owned());
+            panic!("exercise prompt cleanup");
+        }));
+
+        assert!(result.is_err());
+        assert!(!path.lock().unwrap().as_ref().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn prompt_guard_removes_file_when_task_is_cancelled() {
+        let directory = PromptDirectory::new().unwrap();
+        let prompt = directory.write("private prompt").unwrap();
+        let path = prompt.path().to_owned();
+        let task = tokio::spawn(async move {
+            let _prompt = prompt;
+            std::future::pending::<()>().await;
+        });
+
+        task.abort();
+        let _ = task.await;
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn prompt_creation_does_not_replace_guessed_paths() {
+        let directory = PromptDirectory::new().unwrap();
+        let guessed = directory.path().join("prompt-guessed.txt");
+        std::fs::write(&guessed, "sentinel").unwrap();
+
+        let prompt = directory.write("private prompt").unwrap();
+
+        assert_ne!(prompt.path(), guessed);
+        assert_eq!(std::fs::read_to_string(guessed).unwrap(), "sentinel");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prompt_creation_does_not_follow_guessed_symlinks() {
+        let directory = PromptDirectory::new().unwrap();
+        let target = directory.path().join("target.txt");
+        let guessed = directory.path().join("prompt-guessed.txt");
+        std::fs::write(&target, "sentinel").unwrap();
+        std::os::unix::fs::symlink(&target, &guessed).unwrap();
+
+        let prompt = directory.write("private prompt").unwrap();
+
+        assert_ne!(prompt.path(), guessed);
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "sentinel");
     }
 
     #[test]

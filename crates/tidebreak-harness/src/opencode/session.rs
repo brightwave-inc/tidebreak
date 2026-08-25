@@ -3,16 +3,17 @@
 use std::net::TcpListener;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::browser_channel::apply_child_env_tokio;
 use crate::launch::{validate_launch_plan, LaunchPlan};
@@ -26,6 +27,10 @@ use tidebreak_core::PermissionMode;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
+/// Maximum number of parsed SSE payloads waiting for the turn consumer.
+const SSE_EVENT_CAPACITY: usize = 128;
+/// Maximum payload bytes held by queued SSE events.
+const SSE_BYTE_CAPACITY: usize = 1_024 * 1_024;
 const AUTO_FLAG: &str = "--auto";
 /// Environment key for the OpenCode config JSON override.
 const OPENCODE_CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
@@ -44,7 +49,85 @@ pub struct OpencodeSession {
     base_url: Mutex<String>,
     client: reqwest::Client,
     parser: Mutex<OpencodeStreamParser>,
-    events: AsyncMutex<Option<mpsc::UnboundedReceiver<String>>>,
+    events: AsyncMutex<Option<Arc<SseEventStream>>>,
+}
+
+type SseQueueItem = Result<BufferedSseEvent, String>;
+
+/// One queued payload and its share of the queue's byte budget.
+struct BufferedSseEvent {
+    payload: String,
+    _byte_permit: OwnedSemaphorePermit,
+}
+
+struct SseEventStream {
+    receiver: AsyncMutex<mpsc::Receiver<SseQueueItem>>,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Clone)]
+struct SseEventSender {
+    events: mpsc::Sender<SseQueueItem>,
+    bytes: Arc<Semaphore>,
+    byte_capacity: usize,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl SseEventSender {
+    async fn send(&self, payload: String) -> Result<(), ()> {
+        let bytes = payload.len().max(1);
+        if bytes > self.byte_capacity {
+            self.fail(format!(
+                "opencode event stream payload exceeded the {}-byte queue limit",
+                self.byte_capacity
+            ))
+            .await;
+            return Err(());
+        }
+        let Ok(bytes) = u32::try_from(bytes) else {
+            self.fail("opencode event stream payload size is not supported".into())
+                .await;
+            return Err(());
+        };
+        let Ok(permit) = self.bytes.clone().acquire_many_owned(bytes).await else {
+            return Err(());
+        };
+        self.events
+            .send(Ok(BufferedSseEvent {
+                payload,
+                _byte_permit: permit,
+            }))
+            .await
+            .map_err(|_| ())
+    }
+
+    async fn fail(&self, message: String) {
+        let stored = {
+            let mut failure = self.failure.lock().expect("opencode event stream failure");
+            failure.get_or_insert_with(|| message.clone()).clone()
+        };
+        let _ = self.events.send(Err(stored)).await;
+    }
+}
+
+fn sse_event_channel(
+    event_capacity: usize,
+    byte_capacity: usize,
+) -> (SseEventSender, Arc<SseEventStream>) {
+    let (events, receiver) = mpsc::channel(event_capacity);
+    let failure = Arc::new(Mutex::new(None));
+    (
+        SseEventSender {
+            events,
+            bytes: Arc::new(Semaphore::new(byte_capacity)),
+            byte_capacity,
+            failure: Arc::clone(&failure),
+        },
+        Arc::new(SseEventStream {
+            receiver: AsyncMutex::new(receiver),
+            failure,
+        }),
+    )
 }
 
 impl OpencodeSession {
@@ -394,6 +477,24 @@ impl OpencodeSession {
     /// two spawns.
     pub(super) async fn ensure_child(&self) -> Result<(), HarnessError> {
         let mut slot = self.child.lock().await;
+        let stream_failure = {
+            let events = self.events.lock().await;
+            events.as_ref().and_then(|stream| {
+                stream
+                    .failure
+                    .lock()
+                    .expect("opencode event stream failure")
+                    .clone()
+            })
+        };
+        if let Some(failure) = stream_failure {
+            *self.events.lock().await = None;
+            if let Some(mut child) = slot.take() {
+                let _ = child.terminate().await;
+            }
+            self.child_pid.store(0, Ordering::SeqCst);
+            warn!(failure = %failure, "replacing opencode child after event stream failure");
+        }
         if let Some(child) = slot.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
                 return Ok(());
@@ -502,7 +603,7 @@ impl OpencodeSession {
                 response.status()
             )));
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (events, receiver) = sse_event_channel(SSE_EVENT_CAPACITY, SSE_BYTE_CAPACITY);
         tokio::spawn(async move {
             let mut response = response;
             let mut lines = StreamLineBuffer::new();
@@ -511,20 +612,49 @@ impl OpencodeSession {
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
                         let tick = lines.push(&chunk, budget);
+                        if tick.overflow_chunks > 0 {
+                            events
+                                .fail(format!(
+                                    "opencode event stream exceeded the {}-byte line limit",
+                                    budget.max_partial_line
+                                ))
+                                .await;
+                            return;
+                        }
                         for line in tick.lines {
                             if let Some(event) = sse_data_line(&line) {
-                                if tx.send(event).is_err() {
+                                if events.send(event).await.is_err() {
                                     return;
                                 }
                             }
                         }
                     }
-                    Ok(None) | Err(_) => return,
+                    Ok(None) => {
+                        events
+                            .fail("engine event stream closed before the turn finished".into())
+                            .await;
+                        return;
+                    }
+                    Err(err) => {
+                        events
+                            .fail(format!("opencode event stream read failed: {err}"))
+                            .await;
+                        return;
+                    }
                 }
             }
         });
-        *self.events.lock().await = Some(rx);
+        *self.events.lock().await = Some(receiver);
         Ok(())
+    }
+
+    async fn retire_child(&self) {
+        let mut slot = self.child.lock().await;
+        self.child_pid.store(0, Ordering::SeqCst);
+        *self.events.lock().await = None;
+        if let Some(mut child) = slot.take() {
+            let _ = child.terminate().await;
+        }
     }
 
     async fn open_or_resume_session(&self) -> Result<(), HarnessError> {
@@ -665,21 +795,22 @@ impl OpencodeSession {
     }
 
     async fn read_until_terminal_turn(&self) -> Result<(), HarnessError> {
+        let stream = self
+            .events
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| HarnessError::Other("event stream is not connected".into()))?;
         loop {
-            let event = {
-                let mut slot = self.events.lock().await;
-                let Some(rx) = slot.as_mut() else {
-                    return Err(HarnessError::Other("event stream is not connected".into()));
-                };
-                rx.recv().await
-            };
+            let event = stream.receiver.lock().await.recv().await;
             let Some(event) = event else {
                 return Err(HarnessError::Other(
                     "engine event stream closed before the turn finished".into(),
                 ));
             };
+            let event = event.map_err(HarnessError::Other)?;
             let mut terminal = false;
-            for parsed in self.emit_sse_events(&event).await {
+            for parsed in self.emit_sse_events(&event.payload).await {
                 if matches!(
                     parsed,
                     HarnessEvent::TurnCompleted { .. }
@@ -717,7 +848,10 @@ impl HarnessSession for OpencodeSession {
         }
         // Long-lived server child: its exit is a session-level failure, not a
         // turn outcome.
-        self.read_until_terminal_turn().await?;
+        if let Err(err) = self.read_until_terminal_turn().await {
+            self.retire_child().await;
+            return Err(err);
+        }
         Ok(TurnOutcome::Clean)
     }
 
@@ -913,6 +1047,168 @@ mod tests {
         session.park().await.unwrap();
         session.interrupt().await.unwrap();
         assert_eq!(session.child_pid(), None);
+    }
+
+    #[tokio::test]
+    async fn sse_queue_applies_event_count_backpressure() {
+        let (sender, stream) = sse_event_channel(2, 1_024);
+        sender.send("one".into()).await.unwrap();
+        sender.send("two".into()).await.unwrap();
+        let blocked_sender = sender.clone();
+        let mut blocked = tokio::spawn(async move { blocked_sender.send("three".into()).await });
+
+        assert!(timeout(Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err());
+        assert_eq!(
+            stream
+                .receiver
+                .lock()
+                .await
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .payload,
+            "one"
+        );
+        assert!(timeout(Duration::from_secs(1), blocked)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn sse_queue_applies_payload_byte_backpressure() {
+        let (sender, stream) = sse_event_channel(8, 8);
+        sender.send("12345678".into()).await.unwrap();
+        let blocked_sender = sender.clone();
+        let mut blocked = tokio::spawn(async move { blocked_sender.send("x".into()).await });
+
+        assert!(timeout(Duration::from_millis(25), &mut blocked)
+            .await
+            .is_err());
+        assert_eq!(
+            stream
+                .receiver
+                .lock()
+                .await
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .payload,
+            "12345678"
+        );
+        assert!(timeout(Duration::from_secs(1), blocked)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn oversized_sse_payload_fails_without_queueing_truncated_data() {
+        let (sender, stream) = sse_event_channel(2, 4);
+
+        assert!(sender.send("12345".into()).await.is_err());
+        let error = match stream.receiver.lock().await.recv().await.unwrap() {
+            Ok(_) => panic!("oversized payload must not enter the queue"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("4-byte queue limit"));
+        assert!(stream.receiver.lock().await.try_recv().is_err());
+        assert_eq!(
+            stream
+                .failure
+                .lock()
+                .expect("opencode event stream failure")
+                .as_deref(),
+            Some("opencode event stream payload exceeded the 4-byte queue limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_queue_preserves_terminal_event_order() {
+        let (sender, stream) = sse_event_channel(2, 1_024);
+        let progress = r#"{"type":"message.part.updated"}"#;
+        let terminal = r#"{"type":"session.idle"}"#;
+        sender.send(progress.into()).await.unwrap();
+        sender.send(terminal.into()).await.unwrap();
+
+        assert_eq!(
+            stream
+                .receiver
+                .lock()
+                .await
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .payload,
+            progress
+        );
+        assert_eq!(
+            stream
+                .receiver
+                .lock()
+                .await
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .payload,
+            terminal
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_a_failed_stream_clears_reconnect_state() {
+        let session = unit_session();
+        let (_sender, stream) = sse_event_channel(2, 1_024);
+        *session.events.lock().await = Some(stream);
+        session.child_pid.store(42, Ordering::SeqCst);
+
+        session.retire_child().await;
+
+        assert_eq!(session.child_pid(), None);
+        assert!(session.events.lock().await.is_none());
+        assert!(session.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn retiring_a_child_does_not_wait_for_the_active_event_receiver() {
+        let session = Arc::new(unit_session());
+        let (_sender, stream) = sse_event_channel(2, 1_024);
+        *session.events.lock().await = Some(Arc::clone(&stream));
+        session.child_pid.store(42, Ordering::SeqCst);
+        let receiver = stream.receiver.lock().await;
+
+        timeout(Duration::from_secs(1), session.retire_child())
+            .await
+            .expect("retirement must not wait for the event receiver");
+        drop(receiver);
+
+        assert!(session.events.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn recorded_stream_failure_retires_the_child_before_reconnect() {
+        let mut session = unit_session();
+        session.spec.binary = std::path::PathBuf::from("__tidebreak_missing_opencode_binary__");
+        let (sender, stream) = sse_event_channel(2, 1_024);
+        sender.fail("recorded stream failure".into()).await;
+        *session.events.lock().await = Some(stream);
+        session.child_pid.store(42, Ordering::SeqCst);
+
+        let error = session.ensure_child().await.unwrap_err();
+
+        assert!(matches!(error, HarnessError::Io(_)));
+        assert_eq!(session.child_pid(), None);
+        assert!(session.events.lock().await.is_none());
+        assert!(session.child.lock().await.is_none());
     }
 
     #[test]
