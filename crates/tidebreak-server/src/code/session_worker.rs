@@ -34,8 +34,8 @@ use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
-    CodeTurnId, CodeTurnStatus, DbStore, FenceReason, HarnessNoticeLevel, OwnerId, PermissionMode,
-    ReasoningEffort, ToolOutcome,
+    CodeTurnId, CodeTurnStatus, CodeUsage, DbStore, FenceReason, HarnessNoticeLevel, OwnerId,
+    PermissionMode, ReasoningEffort, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -43,6 +43,9 @@ use tidebreak_harness::{
 };
 
 use super::bus::CodeEventBus;
+
+const HIGH_FIRST_CALL_CONTEXT_TOKENS: u64 = 20_000;
+const SHORT_FIRST_TURN_INPUT_CHARS: usize = 2_000;
 
 pub(crate) enum WorkerCommand {
     RunTurn {
@@ -483,6 +486,26 @@ impl HarnessEventSink for LiveSink {
             return;
         }
         let turn_id = *self.turn_id.lock().unwrap();
+        if let (Some(turn_id), HarnessEvent::TurnCompleted { usage }) = (turn_id, &event) {
+            if let Ok(Some(turn)) =
+                tidebreak_core::db::code::get_turn(&self.db, &self.owner, turn_id).await
+            {
+                if let Some(message) = high_first_call_context_warning(&turn, usage) {
+                    let _ = persist_and_publish(
+                        &self.db,
+                        &self.bus,
+                        &self.owner,
+                        self.session_id,
+                        self.spawn_epoch,
+                        CodeEvent::HarnessNotice {
+                            level: HarnessNoticeLevel::Warning,
+                            message,
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
         let Some(code_event) = map_event(event, turn_id) else {
             return;
         };
@@ -550,6 +573,20 @@ impl HarnessEventSink for LiveSink {
             recap.spawn(self.owner.clone(), self.session_id, turn_id);
         }
     }
+}
+
+fn high_first_call_context_warning(turn: &CodeTurn, usage: &CodeUsage) -> Option<String> {
+    let context_tokens = usage.first_call_context_tokens?;
+    let input_chars = turn.user_input.chars().count();
+    if turn.ordinal != 1
+        || input_chars > SHORT_FIRST_TURN_INPUT_CHARS
+        || context_tokens < HIGH_FIRST_CALL_CONTEXT_TOKENS
+    {
+        return None;
+    }
+    Some(format!(
+        "The first model call used {context_tokens} context tokens for a {input_chars}-character first-turn prompt. Check harness startup instructions and injected context for duplication."
+    ))
 }
 
 /// Start the worker for a session.
@@ -2124,16 +2161,12 @@ fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
         .and_then(serde_json::Value::as_str)
         .or_else(|| raw.get("permission").and_then(serde_json::Value::as_str))
         .unwrap_or("");
-    let path = input
-        .get("file_path")
-        .or_else(|| input.get("path"))
-        .or_else(|| raw.get("path"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
+    let paths = approval_file_paths(raw, &input);
+    let path = paths.first().map(String::as_str).unwrap_or("");
     match tool {
-        "Write" | "Edit" | "NotebookEdit" | "write" | "edit" => CodeApprovalKind::FileWrite {
-            paths: vec![path.to_owned()],
-        },
+        "Write" | "Edit" | "NotebookEdit" | "write" | "edit" => {
+            CodeApprovalKind::FileWrite { paths }
+        }
         "Bash" | "bash" => CodeApprovalKind::Command {
             cmd: String::new(),
             cwd: input
@@ -2160,6 +2193,64 @@ fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
             summary: other.to_owned(),
         },
     }
+}
+
+fn approval_file_paths(raw: &serde_json::Value, input: &serde_json::Value) -> Vec<String> {
+    let metadata = raw.get("metadata").unwrap_or(&serde_json::Value::Null);
+    let cwd = metadata
+        .get("cwd")
+        .or_else(|| input.get("cwd"))
+        .or_else(|| raw.get("cwd"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty());
+    let direct = metadata
+        .get("filepath")
+        .or_else(|| metadata.get("file_path"))
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("path"))
+        .or_else(|| raw.get("path"))
+        .and_then(serde_json::Value::as_str);
+    let candidates = direct.into_iter().chain(
+        raw.get("patterns")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|path| !path.chars().any(|ch| "*?[]{}".contains(ch))),
+    );
+    let mut paths = Vec::new();
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let normalized = normalize_approval_path(candidate, cwd);
+        if !normalized.is_empty() && !paths.contains(&normalized) {
+            paths.push(normalized);
+        }
+    }
+    paths
+}
+
+fn normalize_approval_path(path: &str, cwd: Option<&str>) -> String {
+    let path = std::path::Path::new(path);
+    if let Ok(relative) = path.strip_prefix("/workspace") {
+        if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
+            return std::path::Path::new(cwd)
+                .join(relative)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    if path.is_relative() {
+        if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
+            return std::path::Path::new(cwd)
+                .join(path)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    path.to_string_lossy().into_owned()
 }
 
 fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEvent> {
@@ -2292,6 +2383,47 @@ mod tests {
             CodeSubagentStatus::Failed
         ));
         assert_eq!(failed[0].status, CodeSubagentStatus::Failed);
+    }
+
+    #[test]
+    fn high_first_call_context_warns_only_for_short_first_turns() {
+        let mut turn = CodeTurn {
+            id: CodeTurnId::new(),
+            session_id: CodeSessionId::new(),
+            ordinal: 1,
+            status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
+            user_input: "fix the parser".into(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            started_at: Utc::now(),
+            ended_at: Some(Utc::now()),
+        };
+        let usage = CodeUsage {
+            first_call_context_tokens: Some(HIGH_FIRST_CALL_CONTEXT_TOKENS),
+            ..CodeUsage::default()
+        };
+
+        assert!(high_first_call_context_warning(&turn, &usage).is_some());
+        turn.ordinal = 2;
+        assert!(high_first_call_context_warning(&turn, &usage).is_none());
+        turn.ordinal = 1;
+        turn.user_input = "x".repeat(SHORT_FIRST_TURN_INPUT_CHARS + 1);
+        assert!(high_first_call_context_warning(&turn, &usage).is_none());
+        turn.user_input = "short".into();
+        assert!(high_first_call_context_warning(
+            &turn,
+            &CodeUsage {
+                first_call_context_tokens: Some(HIGH_FIRST_CALL_CONTEXT_TOKENS - 1),
+                ..CodeUsage::default()
+            }
+        )
+        .is_none());
     }
 
     async fn seeded_sink() -> (
@@ -2633,6 +2765,36 @@ mod tests {
                 cmd: "rg foo".into(),
                 cwd: None,
             }
+        );
+        assert_eq!(
+            kind_from_raw(&serde_json::json!({
+                "permission": "edit",
+                "metadata": {
+                    "filepath": "/workspace/docs/approval.md",
+                    "cwd": "/worktree"
+                },
+                "patterns": ["docs/approval.md", "*.md"]
+            })),
+            CodeApprovalKind::FileWrite {
+                paths: vec!["/worktree/docs/approval.md".into()],
+            }
+        );
+        assert_eq!(
+            kind_from_raw(&serde_json::json!({
+                "permission": "edit",
+                "cwd": "/worktree",
+                "patterns": ["docs/fallback.md", "*"]
+            })),
+            CodeApprovalKind::FileWrite {
+                paths: vec!["/worktree/docs/fallback.md".into()],
+            }
+        );
+        assert_eq!(
+            kind_from_raw(&serde_json::json!({
+                "permission": "edit",
+                "patterns": ["*"]
+            })),
+            CodeApprovalKind::FileWrite { paths: Vec::new() }
         );
         assert_eq!(
             kind_from_raw(&serde_json::json!({

@@ -3,7 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -17,18 +17,22 @@ const TURN_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 struct Reaper(Child);
 
 impl Reaper {
-    fn wait_with_output(&mut self, timeout: Duration) -> Output {
+    fn wait_status(&mut self, timeout: Duration) -> ExitStatus {
         let deadline = Instant::now() + timeout;
-        let status = loop {
+        loop {
             if let Some(status) = self.0.try_wait().unwrap() {
-                break status;
+                return status;
             }
             assert!(
                 Instant::now() < deadline,
                 "child did not exit within {timeout:?}"
             );
             std::thread::sleep(Duration::from_millis(10));
-        };
+        }
+    }
+
+    fn wait_with_output(&mut self, timeout: Duration) -> Output {
+        let status = self.wait_status(timeout);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         if let Some(mut pipe) = self.0.stdout.take() {
@@ -810,6 +814,31 @@ fn get_json(url: &str, token: &str, path: &str) -> serde_json::Value {
         })
 }
 
+fn json_lines(bytes: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every stdout line is JSON"))
+        .collect()
+}
+
+fn wait_for_terminal_status(url: &str, token: &str, chat: &str, status: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let transcript = get_json(url, token, &format!("/chats/{chat}/messages"));
+        if transcript["terminal_turns"]
+            .as_array()
+            .is_some_and(|turns| turns.iter().any(|turn| turn["status"] == status))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "turn did not reach {status}: {transcript}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// #2115: `tidebreak attach` of an image must land on the next `-p` user
 /// message. Publishing the blob is not enough — `GET /chats/{id}/messages`
 /// has to show it.
@@ -884,5 +913,292 @@ fn attaching_an_image_lands_on_the_next_print_turn() {
             "height": 1,
         }]),
         "transcript: {transcript}"
+    );
+}
+
+/// A document published through `tidebreak attach` is pending for exactly the
+/// next successfully submitted message. The message binds the document to the
+/// transcript. On macOS, where the local executor is available, exec also sees
+/// the same bytes under `documents/`.
+#[test]
+fn attaching_a_document_lands_on_the_next_turn_and_local_exec_can_read_it() {
+    let served = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let script = if cfg!(target_os = "macos") {
+        serde_json::json!([
+            {
+                "tool": "exec",
+                "input": {
+                    "summary": "Read the attached CSV",
+                    "command": "sh",
+                    "args": ["-c", "cat documents/*"],
+                    "files": ["documents"]
+                }
+            },
+            {"text": "read the CSV"}
+        ])
+    } else {
+        serde_json::json!([{"text": "read the CSV"}])
+    }
+    .to_string();
+    let (_server, url, token) =
+        spawn_serve_with_env(served.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let chat = create_chat(&url, &token);
+
+    let source = elsewhere.path().join("sales.csv");
+    std::fs::write(&source, "region,total\nwest,42\n").unwrap();
+    let attached = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args(["attach", &chat])
+        .arg(&source)
+        .arg("--server")
+        .arg(&url)
+        .env("TIDEBREAK_SERVER_TOKEN", &token)
+        .env("TIDEBREAK_DATA_DIR", elsewhere.path())
+        .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("attach the CSV");
+    let stderr = String::from_utf8_lossy(&attached.stderr).into_owned();
+    assert!(attached.status.success(), "stderr: {stderr}");
+    let document_id = String::from_utf8_lossy(&attached.stdout).trim().to_owned();
+    assert!(
+        tidebreak_core::DocumentId::from_str(&document_id).is_ok(),
+        "document id: {document_id:?}"
+    );
+
+    let pending = elsewhere
+        .path()
+        .join("pending-document-attachments")
+        .join(&chat);
+    let pending_ids: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&pending).unwrap()).unwrap();
+    assert_eq!(pending_ids, serde_json::json!([document_id]));
+
+    let printed = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args([
+            "-p",
+            "read the attached sales CSV",
+            "--chat",
+            &chat,
+            "--permission-mode",
+            "allow",
+            "--output-format",
+            "json",
+            "--server",
+        ])
+        .arg(&url)
+        .env("TIDEBREAK_SERVER_TOKEN", &token)
+        .env("TIDEBREAK_DATA_DIR", elsewhere.path())
+        .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run -p after attaching the CSV");
+    let stdout = String::from_utf8_lossy(&printed.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&printed.stderr).into_owned();
+    assert!(
+        printed.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !pending.exists(),
+        "a successful submission clears the pending id"
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let events = json_lines(&printed.stdout);
+        let completed = events
+            .iter()
+            .filter_map(|line| line.get("event"))
+            .find(|event| event["type"] == "tool_call_completed")
+            .unwrap_or_else(|| panic!("exec did not complete: {stdout}"));
+        assert_eq!(completed["status"], "completed", "stdout: {stdout}");
+        assert_eq!(
+            completed["result"]["stdout"], "region,total\nwest,42\n",
+            "stdout: {stdout}"
+        );
+    }
+
+    let transcript = get_json(&url, &token, &format!("/chats/{chat}/messages"));
+    assert_eq!(
+        transcript["messages"][0]["file_attachments"],
+        serde_json::json!([{
+            "document_id": document_id,
+            "name": "sales.csv",
+            "media_type": "text/csv",
+        }]),
+        "transcript: {transcript}"
+    );
+}
+
+/// An approval with no stdin driver is an unavailable interaction, not a user
+/// rejection. Print mode reports one halt, cancels the parked turn, and exits
+/// with the interaction status instead of letting the model retry.
+#[test]
+fn an_undriven_approval_halts_once_and_cancels_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = serde_json::json!([{
+        "tool": "exec",
+        "input": {"summary": "Run a command", "command": "true"}
+    }])
+    .to_string();
+    let (_server, url, token) =
+        spawn_serve_with_env(dir.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let chat = create_chat(&url, &token);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args([
+            "-p",
+            "run the command",
+            "--chat",
+            &chat,
+            "--permission-mode",
+            "ask",
+            "--output-format",
+            "json",
+            "--server",
+        ])
+        .arg(&url)
+        .env("TIDEBREAK_SERVER_TOKEN", &token)
+        .env("TIDEBREAK_DATA_DIR", dir.path())
+        .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run an undriven approval turn");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let lines = json_lines(&output.stdout);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| {
+                line.pointer("/event/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("approval_required")
+            })
+            .count(),
+        1,
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line["type"] == "approval_request")
+            .count(),
+        1,
+        "stdout: {stdout}"
+    );
+    let halts = lines
+        .iter()
+        .filter(|line| line["type"] == "halted")
+        .collect::<Vec<_>>();
+    assert_eq!(halts.len(), 1, "stdout: {stdout}");
+    assert_eq!(halts[0]["reason"], "approval_driver_unavailable");
+    assert!(!stdout.contains("approval_decided"), "stdout: {stdout}");
+
+    wait_for_terminal_status(&url, &token, &chat, "cancelled");
+}
+
+/// `--attach` follows the profile's new `listen.json` after a server restart.
+/// The turn starts on the first endpoint and finishes through the second one.
+#[test]
+fn an_attached_print_turn_refreshes_listen_json_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = serde_json::json!([
+        {
+            "tool": "exec",
+            "input": {
+                "summary": "Pause during restart",
+                "command": "sh",
+                "args": ["-c", "sleep 3"]
+            }
+        },
+        {"text": "recovered after restart"}
+    ])
+    .to_string();
+    let (mut first_server, url, first_token) =
+        spawn_serve_with_env(dir.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let chat = create_chat(&url, &first_token);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tidebreak"));
+    command
+        .args([
+            "-p",
+            "survive the restart",
+            "--chat",
+            &chat,
+            "--permission-mode",
+            "allow",
+            "--output-format",
+            "json",
+            "--attach",
+        ])
+        .env("TIDEBREAK_DATA_DIR", dir.path())
+        .env("TIDEBREAK_KEYCHAIN_MOCK", "1")
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .env_remove("TIDEBREAK_SERVER_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = Reaper(command.spawn().expect("spawn an attached print turn"));
+    let stdout = child.0.stdout.take().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut captured = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .is_some_and(|value| {
+                    value
+                        .pointer("/event/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("tool_call_started")
+                })
+            {
+                let _ = started_tx.send(());
+            }
+            captured.push_str(&line);
+            captured.push('\n');
+        }
+        captured
+    });
+
+    started_rx
+        .recv_timeout(TURN_EXIT_TIMEOUT)
+        .expect("the turn reaches exec before the restart");
+    first_server.0.kill().unwrap();
+    first_server.0.wait().unwrap();
+
+    let (_second_server, _second_url, second_token) =
+        spawn_serve_with_env(dir.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    assert_ne!(
+        first_token, second_token,
+        "a restart rotates attach credentials"
+    );
+
+    let status = child.wait_status(Duration::from_secs(90));
+    let stdout = reader.join().unwrap();
+    let mut stderr = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.code(), Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("\"type\":\"turn_completed\""),
+        "stdout: {stdout}"
     );
 }

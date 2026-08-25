@@ -3,7 +3,7 @@
 //! A driver is attached when the caller asked for NDJSON output *and* stdin is
 //! something other than a terminal — a pipe, a socket, a file. Reading a
 //! decision from an unattached driver, or from one whose input has ended,
-//! yields nothing, and the caller falls back to the standing policy in
+//! yields nothing, and the caller applies the undriven policy in
 //! [`super::protocol::Interaction::undriven`]. That is what keeps
 //! `tidebreak -p … --output-format json < /dev/null` from blocking forever on
 //! an answer nobody is going to write.
@@ -40,7 +40,7 @@ impl<R: AsyncBufRead + Unpin> Driver<R> {
     ///
     /// Emits the request event, then reads lines until one decides it.
     /// `None` means no driver answered — unattached, or the input ended — and
-    /// the standing policy applies. Lines that cannot decide the pending
+    /// the undriven policy applies. Lines that cannot decide the pending
     /// request produce an `error` event and are skipped, so one malformed line
     /// does not lose the session.
     pub async fn decide(
@@ -152,9 +152,7 @@ mod tests {
                 .await;
             assert_eq!(decision, None);
 
-            let Undriven::Halt(halt) = interaction.undriven() else {
-                panic!("an unanswered question must halt");
-            };
+            let Undriven::Halt(halt) = interaction.undriven();
             assert_eq!(halt.reason, HaltReason::QuestionsUndriven);
             let event = halt.event();
             assert_eq!(event["type"], "halted");

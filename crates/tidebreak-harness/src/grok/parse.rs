@@ -35,6 +35,8 @@ pub struct GrokStreamParser {
     /// call. Kept apart from `last_usage` because the closing `end` event
     /// overwrites that with the turn's cumulative total.
     last_call_context_tokens: Option<u64>,
+    /// Prompt tokens on the first per-call usage event in this turn.
+    first_call_context_tokens: Option<u64>,
     pending_text: String,
 }
 
@@ -52,6 +54,7 @@ impl Default for GrokStreamParser {
             emitted_session: false,
             last_usage: CodeUsage::default(),
             last_call_context_tokens: None,
+            first_call_context_tokens: None,
             pending_text: String::new(),
         }
     }
@@ -265,6 +268,14 @@ impl GrokStreamParser {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        if matches!(status, "in_progress" | "inProgress" | "running") {
+            if let Some(spawn) = self.pending_spawns.get_mut(&call_id) {
+                if let Some(input) = value.get("rawInput") {
+                    spawn.detail = subagent_detail(input);
+                }
+            }
+            return Vec::new();
+        }
         if call_id.is_empty() || !self.completed_tools.insert(call_id.clone()) {
             return Vec::new();
         }
@@ -395,6 +406,9 @@ impl GrokStreamParser {
         // reports their 9189 sum. So this call's prompt-side sum is an
         // occupancy reading; the `end` event's is spend.
         self.last_call_context_tokens = Some(usage.context_tokens);
+        if self.first_call_context_tokens.is_none() && usage.context_tokens > 0 {
+            self.first_call_context_tokens = Some(usage.context_tokens);
+        }
         self.last_usage = usage;
         self.flush_assistant()
     }
@@ -414,6 +428,7 @@ impl GrokStreamParser {
         if let Some(context_tokens) = self.last_call_context_tokens {
             self.last_usage.context_tokens = context_tokens;
         }
+        self.last_usage.first_call_context_tokens = self.first_call_context_tokens;
         let mut events = self.emit_session();
         events.extend(self.flush_assistant());
         let stop = value
@@ -448,6 +463,8 @@ impl GrokStreamParser {
                 });
             }
         }
+        self.last_call_context_tokens = None;
+        self.first_call_context_tokens = None;
         events
     }
 
@@ -742,6 +759,7 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
         context_tokens: field("input_tokens")
             .saturating_add(field("cache_read_input_tokens"))
             .saturating_add(field("cache_creation_input_tokens")),
+        first_call_context_tokens: None,
     }
 }
 
@@ -800,6 +818,40 @@ mod tests {
             out.events.last(),
             Some(HarnessEvent::TurnCompleted { .. })
         ));
+    }
+
+    #[test]
+    fn progress_status_synonyms_do_not_complete_or_count_a_tool() {
+        for status in ["in_progress", "inProgress", "running"] {
+            let input = format!(
+                "{{\"type\":\"tool_call\",\"toolCallId\":\"call-1\",\"toolName\":\"read_file\",\"rawInput\":{{}}}}\n{{\"type\":\"tool_call_update\",\"toolCallId\":\"call-1\",\"status\":\"{status}\"}}"
+            );
+            let out = GrokStreamParser::parse_ndjson(&input);
+            assert_eq!(out.unrecognized, 0, "status: {status}");
+            assert!(!out
+                .events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::ToolCompleted { .. })));
+        }
+    }
+
+    #[test]
+    fn usage_keeps_the_first_and_last_call_contexts() {
+        let input = r#"
+{"type":"usage","usage":{"input_tokens":9000,"cache_read_input_tokens":1000}}
+{"type":"usage","usage":{"input_tokens":100,"cache_read_input_tokens":12000}}
+{"type":"end","stopReason":"end_turn","sessionId":"abc","usage":{"input_tokens":9100,"cache_read_input_tokens":13000}}
+"#;
+        let out = GrokStreamParser::parse_ndjson(input);
+        let usage = out.events.iter().find_map(|event| match event {
+            HarnessEvent::TurnCompleted { usage } => Some(usage),
+            _ => None,
+        });
+        assert_eq!(
+            usage.and_then(|usage| usage.first_call_context_tokens),
+            Some(10_000)
+        );
+        assert_eq!(usage.map(|usage| usage.context_tokens), Some(12_100));
     }
 
     #[test]

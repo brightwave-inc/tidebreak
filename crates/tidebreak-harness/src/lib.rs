@@ -635,6 +635,10 @@ pub enum HarnessError {
     /// against the new mode instead of giving up.
     #[error("this engine sets its permission mode at launch")]
     PermissionModeSwitchUnsupported,
+    /// A Plan-mode engine changed its default plan storage outside the
+    /// worktree after Tidebreak redirected plan files to private storage.
+    #[error("plan mode wrote outside the worktree: {0}")]
+    PlanWriteOutsideWorktree(String),
     /// The adapter has no verified same-turn steering channel.
     #[error("mid-turn steering is not available on this engine")]
     SteeringUnsupported,

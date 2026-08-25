@@ -176,6 +176,12 @@ pub struct CodeUsage {
     /// Zero when the engine does not publish enough to compute it.
     #[serde(default)]
     pub context_tokens: u64,
+    /// Prompt tokens resident on the turn's first model call, when the engine
+    /// publishes per-call usage. This exposes startup context separately from
+    /// context that grows while the turn runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_call_context_tokens: Option<u64>,
 }
 
 /// Hint that a turn recorded a checkpoint. The diff body is loaded separately.
@@ -496,6 +502,7 @@ mod tests {
                     cache_read_input_tokens: 33,
                     cache_creation_input_tokens: 44,
                     context_tokens: 88,
+                    first_call_context_tokens: Some(55),
                 },
                 checkpoint: Some(CheckpointHint {
                     checkpoint_ref: Some("refs/tidebreak/checkpoints/ws/1".into()),

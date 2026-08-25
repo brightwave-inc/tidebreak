@@ -5,7 +5,10 @@
 //! stream's own `result` line ends the turn; the child stays up for the next
 //! one. Record 57 has the measurements that forced this.
 
-use std::io;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::Hasher;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -84,14 +87,11 @@ pub(crate) fn effort_flags(effort: Option<ReasoningEffort>) -> Vec<String> {
     vec!["--effort".into(), token.to_owned()]
 }
 
-/// The `--settings` flag that arms fast mode, or nothing when it is off or the
-/// model cannot serve it.
+/// The single `--settings` flag for Tidebreak-owned Claude settings.
 ///
-/// `fastMode` is a settings key rather than a flag of its own, and `--settings`
-/// takes inline JSON as well as a path. Off is the engine's own default, so an
-/// off session composes no flag at all rather than an explicit `false` — that
-/// keeps argv identical to what a session without the feature would produce,
-/// and leaves a user's own settings file to speak for itself.
+/// `plansDirectory` keeps Claude's Plan-mode notes outside both the worktree
+/// and the user's default `~/.claude/plans` directory. `fastMode` shares this
+/// object because Claude accepts one inline JSON settings value.
 ///
 /// The model check is here rather than at the route that stores the bit,
 /// because this is the first point that knows which model the turn actually
@@ -100,12 +100,147 @@ pub(crate) fn effort_flags(effort: Option<ReasoningEffort>) -> Vec<String> {
 /// Dropping the flag degrades that turn to standard speed, which is the same
 /// degrade-don't-refuse rule effort follows — and it is the honest direction,
 /// since the alternative claims a premium the model would never run.
-#[must_use]
-pub(crate) fn fast_mode_flags(fast_mode: bool, model: Option<&str>) -> Vec<String> {
-    if !fast_mode || !model.is_some_and(crate::claude::model_serves_fast_mode) {
-        return Vec::new();
+pub(crate) fn settings_flags(
+    plans_directory: &Path,
+    fast_mode: bool,
+    model: Option<&str>,
+) -> Result<Vec<String>, HarnessError> {
+    let plans_directory = plans_directory
+        .to_str()
+        .ok_or_else(|| HarnessError::Other("Claude plans directory must be valid UTF-8".into()))?;
+    let mut settings = serde_json::Map::from_iter([(
+        "plansDirectory".to_owned(),
+        serde_json::Value::String(plans_directory.to_owned()),
+    )]);
+    if fast_mode && model.is_some_and(crate::claude::model_serves_fast_mode) {
+        settings.insert("fastMode".to_owned(), serde_json::Value::Bool(true));
     }
-    vec!["--settings".into(), r#"{"fastMode":true}"#.to_owned()]
+    Ok(vec![
+        "--settings".into(),
+        serde_json::Value::Object(settings).to_string(),
+    ])
+}
+
+/// One file-system entry under Claude's default plan directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanEntry {
+    kind: u8,
+    len: u64,
+    modified_nanos: u128,
+    content_hash: u64,
+}
+
+/// Snapshot of the default plan directory before a Plan-mode turn.
+struct PlanWriteGuard {
+    root: PathBuf,
+    before: BTreeMap<PathBuf, PlanEntry>,
+}
+
+impl PlanWriteGuard {
+    fn capture(root: PathBuf) -> io::Result<Self> {
+        let before = snapshot_directory(&root)?;
+        Ok(Self { root, before })
+    }
+
+    fn changed_path(&self) -> io::Result<Option<PathBuf>> {
+        let after = snapshot_directory(&self.root)?;
+        let paths = self
+            .before
+            .keys()
+            .chain(after.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let changed = |path: &PathBuf| self.before.get(path) != after.get(path);
+        Ok(paths
+            .iter()
+            .find(|path| !path.as_os_str().is_empty() && changed(path))
+            .cloned()
+            .or_else(|| paths.into_iter().find(changed))
+            .map(|path| self.root.join(path)))
+    }
+}
+
+fn snapshot_directory(root: &Path) -> io::Result<BTreeMap<PathBuf, PlanEntry>> {
+    let mut entries = BTreeMap::new();
+    if !root.exists() {
+        return Ok(entries);
+    }
+    snapshot_directory_at(root, root, &mut entries)?;
+    Ok(entries)
+}
+
+fn snapshot_directory_at(
+    root: &Path,
+    path: &Path,
+    entries: &mut BTreeMap<PathBuf, PlanEntry>,
+) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let relative = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_dir() {
+        1
+    } else if file_type.is_file() {
+        2
+    } else if file_type.is_symlink() {
+        3
+    } else {
+        4
+    };
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    let content_hash = if file_type.is_file() {
+        hash_file(path)?
+    } else if file_type.is_symlink() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(std::fs::read_link(path)?.as_os_str().as_encoded_bytes());
+        hasher.finish()
+    } else {
+        0
+    };
+    entries.insert(
+        relative,
+        PlanEntry {
+            kind,
+            len: metadata.len(),
+            modified_nanos,
+            content_hash,
+        },
+    );
+    if file_type.is_dir() {
+        let mut children = std::fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
+        children.sort_by_key(std::fs::DirEntry::file_name);
+        for child in children {
+            snapshot_directory_at(root, &child.path(), entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> io::Result<u64> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.write(&buffer[..read]);
+    }
+    Ok(hasher.finish())
+}
+
+fn ensure_private_directory(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// The prompt as the engine receives it: the user's text, plus the ultracode
@@ -264,6 +399,8 @@ struct TurnRead {
 /// Live Claude Code session: one child for the session lifetime.
 pub struct ClaudeSession {
     spec: SessionSpec,
+    /// Tidebreak-owned destination for Claude's Plan-mode files.
+    plans_directory: PathBuf,
     /// The session's current permission mode, which a live switch moves.
     /// `spec.permission_mode` is only what it started on.
     permission_mode: Mutex<PermissionMode>,
@@ -297,8 +434,12 @@ impl ClaudeSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
         let resume_ref = spec.resume_ref.clone();
         let permission_mode = spec.permission_mode;
+        let plans_directory = std::env::temp_dir()
+            .join("tidebreak-claude-plans")
+            .join(uuid::Uuid::new_v4().to_string());
         Self {
             spec,
+            plans_directory,
             permission_mode: Mutex::new(permission_mode),
             resume_ref: Mutex::new(resume_ref),
             channel: AsyncMutex::new(None),
@@ -339,6 +480,36 @@ impl ClaudeSession {
         *self.permission_mode.lock().expect("claude permission mode")
     }
 
+    fn default_plans_directory(&self) -> Option<PathBuf> {
+        let extra_home = self
+            .spec
+            .extra_env
+            .iter()
+            .rev()
+            .find(|(key, _)| key.eq_ignore_ascii_case("HOME"))
+            .map(|(_, value)| PathBuf::from(value.as_str()));
+        let probed_home = self
+            .spec
+            .env
+            .iter()
+            .rev()
+            .find(|(key, _)| key.eq_ignore_ascii_case("HOME"))
+            .map(|(_, value)| PathBuf::from(value.as_os_str()));
+        extra_home
+            .or(probed_home)
+            .map(|home| home.join(".claude").join("plans"))
+    }
+
+    fn plan_write_guard(&self) -> Result<Option<PlanWriteGuard>, HarnessError> {
+        if self.permission_mode() != PermissionMode::Plan {
+            return Ok(None);
+        }
+        self.default_plans_directory()
+            .map(PlanWriteGuard::capture)
+            .transpose()
+            .map_err(HarnessError::from)
+    }
+
     fn compose_plan_for(
         &self,
         turn_model: Option<&str>,
@@ -365,10 +536,12 @@ impl ClaudeSession {
             argv.push(model);
         }
         argv.extend(effort_flags(self.resolved_effort(turn_effort)));
-        argv.extend(fast_mode_flags(
+        ensure_private_directory(&self.plans_directory)?;
+        argv.extend(settings_flags(
+            &self.plans_directory,
             self.spec.fast_mode,
             self.resolved_model(turn_model).as_deref(),
-        ));
+        )?);
         if let Some(flags) = crate::claude::browser::launch_args_for_mcp_channels(
             self.spec.approval.as_ref(),
             self.spec.browser.as_ref(),
@@ -589,11 +762,8 @@ impl ClaudeSession {
             None => Ok(TurnRead { saw_terminal, eof }),
         }
     }
-}
 
-#[async_trait]
-impl HarnessSession for ClaudeSession {
-    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+    async fn run_turn_inner(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
         self.interrupts_this_turn.store(0, Ordering::SeqCst);
         self.turn_in_flight.store(true, Ordering::SeqCst);
         let _in_flight = TurnGuard(&self.turn_in_flight);
@@ -605,11 +775,6 @@ impl HarnessSession for ClaudeSession {
                 .await?;
             match self.write_line(&channel, &prompt).await {
                 Ok(()) => break channel,
-                // A child that died between turns leaves a pipe that only
-                // answers on write. Respawning resumes the session, so the
-                // user's message is delivered rather than lost. A child that
-                // was just spawned and already refuses stdin is a real
-                // failure, not a stale handle.
                 Err(err) if !fresh && !retried => {
                     retried = true;
                     warn!(%err, "engine child refused the turn; respawning");
@@ -625,8 +790,6 @@ impl HarnessSession for ClaudeSession {
         let read = match self.read_turn(&channel).await {
             Ok(read) => read,
             Err(err) => {
-                // The stream is unusable. Retire the child so the next turn
-                // starts a fresh one and resumes.
                 self.retire_channel().await;
                 return Err(err);
             }
@@ -637,12 +800,9 @@ impl HarnessSession for ClaudeSession {
             if !stderr.is_empty() {
                 warn!(bytes = stderr.len(), "engine stderr (capped)");
             }
-            // The child is still up and the stream closed the turn itself.
             return Ok(turn_outcome(None, read.saw_terminal, &stderr));
         }
 
-        // Stdout closed: the process is gone. Report how it ended and drop it,
-        // so the next turn respawns and resumes from the session's ref.
         let status = channel.exit_status().await;
         let stderr = channel.take_final_stderr().await;
         if !stderr.is_empty() {
@@ -650,6 +810,26 @@ impl HarnessSession for ClaudeSession {
         }
         self.retire_channel().await;
         Ok(turn_outcome(status, read.saw_terminal, &stderr))
+    }
+}
+
+#[async_trait]
+impl HarnessSession for ClaudeSession {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        let guard = self.plan_write_guard()?;
+        let outcome = self.run_turn_inner(input).await;
+        if let Some(path) = guard
+            .as_ref()
+            .map(PlanWriteGuard::changed_path)
+            .transpose()?
+            .flatten()
+        {
+            self.retire_channel().await;
+            return Err(HarnessError::PlanWriteOutsideWorktree(
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        outcome
     }
 
     async fn decide(
@@ -788,6 +968,7 @@ impl HarnessSession for ClaudeSession {
         if let Some(channel) = taken {
             channel.stop(None).await;
         }
+        let _ = std::fs::remove_dir_all(&self.plans_directory);
         Ok(())
     }
 }
@@ -1104,6 +1285,36 @@ mod tests {
         assert_eq!(plan.argv[index + 1], "low");
     }
 
+    #[test]
+    fn tidebreak_settings_redirect_plans_and_merge_fast_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session_with_mode(
+            PathBuf::from("/usr/bin/claude"),
+            dir.path(),
+            Arc::new(Discard),
+            PermissionMode::Plan,
+        );
+        session.spec.model = Some("claude-opus-5".into());
+        session.spec.fast_mode = true;
+
+        let plan = session.compose_plan_for(None, None).unwrap();
+        let settings_indexes = plan
+            .argv
+            .iter()
+            .enumerate()
+            .filter_map(|(index, arg)| (arg == "--settings").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(settings_indexes.len(), 1);
+        let settings: serde_json::Value =
+            serde_json::from_str(&plan.argv[settings_indexes[0] + 1]).unwrap();
+        assert_eq!(settings["fastMode"], true);
+        assert_eq!(
+            settings["plansDirectory"],
+            session.plans_directory.to_string_lossy().as_ref()
+        );
+        assert!(!session.plans_directory.starts_with(dir.path()));
+    }
+
     /// The control request reaches `plan`, `manual`, and `acceptEdits`.
     /// `Allow` is the bypass flag, which only a fresh child can carry.
     #[test]
@@ -1411,6 +1622,36 @@ done
             other => panic!("a child that exited 3 must not look clean: {other:?}"),
         }
         assert_eq!(session.child_pid(), None, "the pid is cleared on exit");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_fails_if_the_engine_writes_to_the_default_home_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let binary = write_engine(
+            dir.path(),
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  mkdir -p "$HOME/.claude/plans"
+  printf 'escaped\n' > "$HOME/.claude/plans/escaped.md"
+  printf '{"type":"system","subtype":"init","session_id":"sess-plan","claude_code_version":"2.1.245"}\n'
+  printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-plan","usage":{"input_tokens":1,"output_tokens":1}}\n'
+done
+"#,
+        );
+        let mut session = session_with(binary, &worktree, Arc::new(Discard));
+        session.spec.env = vec![("HOME".into(), home.as_os_str().to_owned())];
+
+        let error = session.run_turn(turn("plan this")).await.unwrap_err();
+        assert!(matches!(
+            error,
+            HarnessError::PlanWriteOutsideWorktree(path)
+                if path.ends_with(".claude/plans/escaped.md")
+        ));
+        assert_eq!(session.child_pid(), None, "the violating child is retired");
     }
 
     /// The whole point of record 57: two turns, one process, and a turn that

@@ -2,10 +2,12 @@
 //! consumes.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    AgentError, AgentRunId, CallId, ChatId, OutputId, OutputRevisionId, Result, TurnId,
+    AgentError, AgentRunId, CallId, ChatId, DocumentId, MessageId, OutputId, OutputRevisionId,
+    Result, TurnId,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -29,6 +31,7 @@ pub struct Client {
     base: String,
     token: String,
     local_import_token: Option<String>,
+    listen_data_dir: Option<PathBuf>,
 }
 
 /// The error body every route answers with on failure.
@@ -55,6 +58,45 @@ pub struct IngestedSource {
     pub readiness: tidebreak_core::DocumentReadiness,
 }
 
+/// Durable terminal state used when a print-mode event socket cannot recover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableTurn {
+    pub status: DurableTurnStatus,
+    pub content: String,
+    pub last_event_seq: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableTurnStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Deserialize)]
+struct DurableTranscript {
+    messages: Vec<DurableMessage>,
+    terminal_turns: Vec<DurableTerminalTurn>,
+    last_event_seq: i64,
+}
+
+#[derive(Deserialize)]
+struct DurableMessage {
+    id: MessageId,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct DurableTerminalTurn {
+    turn_id: TurnId,
+    #[serde(default)]
+    message_id: Option<MessageId>,
+    status: DurableTurnStatus,
+    #[serde(default)]
+    partial_content: String,
+}
+
 impl Client {
     /// A client for a server bound in this process.
     pub fn new(addr: SocketAddr, token: &str) -> Result<Self> {
@@ -78,6 +120,17 @@ impl Client {
         token: &str,
         local_import_token: Option<&str>,
     ) -> Result<Self> {
+        Self::attach_with_reconnect_source(base, token, local_import_token, None)
+    }
+
+    /// Attach to a server and remember the profile whose `listen.json` owns
+    /// its rotating endpoint credentials.
+    pub fn attach_with_reconnect_source(
+        base: String,
+        token: &str,
+        local_import_token: Option<&str>,
+        listen_data_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|error| AgentError::msg(format!("invalid server token: {error}")))?;
@@ -94,7 +147,24 @@ impl Client {
             base,
             token: token.to_owned(),
             local_import_token: local_import_token.map(str::to_owned),
+            listen_data_dir,
         })
+    }
+
+    /// Re-read a desktop-owned attach endpoint after the desktop restarts.
+    /// Explicit `--server` clients have no rotating source and remain unchanged.
+    pub fn refresh_attach_endpoint(&mut self) -> Result<()> {
+        let Some(data_dir) = self.listen_data_dir.clone() else {
+            return Ok(());
+        };
+        let endpoint = tidebreak_server::listen_endpoint::ListenEndpoint::read(&data_dir)?;
+        *self = Self::attach_with_reconnect_source(
+            endpoint.base_url.trim_end_matches('/').to_owned(),
+            &endpoint.token,
+            Some(&endpoint.local_import_token),
+            Some(data_dir),
+        )?;
+        Ok(())
     }
 
     fn with_local_import(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -484,14 +554,16 @@ impl Client {
 
     /// Accept a user message and queue its turn (`202`).
     ///
-    /// `attachments` are image ids returned by [`Self::attach_image`]. An empty
-    /// slice is the ordinary text-only send.
+    /// `attachments` are image ids returned by [`Self::attach_image`].
+    /// `file_attachments` are document ids returned by
+    /// [`Self::attach_document`]. Empty slices are the ordinary text-only send.
     pub async fn post_message(
         &self,
         chat: ChatId,
         turn_id: TurnId,
         content: &str,
         attachments: &[uuid::Uuid],
+        file_attachments: &[DocumentId],
     ) -> Result<()> {
         let response = self
             .http
@@ -500,12 +572,21 @@ impl Client {
                 "turn_id": turn_id,
                 "content": content,
                 "attachments": attachments,
+                "file_attachments": file_attachments,
             }))
             .send()
             .await
             .map_err(request_error)?;
         Self::expect_success(response).await?;
         Ok(())
+    }
+
+    /// Read one turn's durable terminal state after live event delivery fails.
+    pub async fn durable_turn(&self, chat: ChatId, turn_id: TurnId) -> Result<Option<DurableTurn>> {
+        let transcript: DurableTranscript = self
+            .get_json(format!("{}/chats/{chat}/messages", self.base))
+            .await?;
+        Ok(durable_turn_from_transcript(transcript, turn_id))
     }
 
     /// Cancel one exact turn (`202`; `409` if it already finished).
@@ -707,12 +788,12 @@ impl Client {
         title: &str,
         media_type: &str,
         bytes: Vec<u8>,
-    ) -> Result<String> {
-        Ok(self
-            .publish_document_source(chat, Some(title), None, media_type, bytes)
-            .await?
-            .document_id
-            .to_string())
+    ) -> Result<DocumentId> {
+        Ok(DocumentId::from(
+            self.publish_document_source(chat, Some(title), None, media_type, bytes)
+                .await?
+                .document_id,
+        ))
     }
 
     /// Publish one source into a conversation through the ingest route.
@@ -1124,4 +1205,123 @@ fn urlencode(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn durable_turn_from_transcript(
+    transcript: DurableTranscript,
+    turn_id: TurnId,
+) -> Option<DurableTurn> {
+    let turn = transcript
+        .terminal_turns
+        .into_iter()
+        .find(|turn| turn.turn_id == turn_id)?;
+    let content = turn
+        .message_id
+        .and_then(|message_id| {
+            transcript
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .map(|message| message.content.clone())
+        })
+        .unwrap_or(turn.partial_content);
+    Some(DurableTurn {
+        status: turn.status,
+        content,
+        last_event_seq: transcript.last_event_seq,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refreshing_an_attach_client_reloads_the_rotated_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        tidebreak_server::listen_endpoint::write(
+            dir.path(),
+            "http://127.0.0.1:1001",
+            "first-token",
+            "first-import",
+        )
+        .unwrap();
+        let mut client = Client::attach_with_reconnect_source(
+            "http://127.0.0.1:1001".into(),
+            "first-token",
+            Some("first-import"),
+            Some(dir.path().to_path_buf()),
+        )
+        .unwrap();
+
+        tidebreak_server::listen_endpoint::write(
+            dir.path(),
+            "http://127.0.0.1:2002/",
+            "second-token",
+            "second-import",
+        )
+        .unwrap();
+        client.refresh_attach_endpoint().unwrap();
+
+        assert_eq!(client.base, "http://127.0.0.1:2002");
+        assert_eq!(client.token, "second-token");
+        assert_eq!(client.local_import_token.as_deref(), Some("second-import"));
+        assert_eq!(client.listen_data_dir.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn durable_reconciliation_prefers_the_committed_message_and_keeps_partial_fallback() {
+        let completed_turn = TurnId::new();
+        let cancelled_turn = TurnId::new();
+        let message_id = MessageId::new();
+        let transcript = DurableTranscript {
+            messages: vec![DurableMessage {
+                id: message_id,
+                content: "authoritative answer".into(),
+            }],
+            terminal_turns: vec![
+                DurableTerminalTurn {
+                    turn_id: completed_turn,
+                    message_id: Some(message_id),
+                    status: DurableTurnStatus::Completed,
+                    partial_content: "partial".into(),
+                },
+                DurableTerminalTurn {
+                    turn_id: cancelled_turn,
+                    message_id: None,
+                    status: DurableTurnStatus::Cancelled,
+                    partial_content: "visible before cancellation".into(),
+                },
+            ],
+            last_event_seq: 41,
+        };
+
+        assert_eq!(
+            durable_turn_from_transcript(transcript, completed_turn),
+            Some(DurableTurn {
+                status: DurableTurnStatus::Completed,
+                content: "authoritative answer".into(),
+                last_event_seq: 41,
+            })
+        );
+
+        let transcript = DurableTranscript {
+            messages: Vec::new(),
+            terminal_turns: vec![DurableTerminalTurn {
+                turn_id: cancelled_turn,
+                message_id: None,
+                status: DurableTurnStatus::Cancelled,
+                partial_content: "visible before cancellation".into(),
+            }],
+            last_event_seq: 42,
+        };
+        assert_eq!(
+            durable_turn_from_transcript(transcript, cancelled_turn),
+            Some(DurableTurn {
+                status: DurableTurnStatus::Cancelled,
+                content: "visible before cancellation".into(),
+                last_event_seq: 42,
+            })
+        );
+    }
 }

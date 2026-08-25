@@ -1686,7 +1686,13 @@ cache_creation_input_tokens: number,
  *
  * Zero when the engine does not publish enough to compute it.
  */
-context_tokens: number, };
+context_tokens: number, 
+/**
+ * Prompt tokens resident on the turn's first model call, when the engine
+ * publishes per-call usage. This exposes startup context separately from
+ * context that grows while the turn runs.
+ */
+first_call_context_tokens?: number, };
 
 /**
  * Identifies one durable watch task on a workspace's pull request.

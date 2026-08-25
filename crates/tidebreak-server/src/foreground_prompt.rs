@@ -28,6 +28,7 @@ You are Tidebreak, an assistant working with the user inside one conversation.
 - Proceed with reasonable, reversible assumptions when ambiguity is minor. If a missing choice would materially change the result or authorize a broader action, ask one concise question instead of guessing.
 - Use tools when they materially improve correctness or complete requested work. Never claim to have accessed, changed, or verified something unless the available tools or conversation actually support that claim.
 - When the user explicitly asks you to run, reproduce, or test something, do not substitute reasoning for execution or imply that it ran. Make an execution claim only after an `exec` result supports it; if `exec` is unavailable this turn, say plainly that you cannot execute it.
+- Images from earlier conversation turns remain available inline unless the conversation contains an explicit `[image omitted from context: ...]` marker. `list_documents` does not list image attachments, and the absence of an image file in scratch or `documents/` does not mean that you lost its pixels.
 - Stay within the current conversation. Do not invent projects, organization context, shared memory, or access outside the capabilities provided for this turn.
 
 ## Trust and safety
@@ -44,6 +45,7 @@ You are Tidebreak, an assistant working with the user inside one conversation.
 - Proceed with reasonable, reversible assumptions when ambiguity is minor. If a missing choice would materially change the result or authorize a broader action, ask one concise question instead of guessing.
 - Answer from the conversation and your own knowledge. Never claim to have accessed, changed, or verified anything outside the conversation.
 - When the user explicitly asks you to run, reproduce, or test something, say plainly that execution is unavailable in this reply. Do not substitute reasoning for execution or imply that anything ran.
+- Images from earlier conversation turns remain available inline unless the conversation contains an explicit `[image omitted from context: ...]` marker.
 - Stay within the current conversation. Do not invent projects, organization context, shared memory, or access outside this reply.
 
 ## Trust and safety
@@ -469,6 +471,7 @@ pub(crate) fn compose_for_surface(
             OUTPUTS_HEADING,
             &[
                 "- Files you save in `output/` during `exec` are published to the user automatically as durable outputs; use them when the user explicitly wants a report, plan, table, data file, web page, or another file to preview or save.",
+                "- For visual review, write PNG, JPEG, or WebP images to `preview/`. SVG remains a durable source file in `output/`, but it needs a raster copy in `preview/` before you can inspect its pixels.",
                 "- Prefer a normal conversational answer when a separate file would add no value.",
                 "- Make each output self-contained and use a clear portable filename. Saving to the same filename updates that output in place as a new version, so preserve useful content intentionally.",
             ],
@@ -917,6 +920,19 @@ mod tests {
         assert!(chat_only.contains("execution is unavailable in this reply"));
         assert!(chat_only.contains("Do not substitute reasoning for execution"));
         assert!(chat_only.contains("or imply that anything ran"));
+    }
+
+    #[test]
+    fn image_and_preview_contracts_are_explicit() {
+        let prompt = compose(&[spec("list_documents"), spec("exec")]);
+        let chat_only = compose(&[]);
+
+        assert!(prompt.contains("remain available inline"));
+        assert!(chat_only.contains("remain available inline"));
+        assert!(prompt.contains("[image omitted from context:"));
+        assert!(prompt.contains("`list_documents` does not list image attachments"));
+        assert!(prompt.contains("SVG remains a durable source file in `output/`"));
+        assert!(prompt.contains("raster copy in `preview/`"));
     }
 
     #[test]
@@ -1646,7 +1662,7 @@ mod tests {
         // Re-pinned for the Tidebreak product identity carried by the prompt.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:9f937d96870bc18021864e08981d1fe8baca851a37508b07f1f674ba5743b8d0"
+            "foreground-v2:sha256:8c5ddcc6e2a85de35dadca1b282791a44e0202e67225d2a26aa3b91bbf65a9e6"
         );
     }
 }

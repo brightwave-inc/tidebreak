@@ -42,6 +42,8 @@ pub struct CodexStreamParser {
     parent_turn_active: bool,
     /// Thread-wide counters at the start of the active turn.
     turn_usage_baseline: CodeUsage,
+    /// Prompt resident on the first usage update after `turn/started`.
+    turn_first_call_context_tokens: Option<u64>,
     /// Latest thread-wide counters plus the final call's context occupancy.
     last_usage: CodeUsage,
     last_turn_id: Option<String>,
@@ -232,6 +234,7 @@ impl CodexStreamParser {
                 }
                 self.parent_turn_active = true;
                 self.turn_usage_baseline = self.last_usage.clone();
+                self.turn_first_call_context_tokens = None;
                 vec![HarnessEvent::TurnStarted]
             }
             "turn/completed" if parent_thread => self.parse_turn_completed(&params),
@@ -255,7 +258,12 @@ impl CodexStreamParser {
                 // The app server multiplexes child threads over the parent's
                 // connection. Their counters must not replace the parent's.
                 if parent_thread {
-                    self.last_usage = usage_from(params.get("tokenUsage"));
+                    let usage = usage_from(params.get("tokenUsage"));
+                    if self.parent_turn_active && self.turn_first_call_context_tokens.is_none() {
+                        self.turn_first_call_context_tokens =
+                            (usage.context_tokens > 0).then_some(usage.context_tokens);
+                    }
+                    self.last_usage = usage;
                 }
                 Vec::new()
             }
@@ -302,6 +310,7 @@ impl CodexStreamParser {
         }
         match item.get("type").and_then(Value::as_str) {
             Some("commandExecution") => self.emit_tool_started(&item, parent_call_id),
+            Some("fileChange") => self.emit_file_change_started(&item, parent_call_id),
             Some("collabAgentToolCall") => self.emit_collab_started(&item, parent_call_id),
             Some("subAgentActivity" | "userMessage" | "agentMessage" | "reasoning") => Vec::new(),
             Some(other) => {
@@ -323,6 +332,7 @@ impl CodexStreamParser {
         }
         match item.get("type").and_then(Value::as_str) {
             Some("commandExecution") => self.emit_tool_completed(&item, parent_call_id),
+            Some("fileChange") => self.emit_file_change_completed(&item, parent_call_id),
             Some("collabAgentToolCall") => self.emit_collab_completed(&item, parent_call_id),
             Some("agentMessage") => {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
@@ -378,7 +388,11 @@ impl CodexStreamParser {
         self.parent_turn_active = false;
         match status {
             "completed" => vec![HarnessEvent::TurnCompleted {
-                usage: turn_usage_since(&self.last_usage, &self.turn_usage_baseline),
+                usage: turn_usage_since(
+                    &self.last_usage,
+                    &self.turn_usage_baseline,
+                    self.turn_first_call_context_tokens,
+                ),
             }],
             "interrupted" => vec![HarnessEvent::TurnInterrupted],
             "failed" => {
@@ -411,7 +425,11 @@ impl CodexStreamParser {
                         ),
                     },
                     HarnessEvent::TurnCompleted {
-                        usage: turn_usage_since(&self.last_usage, &self.turn_usage_baseline),
+                        usage: turn_usage_since(
+                            &self.last_usage,
+                            &self.turn_usage_baseline,
+                            self.turn_first_call_context_tokens,
+                        ),
                     },
                 ]
             }
@@ -808,6 +826,66 @@ impl CodexStreamParser {
         }]
     }
 
+    fn emit_file_change_started(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let call_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if call_id.is_empty() || !self.started_tools.insert(call_id.clone()) {
+            return Vec::new();
+        }
+        vec![HarnessEvent::ToolStarted {
+            call_id,
+            name: "fileChange".into(),
+            detail: file_change_detail(item),
+            parent_call_id,
+        }]
+    }
+
+    fn emit_file_change_completed(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let call_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if call_id.is_empty() {
+            return Vec::new();
+        }
+        let detail = file_change_detail(item);
+        let mut events = Vec::new();
+        if self.started_tools.insert(call_id.clone()) {
+            events.push(HarnessEvent::ToolStarted {
+                call_id: call_id.clone(),
+                name: "fileChange".into(),
+                detail: detail.clone(),
+                parent_call_id: parent_call_id.clone(),
+            });
+        }
+        let status = item.get("status").and_then(Value::as_str).unwrap_or("");
+        let outcome = match status {
+            "declined" => ToolOutcome::Denied,
+            "failed" | "cancelled" | "canceled" => ToolOutcome::Failed,
+            _ => ToolOutcome::Succeeded,
+        };
+        events.push(HarnessEvent::ToolCompleted {
+            call_id,
+            outcome,
+            preview: file_change_preview(item),
+            detail: (detail.specificity() > 0).then_some(detail),
+            parent_call_id,
+        });
+        events
+    }
+
     fn count_unrecognized(&mut self, label: &str, payload: impl std::fmt::Display) {
         self.unrecognized += 1;
         let mut rendered = payload.to_string();
@@ -944,6 +1022,30 @@ fn command_detail(item: &Value) -> ToolDetail {
     }
 }
 
+fn file_change_detail(item: &Value) -> ToolDetail {
+    let path = item
+        .get("changes")
+        .and_then(Value::as_array)
+        .and_then(|changes| changes.first())
+        .and_then(|change| change.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    ToolDetail::FileEdit { path }
+}
+
+fn file_change_preview(item: &Value) -> String {
+    let preview = item
+        .get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|change| change.get("diff").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bound(&preview, MAX_PREVIEW_CHARS)
+}
+
 /// Normalize `thread/tokenUsage` into disjoint cumulative counters.
 ///
 /// Two corrections over reading the payload verbatim.
@@ -976,6 +1078,7 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
         cache_read_input_tokens,
         cache_creation_input_tokens,
         context_tokens: context_tokens_from(value),
+        first_call_context_tokens: None,
     }
 }
 
@@ -985,7 +1088,11 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
 /// before `turn/started`. Subtracting that snapshot keeps later turns from
 /// inheriting every earlier turn's spend. If the engine resets a counter,
 /// treat the latest value as a fresh total instead of subtracting past zero.
-fn turn_usage_since(total: &CodeUsage, baseline: &CodeUsage) -> CodeUsage {
+fn turn_usage_since(
+    total: &CodeUsage,
+    baseline: &CodeUsage,
+    first_call_context_tokens: Option<u64>,
+) -> CodeUsage {
     let counters_reset = total.input_tokens < baseline.input_tokens
         || total.output_tokens < baseline.output_tokens
         || total.cache_read_input_tokens < baseline.cache_read_input_tokens
@@ -1005,6 +1112,7 @@ fn turn_usage_since(total: &CodeUsage, baseline: &CodeUsage) -> CodeUsage {
             .cache_creation_input_tokens
             .saturating_sub(baseline.cache_creation_input_tokens),
         context_tokens: total.context_tokens,
+        first_call_context_tokens,
     }
 }
 
@@ -1089,6 +1197,7 @@ mod tests {
             cache_read_input_tokens: 9_984,
             cache_creation_input_tokens: 0,
             context_tokens: 14_531,
+            first_call_context_tokens: None,
         };
         let total = CodeUsage {
             input_tokens: 5_819,
@@ -1096,16 +1205,18 @@ mod tests {
             cache_read_input_tokens: 24_064,
             cache_creation_input_tokens: 0,
             context_tokens: 15_352,
+            first_call_context_tokens: None,
         };
 
         assert_eq!(
-            turn_usage_since(&total, &baseline),
+            turn_usage_since(&total, &baseline, Some(15_352)),
             CodeUsage {
                 input_tokens: 1_272,
                 output_tokens: 6,
                 cache_read_input_tokens: 14_080,
                 cache_creation_input_tokens: 0,
                 context_tokens: 15_352,
+                first_call_context_tokens: Some(15_352),
             }
         );
     }
@@ -1203,6 +1314,77 @@ mod tests {
 
         assert_eq!(out.unrecognized, 0);
         assert!(out.events.is_empty());
+    }
+
+    #[test]
+    fn file_change_items_emit_a_matched_bounded_edit_span() {
+        let long_diff = format!("+{}", "x".repeat(MAX_PREVIEW_CHARS + 20));
+        let started = serde_json::json!({
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "id": "edit-1",
+                    "changes": [{"path": "docs/exercise.md"}]
+                }
+            }
+        });
+        let completed = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "id": "edit-1",
+                    "status": "completed",
+                    "changes": [{"path": "docs/exercise.md", "diff": long_diff}]
+                }
+            }
+        });
+        let mut parser = CodexStreamParser::new();
+        let mut events = parser.push_line(&started.to_string());
+        events.extend(parser.push_line(&completed.to_string()));
+
+        assert_eq!(parser.unrecognized(), 0);
+        assert!(matches!(
+            events.first(),
+            Some(HarnessEvent::ToolStarted {
+                call_id,
+                detail: ToolDetail::FileEdit { path },
+                ..
+            }) if call_id == "edit-1" && path == "docs/exercise.md"
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: ToolOutcome::Succeeded,
+                preview,
+                detail: Some(ToolDetail::FileEdit { path }),
+                ..
+            }) if call_id == "edit-1"
+                && path == "docs/exercise.md"
+                && preview.chars().count() == MAX_PREVIEW_CHARS
+        ));
+    }
+
+    #[test]
+    fn first_usage_update_records_starting_context() {
+        let input = r#"
+{"method":"turn/started","params":{"turn":{"status":"inProgress"}}}
+{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":15000,"cachedInputTokens":5000,"outputTokens":1},"last":{"inputTokens":15000}}}}
+{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":31000,"cachedInputTokens":13000,"outputTokens":2},"last":{"inputTokens":16000}}}}
+{"method":"turn/completed","params":{"turn":{"status":"completed"}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+        let usage = out.events.iter().find_map(|event| match event {
+            HarnessEvent::TurnCompleted { usage } => Some(usage),
+            _ => None,
+        });
+        assert_eq!(
+            usage.and_then(|usage| usage.first_call_context_tokens),
+            Some(15_000)
+        );
+        assert_eq!(usage.map(|usage| usage.context_tokens), Some(16_000));
     }
 
     #[test]

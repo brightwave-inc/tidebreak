@@ -646,6 +646,7 @@ mod tests {
                 cache_read_input_tokens: 14_080,
                 cache_creation_input_tokens: 0,
                 context_tokens: 15_352,
+                first_call_context_tokens: Some(15_352),
             },
             "the resumed turn must not inherit the first turn's spend"
         );
