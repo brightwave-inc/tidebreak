@@ -7,12 +7,14 @@ import {
   GitBranch,
   GitPullRequest,
   LoaderCircle,
+  MessageSquareText,
   RefreshCw,
   RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
+import type { CodeWorkspaceHistorySearchMatch } from "@/api/types";
 import { SearchInput } from "@/components/SearchInput";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +41,22 @@ import { listArchivedWorkspaces, isPutAway } from "./workspaceCards";
 
 type AgeFilter = "all" | "7d" | "30d" | "90d";
 
+type HistorySearchState = {
+  query: string;
+  matches: CodeWorkspaceHistorySearchMatch[];
+  loading: boolean;
+  error: string | null;
+  truncated: boolean;
+};
+
+const EMPTY_HISTORY_SEARCH: HistorySearchState = {
+  query: "",
+  matches: [],
+  loading: false,
+  error: null,
+  truncated: false,
+};
+
 export function CodeArchivePage() {
   return (
     <RouteFrame sidebar={<CodeSidebar />}>
@@ -62,13 +80,14 @@ function CodeArchiveBody() {
   const [repoId, setRepoId] = useState("all");
   const [age, setAge] = useState<AgeFilter>("all");
   const [restoring, setRestoring] = useState<string | null>(null);
+  const [historySearch, setHistorySearch] =
+    useState<HistorySearchState>(EMPTY_HISTORY_SEARCH);
 
   useEffect(() => {
     void refresh(client);
   }, [client, refresh]);
 
-  const archived = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
+  const archiveCandidates = useMemo(() => {
     const cutoff = archiveCutoff(age);
     return listArchivedWorkspaces(workspaces).filter((workspace) => {
       if (repoId !== "all" && workspace.repo_id !== repoId) return false;
@@ -76,11 +95,128 @@ function CodeArchiveBody() {
         workspace.archived_at ?? workspace.created_at,
       );
       if (cutoff !== null && archivedAt < cutoff) return false;
+      return true;
+    });
+  }, [age, repoId, workspaces]);
+
+  const historyAnchors = useMemo(() => {
+    const seenRepos = new Set<string>();
+    return archiveCandidates.filter((workspace) => {
+      if (seenRepos.has(workspace.repo_id)) return false;
+      seenRepos.add(workspace.repo_id);
+      return true;
+    });
+  }, [archiveCandidates]);
+
+  const trimmedSearch = search.trim();
+
+  useEffect(() => {
+    if (!loaded || error || !trimmedSearch || historyAnchors.length === 0) {
+      setHistorySearch(EMPTY_HISTORY_SEARCH);
+      return;
+    }
+
+    let cancelled = false;
+    setHistorySearch({
+      query: trimmedSearch,
+      matches: [],
+      loading: true,
+      error: null,
+      truncated: false,
+    });
+    const timeout = window.setTimeout(() => {
+      void Promise.allSettled(
+        historyAnchors.map((workspace) =>
+          client.searchCodeWorkspace(workspace.id, {
+            query: trimmedSearch,
+            history: true,
+            limit: 200,
+          }),
+        ),
+      ).then((results) => {
+        if (cancelled) return;
+        const matches: CodeWorkspaceHistorySearchMatch[] = [];
+        let truncated = false;
+        let failureCount = 0;
+        let firstFailure: unknown;
+        for (const result of results) {
+          if (result.status === "rejected") {
+            failureCount += 1;
+            firstFailure ??= result.reason;
+            continue;
+          }
+          matches.push(...(result.value.history_matches ?? []));
+          truncated ||= result.value.truncated;
+        }
+        setHistorySearch({
+          query: trimmedSearch,
+          matches,
+          loading: false,
+          error:
+            failureCount === 0
+              ? null
+              : failureCount === results.length
+                ? friendlyErrorMessage(
+                    firstFailure,
+                    "Could not search conversations.",
+                  )
+                : "Some conversations could not be searched.",
+          truncated,
+        });
+      });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [client, error, historyAnchors, loaded, trimmedSearch]);
+
+  const activeHistorySearch =
+    historySearch.query === trimmedSearch
+      ? historySearch
+      : {
+          ...EMPTY_HISTORY_SEARCH,
+          loading:
+            loaded &&
+            !error &&
+            Boolean(trimmedSearch) &&
+            historyAnchors.length > 0,
+        };
+
+  const historyMatchesByWorkspace = useMemo(() => {
+    const allowedWorkspaceIds = new Set(
+      archiveCandidates.map((workspace) => workspace.id),
+    );
+    const seenSessions = new Set<string>();
+    const grouped = new Map<string, CodeWorkspaceHistorySearchMatch[]>();
+    const matches = [...activeHistorySearch.matches].sort(
+      (left, right) =>
+        searchTimestamp(right.created_at) - searchTimestamp(left.created_at),
+    );
+    for (const match of matches) {
+      if (!allowedWorkspaceIds.has(match.workspace_id)) continue;
+      const sessionKey = `${match.workspace_id}\0${match.session_id}`;
+      if (seenSessions.has(sessionKey)) continue;
+      seenSessions.add(sessionKey);
+      const workspaceMatches = grouped.get(match.workspace_id);
+      if (workspaceMatches) {
+        workspaceMatches.push(match);
+      } else {
+        grouped.set(match.workspace_id, [match]);
+      }
+    }
+    return grouped;
+  }, [activeHistorySearch.matches, archiveCandidates]);
+
+  const archived = useMemo(() => {
+    const query = trimmedSearch.toLocaleLowerCase();
+    return archiveCandidates.filter((workspace) => {
       if (!query) return true;
       const repo = repos.find(
         (candidate) => candidate.id === workspace.repo_id,
       );
-      return [
+      const metadataMatches = [
         workspace.title,
         workspace.branch_name,
         workspace.worktree_path,
@@ -89,8 +225,9 @@ function CodeArchiveBody() {
         .join(" ")
         .toLocaleLowerCase()
         .includes(query);
+      return metadataMatches || historyMatchesByWorkspace.has(workspace.id);
     });
-  }, [age, repoId, repos, search, workspaces]);
+  }, [archiveCandidates, historyMatchesByWorkspace, repos, trimmedSearch]);
 
   const restore = async (workspaceId: string) => {
     if (restoring) return;
@@ -147,7 +284,7 @@ function CodeArchiveBody() {
           size="sm"
           value={search}
           onValueChange={setSearch}
-          placeholder="Search archived workspaces…"
+          placeholder="Search workspaces and conversations…"
           className="min-w-56 flex-1 md:max-w-md"
         />
         <Select value={repoId} onValueChange={setRepoId}>
@@ -179,6 +316,32 @@ function CodeArchiveBody() {
         </Select>
       </div>
 
+      {(activeHistorySearch.loading ||
+        activeHistorySearch.error ||
+        activeHistorySearch.truncated) && (
+        <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-b border-border-subtle px-5 py-2 text-xs">
+          {activeHistorySearch.loading && (
+            <span
+              role="status"
+              className="flex items-center gap-1.5 text-muted-foreground"
+            >
+              <LoaderCircle className="size-3.5 animate-spin" />
+              Searching conversations…
+            </span>
+          )}
+          {activeHistorySearch.error && (
+            <span role="alert" className="text-critical-foreground-muted">
+              {activeHistorySearch.error} Workspace matches are still shown.
+            </span>
+          )}
+          {activeHistorySearch.truncated && (
+            <span className="text-warning-foreground">
+              Conversation results were truncated. Narrow the search.
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 overflow-auto">
         {!loaded ? (
           <ArchiveSkeleton />
@@ -195,6 +358,18 @@ function CodeArchiveBody() {
               <EmptyTitle>No archived workspaces</EmptyTitle>
               <EmptyDescription>
                 Archived workspaces leave the main rail and collect here.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : activeHistorySearch.loading && archived.length === 0 ? (
+          <Empty className="min-h-72">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <LoaderCircle className="animate-spin" />
+              </EmptyMedia>
+              <EmptyTitle>Searching conversations</EmptyTitle>
+              <EmptyDescription>
+                Checking archived session history for this search.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -223,30 +398,64 @@ function CodeArchiveBody() {
               const repo = repos.find(
                 (candidate) => candidate.id === workspace.repo_id,
               );
+              const workspaceHistory =
+                historyMatchesByWorkspace.get(workspace.id) ?? [];
               return (
                 <div
                   key={workspace.id}
                   role="listitem"
-                  className="grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] gap-4 border-b border-border-subtle px-5 py-3"
+                  className="grid grid-cols-[minmax(260px,1fr)_170px_150px_180px] items-start gap-4 border-b border-border-subtle px-5 py-3"
                 >
-                  <button
-                    type="button"
-                    className="min-w-0 cursor-pointer text-left hover:text-primary"
-                    onClick={() =>
-                      void navigate({
-                        to: "/code/w/$workspaceId",
-                        params: { workspaceId: workspace.id },
-                      })
-                    }
-                  >
-                    <span className="block truncate text-sm font-medium">
-                      {workspace.title}
-                    </span>
-                    <span className="mt-1 flex items-center gap-1.5 truncate font-mono text-xs text-muted-foreground">
-                      <GitBranch className="size-3.5 shrink-0" />
-                      {workspace.branch_name}
-                    </span>
-                  </button>
+                  <div className="min-w-0">
+                    <button
+                      type="button"
+                      className="block w-full min-w-0 cursor-pointer rounded-sm text-left hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() =>
+                        void navigate({
+                          to: "/code/w/$workspaceId",
+                          params: { workspaceId: workspace.id },
+                        })
+                      }
+                    >
+                      <span className="block truncate text-sm font-medium">
+                        {workspace.title}
+                      </span>
+                      <span className="mt-1 flex items-center gap-1.5 truncate font-mono text-xs text-muted-foreground">
+                        <GitBranch className="size-3.5 shrink-0" />
+                        {workspace.branch_name}
+                      </span>
+                    </button>
+                    {workspaceHistory.length > 0 && (
+                      <div className="mt-2 space-y-1.5">
+                        {workspaceHistory.map((match) => (
+                          <button
+                            key={match.session_id}
+                            type="button"
+                            aria-label={`Open conversation in ${workspace.title}: ${match.preview}`}
+                            className="block w-full rounded-md border border-border-subtle bg-muted/50 px-2 py-1.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={() =>
+                              void navigate({
+                                to: "/code/w/$workspaceId",
+                                params: { workspaceId: match.workspace_id },
+                                search: { task: match.session_id },
+                              })
+                            }
+                          >
+                            <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                              <MessageSquareText className="size-3.5 shrink-0" />
+                              {historySourceLabel(match.source)}
+                              <span className="font-normal text-muted-foreground">
+                                · {relativeTime(match.created_at)}
+                              </span>
+                            </span>
+                            <span className="mt-0.5 line-clamp-2 block text-xs text-muted-foreground">
+                              {match.preview}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <span className="flex min-w-0 items-center truncate text-xs text-muted-foreground">
                     {repo?.display_name ?? workspace.repo_id}
                   </span>
@@ -338,5 +547,23 @@ function relativeTime(value: string): string {
     return formatDistanceToNowStrict(new Date(value), { addSuffix: true });
   } catch {
     return value;
+  }
+}
+
+function searchTimestamp(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function historySourceLabel(
+  source: CodeWorkspaceHistorySearchMatch["source"],
+): string {
+  switch (source) {
+    case "turn_user_input":
+      return "Your message";
+    case "turn_narrative":
+      return "Turn summary";
+    case "event":
+      return "Conversation";
   }
 }

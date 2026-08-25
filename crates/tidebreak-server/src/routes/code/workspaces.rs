@@ -9,10 +9,11 @@ use crate::state::AppState;
 
 use super::types::{
     ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
-    CodeWorktreeRoot, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
-    SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
-    WorkspaceSearchQuery, WorkspaceTreeQuery,
+    CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch,
+    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
+    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, SetCodeWorktreeRootBody,
+    WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery,
+    WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -159,6 +160,47 @@ pub async fn search_workspace(
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceSearchQuery>,
 ) -> Result<Json<CodeWorkspaceSearch>, ServerError> {
+    if query.history {
+        let history_query = query.query.trim();
+        if history_query.chars().count()
+            > tidebreak_core::db::code::MAX_TRANSCRIPT_SEARCH_QUERY_CHARS
+        {
+            return Err(ServerError::bad_request(format!(
+                "search query must be at most {} characters",
+                tidebreak_core::db::code::MAX_TRANSCRIPT_SEARCH_QUERY_CHARS
+            )));
+        }
+        let searched = code
+            .workspace_transcript_search(id, history_query, query.limit)
+            .await?;
+        return Ok(Json(CodeWorkspaceSearch {
+            matches: Vec::new(),
+            history_matches: searched
+                .matches
+                .into_iter()
+                .map(|matched| CodeWorkspaceHistorySearchMatch {
+                    workspace_id: matched.workspace_id,
+                    workspace_title: matched.workspace_title,
+                    session_id: matched.session_id,
+                    turn_id: matched.turn_id,
+                    source: match matched.source {
+                        tidebreak_core::db::code::CodeTranscriptSearchSource::TurnUserInput => {
+                            CodeWorkspaceHistorySearchSource::TurnUserInput
+                        }
+                        tidebreak_core::db::code::CodeTranscriptSearchSource::TurnNarrative => {
+                            CodeWorkspaceHistorySearchSource::TurnNarrative
+                        }
+                        tidebreak_core::db::code::CodeTranscriptSearchSource::Event => {
+                            CodeWorkspaceHistorySearchSource::Event
+                        }
+                    },
+                    preview: matched.preview,
+                    created_at: matched.created_at,
+                })
+                .collect(),
+            truncated: searched.truncated,
+        }));
+    }
     let (matches, truncated) = code
         .workspace_search(
             id,
@@ -177,6 +219,7 @@ pub async fn search_workspace(
                 line: matched.line,
             })
             .collect(),
+        history_matches: Vec::new(),
         truncated,
     }))
 }

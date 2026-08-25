@@ -9160,6 +9160,133 @@ async fn workspace_tree_is_bounded_ignores_and_never_returns_contents() {
     assert_eq!(bounded_search["truncated"], true);
 }
 
+#[tokio::test]
+async fn workspace_history_search_spans_released_and_live_workspaces() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (registered, first_workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let second_workspace = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&registered),
+            "title": "second change",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    let mut session_ids = Vec::new();
+    for (workspace, message) in [
+        (
+            &first_workspace,
+            "Find durable-history-needle in released work",
+        ),
+        (
+            &second_workspace,
+            "Find durable-history-needle in live work",
+        ),
+    ] {
+        let session = client
+            .post(format!(
+                "http://{addr}/code/workspaces/{}/sessions",
+                json_id(workspace)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "harness": "claude_code",
+                "permission_mode": "plan",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        session_ids.push(json_id(&session).to_owned());
+        let submitted = client
+            .post(format!(
+                "http://{addr}/code/sessions/{}/turns",
+                json_id(&session)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": message }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(submitted.status(), reqwest::StatusCode::ACCEPTED);
+    }
+
+    let first_id = WorkspaceId(uuid::Uuid::parse_str(json_id(&first_workspace)).unwrap());
+    let mut released = tidebreak_core::db::code::get_workspace(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        first_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    released.status = CodeWorkspaceStatus::Released;
+    released.archived_at = Some(chrono::Utc::now());
+    released.released_at = Some(chrono::Utc::now());
+    assert!(
+        tidebreak_core::db::code::save_workspace(&runtime.db, &released)
+            .await
+            .unwrap()
+    );
+
+    let searched = client
+        .get(format!(
+            "http://{addr}/code/workspaces/{}/search",
+            json_id(&first_workspace)
+        ))
+        .bearer_auth(&token)
+        .query(&[
+            ("query", "durable-history-needle"),
+            ("history", "true"),
+            ("limit", "10"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(searched.status(), reqwest::StatusCode::OK);
+    let searched: serde_json::Value = searched.json().await.unwrap();
+    assert_eq!(searched["matches"], serde_json::json!([]));
+    assert_eq!(searched["truncated"], false);
+    let history = searched["history_matches"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history.iter().all(|matched| {
+        matched["source"] == "turn_user_input"
+            && matched["preview"]
+                .as_str()
+                .unwrap()
+                .contains("durable-history-needle")
+    }));
+    let found_workspaces = history
+        .iter()
+        .map(|matched| matched["workspace_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        found_workspaces,
+        [json_id(&first_workspace), json_id(&second_workspace)]
+            .into_iter()
+            .collect()
+    );
+    let found_sessions = history
+        .iter()
+        .map(|matched| matched["session_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        found_sessions,
+        session_ids.iter().map(String::as_str).collect()
+    );
+}
+
 #[allow(dead_code)]
 fn _types(
     _id: WorkspaceId,

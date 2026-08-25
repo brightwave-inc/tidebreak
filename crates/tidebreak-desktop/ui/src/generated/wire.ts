@@ -1777,6 +1777,16 @@ export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffst
 export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, };
 
 /**
+ * One repository-wide conversation-history match.
+ */
+export type CodeWorkspaceHistorySearchMatch = { workspace_id: WorkspaceId, workspace_title: string, session_id: CodeSessionId, turn_id?: CodeTurnId, source: CodeWorkspaceHistorySearchSource, preview: string, created_at: string, };
+
+/**
+ * Stored field that produced a workspace conversation-history match.
+ */
+export type CodeWorkspaceHistorySearchSource = "turn_user_input" | "turn_narrative" | "event";
+
+/**
  * PR + checks digest plus the local git facts the PR card needs.
  */
 export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, 
@@ -1819,7 +1829,7 @@ export type CodeWorkspacePullRequests = { items: Array<CodeWorkspacePullRequestF
 /**
  * Bounded content-search response for `GET /code/workspaces/{id}/search`.
  */
-export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, truncated: boolean, };
+export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, history_matches?: Array<CodeWorkspaceHistorySearchMatch>, truncated: boolean, };
 
 /**
  * One matching line from a workspace content search.
