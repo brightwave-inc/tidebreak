@@ -319,10 +319,12 @@ function bearerEnvironmentFromHeaders(
   if (!isRecord(value)) return { error: "HTTP headers must be a JSON object." };
   const entries = Object.entries(value);
   if (entries.length === 0) return { value: null };
-  if (entries.length !== 1 || entries[0]?.[0].toLowerCase() !== "authorization") {
+  if (
+    entries.length !== 1 ||
+    entries[0]?.[0].toLowerCase() !== "authorization"
+  ) {
     return {
-      error:
-        "Custom HTTP headers are not supported. Add this server manually.",
+      error: "Custom HTTP headers are not supported. Add this server manually.",
     };
   }
   const authorization = entries[0][1];
