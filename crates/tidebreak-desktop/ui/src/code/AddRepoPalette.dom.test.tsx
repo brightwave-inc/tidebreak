@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import { renderWithRouter } from "@/test/router";
+import { setAttachedRemotely } from "@/host";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
@@ -30,6 +32,7 @@ function app(
         ],
         chooses_destination: false,
       })),
+      listCodeGithubRepositories: vi.fn(async () => ({ repositories: [] })),
       startCodeClone: vi.fn(),
       getCodeRepo: vi.fn(),
       createCodeRepo: vi.fn(),
@@ -349,6 +352,154 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
     );
   });
 
+  it("offers the caller's repositories as suggestions", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: true,
+              remediation:
+                "Clones and pushes use your own GitHub account: work lands as mira-chen.",
+            },
+          ],
+          chooses_destination: true,
+        })),
+        listCodeGithubRepositories: vi.fn(async () => ({
+          repositories: [
+            {
+              full_name: "mira-chen/notes",
+              private: true,
+              description: "scratch",
+            },
+            {
+              full_name: "brightwave-inc/tidebreak",
+              private: true,
+            },
+          ],
+        })),
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    const user = userEvent.setup();
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    await user.click(
+      await screen.findByRole("combobox", { name: "Repository" }),
+    );
+    expect(
+      await screen.findByRole("option", { name: /mira-chen\/notes/ }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: /mira-chen\/notes/ }));
+    expect(
+      screen.getByRole("combobox", { name: "Repository" }),
+    ).toHaveTextContent("mira-chen/notes");
+  });
+
+  it("keeps the picker when the list fails so a name can still be typed", async () => {
+    await renderPalette(
+      app({
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: true,
+              remediation:
+                "Clones and pushes use your own GitHub account: work lands as mira-chen.",
+            },
+          ],
+          chooses_destination: true,
+        })),
+        listCodeGithubRepositories: vi.fn(async () => {
+          throw new Error("502: bad gateway");
+        }),
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    const user = userEvent.setup();
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    expect(await screen.findByTestId("github-list-failed")).toHaveTextContent(
+      /Suggestions did not load/,
+    );
+    const picker = await screen.findByRole("combobox", { name: "Repository" });
+    await user.click(picker);
+    await user.type(
+      screen.getByPlaceholderText("Search or type owner/repo"),
+      "acme/app",
+    );
+    await user.click(screen.getByRole("option", { name: "acme/app" }));
+    expect(picker).toHaveTextContent("acme/app");
+  });
+
+  it("clones from the dropdown with Cmd+Enter", async () => {
+    const startCodeClone = vi.fn(async () => ({
+      id: "job-1",
+      phase: "starting",
+      done: false,
+    }));
+    await renderPalette(
+      app({
+        startCodeClone,
+        getCodeRepoSources: vi.fn(async () => ({
+          sources: [
+            { kind: "local", available: true },
+            { kind: "git_url", available: true },
+            {
+              kind: "github",
+              available: true,
+              remediation:
+                "Clones and pushes use your own GitHub account: work lands as mira-chen.",
+            },
+          ],
+          chooses_destination: true,
+        })),
+        listCodeGithubRepositories: vi.fn(async () => ({
+          repositories: [
+            {
+              full_name: "mira-chen/notes",
+              private: true,
+              description: "scratch",
+            },
+          ],
+        })),
+        getCodeCloneDefaults: vi.fn(async () => {
+          throw new Error("403: forbidden");
+        }),
+      } as never),
+    );
+    const user = userEvent.setup();
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    await user.click(
+      await screen.findByRole("combobox", { name: "Repository" }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: /mira-chen\/notes/ }),
+    );
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    await waitFor(() =>
+      expect(startCodeClone).toHaveBeenCalledWith(
+        expect.objectContaining({ github: "mira-chen/notes" }),
+      ),
+    );
+  });
+
   it("hides GitHub until the caller connects, and points at the gateway", async () => {
     await renderPalette(
       app({
@@ -375,5 +526,28 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
     expect(
       screen.getByText(/connect your GitHub account at the Model Gateway/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("AddRepoPalette when attached to a machine with no destination", () => {
+  afterEach(() => {
+    setAttachedRemotely(false);
+  });
+
+  it("hides Local folder and says the destination is missing", async () => {
+    setAttachedRemotely(true);
+    await renderPalette();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: /Local folder/ }),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    expect(
+      await screen.findByTestId("clone-destination-missing"),
+    ).toHaveTextContent(/no clone destination configured/);
+    expect(screen.getByRole("button", { name: "Clone" })).toBeDisabled();
   });
 });

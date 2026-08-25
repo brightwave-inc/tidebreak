@@ -141,6 +141,11 @@ pub(crate) struct CodeRuntime {
     /// Visible worktree root this embedding names, if any. The stored
     /// `code_worktree_root` setting overrides it; see [`super::worktree_root`].
     pub(crate) worktree_root_default: Option<PathBuf>,
+    /// Where this embedding places clones when no `code_clone_parent_dir`
+    /// is stored. The self-host profile sets `{data_dir}/code/src` so a
+    /// hosted machine never asks a caller to name a path they cannot see
+    /// (decision 70).
+    pub(crate) clone_parent_default: Option<PathBuf>,
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
     pub(crate) browser_tokens: BrowserTokenRegistry,
@@ -279,6 +284,7 @@ impl CodeRuntime {
             blobs: Arc::new(tidebreak_core::FsBlobStore::new(data_dir.join("blobs"))),
             data_dir: data_dir.clone(),
             worktree_root_default,
+            clone_parent_default: None,
             approvals: ApprovalBridge::new(),
             browser_tokens,
             browser_runtime,
@@ -403,6 +409,7 @@ impl CodeRuntime {
             blobs: Arc::new(tidebreak_core::FsBlobStore::new(data_dir.join("blobs"))),
             data_dir,
             worktree_root_default: None,
+            clone_parent_default: None,
             approvals: ApprovalBridge::new(),
             browser_tokens,
             browser_runtime,
@@ -449,6 +456,11 @@ impl CodeRuntime {
         lender: Arc<dyn crate::obo_gateway::GitCredentialLender>,
     ) -> Self {
         self.git_credentials = Some(lender);
+        self
+    }
+
+    pub(crate) fn with_clone_parent_default(mut self, parent: PathBuf) -> Self {
+        self.clone_parent_default = Some(parent);
         self
     }
 

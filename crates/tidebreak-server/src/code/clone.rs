@@ -22,7 +22,8 @@ use super::runtime::CodeRuntime;
 use crate::error::ServerError;
 use crate::obo_gateway::{GitCredential, GitForgeAttribution, GitForgeError, GitForgeIdentity};
 use crate::routes::code::{
-    CodeCloneDefaults, CodeCloneJobSnapshot, CodeRepoSource, CodeRepoSources,
+    CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeRepoSource,
+    CodeRepoSources,
 };
 
 const CLONE_TIMEOUT: Duration = Duration::from_secs(900);
@@ -204,25 +205,73 @@ impl CodeRuntime {
         ];
         Ok(CodeRepoSources {
             sources,
-            chooses_destination: read_clone_parent_dir(&*self.db).await?.is_some(),
+            chooses_destination: self.chooses_clone_destination().await?,
         })
     }
 
-    /// The parent directory a clone lands under: what the caller asked for, or
-    /// the destination the machine already remembers.
+    /// Whether this machine places clones itself: a stored destination, or
+    /// the embedding's default (decision 70).
+    async fn chooses_clone_destination(&self) -> Result<bool, ServerError> {
+        if self.clone_parent_default.is_some() {
+            return Ok(true);
+        }
+        Ok(read_clone_parent_dir(&*self.db).await?.is_some())
+    }
+
+    /// The parent directory a clone lands under: what the caller asked for,
+    /// the destination the machine already remembers, or the embedding's
+    /// default.
     ///
     /// Preferring the caller keeps a desktop working on its own machine
-    /// exactly as before. Falling back to the setting is what lets a caller
-    /// who cannot see the filesystem clone at all.
+    /// exactly as before. Falling back to the setting, then the default, is
+    /// what lets a caller who cannot see the filesystem clone at all.
     async fn clone_parent(&self, requested: Option<&str>) -> Result<PathBuf, ServerError> {
         if let Some(value) = requested.map(str::trim).filter(|value| !value.is_empty()) {
             return Ok(PathBuf::from(value));
         }
-        match read_clone_parent_dir(&*self.db).await? {
-            Some(configured) => Ok(PathBuf::from(configured)),
-            None => Err(ServerError::bad_request_kind(
-                "clone_parent_missing",
-                "this machine has no clone destination configured, so the request must name one",
+        if let Some(configured) = read_clone_parent_dir(&*self.db).await? {
+            return Ok(PathBuf::from(configured));
+        }
+        if let Some(default) = &self.clone_parent_default {
+            ensure_parent_dir(default).await?;
+            return Ok(default.clone());
+        }
+        Err(ServerError::bad_request_kind(
+            "clone_parent_missing",
+            "this machine has no clone destination configured, so the request must name one",
+        ))
+    }
+
+    /// Repositories this caller can clone from GitHub, for the add-repository
+    /// picker (decision 70).
+    ///
+    /// A hosted machine asks the gateway; a machine with no lender answers
+    /// an empty list so the typed `owner/repo` field stays the path. A
+    /// lender error is a failed list, not an empty one: the dialog keeps
+    /// type-in and says the suggestions did not load.
+    pub(crate) async fn list_github_repositories(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<CodeGithubRepositories, ServerError> {
+        let Some(lender) = self.git_credentials() else {
+            return Ok(CodeGithubRepositories {
+                repositories: Vec::new(),
+            });
+        };
+        match lender.list_repositories(owner).await {
+            Ok(repositories) => Ok(CodeGithubRepositories {
+                repositories: repositories
+                    .into_iter()
+                    .map(|repository| crate::routes::code::CodeGithubRepository {
+                        full_name: repository.full_name,
+                        private: repository.private,
+                        description: repository.description,
+                    })
+                    .collect(),
+            }),
+            Err(error) => Err(ServerError::unprocessable_kind(
+                "git_forge_refused",
+                git_forge_refusal_message(&error),
             )),
         }
     }
@@ -577,6 +626,16 @@ pub(crate) async fn git_available() -> bool {
         .await,
         Ok(Ok(status)) if status.success()
     )
+}
+
+async fn ensure_parent_dir(parent: &Path) -> Result<(), ServerError> {
+    if let Err(err) = tokio::fs::create_dir_all(parent).await {
+        return Err(ServerError::bad_request_kind(
+            "clone_parent_unusable",
+            format!("could not create parent_dir {}: {err}", parent.display()),
+        ));
+    }
+    validate_parent_dir(parent).await
 }
 
 async fn validate_parent_dir(parent: &Path) -> Result<(), ServerError> {

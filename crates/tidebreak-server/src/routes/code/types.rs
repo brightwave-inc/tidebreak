@@ -489,9 +489,8 @@ pub struct CodeCloneDefaults {
 /// attached to a machine elsewhere cannot, while the machine's own answer is
 /// identical either way.
 ///
-/// `chooses_destination` says the machine places clones under the destination
-/// its operator configured, so a caller names no path — which is what lets a
-/// shared machine keep its filesystem layout to itself.
+/// `chooses_destination` says the machine places clones itself — a stored
+/// destination, or the self-host default — so a caller names no path.
 ///
 /// Unknown source kinds are ignored by clients rather than rendered, so this
 /// set may grow without a client release (decision 17).
@@ -499,6 +498,22 @@ pub struct CodeCloneDefaults {
 pub struct CodeRepoSources {
     pub sources: Vec<CodeRepoSource>,
     pub chooses_destination: bool,
+}
+
+/// One GitHub repository the add-repository picker can offer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodeGithubRepository {
+    pub full_name: String,
+    pub private: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+}
+
+/// `GET /code/repos/github`: repositories this caller can clone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeGithubRepositories {
+    pub repositories: Vec<CodeGithubRepository>,
 }
 
 /// One way of adding a repository, and whether this machine can serve it.

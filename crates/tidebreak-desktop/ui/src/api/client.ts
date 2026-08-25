@@ -105,6 +105,7 @@ import {
   type CodePrMergeMethod,
   type CodeWorkspaceSnapshot,
   type CodeCloneDefaults,
+  type CodeGithubRepositories,
   type CodeRepoSources,
   type CodeWorktreeRoot,
   type CodeCheckLogsSnapshot,
@@ -148,6 +149,7 @@ import {
 import {
   parseCodeApproval,
   parseCodeCloneDefaults,
+  parseCodeGithubRepositories,
   parseCodeRepoSources,
   parseCodeWorktreeRoot,
   parseCodeCheckLogsSnapshot,
@@ -2063,6 +2065,15 @@ export class ApiClient {
    * on a shared machine the person adding a repository is usually not an
    * administrator, and a dialog that cannot read its own options is no dialog.
    */
+  async listCodeGithubRepositories(): Promise<CodeGithubRepositories> {
+    return requireParsed(
+      parseCodeGithubRepositories(
+        await this.json("/code/repos/github", { headers: this.headers() }),
+      ),
+      "github repositories",
+    );
+  }
+
   async getCodeRepoSources(): Promise<CodeRepoSources> {
     return requireParsed(
       parseCodeRepoSources(

@@ -51,8 +51,8 @@ pub(crate) use harnesses::{
     install_harness, list_harness_models, list_harnesses, refresh_harnesses,
 };
 pub(crate) use repos::{
-    clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_repos, patch_repo,
-    repo_sources, start_clone,
+    clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_github_repositories,
+    list_repos, patch_repo, repo_sources, start_clone,
 };
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
@@ -80,14 +80,14 @@ pub(crate) use types::{
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
     CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
     CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
-    CodeForkBody, CodeForkTranscript, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot,
-    CodePushSnapshot, CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug,
-    CodeSessionDigest, CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead,
-    CodeTerminalSnapshot, CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice,
-    CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
-    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateCodeTriggerBody,
-    HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
+    CodeForkBody, CodeForkTranscript, CodeGithubRepositories, CodeGithubRepository,
+    CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot, CodeRepoSnapshot,
+    CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
+    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
+    CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
+    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
+    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
     UpdateCodeTriggerBody,
 };

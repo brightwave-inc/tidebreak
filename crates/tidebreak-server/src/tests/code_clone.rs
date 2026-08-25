@@ -456,6 +456,114 @@ async fn a_machine_that_remembers_a_destination_clones_without_being_given_one()
     );
 }
 
+#[tokio::test]
+async fn a_self_host_default_places_clones_without_being_given_a_destination() {
+    let (router, token, _runtime, dir) = {
+        let (dir, store) = temp_db_store("code-clone-default.db").await;
+        let db = std::sync::Arc::new(store);
+        let store_trait: std::sync::Arc<dyn Store> = db.clone();
+        let mut registry = AdapterRegistry::new();
+        registry.register(std::sync::Arc::new(ScriptedAdapter::new(
+            plain_text_script(),
+        )));
+        let default = dir.path().join("code").join("src");
+        let runtime = std::sync::Arc::new(
+            CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry)
+                .with_clone_parent_default(default.clone()),
+        );
+        let mut state = AppState::new(
+            Config::desktop(dir.path()),
+            store_trait,
+            std::sync::Arc::new(FixedResolver(std::sync::Arc::new(FakeProvider))),
+            std::sync::Arc::new(MemSecrets::default()),
+            std::sync::Arc::new(ToolRegistry::new()),
+            AgentConfig {
+                model: "fake".into(),
+                ..AgentConfig::default()
+            },
+        );
+        let token = state.token.clone();
+        state.code = Some(runtime.clone());
+        (app(state), token, runtime, dir)
+    };
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let origin = init_bare_origin(dir.path());
+
+    let sources: serde_json::Value = client
+        .get(format!("http://{addr}/code/repos/sources"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        sources["chooses_destination"], true,
+        "a self-host default means the machine places clones itself"
+    );
+
+    let started = client
+        .post(format!("http://{addr}/code/repos/clone"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "url": origin, "name": "ship" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(started.status(), reqwest::StatusCode::ACCEPTED);
+    let job: serde_json::Value = started.json().await.unwrap();
+    let finished = wait_job(&client, addr, &token, job["id"].as_str().unwrap()).await;
+    assert!(finished["error"].is_null(), "{finished:?}");
+    assert!(
+        dir.path().join("code").join("src").join("ship").exists(),
+        "the clone lands under the self-host default"
+    );
+}
+
+#[tokio::test]
+async fn a_hosted_machine_lists_the_callers_github_repositories() {
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, _runtime, _dir) = code_app_with(Some(lender)).await;
+    let addr = serve(router).await;
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/code/repos/github"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["repositories"][0]["full_name"], "mira-chen/notes");
+    assert_eq!(listed["repositories"][0]["private"], true);
+}
+
+#[tokio::test]
+async fn a_hosted_machine_does_not_treat_a_failed_github_list_as_empty() {
+    let lender = Arc::new(FakeLender::refusing(GitForgeError::Unavailable(
+        "the Model Gateway git-repositories request failed".into(),
+    )));
+    let (router, token, _runtime, _dir) = code_app_with(Some(lender)).await;
+    let addr = serve(router).await;
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/code/repos/github"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["kind"], "git_forge_refused");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("git-repositories request failed"),
+        "{body:?}"
+    );
+}
+
 async fn fetch_sources(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
