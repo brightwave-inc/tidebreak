@@ -588,8 +588,10 @@ jobs:
         needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
-    runs-on: macos-latest
-    timeout-minutes: 60
+    # Set PRODUCTION_MACOS_RUNNER to a provisioned ARM64 larger-runner label
+    # when release compile time matters more than the additional runner cost.
+    runs-on: ${{ vars.PRODUCTION_MACOS_RUNNER || 'macos-latest' }}
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -597,6 +599,24 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
+      # Generate this file before checking out the tag. Code from the release
+      # source cannot influence the command that creates the build configuration.
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.TIDEBREAK_VERSION,
+              bundle: { targets: ["app", "dmg"] },
+              // Release bundles register only the real scheme. The dev scheme
+              // stays in tauri.conf.json for debug bundles, but a release
+              // binary refuses tidebreak-dev:// links by design.
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
+            }));
+          '
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
@@ -684,7 +704,11 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/tidebreak-desktop
-          args: --target universal-apple-darwin --no-bundle --ci
+          args: >-
+            --target universal-apple-darwin
+            --config ${{ runner.temp }}/tidebreak-release.json
+            --no-bundle
+            --ci
 
       - name: Save release-specific unsigned Rust build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
@@ -723,6 +747,70 @@ jobs:
         if: ${{ steps.compile.outcome != 'success' }}
         run: exit 1
 
+      - name: Archive prepared macOS inputs
+        env:
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-macos
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+          RELEASE_TARGET: universal-apple-darwin
+        run: |
+          app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop"
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET"
+          for file in "$app_binary" "$broker_sidecar" "$cli_sidecar" "$RELEASE_CONFIG"; do
+            [[ -s "$file" ]] || {
+              echo "Prepared macOS input is missing or empty: $file" >&2
+              exit 1
+            }
+          done
+
+          rm -rf "$PREPARED_ROOT"
+          install -d \
+            "$PREPARED_ROOT/target/$RELEASE_TARGET/release" \
+            "$PREPARED_ROOT/crates/tidebreak-desktop/binaries"
+          install -m 755 \
+            "$app_binary" \
+            "$PREPARED_ROOT/$app_binary"
+          install -m 755 \
+            "$broker_sidecar" \
+            "$PREPARED_ROOT/$broker_sidecar"
+          install -m 755 \
+            "$cli_sidecar" \
+            "$PREPARED_ROOT/$cli_sidecar"
+          install -m 644 \
+            "$RELEASE_CONFIG" \
+            "$PREPARED_ROOT/release-config.json"
+
+          (
+            cd "$PREPARED_ROOT"
+            shasum -a 256 \
+              release-config.json \
+              "$app_binary" \
+              "$broker_sidecar" \
+              "$cli_sidecar" \
+              > SHA256SUMS
+            tar -cf "$GITHUB_WORKSPACE/prepared-macos.tar" \
+              SHA256SUMS \
+              release-config.json \
+              target \
+              crates
+          )
+          (
+            cd "$GITHUB_WORKSPACE"
+            shasum -a 256 prepared-macos.tar > prepared-macos.tar.sha256
+          )
+
+      - name: Upload prepared macOS inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-prepared-macos-universal-${{ github.run_id }}
+          path: |
+            prepared-macos.tar
+            prepared-macos.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
   build_macos:
     name: macOS · universal
     needs: [validate, inspect_hosted, prepare_macos]
@@ -741,14 +829,6 @@ jobs:
       name: desktop-production
       url: https://downloads.brightwave.io/tidebreak/manifest.json
     env:
-      # Reuse compiler outputs across trusted release runs without caching the
-      # signed bundles or any signing material.
-      CARGO_INCREMENTAL: 0
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_ONLY
-      # Rust code that reports or gates on the product version reads this value.
-      # Cargo package versions remain development metadata and are not released.
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
       APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
       APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
@@ -756,95 +836,56 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Build the immutable commit resolved from the validated release tag.
           ref: ${{ needs.validate.outputs.sha }}
 
-      # This restore-only step runs before production secrets are loaded. The
-      # matching cache is written by a credential-free prerequisite job.
-      #
-      # Every key below pins the source identity of what it may restore: the
-      # release commit SHA, or at minimum the Cargo.lock and toolchain hashes.
-      # An arch-only fallback would let this job restore a `main`-warmed
-      # archive that has no relation to the released tag. The path list must
-      # stay byte-identical to the writing jobs' — `actions/cache` folds it
-      # into the cache version, so trimming entries here would silently miss
-      # every key instead of restoring a subset. The next step deletes the
-      # linked products the archive carries, so only compiler intermediates
-      # survive into the signed build.
-      - name: Restore unsigned Rust build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Download prepared macOS inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/aarch64-apple-darwin/release/.cargo-lock
-            target/aarch64-apple-darwin/release/.fingerprint
-            target/aarch64-apple-darwin/release/build
-            target/aarch64-apple-darwin/release/deps
-            target/aarch64-apple-darwin/release/tidebreak-desktop
-            target/aarch64-apple-darwin/release/tidebreak-host-broker
-            target/aarch64-apple-darwin/release/tidebreak
-            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
-            target/x86_64-apple-darwin/release/.cargo-lock
-            target/x86_64-apple-darwin/release/.fingerprint
-            target/x86_64-apple-darwin/release/build
-            target/x86_64-apple-darwin/release/deps
-            target/x86_64-apple-darwin/release/tidebreak-desktop
-            target/x86_64-apple-darwin/release/tidebreak-host-broker
-            target/x86_64-apple-darwin/release/tidebreak
-            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
-          key: macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
-          restore-keys: |
-            macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
-            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          name: tidebreak-prepared-macos-universal-${{ github.run_id }}
+          path: ${{ runner.temp }}/prepared-macos-download
 
-      # A restore extracts the whole archive, including the linked products a
-      # cache-warming run left in it. Those are the bytes that get signed, so
-      # delete them and let the signed build relink them from the tag's
-      # sources; the compiler intermediates that make the reuse worthwhile
-      # stay. The sidecar matters most: Tauri copies it into the signed
-      # product verbatim, with no Cargo fingerprint governing it.
-      - name: Discard restored product binaries
+      - name: Verify prepared macOS inputs
+        env:
+          PREPARED_DOWNLOAD: ${{ runner.temp }}/prepared-macos-download
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-macos
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+          RELEASE_TARGET: universal-apple-darwin
         run: |
-          rm -rf \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin}/release/tidebreak-desktop \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak-host-broker \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/libtidebreak_desktop_lib.* \
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-{aarch64-apple-darwin,x86_64-apple-darwin} \
-            crates/tidebreak-desktop/binaries/tidebreak-{aarch64-apple-darwin,x86_64-apple-darwin} \
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin \
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
+          (
+            cd "$PREPARED_DOWNLOAD"
+            shasum -a 256 --check prepared-macos.tar.sha256
+          )
+          rm -rf "$PREPARED_ROOT"
+          install -d "$PREPARED_ROOT"
+          tar -xf "$PREPARED_DOWNLOAD/prepared-macos.tar" -C "$PREPARED_ROOT"
+          (
+            cd "$PREPARED_ROOT"
+            shasum -a 256 --check SHA256SUMS
+            expected_files="$(printf '%s\n' \
+              "./SHA256SUMS" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET" \
+              "./release-config.json" \
+              "./target/$RELEASE_TARGET/release/tidebreak-desktop" \
+              | LC_ALL=C sort)"
+            actual_files="$(find . -type f -print | LC_ALL=C sort)"
+            [[ "$actual_files" = "$expected_files" ]] || {
+              echo "Prepared macOS archive contains an unexpected file set" >&2
+              printf '%s\n' "$actual_files" >&2
+              exit 1
+            }
+          )
 
-      # sccache, rust-cache, and the UI install run before any Apple or Tauri
-      # material is on disk. pnpm is pinned; lifecycle scripts stay off.
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-
-      - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: macos-release-cargo-registry-v2-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          # Signed apps, DMGs, updater archives, and signatures remain outside
-          # both the Cargo download cache and the restore-only build cache.
-          cache-targets: false
-          # prepare_macos and cache-macos.yml are the writers. This job holds
-          # Apple and Tauri material, so it must not publish the cache.
-          save-if: false
+          app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop"
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET"
+          install -d \
+            "$(dirname "$app_binary")" \
+            "$(dirname "$broker_sidecar")"
+          install -m 755 "$PREPARED_ROOT/$app_binary" "$app_binary"
+          install -m 755 "$PREPARED_ROOT/$broker_sidecar" "$broker_sidecar"
+          install -m 755 "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
+          install -m 644 "$PREPARED_ROOT/release-config.json" "$RELEASE_CONFIG"
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -853,10 +894,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
-      - name: Install UI dependencies
-        working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile --ignore-scripts
+          cache-dependency-path: .github/tauri-cli/pnpm-lock.yaml
+      - name: Install pinned Tauri bundler
+        run: |
+          pnpm --dir .github/tauri-cli install --frozen-lockfile --ignore-scripts
+          echo "$GITHUB_WORKSPACE/.github/tauri-cli/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Validate production signing configuration
         env:
@@ -933,42 +975,32 @@ jobs:
             echo "APPLE_SIGNING_KEYCHAIN=$keychain_path"
           } >> "$GITHUB_ENV"
 
-      - name: Install Rust target
-        run: |
-          rustup show
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-      - name: Write tag-derived Tauri configuration
+      - name: Add the macOS signing identity to the prepared configuration
         env:
-          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+          PREPARED_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-signing.json
         run: |
           node -e '
             const fs = require("node:fs");
-            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
-              version: process.env.TIDEBREAK_VERSION,
-              bundle: {
-                targets: ["app", "dmg"],
-                macOS: { signingIdentity: process.env.APPLE_SIGNING_IDENTITY }
-              },
-              // Release bundles register only the real scheme. The dev scheme
-              // stays in tauri.conf.json for debug bundles, but a release
-              // binary refuses tidebreak-dev:// links by design — if its
-              // Info.plist also claimed the scheme, Launch Services would
-              // route dev pairing links to the installed app, which then
-              // drops them, shadowing whatever debug bundle should answer.
-              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
-            }));
+            const config = JSON.parse(fs.readFileSync(process.env.PREPARED_CONFIG, "utf8"));
+            if (config.version !== process.env.TIDEBREAK_VERSION) {
+              throw new Error("Prepared version " + config.version + " does not match " + process.env.TIDEBREAK_VERSION);
+            }
+            config.bundle.macOS = {
+              ...(config.bundle.macOS ?? {}),
+              signingIdentity: process.env.APPLE_SIGNING_IDENTITY
+            };
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify(config));
           '
 
-      - name: Build, sign, and notarize the Tauri app
-        id: tauri
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
-        with:
-          projectPath: crates/tidebreak-desktop
-          args: >-
-            --target universal-apple-darwin
-            --config ${{ runner.temp }}/tidebreak-release.json
-            --bundles app,dmg
+      - name: Bundle, sign, and notarize the prepared Tauri app
+        working-directory: crates/tidebreak-desktop
+        run: |
+          tauri bundle \
+            --target universal-apple-darwin \
+            --config "$RUNNER_TEMP/tidebreak-signing.json" \
+            --bundles app,dmg \
+            --ci
 
       - name: Notarize and staple the DMG
         env:
@@ -1162,6 +1194,25 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
+      # Generate this file before checking out the tag. Code from the release
+      # source cannot influence the command that creates the build configuration.
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.TIDEBREAK_VERSION,
+              // NSIS supports per-user installs without elevation and needs
+              // no WiX configuration.
+              bundle: { targets: ["nsis"] },
+              // Release bundles register only the real scheme. A release
+              // binary refuses tidebreak-dev:// links by design.
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
+            }));
+          '
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
@@ -1269,7 +1320,11 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/tidebreak-desktop
-          args: --target ${{ matrix.target }} --no-bundle --ci
+          args: >-
+            --target ${{ matrix.target }}
+            --config ${{ runner.temp }}/tidebreak-release.json
+            --no-bundle
+            --ci
 
       - name: Save release-specific unsigned Rust build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
@@ -1295,6 +1350,62 @@ jobs:
       - name: Require a successful unsigned compilation
         if: ${{ steps.compile.outcome != 'success' }}
         run: exit 1
+
+      - name: Archive prepared Windows inputs
+        env:
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop.exe"
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
+          for file in "$app_binary" "$broker_sidecar" "$cli_sidecar" "$RELEASE_CONFIG"; do
+            [[ -s "$file" ]] || {
+              echo "Prepared Windows input is missing or empty: $file" >&2
+              exit 1
+            }
+          done
+
+          rm -rf "$PREPARED_ROOT"
+          mkdir -p \
+            "$PREPARED_ROOT/target/$RELEASE_TARGET/release" \
+            "$PREPARED_ROOT/crates/tidebreak-desktop/binaries"
+          cp -p "$app_binary" "$PREPARED_ROOT/$app_binary"
+          cp -p "$broker_sidecar" "$PREPARED_ROOT/$broker_sidecar"
+          cp -p "$cli_sidecar" "$PREPARED_ROOT/$cli_sidecar"
+          cp "$RELEASE_CONFIG" "$PREPARED_ROOT/release-config.json"
+
+          (
+            cd "$PREPARED_ROOT"
+            sha256sum \
+              release-config.json \
+              "$app_binary" \
+              "$broker_sidecar" \
+              "$cli_sidecar" \
+              > SHA256SUMS
+            tar -cf "$GITHUB_WORKSPACE/prepared-windows.tar" \
+              SHA256SUMS \
+              release-config.json \
+              target \
+              crates
+          )
+          (
+            cd "$GITHUB_WORKSPACE"
+            sha256sum prepared-windows.tar > prepared-windows.tar.sha256
+          )
+
+      - name: Upload prepared Windows inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-prepared-windows-${{ matrix.arch }}-${{ github.run_id }}
+          path: |
+            prepared-windows.tar
+            prepared-windows.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
 
   build_windows:
     name: Windows · ${{ matrix.arch }}
@@ -1327,83 +1438,58 @@ jobs:
             target: aarch64-pc-windows-msvc
             runner: windows-11-arm
     env:
-      # Reuse compiler outputs across trusted release runs without caching the
-      # bundled installers or the updater signing material.
-      CARGO_INCREMENTAL: 0
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_ONLY
-      # Rust code that reports or gates on the product version reads this value.
-      # Cargo package versions remain development metadata and are not released.
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Build the immutable commit resolved from the validated release tag.
           ref: ${{ needs.validate.outputs.sha }}
 
-      # This restore-only step runs before the updater-signing secret is
-      # loaded. The matching cache is written by a credential-free prerequisite
-      # job for this exact release commit and version. The path list must stay
-      # byte-identical to the writing job's — `actions/cache` folds it into the
-      # cache version. The next step deletes the linked products the archive
-      # carries, so only compiler intermediates survive into the packaged build.
-      - name: Restore unsigned Rust build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Download prepared Windows inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/${{ matrix.target }}/release/.cargo-lock
-            target/${{ matrix.target }}/release/.fingerprint
-            target/${{ matrix.target }}/release/build
-            target/${{ matrix.target }}/release/deps
-            target/${{ matrix.target }}/release/tidebreak-desktop.exe
-            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
-            target/${{ matrix.target }}/release/tidebreak.exe
-            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
-            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
-          key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          name: tidebreak-prepared-windows-${{ matrix.arch }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/prepared-windows-download
 
-      # A restore extracts the whole archive, including the linked products a
-      # prerequisite run left in it. Delete them and let this build relink them
-      # from the tag's own sources; the compiler intermediates that make the
-      # reuse worthwhile stay. The sidecar matters most: Tauri copies it into
-      # the installer verbatim, with no Cargo fingerprint governing it.
-      - name: Discard restored product binaries
+      - name: Verify prepared Windows inputs
         env:
+          PREPARED_DOWNLOAD: ${{ runner.temp }}/prepared-windows-download
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
-          rm -rf \
-            "target/$RELEASE_TARGET/release/tidebreak-desktop.exe" \
-            "target/$RELEASE_TARGET/release/tidebreak-host-broker.exe" \
-            "target/$RELEASE_TARGET/release/tidebreak.exe" \
-            "target/$RELEASE_TARGET/release/"tidebreak_desktop_lib.* \
-            "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe" \
-            "crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
+          (
+            cd "$PREPARED_DOWNLOAD"
+            sha256sum --check --strict prepared-windows.tar.sha256
+          )
+          rm -rf "$PREPARED_ROOT"
+          mkdir -p "$PREPARED_ROOT"
+          tar -xf "$PREPARED_DOWNLOAD/prepared-windows.tar" -C "$PREPARED_ROOT"
+          (
+            cd "$PREPARED_ROOT"
+            sha256sum --check --strict SHA256SUMS
+            expected_files="$(printf '%s\n' \
+              "./SHA256SUMS" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe" \
+              "./release-config.json" \
+              "./target/$RELEASE_TARGET/release/tidebreak-desktop.exe" \
+              | LC_ALL=C sort)"
+            actual_files="$(find . -type f -print | LC_ALL=C sort)"
+            [[ "$actual_files" = "$expected_files" ]] || {
+              echo "Prepared Windows archive contains an unexpected file set" >&2
+              printf '%s\n' "$actual_files" >&2
+              exit 1
+            }
+          )
 
-      # sccache, rust-cache, and the UI install run before the updater key is
-      # loaded. pnpm is pinned; lifecycle scripts stay off.
-      - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.16.0
-
-      - name: Cache Cargo downloads
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
-          cache-bin: false
-          # Installers, updater signatures, and signing material remain outside
-          # both the Cargo download cache and the restore-only build cache. The
-          # credential-free prerequisite is the single registry-cache writer.
-          cache-targets: false
-          save-if: false
+          app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop.exe"
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
+          mkdir -p "$(dirname "$app_binary")" "$(dirname "$broker_sidecar")"
+          cp -p "$PREPARED_ROOT/$app_binary" "$app_binary"
+          cp -p "$PREPARED_ROOT/$broker_sidecar" "$broker_sidecar"
+          cp -p "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
+          cp "$PREPARED_ROOT/release-config.json" "$RELEASE_CONFIG"
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -1412,10 +1498,23 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
-      - name: Install UI dependencies
-        working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile --ignore-scripts
+          cache-dependency-path: .github/tauri-cli/pnpm-lock.yaml
+      - name: Install pinned Tauri bundler
+        run: |
+          pnpm --dir .github/tauri-cli install --frozen-lockfile --ignore-scripts
+          echo "$GITHUB_WORKSPACE/.github/tauri-cli/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Validate the prepared Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const config = JSON.parse(fs.readFileSync(process.env.RELEASE_CONFIG, "utf8"));
+            if (config.version !== process.env.TIDEBREAK_VERSION) {
+              throw new Error("Prepared version " + config.version + " does not match " + process.env.TIDEBREAK_VERSION);
+            }
+          '
 
       # Authenticode code signing is deliberately absent: v1 Windows releases
       # ship unsigned installers. The Tauri updater key still signs the
@@ -1437,76 +1536,15 @@ jobs:
             exit 1
           fi
 
-      - name: Install Rust target
+      - name: Bundle the prepared Tauri app without Windows code signing
+        working-directory: crates/tidebreak-desktop
         run: |
-          rustup show
-          rustup target add "${{ matrix.target }}"
-
-      # whisper.cpp refuses MSVC on ARM. The cmake crate honors CMAKE_GENERATOR
-      # from the environment but not CMAKE_GENERATOR_TOOLSET, so Ninja plus
-      # clang-cl is the reliable way to keep aarch64-pc-windows-msvc while
-      # compiling the native C/C++ with Clang.
-      - name: Use clang-cl for Windows ARM native code
-        if: ${{ matrix.arch == 'aarch64' }}
-        run: |
-          clang_cl=""
-          for candidate in \
-            "$(command -v clang-cl || true)" \
-            "/c/Program Files/LLVM/bin/clang-cl.exe" \
-            "/c/Program Files/LLVM/bin/clang-cl"; do
-            if [[ -n "$candidate" && -x "$candidate" ]]; then
-              clang_cl="$candidate"
-              break
-            fi
-          done
-          if [[ -z "$clang_cl" ]]; then
-            echo "clang-cl is required to compile whisper.cpp on Windows ARM" >&2
-            exit 1
-          fi
-          if ! command -v ninja >/dev/null; then
-            echo "ninja is required to compile whisper.cpp on Windows ARM" >&2
-            exit 1
-          fi
-          clang_cl="$(cygpath -m "$clang_cl")"
-          {
-            echo "CC=$clang_cl"
-            echo "CXX=$clang_cl"
-            echo "CXXFLAGS=/EHsc"
-            echo "CMAKE_GENERATOR=Ninja"
-            echo "CMAKE_C_COMPILER=$clang_cl"
-            echo "CMAKE_CXX_COMPILER=$clang_cl"
-            echo "CMAKE_ASM_COMPILER=$clang_cl"
-          } >> "$GITHUB_ENV"
-          echo "Using $clang_cl with Ninja for Windows ARM native code"
-
-      - name: Write tag-derived Tauri configuration
-        env:
-          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
-              version: process.env.TIDEBREAK_VERSION,
-              // One installer format for v1: NSIS supports per-user installs
-              // without elevation and needs no WiX configuration.
-              bundle: { targets: ["nsis"] },
-              // Release bundles register only the real scheme, mirroring the
-              // macOS release configuration: a release binary refuses
-              // tidebreak-dev:// links by design, so registering the dev scheme
-              // would shadow whatever debug build should answer it.
-              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
-            }));
-          '
-
-      - name: Build the Tauri app without Windows code signing
-        id: tauri
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
-        with:
-          projectPath: crates/tidebreak-desktop
-          args: >-
-            --target ${{ matrix.target }}
-            --config ${{ runner.temp }}/tidebreak-release.json
-            --bundles nsis
+          tauri bundle \
+            --target "${{ matrix.target }}" \
+            --config "$RUNNER_TEMP/tidebreak-release.json" \
+            --bundles nsis \
+            --no-sign \
+            --ci
 
       - name: Verify and collect unsigned artifacts
         env:
