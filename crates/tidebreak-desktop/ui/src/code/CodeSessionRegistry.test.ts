@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SequencedCodeEventFrame } from "../api/types";
 import {
   acquireCodeSession,
+  MAX_RETAINED_CODE_SESSIONS,
   peekCodeSession,
   releaseCodeSession,
   resetCodeSessionRegistry,
@@ -56,7 +57,7 @@ describe("CodeSessionRegistry", () => {
     expect(store.getState().hydrated).toBe(true);
   });
 
-  it("shares one store across two acquires and closes the socket on last release", () => {
+  it("shares one store and parks it after the last release", () => {
     const sockets: FakeSocket[] = [];
     const openSocket = (
       after: number,
@@ -87,7 +88,103 @@ describe("CodeSessionRegistry", () => {
 
     releaseCodeSession("s1");
     expect(sockets[0]?.closed).toBe(true);
-    expect(peekCodeSession("s1")).toBeUndefined();
+    expect(peekCodeSession("s1")).toMatchObject({
+      controller: null,
+      refCount: 0,
+    });
+    expect(first.getState().connectionState).toBe("reconnecting");
+  });
+
+  it("reopens a parked store from its last sequence without hydrating again", async () => {
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const hydrateTurns = vi.fn(async () => [
+      {
+        id: "t1",
+        session_id: "s1",
+        ordinal: 1,
+        status: "completed" as const,
+        user_input: "list the files",
+        attachments: [],
+        started_at: "2026-08-15T12:00:00.000Z",
+        ended_at: "2026-08-15T12:00:02.500Z",
+      },
+    ]);
+    const first = acquireCodeSession("s1", openSocket, undefined, hydrateTurns);
+    await Promise.resolve();
+    await Promise.resolve();
+    first
+      .getState()
+      .applyEvent(
+        { seq: 7, event: { type: "turn_started", turn_id: "t2" } },
+        { nextId: () => "id", now: () => "2026-08-15T12:00:03.000Z" },
+      );
+
+    releaseCodeSession("s1");
+    const reopened = acquireCodeSession(
+      "s1",
+      openSocket,
+      undefined,
+      hydrateTurns,
+    );
+
+    expect(reopened).toBe(first);
+    expect(reopened.getState().items).toContainEqual({
+      kind: "user",
+      id: userItemId("t1"),
+      turnId: "t1",
+      text: "list the files",
+      createdAt: "2026-08-15T12:00:00.000Z",
+      attachments: [],
+    });
+    expect(hydrateTurns).toHaveBeenCalledTimes(1);
+    expect(sockets.map((socket) => socket.after)).toEqual([0, 7]);
+  });
+
+  it("retries initial turn hydration when the first open could not read it", async () => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => new FakeSocket(after, onFrame) as unknown as WebSocket;
+    const hydrateTurns = vi
+      .fn<() => Promise<[]>>()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([]);
+
+    acquireCodeSession("s1", openSocket, undefined, hydrateTurns);
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseCodeSession("s1");
+
+    acquireCodeSession("s1", openSocket, undefined, hydrateTurns);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts the least recently parked store when the cache is full", () => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => new FakeSocket(after, onFrame) as unknown as WebSocket;
+
+    for (let index = 0; index <= MAX_RETAINED_CODE_SESSIONS; index += 1) {
+      const sessionId = `s${index}`;
+      acquireCodeSession(sessionId, openSocket);
+      releaseCodeSession(sessionId);
+    }
+
+    expect(peekCodeSession("s0")).toBeUndefined();
+    expect(peekCodeSession("s1")?.refCount).toBe(0);
+    expect(peekCodeSession(`s${MAX_RETAINED_CODE_SESSIONS}`)?.refCount).toBe(0);
   });
 
   it("reopen hydrates user prompts before the journal replays from after=0", async () => {

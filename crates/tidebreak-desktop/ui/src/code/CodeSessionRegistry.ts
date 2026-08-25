@@ -15,9 +15,9 @@ import {
  * Per-session stores and the sockets that feed them.
  *
  * Chat pins one session at a time. Code mode keeps several open: two views of
- * the same session must share one store and one socket, and unmounting the
- * last view must close that socket. The map is ref-counted so that contract
- * is mechanical rather than something each page has to remember.
+ * the same session must share one store and one socket. When the last view
+ * unmounts, the registry closes the socket but retains a few recent stores so
+ * returning to a workspace can paint its transcript before reconnecting.
  */
 
 export type CodeSessionOpenSocket = (
@@ -27,11 +27,16 @@ export type CodeSessionOpenSocket = (
 
 export type CodeSessionEntry = {
   store: ReturnType<typeof createCodeSessionStore>;
-  controller: CodeSessionController;
+  controller: CodeSessionController | null;
   refCount: number;
+  turnsHydrated: boolean;
 };
 
 const registry = new Map<string, CodeSessionEntry>();
+const retainedSessionIds = new Set<string>();
+
+/** Bound transcript memory while keeping normal workspace switching instant. */
+export const MAX_RETAINED_CODE_SESSIONS = 4;
 
 const defaultDeps: CodeSessionDeps = {
   nextId: () => {
@@ -43,18 +48,14 @@ const defaultDeps: CodeSessionDeps = {
 
 let nextItem = 0;
 
-export function acquireCodeSession(
-  sessionId: string,
+function createController(
+  store: ReturnType<typeof createCodeSessionStore>,
   openSocket: CodeSessionOpenSocket,
-  deps: CodeSessionDeps = defaultDeps,
-  hydrateTurns?: () => Promise<CodeTurnSnapshot[]>,
-): ReturnType<typeof createCodeSessionStore> {
-  const existing = registry.get(sessionId);
-  if (existing) {
-    existing.refCount += 1;
-    return existing.store;
-  }
-  const store = createCodeSessionStore();
+  deps: CodeSessionDeps,
+  hydrateTurns: (() => Promise<CodeTurnSnapshot[]>) | undefined,
+  hydrateBeforeConnect: boolean,
+  onTurnsHydrated: () => void,
+): CodeSessionController {
   const fetchedPrompts = new Set<string>();
   const fillPrompt = (turnId: string) => {
     if (!hydrateTurns || fetchedPrompts.has(turnId)) return;
@@ -75,7 +76,7 @@ export function acquireCodeSession(
         // The prompt lands on the next open. The turn itself still streams.
       });
   };
-  const controller = new CodeSessionController({
+  return new CodeSessionController({
     openSocket,
     getAfter: () => store.getState().lastSeq,
     onEvents: (frames, initialViewSettled) => {
@@ -92,13 +93,72 @@ export function acquireCodeSession(
     onConnectionState: (connectionState) => {
       store.getState().setConnectionState(connectionState);
     },
-    hydrateTurns,
+    hydrateTurns: hydrateBeforeConnect ? hydrateTurns : undefined,
     onHydrate: (turns) => {
       store.getState().update((session) => hydrateCodeTurns(session, turns));
+      onTurnsHydrated();
     },
   });
-  registry.set(sessionId, { store, controller, refCount: 1 });
-  controller.start();
+}
+
+function retainCodeSession(sessionId: string): void {
+  retainedSessionIds.delete(sessionId);
+  retainedSessionIds.add(sessionId);
+  while (retainedSessionIds.size > MAX_RETAINED_CODE_SESSIONS) {
+    const oldest = retainedSessionIds.values().next().value;
+    if (oldest === undefined) return;
+    retainedSessionIds.delete(oldest);
+    registry.get(oldest)?.controller?.dispose();
+    registry.delete(oldest);
+  }
+}
+
+export function acquireCodeSession(
+  sessionId: string,
+  openSocket: CodeSessionOpenSocket,
+  deps: CodeSessionDeps = defaultDeps,
+  hydrateTurns?: () => Promise<CodeTurnSnapshot[]>,
+): ReturnType<typeof createCodeSessionStore> {
+  const existing = registry.get(sessionId);
+  if (existing) {
+    if (existing.refCount === 0) {
+      retainedSessionIds.delete(sessionId);
+      existing.refCount = 1;
+      existing.controller = createController(
+        existing.store,
+        openSocket,
+        deps,
+        hydrateTurns,
+        !existing.turnsHydrated,
+        () => {
+          existing.turnsHydrated = true;
+        },
+      );
+      existing.controller.start();
+    } else {
+      existing.refCount += 1;
+    }
+    return existing.store;
+  }
+  const store = createCodeSessionStore();
+  const entry: CodeSessionEntry = {
+    store,
+    controller: null,
+    refCount: 1,
+    turnsHydrated: hydrateTurns === undefined,
+  };
+  registry.set(sessionId, entry);
+  entry.controller = createController(
+    store,
+    openSocket,
+    deps,
+    hydrateTurns,
+    !entry.turnsHydrated,
+    () => {
+      entry.turnsHydrated = true;
+    },
+  );
+  entry.controller.start();
   return store;
 }
 
@@ -117,11 +177,13 @@ export function acquireCodeSessionFromClient(
 
 export function releaseCodeSession(sessionId: string): void {
   const existing = registry.get(sessionId);
-  if (!existing) return;
+  if (!existing || existing.refCount === 0) return;
   existing.refCount -= 1;
   if (existing.refCount > 0) return;
-  existing.controller.dispose();
-  registry.delete(sessionId);
+  existing.controller?.dispose();
+  existing.controller = null;
+  existing.store.getState().setConnectionState("reconnecting");
+  retainCodeSession(sessionId);
 }
 
 export function peekCodeSession(
@@ -133,9 +195,10 @@ export function peekCodeSession(
 /** Test-only: drop every live entry without waiting for unmounts. */
 export function resetCodeSessionRegistry(): void {
   for (const entry of registry.values()) {
-    entry.controller.dispose();
+    entry.controller?.dispose();
   }
   registry.clear();
+  retainedSessionIds.clear();
   nextItem = 0;
 }
 
