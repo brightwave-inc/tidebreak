@@ -449,8 +449,11 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
       key: "Enter",
       metaKey: true,
     });
-    await waitFor(() => expect(startCodeClone).toHaveBeenCalled());
-    expect(startCodeClone.mock.calls[0]?.[0].github).toBe("mira-chen/notes");
+    await waitFor(() =>
+      expect(startCodeClone).toHaveBeenCalledWith(
+        expect.objectContaining({ github: "mira-chen/notes" }),
+      ),
+    );
   });
 
   it("hides GitHub until the caller connects, and points at the gateway", async () => {
