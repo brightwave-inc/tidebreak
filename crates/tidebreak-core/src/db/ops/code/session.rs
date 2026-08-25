@@ -398,6 +398,36 @@ pub async fn set_session_subagents(
     Ok(result.rows_affected == 1)
 }
 
+/// Record the engine-native resume ref once a running turn proves it is safe.
+///
+/// The event sink learns this value while the turn is still running. A
+/// targeted, epoch-fenced write makes it survive a hard restart without
+/// letting an outgoing worker restore a stale ref after a reap or relaunch.
+pub async fn set_session_harness_resume_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    resume_ref: &str,
+) -> Result<bool> {
+    let result = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::HarnessResumeRef,
+            sea_orm::sea_query::Expr::value(Some(resume_ref.to_owned())),
+        )
+        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session::Column::SpawnEpoch.eq(spawn_epoch))
+        .filter(
+            entities::code_session::Column::Lifecycle
+                .eq(CodeSessionLifecycle::Running.as_str().to_owned()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<CodeSession> {
     let harness_kind = HarnessKind::from_str(&row.harness_kind).ok_or_else(|| {
         AgentError::Store(format!(
