@@ -235,15 +235,200 @@ pub(crate) fn fact_from_summary(
     })
 }
 
-/// Open head branches → pull request numbers, for stack derivation
-/// (decision 62). A pull request is stacked on another when its base branch
-/// is that pull request's head branch in the same repository; only open
-/// parents count, since a merged parent's branch is history, not a base.
+/// Case-insensitive repository identity used while resolving stack edges.
+///
+/// GitHub repository owner and name tokens are case-insensitive. Branch names
+/// remain case-sensitive and live on [`StackParentEdge`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct StackRepositoryIdentity {
+    pub(crate) host: String,
+    pub(crate) owner: String,
+    pub(crate) name: String,
+}
+
+impl StackRepositoryIdentity {
+    pub(crate) fn new(host: &str, owner: &str, name: &str) -> Option<Self> {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        let owner = owner.trim().to_ascii_lowercase();
+        let name = name.trim().to_ascii_lowercase();
+        let name = name.strip_suffix(".git").unwrap_or(&name).to_owned();
+        if host.is_empty() || owner.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some(Self { host, owner, name })
+    }
+}
+
+/// Immutable pull-request identity after a stack edge resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct StackPullRequestIdentity {
+    pub(crate) base_repository: StackRepositoryIdentity,
+    pub(crate) number: u64,
+}
+
+/// The mutable branch edge that may resolve to an immutable pull request.
+///
+/// The base repository scopes the pull-request number. The head repository
+/// distinguishes same-named branches in forks of that base repository.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct StackParentEdge {
+    pub(crate) base_repository: StackRepositoryIdentity,
+    pub(crate) head_repository: Option<StackRepositoryIdentity>,
+    pub(crate) head_branch: String,
+}
+
+impl StackParentEdge {
+    pub(crate) fn new(
+        base_repository: StackRepositoryIdentity,
+        head_repository: Option<StackRepositoryIdentity>,
+        head_branch: &str,
+    ) -> Option<Self> {
+        if head_branch.is_empty() {
+            return None;
+        }
+        Some(Self {
+            base_repository,
+            head_repository,
+            head_branch: head_branch.to_owned(),
+        })
+    }
+}
+
+/// One possible open stack parent from a host observation or durable fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StackParentCandidate {
+    pub(crate) pull_request: StackPullRequestIdentity,
+    pub(crate) open: bool,
+    pub(crate) head_repository: Option<StackRepositoryIdentity>,
+    pub(crate) head_branch: Option<String>,
+}
+
+/// Why a branch edge could not safely resolve to one pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StackParentUnresolvedReason {
+    MissingParent,
+    IncompleteHostIdentity,
+    Ambiguous {
+        candidates: Vec<StackPullRequestIdentity>,
+    },
+}
+
+/// A stack edge resolves to one immutable pull request or stays explicit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StackParentResolution {
+    Resolved(StackPullRequestIdentity),
+    Unresolved {
+        edge: StackParentEdge,
+        reason: StackParentUnresolvedReason,
+    },
+}
+
+/// Open pull-request heads indexed by full fork-qualified branch identity.
+#[derive(Debug, Default)]
+pub(crate) struct StackParentIndex {
+    exact: HashMap<StackParentEdge, Vec<StackPullRequestIdentity>>,
+    incomplete_branches: HashSet<(StackRepositoryIdentity, String)>,
+    incomplete_repositories: HashSet<StackRepositoryIdentity>,
+}
+
+impl StackParentIndex {
+    pub(crate) fn new(candidates: impl IntoIterator<Item = StackParentCandidate>) -> Self {
+        let mut index = Self::default();
+        for candidate in candidates {
+            if !candidate.open {
+                continue;
+            }
+            match (candidate.head_repository, candidate.head_branch) {
+                (Some(head_repository), Some(head_branch)) if !head_branch.is_empty() => {
+                    let edge = StackParentEdge {
+                        base_repository: candidate.pull_request.base_repository.clone(),
+                        head_repository: Some(head_repository),
+                        head_branch,
+                    };
+                    index
+                        .exact
+                        .entry(edge)
+                        .or_default()
+                        .push(candidate.pull_request);
+                }
+                (None, Some(head_branch)) if !head_branch.is_empty() => {
+                    index
+                        .incomplete_branches
+                        .insert((candidate.pull_request.base_repository, head_branch));
+                }
+                _ => {
+                    index
+                        .incomplete_repositories
+                        .insert(candidate.pull_request.base_repository);
+                }
+            }
+        }
+        for candidates in index.exact.values_mut() {
+            candidates.sort();
+            candidates.dedup();
+        }
+        index
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        edge: &StackParentEdge,
+        child: Option<&StackPullRequestIdentity>,
+    ) -> StackParentResolution {
+        if edge.head_repository.is_none() {
+            return StackParentResolution::Unresolved {
+                edge: edge.clone(),
+                reason: StackParentUnresolvedReason::IncompleteHostIdentity,
+            };
+        }
+        let mut candidates = self.exact.get(edge).cloned().unwrap_or_default();
+        if let Some(child) = child {
+            candidates.retain(|candidate| candidate != child);
+        }
+        let incomplete = self.incomplete_repositories.contains(&edge.base_repository)
+            || self
+                .incomplete_branches
+                .contains(&(edge.base_repository.clone(), edge.head_branch.clone()));
+        let reason = if incomplete {
+            StackParentUnresolvedReason::IncompleteHostIdentity
+        } else if candidates.is_empty() {
+            StackParentUnresolvedReason::MissingParent
+        } else if candidates.len() == 1 {
+            return StackParentResolution::Resolved(
+                candidates
+                    .pop()
+                    .expect("a one-candidate stack edge has a parent"),
+            );
+        } else {
+            StackParentUnresolvedReason::Ambiguous { candidates }
+        };
+        StackParentResolution::Unresolved {
+            edge: edge.clone(),
+            reason,
+        }
+    }
+}
+
+/// Compatibility view for durable-only watch and trigger lookups.
+///
+/// Durable facts do not carry the head repository, so they cannot form a
+/// fork-qualified [`StackParentEdge`]. Keep the established unique-branch
+/// lookup for those callers, but refuse duplicate branch candidates instead
+/// of letting iteration order choose one.
 pub(crate) fn stack_parents_by_head(facts: &[CodePullRequestFact]) -> HashMap<String, u64> {
-    facts
+    let mut candidates: HashMap<String, Option<u64>> = HashMap::new();
+    for fact in facts
         .iter()
         .filter(|fact| fact.state == CodePullRequestState::Open && !fact.head_branch.is_empty())
-        .map(|fact| (fact.head_branch.clone(), fact.number))
+    {
+        candidates
+            .entry(fact.head_branch.clone())
+            .and_modify(|number| *number = None)
+            .or_insert(Some(fact.number));
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(branch, number)| number.map(|number| (branch, number)))
         .collect()
 }
 
@@ -251,6 +436,40 @@ pub(crate) fn stack_parents_by_head(facts: &[CodePullRequestFact]) -> HashMap<St
 mod tests {
     use super::*;
     use tidebreak_core::CodePullRequestId;
+
+    fn repository(owner: &str, name: &str) -> StackRepositoryIdentity {
+        StackRepositoryIdentity::new("github.com", owner, name).unwrap()
+    }
+
+    fn parent(
+        number: u64,
+        base_repository: &StackRepositoryIdentity,
+        head_repository: Option<&StackRepositoryIdentity>,
+        head_branch: Option<&str>,
+    ) -> StackParentCandidate {
+        StackParentCandidate {
+            pull_request: StackPullRequestIdentity {
+                base_repository: base_repository.clone(),
+                number,
+            },
+            open: true,
+            head_repository: head_repository.cloned(),
+            head_branch: head_branch.map(str::to_owned),
+        }
+    }
+
+    fn edge(
+        base_repository: &StackRepositoryIdentity,
+        head_repository: &StackRepositoryIdentity,
+        head_branch: &str,
+    ) -> StackParentEdge {
+        StackParentEdge::new(
+            base_repository.clone(),
+            Some(head_repository.clone()),
+            head_branch,
+        )
+        .unwrap()
+    }
 
     fn fact(number: u64, head: &str, state: CodePullRequestState) -> CodePullRequestFact {
         CodePullRequestFact {
@@ -279,14 +498,143 @@ mod tests {
     }
 
     #[test]
-    fn only_open_heads_parent_a_stack() {
-        let parents = stack_parents_by_head(&[
-            fact(1, "feat/base", CodePullRequestState::Open),
-            fact(2, "feat/merged-away", CodePullRequestState::Merged),
-            fact(3, "", CodePullRequestState::Open),
+    fn same_named_fork_heads_resolve_to_the_requested_fork() {
+        let base = repository("acme", "tools");
+        let alice = repository("alice", "tools");
+        let bob = repository("bob", "tools");
+        let index = StackParentIndex::new([
+            parent(41, &base, Some(&alice), Some("stack/base")),
+            parent(42, &base, Some(&bob), Some("stack/base")),
         ]);
-        assert_eq!(parents.get("feat/base"), Some(&1));
-        assert!(!parents.contains_key("feat/merged-away"));
-        assert!(!parents.contains_key(""));
+
+        assert_eq!(
+            index.resolve(&edge(&base, &bob, "stack/base"), None),
+            StackParentResolution::Resolved(StackPullRequestIdentity {
+                base_repository: base,
+                number: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn same_named_heads_in_different_base_repositories_stay_isolated() {
+        let tools = repository("acme", "tools");
+        let web = repository("acme", "web");
+        let index = StackParentIndex::new([
+            parent(51, &tools, Some(&tools), Some("stack/base")),
+            parent(61, &web, Some(&web), Some("stack/base")),
+        ]);
+
+        assert_eq!(
+            index.resolve(&edge(&web, &web, "stack/base"), None),
+            StackParentResolution::Resolved(StackPullRequestIdentity {
+                base_repository: web,
+                number: 61,
+            })
+        );
+    }
+
+    #[test]
+    fn renamed_and_deleted_parent_branches_stay_unresolved() {
+        let base = repository("acme", "tools");
+        let other_fork = repository("other", "tools");
+        let renamed = StackParentIndex::new([
+            parent(71, &base, Some(&base), Some("stack/renamed")),
+            parent(72, &base, Some(&other_fork), Some("stack/base")),
+        ]);
+        assert_eq!(
+            renamed.resolve(&edge(&base, &base, "stack/base"), None),
+            StackParentResolution::Unresolved {
+                edge: edge(&base, &base, "stack/base"),
+                reason: StackParentUnresolvedReason::MissingParent,
+            }
+        );
+
+        let deleted = StackParentIndex::new([parent(73, &base, None, Some("stack/base"))]);
+        assert_eq!(
+            deleted.resolve(&edge(&base, &base, "stack/base"), None),
+            StackParentResolution::Unresolved {
+                edge: edge(&base, &base, "stack/base"),
+                reason: StackParentUnresolvedReason::IncompleteHostIdentity,
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_parent_candidates_are_explicit_and_deterministic() {
+        let base = repository("acme", "tools");
+        let index = StackParentIndex::new([
+            parent(82, &base, Some(&base), Some("stack/base")),
+            parent(81, &base, Some(&base), Some("stack/base")),
+        ]);
+
+        assert_eq!(
+            index.resolve(&edge(&base, &base, "stack/base"), None),
+            StackParentResolution::Unresolved {
+                edge: edge(&base, &base, "stack/base"),
+                reason: StackParentUnresolvedReason::Ambiguous {
+                    candidates: vec![
+                        StackPullRequestIdentity {
+                            base_repository: base.clone(),
+                            number: 81,
+                        },
+                        StackPullRequestIdentity {
+                            base_repository: base,
+                            number: 82,
+                        },
+                    ],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn an_incomplete_edge_stays_explicitly_unresolved() {
+        let base = repository("acme", "tools");
+        let index = StackParentIndex::new([parent(83, &base, Some(&base), Some("stack/base"))]);
+        let incomplete = StackParentEdge::new(base, None, "stack/base").unwrap();
+
+        assert_eq!(
+            index.resolve(&incomplete, None),
+            StackParentResolution::Unresolved {
+                edge: incomplete,
+                reason: StackParentUnresolvedReason::IncompleteHostIdentity,
+            }
+        );
+    }
+
+    #[test]
+    fn durable_branch_compatibility_drops_ambiguous_heads() {
+        let parents = stack_parents_by_head(&[
+            fact(1, "stack/base", CodePullRequestState::Open),
+            fact(2, "stack/base", CodePullRequestState::Open),
+            fact(3, "stack/unique", CodePullRequestState::Open),
+            fact(4, "stack/closed", CodePullRequestState::Closed),
+        ]);
+
+        assert!(!parents.contains_key("stack/base"));
+        assert_eq!(parents.get("stack/unique"), Some(&3));
+        assert!(!parents.contains_key("stack/closed"));
+    }
+
+    #[test]
+    fn closed_heads_and_self_edges_do_not_parent_a_stack() {
+        let base = repository("acme", "tools");
+        let mut closed = parent(91, &base, Some(&base), Some("stack/base"));
+        closed.open = false;
+        let child = StackPullRequestIdentity {
+            base_repository: base.clone(),
+            number: 92,
+        };
+        let index =
+            StackParentIndex::new([closed, parent(92, &base, Some(&base), Some("stack/base"))]);
+
+        assert_eq!(
+            index.resolve(&edge(&base, &base, "stack/base"), Some(&child)),
+            StackParentResolution::Unresolved {
+                edge: edge(&base, &base, "stack/base"),
+                reason: StackParentUnresolvedReason::MissingParent,
+            }
+        );
     }
 }

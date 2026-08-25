@@ -22,7 +22,96 @@ use tidebreak_core::{
 };
 use tidebreak_harness::AdapterRegistry;
 
-const LIST_JSON: &str = r#"[{"number":412,"url":"https://github.com/acme/tools/pull/412","state":"OPEN","title":"Tracked work","isDraft":false,"author":{"login":"octocat"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","autoMergeRequest":null,"headRefName":"tidebreak/tracked","headRefOid":"aaa111","baseRefName":"main","updatedAt":"2026-08-22T12:00:00Z","createdAt":"2026-08-22T10:00:00Z","mergedAt":null,"closedAt":null,"labels":[]},{"number":500,"url":"https://github.com/acme/tools/pull/500","state":"OPEN","title":"Somebody else","isDraft":false,"author":{"login":"stranger"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","autoMergeRequest":null,"headRefName":"tidebreak/fuzzy","headRefOid":"bbb222","baseRefName":"main","updatedAt":"2026-08-22T12:00:00Z","createdAt":"2026-08-22T11:00:00Z","mergedAt":null,"closedAt":null,"labels":[]},{"number":413,"url":"https://github.com/acme/tools/pull/413","state":"OPEN","title":"Stacked child","isDraft":false,"author":{"login":"octocat"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"BEHIND","autoMergeRequest":null,"headRefName":"tidebreak/tracked-child","headRefOid":"ccc333","baseRefName":"tidebreak/tracked","updatedAt":"2026-08-22T12:30:00Z","createdAt":"2026-08-22T12:00:00Z","mergedAt":null,"closedAt":null,"labels":[]}]"#;
+const LIST_JSON: &str = r#"[
+  {
+    "number": 412,
+    "url": "https://github.com/acme/tools/pull/412",
+    "state": "OPEN",
+    "title": "Tracked work",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/tracked",
+    "headRefOid": "aaa111",
+    "baseRefName": "main",
+    "updatedAt": "2026-08-22T12:00:00Z",
+    "createdAt": "2026-08-22T10:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 414,
+    "url": "https://github.com/acme/tools/pull/414",
+    "state": "OPEN",
+    "title": "Same branch from another fork",
+    "isDraft": false,
+    "author": {"login": "other"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "other/tools"},
+    "headRepositoryOwner": {"login": "other"},
+    "headRefName": "tidebreak/tracked",
+    "headRefOid": "ddd444",
+    "baseRefName": "main",
+    "updatedAt": "2026-08-22T12:15:00Z",
+    "createdAt": "2026-08-22T11:30:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 500,
+    "url": "https://github.com/acme/tools/pull/500",
+    "state": "OPEN",
+    "title": "Somebody else",
+    "isDraft": false,
+    "author": {"login": "stranger"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/fuzzy",
+    "headRefOid": "bbb222",
+    "baseRefName": "main",
+    "updatedAt": "2026-08-22T12:00:00Z",
+    "createdAt": "2026-08-22T11:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 413,
+    "url": "https://github.com/acme/tools/pull/413",
+    "state": "OPEN",
+    "title": "Stacked child",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "BEHIND",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/tracked-child",
+    "headRefOid": "ccc333",
+    "baseRefName": "tidebreak/tracked",
+    "updatedAt": "2026-08-22T12:30:00Z",
+    "createdAt": "2026-08-22T12:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  }
+]"#;
 
 fn write_executable(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -208,7 +297,7 @@ async fn the_sweep_persists_facts_and_mints_exact_attribution_only() {
 
     crate::code::reconcile::sweep_reconcile(&runtime).await;
 
-    // Both listed pull requests were read, but only the tracked one — the
+    // All listed pull requests were read, but only the tracked one — the
     // exact number tier — persisted and minted.
     let fact = get_pull_request_fact(&db, &owner, "github.com", "acme", "tools", 412)
         .await
@@ -305,10 +394,9 @@ async fn a_delivery_read_serves_durable_links_with_the_relation() {
     assert!(link.exact);
     assert_eq!(link.relation, Some(CodePullRequestRelation::Contributed));
 
-    // Stack annotation rides the durable fact set: the child's base branch is
-    // the tracked pull request's head, so it points at its parent even though
-    // the child itself holds no fact row; the parent, based on main, points
-    // at nothing.
+    // Stack annotation uses the host's fork-qualified head identity. PR 414
+    // has the same branch from another fork, so the child still selects 412;
+    // the parent, based on the default branch, points at nothing.
     let child = page
         .items
         .iter()
