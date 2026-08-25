@@ -274,7 +274,7 @@ impl LiveSink {
             } => {
                 let mut subagents = self.subagents.lock().expect("code sink subagents");
                 match subagents.iter_mut().find(|entry| entry.call_id == *call_id) {
-                    Some(entry) => {
+                    Some(entry) if entry.status == CodeSubagentStatus::Running => {
                         entry.status = match outcome {
                             ToolOutcome::Succeeded => CodeSubagentStatus::Done,
                             ToolOutcome::Failed | ToolOutcome::Denied => CodeSubagentStatus::Failed,
@@ -291,7 +291,7 @@ impl LiveSink {
                         }
                         Some(subagents.clone())
                     }
-                    None => None,
+                    Some(_) | None => None,
                 }
             }
             CodeEvent::TurnCompleted { .. } => {
@@ -2356,6 +2356,34 @@ mod tests {
             })
             .await;
             sink.emit(boundary).await;
+            let session = get_session(&store, &OwnerId::local(), session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                session
+                    .subagents
+                    .iter()
+                    .find(|entry| entry.call_id == call_id)
+                    .map(|entry| entry.status),
+                Some(expected)
+            );
+
+            // Codex can publish a child result after the parent boundary.
+            // The parent already settled the span, so that late result must
+            // not revise the recorded outcome.
+            sink.emit(HarnessEvent::ToolCompleted {
+                call_id: call_id.into(),
+                outcome: if expected == CodeSubagentStatus::Done {
+                    ToolOutcome::Failed
+                } else {
+                    ToolOutcome::Succeeded
+                },
+                preview: "late child result".into(),
+                detail: None,
+                parent_call_id: None,
+            })
+            .await;
             let session = get_session(&store, &OwnerId::local(), session_id)
                 .await
                 .unwrap()

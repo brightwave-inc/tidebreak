@@ -1,8 +1,9 @@
 //! Parse captured Codex app-server JSON-RPC frames into [`HarnessEvent`]s.
 //!
-//! Written only against the checked-in fixtures under
-//! `fixtures/codex/0.147.0/`. Unknown methods increment a counter and are
-//! logged (size-capped). They are never fatal and never dropped silently.
+//! Written against the checked-in fixtures under `fixtures/codex/0.147.0/`
+//! and that version's generated app-server schema. Unknown methods increment
+//! a counter and are logged (size-capped). They are never fatal and never
+//! dropped silently.
 //!
 //! Fixture lines are framed `{ "dir": "in"|"out", "msg": <json-rpc> }`. A
 //! bare JSON-RPC object is treated as inbound.
@@ -12,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use tidebreak_core::{
     BoundedError, CodeUsage, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
 use crate::{ApprovalDecision, HarnessApprovalRef, HarnessEvent};
@@ -27,7 +28,18 @@ pub struct CodexStreamParser {
     resume_ref: Option<String>,
     version: Option<String>,
     started_tools: HashSet<String>,
+    /// Codex child thread ids whose synthetic `Task` span has started.
+    started_subagents: HashSet<String>,
+    /// Child thread ids whose synthetic `Task` span has settled.
+    settled_subagents: HashSet<String>,
+    /// Best display detail observed for each child thread.
+    subagent_details: HashMap<String, ToolDetail>,
+    /// The containing `Task` for nested child threads. Top-level children map
+    /// to `None` because their spawn ran on the parent thread.
+    subagent_parents: HashMap<String, Option<String>>,
     emitted_session: bool,
+    /// Child frames are accepted only while their parent turn is open.
+    parent_turn_active: bool,
     /// Thread-wide counters at the start of the active turn.
     turn_usage_baseline: CodeUsage,
     /// Latest thread-wide counters plus the final call's context occupancy.
@@ -184,15 +196,24 @@ impl CodexStreamParser {
 
     fn parse_method(&mut self, method: &str, value: &Value) -> Vec<HarnessEvent> {
         let params = value.get("params").cloned().unwrap_or(Value::Null);
-        if let Some(turn_id) = params
-            .get("turnId")
-            .and_then(Value::as_str)
-            .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
-        {
-            self.last_turn_id = Some(turn_id.to_owned());
+        let parent_thread = self.is_parent_thread(&params);
+        if parent_thread {
+            if let Some(turn_id) = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
+            {
+                self.last_turn_id = Some(turn_id.to_owned());
+            }
         }
         match method {
             "item/agentMessage/delta" => {
+                // A completed child message is journaled with its `Task` id.
+                // The transient delta has no attribution field, so emitting it
+                // would flatten the child's text into the parent transcript.
+                if !parent_thread {
+                    return Vec::new();
+                }
                 let text = params.get("delta").and_then(Value::as_str).unwrap_or("");
                 if text.is_empty() {
                     Vec::new()
@@ -206,10 +227,15 @@ impl CodexStreamParser {
             "item/completed" => self.parse_item_completed(&params),
             "item/commandExecution/requestApproval" => self.parse_approval_request(value, &params),
             "turn/started" => {
+                if !parent_thread {
+                    return self.ensure_subagent_started(&params);
+                }
+                self.parent_turn_active = true;
                 self.turn_usage_baseline = self.last_usage.clone();
                 vec![HarnessEvent::TurnStarted]
             }
-            "turn/completed" => self.parse_turn_completed(&params),
+            "turn/completed" if parent_thread => self.parse_turn_completed(&params),
+            "turn/completed" => self.parse_subagent_turn_completed(&params),
             "warning" | "error" => {
                 let message = params
                     .pointer("/message")
@@ -226,7 +252,11 @@ impl CodexStreamParser {
                 }]
             }
             "thread/tokenUsage/updated" => {
-                self.last_usage = usage_from(params.get("tokenUsage"));
+                // The app server multiplexes child threads over the parent's
+                // connection. Their counters must not replace the parent's.
+                if parent_thread {
+                    self.last_usage = usage_from(params.get("tokenUsage"));
+                }
                 Vec::new()
             }
             "account/rateLimits/updated"
@@ -266,9 +296,14 @@ impl CodexStreamParser {
 
     fn parse_item_started(&mut self, params: &Value) -> Vec<HarnessEvent> {
         let item = params.get("item").cloned().unwrap_or(Value::Null);
+        let parent_call_id = self.parent_call_id(params);
+        if parent_call_id.is_some() && !self.parent_turn_active {
+            return Vec::new();
+        }
         match item.get("type").and_then(Value::as_str) {
-            Some("commandExecution") => self.emit_tool_started(&item),
-            Some("userMessage" | "agentMessage" | "reasoning") => Vec::new(),
+            Some("commandExecution") => self.emit_tool_started(&item, parent_call_id),
+            Some("collabAgentToolCall") => self.emit_collab_started(&item, parent_call_id),
+            Some("subAgentActivity" | "userMessage" | "agentMessage" | "reasoning") => Vec::new(),
             Some(other) => {
                 self.count_unrecognized(&format!("item/started/{other}"), &item);
                 Vec::new()
@@ -282,8 +317,13 @@ impl CodexStreamParser {
 
     fn parse_item_completed(&mut self, params: &Value) -> Vec<HarnessEvent> {
         let item = params.get("item").cloned().unwrap_or(Value::Null);
+        let parent_call_id = self.parent_call_id(params);
+        if parent_call_id.is_some() && !self.parent_turn_active {
+            return Vec::new();
+        }
         match item.get("type").and_then(Value::as_str) {
-            Some("commandExecution") => self.emit_tool_completed(&item),
+            Some("commandExecution") => self.emit_tool_completed(&item, parent_call_id),
+            Some("collabAgentToolCall") => self.emit_collab_completed(&item, parent_call_id),
             Some("agentMessage") => {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
                 if text.is_empty() {
@@ -291,11 +331,11 @@ impl CodexStreamParser {
                 } else {
                     vec![HarnessEvent::AssistantMessage {
                         text: bound(text, MAX_EVENT_TEXT_CHARS),
-                        parent_call_id: None,
+                        parent_call_id,
                     }]
                 }
             }
-            Some("userMessage" | "reasoning") => Vec::new(),
+            Some("subAgentActivity" | "userMessage" | "reasoning") => Vec::new(),
             Some(other) => {
                 self.count_unrecognized(&format!("item/completed/{other}"), &item);
                 Vec::new()
@@ -331,6 +371,11 @@ impl CodexStreamParser {
             .pointer("/turn/status")
             .and_then(Value::as_str)
             .unwrap_or("");
+        // Parent lifecycle is the outer bound for every child (decision 52).
+        // A late child frame must not reopen a span that this boundary settles.
+        self.settled_subagents
+            .extend(self.started_subagents.iter().cloned());
+        self.parent_turn_active = false;
         match status {
             "completed" => vec![HarnessEvent::TurnCompleted {
                 usage: turn_usage_since(&self.last_usage, &self.turn_usage_baseline),
@@ -371,6 +416,263 @@ impl CodexStreamParser {
                 ]
             }
         }
+    }
+
+    /// Whether a multiplexed app-server notification belongs to the thread
+    /// Tidebreak attached. Notifications without a thread id keep the legacy
+    /// parent behavior.
+    fn is_parent_thread(&self, params: &Value) -> bool {
+        let Some(thread_id) = thread_id(params) else {
+            return true;
+        };
+        self.resume_ref
+            .as_deref()
+            .is_none_or(|parent| thread_id == parent)
+    }
+
+    /// The synthetic `Task` span for a child-thread notification.
+    fn parent_call_id(&self, params: &Value) -> Option<String> {
+        (!self.is_parent_thread(params))
+            .then(|| thread_id(params).map(str::to_owned))
+            .flatten()
+    }
+
+    fn ensure_subagent_started(&mut self, params: &Value) -> Vec<HarnessEvent> {
+        if !self.parent_turn_active {
+            return Vec::new();
+        }
+        let Some(thread_id) = self.parent_call_id(params) else {
+            return Vec::new();
+        };
+        let parent = self
+            .subagent_parents
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or(None);
+        let detail = self
+            .subagent_details
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or_else(generic_subagent_detail);
+        self.emit_subagent_started(thread_id, parent, detail)
+    }
+
+    fn parse_subagent_turn_completed(&mut self, params: &Value) -> Vec<HarnessEvent> {
+        if !self.parent_turn_active {
+            return Vec::new();
+        }
+        let Some(thread_id) = self.parent_call_id(params) else {
+            return Vec::new();
+        };
+        let status = params
+            .pointer("/turn/status")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (outcome, preview) = match status {
+            "completed" => (ToolOutcome::Succeeded, String::new()),
+            "interrupted" => (ToolOutcome::Failed, "Subagent interrupted".to_owned()),
+            "failed" => (
+                ToolOutcome::Failed,
+                params
+                    .pointer("/turn/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Subagent failed")
+                    .to_owned(),
+            ),
+            other => {
+                let label = if other.is_empty() { "missing" } else { other };
+                self.count_unrecognized(&format!("subagent/turn-completed/{label}"), params);
+                (
+                    ToolOutcome::Failed,
+                    format!("Subagent ended with an unrecognized status ({label})"),
+                )
+            }
+        };
+        self.settle_subagent(thread_id, outcome, preview)
+    }
+
+    fn emit_collab_started(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        match item.get("tool").and_then(Value::as_str) {
+            Some("spawnAgent") => self.start_spawned_subagents(item, parent_call_id),
+            Some("sendInput" | "resumeAgent" | "wait" | "closeAgent") => {
+                self.start_collab_companions(item)
+            }
+            Some(other) => {
+                self.count_unrecognized(&format!("collab/tool/{other}"), item);
+                Vec::new()
+            }
+            None => {
+                self.count_unrecognized("collab/tool/missing", item);
+                Vec::new()
+            }
+        }
+    }
+
+    fn emit_collab_completed(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        match item.get("tool").and_then(Value::as_str) {
+            Some("spawnAgent") => {
+                let targets = collab_targets(item);
+                let mut events = self.start_spawned_subagents(item, parent_call_id.clone());
+                if targets.is_empty() {
+                    if collab_outcome(item) == ToolOutcome::Failed {
+                        let call_id = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned();
+                        if !call_id.is_empty() {
+                            let detail = subagent_detail(item);
+                            events.extend(self.emit_subagent_started(
+                                call_id.clone(),
+                                parent_call_id,
+                                detail,
+                            ));
+                            events.extend(self.settle_subagent(
+                                call_id,
+                                ToolOutcome::Failed,
+                                "Codex could not start the subagent".to_owned(),
+                            ));
+                        }
+                    }
+                    return events;
+                }
+                for target in targets {
+                    if let Some((outcome, preview)) = subagent_state_outcome(item, &target) {
+                        events.extend(self.settle_subagent(target, outcome, preview));
+                    } else if collab_outcome(item) == ToolOutcome::Failed {
+                        events.extend(self.settle_subagent(
+                            target,
+                            ToolOutcome::Failed,
+                            "Codex could not start the subagent".to_owned(),
+                        ));
+                    }
+                }
+                events
+            }
+            Some("sendInput" | "resumeAgent" | "wait" | "closeAgent") => {
+                let targets = collab_targets(item);
+                let mut events = self.start_collab_companions(item);
+                let outcome = collab_outcome(item);
+                for target in targets {
+                    let call_id = collab_call_id(item, &target);
+                    if !call_id.is_empty() {
+                        events.push(HarnessEvent::ToolCompleted {
+                            call_id,
+                            outcome,
+                            preview: bound(&collab_preview(item, &target), MAX_PREVIEW_CHARS),
+                            detail: None,
+                            parent_call_id: Some(target.clone()),
+                        });
+                    }
+                    if let Some((task_outcome, preview)) = subagent_state_outcome(item, &target) {
+                        events.extend(self.settle_subagent(target, task_outcome, preview));
+                    }
+                }
+                events
+            }
+            Some(other) => {
+                self.count_unrecognized(&format!("collab/tool/{other}"), item);
+                Vec::new()
+            }
+            None => {
+                self.count_unrecognized("collab/tool/missing", item);
+                Vec::new()
+            }
+        }
+    }
+
+    fn start_spawned_subagents(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let detail = subagent_detail(item);
+        let mut events = Vec::new();
+        for target in collab_targets(item) {
+            events.extend(self.emit_subagent_started(
+                target,
+                parent_call_id.clone(),
+                detail.clone(),
+            ));
+        }
+        events
+    }
+
+    fn emit_subagent_started(
+        &mut self,
+        thread_id: String,
+        parent_call_id: Option<String>,
+        detail: ToolDetail,
+    ) -> Vec<HarnessEvent> {
+        self.subagent_details
+            .insert(thread_id.clone(), detail.clone());
+        self.subagent_parents
+            .insert(thread_id.clone(), parent_call_id.clone());
+        if !self.started_subagents.insert(thread_id.clone()) {
+            return Vec::new();
+        }
+        vec![HarnessEvent::ToolStarted {
+            call_id: thread_id,
+            name: "Task".into(),
+            detail,
+            parent_call_id,
+        }]
+    }
+
+    fn start_collab_companions(&mut self, item: &Value) -> Vec<HarnessEvent> {
+        let mut events = Vec::new();
+        for target in collab_targets(item) {
+            let call_id = collab_call_id(item, &target);
+            if call_id.is_empty() || !self.started_tools.insert(call_id.clone()) {
+                continue;
+            }
+            events.push(HarnessEvent::ToolStarted {
+                call_id,
+                name: collab_tool_name(item).to_owned(),
+                detail: collab_detail(item, &target),
+                parent_call_id: Some(target),
+            });
+        }
+        events
+    }
+
+    fn settle_subagent(
+        &mut self,
+        thread_id: String,
+        outcome: ToolOutcome,
+        preview: String,
+    ) -> Vec<HarnessEvent> {
+        let parent_call_id = self
+            .subagent_parents
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or(None);
+        let detail = self
+            .subagent_details
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or_else(generic_subagent_detail);
+        let mut events =
+            self.emit_subagent_started(thread_id.clone(), parent_call_id.clone(), detail.clone());
+        if !self.settled_subagents.insert(thread_id.clone()) {
+            return events;
+        }
+        events.push(HarnessEvent::ToolCompleted {
+            call_id: thread_id,
+            outcome,
+            preview: bound(&preview, MAX_PREVIEW_CHARS),
+            detail: Some(detail),
+            parent_call_id,
+        });
+        events
     }
 
     fn parse_rpc_result(&mut self, value: &Value) -> Vec<HarnessEvent> {
@@ -448,7 +750,11 @@ impl CodexStreamParser {
         }]
     }
 
-    fn emit_tool_started(&mut self, item: &Value) -> Vec<HarnessEvent> {
+    fn emit_tool_started(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
         let call_id = item
             .get("id")
             .and_then(Value::as_str)
@@ -461,11 +767,15 @@ impl CodexStreamParser {
             call_id,
             name: "commandExecution".into(),
             detail: command_detail(item),
-            parent_call_id: None,
+            parent_call_id,
         }]
     }
 
-    fn emit_tool_completed(&mut self, item: &Value) -> Vec<HarnessEvent> {
+    fn emit_tool_completed(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
         let call_id = item
             .get("id")
             .and_then(Value::as_str)
@@ -494,7 +804,7 @@ impl CodexStreamParser {
             outcome,
             preview: bound(preview, MAX_PREVIEW_CHARS),
             detail: (detail.specificity() > 0).then_some(detail),
-            parent_call_id: None,
+            parent_call_id,
         }]
     }
 
@@ -517,6 +827,104 @@ impl CodexStreamParser {
             payload = %rendered,
             "unrecognized engine event payload"
         );
+    }
+}
+
+fn thread_id(params: &Value) -> Option<&str> {
+    params.get("threadId").and_then(Value::as_str)
+}
+
+fn collab_targets(item: &Value) -> Vec<String> {
+    item.get("receiverThreadIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|thread_id| !thread_id.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn collab_tool_name(item: &Value) -> &str {
+    match item.get("tool").and_then(Value::as_str) {
+        Some("sendInput") => "SendInput",
+        Some("resumeAgent") => "ResumeAgent",
+        Some("wait") => "WaitAgent",
+        Some("closeAgent") => "CloseAgent",
+        _ => "Subagent",
+    }
+}
+
+fn collab_call_id(item: &Value, target: &str) -> String {
+    let call_id = item.get("id").and_then(Value::as_str).unwrap_or("");
+    if call_id.is_empty() || target.is_empty() {
+        String::new()
+    } else {
+        format!("{call_id}:{target}")
+    }
+}
+
+fn first_nonempty_line(value: Option<&str>) -> Option<&str> {
+    value?.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn generic_subagent_detail() -> ToolDetail {
+    ToolDetail::Other {
+        summary: "Subagent".to_owned(),
+    }
+}
+
+fn subagent_detail(item: &Value) -> ToolDetail {
+    let summary =
+        first_nonempty_line(item.get("prompt").and_then(Value::as_str)).unwrap_or("Subagent");
+    ToolDetail::Other {
+        summary: bound(summary, MAX_TOOL_SUMMARY_CHARS),
+    }
+}
+
+fn collab_detail(item: &Value, target: &str) -> ToolDetail {
+    let target = &target[..8.min(target.len())];
+    let summary = match item.get("tool").and_then(Value::as_str) {
+        Some("sendInput") => first_nonempty_line(item.get("prompt").and_then(Value::as_str))
+            .map(|prompt| format!("Send to {target}: {prompt}"))
+            .unwrap_or_else(|| format!("Send input to {target}")),
+        Some("resumeAgent") => format!("Resume subagent {target}"),
+        Some("wait") => format!("Wait for subagent {target}"),
+        Some("closeAgent") => format!("Close subagent {target}"),
+        _ => format!("Subagent {target}"),
+    };
+    ToolDetail::Other {
+        summary: bound(&summary, MAX_TOOL_SUMMARY_CHARS),
+    }
+}
+
+fn collab_outcome(item: &Value) -> ToolOutcome {
+    match item.get("status").and_then(Value::as_str) {
+        Some("failed") => ToolOutcome::Failed,
+        _ => ToolOutcome::Succeeded,
+    }
+}
+
+fn collab_preview(item: &Value, target: &str) -> String {
+    item.pointer(&format!("/agentsStates/{target}/message"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn subagent_state_outcome(item: &Value, target: &str) -> Option<(ToolOutcome, String)> {
+    let state = item.pointer(&format!("/agentsStates/{target}"))?;
+    let status = state.get("status").and_then(Value::as_str)?;
+    let preview = state
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    match status {
+        "completed" => Some((ToolOutcome::Succeeded, preview)),
+        "interrupted" | "errored" | "shutdown" | "notFound" => Some((ToolOutcome::Failed, preview)),
+        "pendingInit" | "running" => None,
+        _ => None,
     }
 }
 
@@ -857,5 +1265,155 @@ mod tests {
             out.events.last(),
             Some(HarnessEvent::TurnCompleted { .. })
         ));
+    }
+
+    #[test]
+    fn collaboration_threads_become_task_spans_instead_of_parent_activity() {
+        let input = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.147.0"}}}}
+{"method":"turn/started","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent","status":"inProgress","senderThreadId":"parent","receiverThreadIds":[],"prompt":"Inspect the parser.\nReport the result.","model":null,"reasoningEffort":null,"agentsStates":{}}}}
+{"method":"item/completed","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent","status":"completed","senderThreadId":"parent","receiverThreadIds":["child"],"prompt":"Inspect the parser.\nReport the result.","model":null,"reasoningEffort":null,"agentsStates":{"child":{"status":"running","message":null}}}}}
+{"method":"item/started","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"subAgentActivity","id":"activity-1","agentThreadId":"child","agentPath":"worker","kind":"started"}}}
+{"method":"item/completed","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"subAgentActivity","id":"activity-1","agentThreadId":"child","agentPath":"worker","kind":"started"}}}
+{"method":"turn/started","params":{"threadId":"child","turn":{"id":"child-turn","status":"inProgress"}}}
+{"method":"item/started","params":{"threadId":"child","turnId":"child-turn","item":{"type":"commandExecution","id":"child-command","command":"rg parser","cwd":"/workspace","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"child","turnId":"child-turn","item":{"type":"commandExecution","id":"child-command","command":"rg parser","cwd":"/workspace","status":"completed","aggregatedOutput":"match\n","exitCode":0}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"child","turnId":"child-turn","itemId":"child-message","delta":"Found it"}}
+{"method":"item/completed","params":{"threadId":"child","turnId":"child-turn","item":{"type":"agentMessage","id":"child-message","text":"Found it","phase":"final_answer"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"child","turnId":"child-turn","tokenUsage":{"total":{"inputTokens":9000,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":9000},"last":{"inputTokens":9000}}}}
+{"method":"turn/completed","params":{"threadId":"child","turn":{"id":"child-turn","status":"completed"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"parent","turnId":"parent-turn","tokenUsage":{"total":{"inputTokens":100,"cachedInputTokens":20,"cacheWriteInputTokens":0,"outputTokens":5},"last":{"inputTokens":70}}}}
+{"method":"turn/completed","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"completed"}}}
+{"method":"item/started","params":{"threadId":"child","turnId":"child-turn","item":{"type":"commandExecution","id":"late-command","command":"touch late","cwd":"/workspace","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"child","turnId":"child-turn","item":{"type":"commandExecution","id":"late-command","command":"touch late","cwd":"/workspace","status":"completed","aggregatedOutput":"","exitCode":0}}}
+"#;
+        let mut parser = CodexStreamParser::new();
+        let mut events = Vec::new();
+        for line in input.lines() {
+            events.extend(parser.push_line(line));
+        }
+
+        assert_eq!(parser.unrecognized(), 0);
+        assert_eq!(parser.last_turn_id(), Some("parent-turn"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnStarted))
+                .count(),
+            1,
+            "a child turn must not start another Tidebreak turn"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::TurnCompleted { .. }))
+                .count(),
+            1,
+            "a child turn must not complete the parent turn"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted {
+                call_id,
+                name,
+                detail,
+                parent_call_id: None,
+            } if call_id == "child" && name == "Task" && detail.subject() == "Inspect the parser."
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted {
+                call_id,
+                parent_call_id: Some(parent),
+                ..
+            } if call_id == "child-command" && parent == "child"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::AssistantMessage {
+                text,
+                parent_call_id: Some(parent),
+            } if text == "Found it" && parent == "child"
+        )));
+        assert!(!events.iter().any(
+            |event| matches!(event, HarnessEvent::AssistantDelta { text } if text == "Found it")
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCompleted {
+                        call_id,
+                        parent_call_id: None,
+                        ..
+                    } if call_id == "child"
+                ))
+                .count(),
+            1
+        );
+        let usage = events.iter().find_map(|event| match event {
+            HarnessEvent::TurnCompleted { usage } => Some(usage),
+            _ => None,
+        });
+        assert_eq!(usage.map(|usage| usage.output_tokens), Some(5));
+        assert_eq!(usage.map(|usage| usage.context_tokens), Some(70));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted { call_id, .. } if call_id == "late-command"
+        )));
+    }
+
+    #[test]
+    fn a_wait_result_settles_each_target_once() {
+        let input = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"parent","cliVersion":"0.147.0"}}}}
+{"method":"turn/started","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent","status":"completed","senderThreadId":"parent","receiverThreadIds":["child"],"prompt":"Run focused checks","model":null,"reasoningEffort":null,"agentsStates":{"child":{"status":"running","message":null}}}}}
+{"method":"item/started","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"collabAgentToolCall","id":"wait-1","tool":"wait","status":"inProgress","senderThreadId":"parent","receiverThreadIds":["child"],"prompt":null,"model":null,"reasoningEffort":null,"agentsStates":{"child":{"status":"running","message":null}}}}}
+{"method":"item/completed","params":{"threadId":"parent","turnId":"parent-turn","item":{"type":"collabAgentToolCall","id":"wait-1","tool":"wait","status":"completed","senderThreadId":"parent","receiverThreadIds":["child"],"prompt":null,"model":null,"reasoningEffort":null,"agentsStates":{"child":{"status":"completed","message":"Focused checks passed."}}}}}
+{"method":"turn/completed","params":{"threadId":"child","turn":{"id":"child-turn","status":"completed"}}}
+{"method":"turn/completed","params":{"threadId":"parent","turn":{"id":"parent-turn","status":"completed"}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+
+        assert_eq!(out.unrecognized, 0);
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStarted {
+                call_id,
+                name,
+                parent_call_id: Some(parent),
+                ..
+            } if call_id == "wait-1:child" && name == "WaitAgent" && parent == "child"
+        )));
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCompleted {
+                        call_id,
+                        outcome: ToolOutcome::Succeeded,
+                        parent_call_id: None,
+                        ..
+                    } if call_id == "child"
+                ))
+                .count(),
+            1,
+            "the later child turn completion must not settle the Task twice"
+        );
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                call_id,
+                preview,
+                parent_call_id: None,
+                ..
+            } if call_id == "child" && preview == "Focused checks passed."
+        )));
     }
 }
