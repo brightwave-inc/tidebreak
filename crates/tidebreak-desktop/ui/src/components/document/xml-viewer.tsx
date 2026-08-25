@@ -3,7 +3,6 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronRightIcon,
-  Loader2Icon,
 } from "lucide-react";
 import {
   createContext,
@@ -26,6 +25,7 @@ import {
   useFileDownload,
   type FileBytesSource,
 } from "@/document/useFileDownload";
+import { DocumentViewerState } from "@/document/ViewerPrimitives";
 import { cn } from "@/lib/utils";
 import { FileDownloadProgressIndicator } from "./FileDownloadProgress";
 
@@ -281,9 +281,9 @@ export function XmlViewer({
   if (fileDownload.error) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
-        <div className="text-muted-foreground flex h-64 items-center justify-center">
-          <p>Failed to download document</p>
-        </div>
+        <DocumentViewerState variant="error">
+          This document could not be loaded.
+        </DocumentViewerState>
       </div>
     );
   }
@@ -297,7 +297,9 @@ export function XmlViewer({
         {fileDownload.progress ? (
           <FileDownloadProgressIndicator progress={fileDownload.progress} />
         ) : (
-          <Loader2Icon className="text-muted-foreground size-6 animate-spin" />
+          <DocumentViewerState variant="loading">
+            Loading document…
+          </DocumentViewerState>
         )}
       </div>
     );
@@ -306,9 +308,9 @@ export function XmlViewer({
   if (!xmlDoc || !xmlDoc.documentElement) {
     return (
       <div className={cn("relative overflow-auto", className)} {...props}>
-        <div className="text-muted-foreground flex h-64 items-center justify-center">
-          <p>Unable to parse XML</p>
-        </div>
+        <DocumentViewerState variant="error">
+          Unable to parse XML.
+        </DocumentViewerState>
       </div>
     );
   }
@@ -319,6 +321,7 @@ export function XmlViewer({
       {...props}
     >
       <XmlBreadcrumbBar
+        key={source.cacheKey}
         root={xmlDoc.documentElement}
         onCollapseAll={collapseAll}
         onNavigate={navigateToPath}
@@ -359,8 +362,6 @@ function XmlBreadcrumbBar({
   const [breadcrumb, setBreadcrumb] = useState<
     { element: Element; path: string }[]
   >([]);
-
-  useEffect(() => setBreadcrumb([]), [root]);
 
   const handleSelect = useCallback(
     (depth: number, element: Element, path: string) => {

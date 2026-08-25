@@ -1,15 +1,15 @@
-import type { HTMLAttributes, ReactNode } from "react";
+import type { HTMLAttributes } from "react";
 import { useRef } from "react";
 
 import { DocxViewerPreview } from "@/components/extend/docx-viewer";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
-import {
-  DOCUMENT_VIEWER_SURFACE,
-  useSecureViewerLinks,
-} from "@/document/extendViewerSurface";
+import { useSecureViewerLinks } from "@/document/extendViewerSurface";
 import { useLocalDocumentUrl } from "@/document/useLocalDocumentUrl";
 import type { FileBytesSource } from "@/document/useFileDownload";
-import { cn } from "@/lib/utils";
+import {
+  DocumentViewerShell,
+  DocumentViewerState,
+} from "@/document/ViewerPrimitives";
 import { useTheme } from "@/theme";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
@@ -28,22 +28,22 @@ export default function DocxViewer({ source, className, ...restProps }: Props) {
   useSecureViewerLinks(containerRef);
 
   return (
-    <div
+    <DocumentViewerShell
       ref={containerRef}
-      className={cn(
-        "relative flex min-h-0 flex-col overflow-hidden",
-        className,
-        DOCUMENT_VIEWER_SURFACE,
-      )}
+      className={className}
       {...restProps}
     >
       {file.error ? (
-        <ViewerMessage>This document could not be loaded.</ViewerMessage>
+        <DocumentViewerState variant="error">
+          This document could not be loaded.
+        </DocumentViewerState>
       ) : !file.objectUrl ? (
         file.progress ? (
           <FileDownloadProgressIndicator progress={file.progress} />
         ) : (
-          <ViewerMessage>Loading document…</ViewerMessage>
+          <DocumentViewerState variant="loading">
+            Loading document…
+          </DocumentViewerState>
         )
       ) : (
         <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
@@ -60,14 +60,6 @@ export default function DocxViewer({ source, className, ...restProps }: Props) {
           />
         </div>
       )}
-    </div>
-  );
-}
-
-function ViewerMessage({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex min-h-64 grow items-center justify-center text-sm text-muted-foreground">
-      {children}
-    </div>
+    </DocumentViewerShell>
   );
 }

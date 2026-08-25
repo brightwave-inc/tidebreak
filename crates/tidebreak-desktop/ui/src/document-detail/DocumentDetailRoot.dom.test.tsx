@@ -626,7 +626,7 @@ describe("DocumentDetailRoot", () => {
       '{"invoice": ',
     );
 
-    expect(await screen.findByText("Unable to parse JSON")).toBeVisible();
+    expect(await screen.findByText("Unable to parse JSON.")).toBeVisible();
   });
 });
 

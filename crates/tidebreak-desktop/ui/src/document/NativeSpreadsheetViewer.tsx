@@ -13,14 +13,12 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   FunctionSquareIcon,
-  Loader2Icon,
   MinusIcon,
   PlusIcon,
 } from "lucide-react";
 import {
   type HTMLAttributes,
   type MutableRefObject,
-  type ReactNode,
   type Ref,
   useCallback,
   useEffect,
@@ -41,6 +39,7 @@ import {
   useFileDownload,
   type FileBytesSource,
 } from "@/document/useFileDownload";
+import { DocumentViewerState } from "@/document/ViewerPrimitives";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/theme";
 
@@ -86,7 +85,9 @@ export default function NativeSpreadsheetViewer({
         {fileDownload.progress ? (
           <FileDownloadProgressIndicator progress={fileDownload.progress} />
         ) : (
-          <ViewerMessage spinner>Loading workbook…</ViewerMessage>
+          <DocumentViewerState variant="loading" className="h-full">
+            Loading workbook…
+          </DocumentViewerState>
         )}
       </div>
     );
@@ -98,7 +99,9 @@ export default function NativeSpreadsheetViewer({
         className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
-        <ViewerMessage>This workbook could not be loaded.</ViewerMessage>
+        <DocumentViewerState variant="error" className="h-full">
+          This workbook could not be loaded.
+        </DocumentViewerState>
       </div>
     );
   }
@@ -139,7 +142,9 @@ function LoadedWorkbook({
         className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
-        <ViewerMessage>This workbook could not be prepared.</ViewerMessage>
+        <DocumentViewerState variant="error" className="h-full">
+          This workbook could not be prepared.
+        </DocumentViewerState>
       </div>
     );
   }
@@ -150,7 +155,9 @@ function LoadedWorkbook({
         className={cn(WORKBOOK_SURFACE, "relative min-h-0", className)}
         {...restProps}
       >
-        <ViewerMessage spinner>Preparing workbook…</ViewerMessage>
+        <DocumentViewerState variant="loading" className="h-full">
+          Preparing workbook…
+        </DocumentViewerState>
       </div>
     );
   }
@@ -244,15 +251,19 @@ function RenderedWorkbook({
         enableCanvasSelectionAnimation
         enableGestureZoom
         errorState={(error) => (
-          <ViewerMessage>
+          <DocumentViewerState variant="error" className="h-full">
             <span className="block">This workbook could not be read.</span>
             <span className="mt-1 block text-xs">{error.message}</span>
-          </ViewerMessage>
+          </DocumentViewerState>
         )}
         experimentalCanvas
         getCellStyle={getCellStyle}
         isDark={dark}
-        loadingState={<ViewerMessage spinner>Reading workbook…</ViewerMessage>}
+        loadingState={
+          <DocumentViewerState variant="loading" className="h-full">
+            Reading workbook…
+          </DocumentViewerState>
+        }
         readOnly
         renderScroller={renderScroller}
         renderTableHeaderMenu={() => null}
@@ -677,21 +688,4 @@ function workbookFileName(mediaType: string): string {
     "application/vnd.ms-excel"
     ? "workbook.xls"
     : "workbook.xlsx";
-}
-
-function ViewerMessage({
-  spinner,
-  children,
-}: {
-  spinner?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex h-full min-h-64 items-center justify-center p-6 text-center text-sm text-muted-foreground">
-      <div className="flex flex-col items-center gap-2">
-        {spinner ? <Loader2Icon className="size-6 animate-spin" /> : null}
-        <p>{children}</p>
-      </div>
-    </div>
-  );
 }

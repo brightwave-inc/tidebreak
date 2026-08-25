@@ -8,7 +8,6 @@
  * which is code-split so opening one format does not fetch the others. The
  * download itself is shared — both sides use `@/document/useFileDownload`.
  */
-import { Loader2Icon } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 
 import type { DocumentDetail } from "@/api";
@@ -16,6 +15,7 @@ import { useApp } from "@/AppContext";
 import { DocumentViewer, hasOriginalViewer } from "@/document/DocumentViewer";
 import type { SheetHighlightRange } from "@/document/UniverSpreadsheetViewer";
 import { documentFileSource } from "@/document/useFileDownload";
+import { DocumentViewerState } from "@/document/ViewerPrimitives";
 import { cn } from "@/lib/utils";
 import {
   CITATION_MARK_CLASS,
@@ -131,7 +131,16 @@ export function DocumentDetails({
           ) : type.startsWith("image/") ? (
             <ImageViewer source={source} className="bg-page-background grow" />
           ) : structured !== null ? (
-            <Suspense fallback={<ViewerLoading />}>
+            <Suspense
+              fallback={
+                <DocumentViewerState
+                  variant="loading"
+                  className="bg-page-background"
+                >
+                  Loading viewer…
+                </DocumentViewerState>
+              }
+            >
               {structured === "json" ? (
                 <JsonViewer source={source} className="grow" />
               ) : (
@@ -153,14 +162,6 @@ export function DocumentDetails({
       ) : (
         <ExtractedText info={info} targetLines={targetLines} />
       )}
-    </div>
-  );
-}
-
-function ViewerLoading() {
-  return (
-    <div className="flex grow items-center justify-center bg-page-background">
-      <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
     </div>
   );
 }

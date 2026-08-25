@@ -133,15 +133,17 @@ export function ChangeSummaryCard({ client, chatId, turnId, files }: Props) {
             </p>
           )}
         </div>
-        <button
+        <Button
           type="button"
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+          variant="outline"
+          size="sm"
+          className="shrink-0"
           disabled={available.length === 0 || undoingAll}
           onClick={() => void undoAll()}
         >
           <RotateCcw size={13} aria-hidden="true" />
           {undoingAll ? "Undoing…" : "Undo all"}
-        </button>
+        </Button>
       </header>
 
       <div className="divide-y divide-border">
@@ -202,9 +204,11 @@ function FileChangeRow({
           </p>
         </div>
         {!rejected && (
-          <button
+          <Button
             type="button"
-            className="shrink-0 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            variant="ghost"
+            size="xs"
+            className="shrink-0 text-muted-foreground"
             disabled={file.undo !== "available" || working}
             onClick={onUndo}
           >
@@ -213,7 +217,7 @@ function FileChangeRow({
               : file.undo === "already_undone"
                 ? "Undone"
                 : "Undo"}
-          </button>
+          </Button>
         )}
       </div>
       {file.diff && <TextDiff diff={file.diff} />}

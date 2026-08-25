@@ -9,8 +9,7 @@ import sheetsCoreEnUS from "@univerjs/preset-sheets-core/locales/en-US";
 import "@univerjs/preset-sheets-core/lib/index.css";
 import type { FUniver, IWorkbookData, Univer } from "@univerjs/presets";
 import { createUniver, LocaleType } from "@univerjs/presets";
-import { Loader2Icon } from "lucide-react";
-import type { HTMLAttributes, ReactNode } from "react";
+import type { HTMLAttributes } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
@@ -19,6 +18,7 @@ import UniverFormulaWorker from "@/workers/univer-formula.worker?worker&inline";
 import { SpreadsheetShortcutsInfoBar } from "./SpreadsheetShortcutsInfo";
 import { parseCellAddress } from "./spreadsheet";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
+import { DocumentViewerState } from "./ViewerPrimitives";
 import { useFileDownload, type FileBytesSource } from "./useFileDownload";
 import { useUniverWorker } from "./useUniverWorker";
 
@@ -370,7 +370,9 @@ export default function UniverSpreadsheetViewer({
         {fileDownload.progress ? (
           <FileDownloadProgressIndicator progress={fileDownload.progress} />
         ) : (
-          <ViewerMessage spinner>Loading spreadsheet…</ViewerMessage>
+          <DocumentViewerState variant="loading">
+            Loading spreadsheet…
+          </DocumentViewerState>
         )}
       </div>
     );
@@ -379,11 +381,11 @@ export default function UniverSpreadsheetViewer({
   if (errorType) {
     return (
       <div className={cn("relative overflow-auto", className)} {...restProps}>
-        <ViewerMessage>
+        <DocumentViewerState variant="error">
           {errorType === "parse"
             ? "This spreadsheet could not be read."
             : "This spreadsheet could not be loaded."}
-        </ViewerMessage>
+        </DocumentViewerState>
       </div>
     );
   }
@@ -392,7 +394,9 @@ export default function UniverSpreadsheetViewer({
     <div className={cn("relative flex flex-col", className)} {...restProps}>
       {isProcessing && (
         <div className="bg-background/80 absolute inset-0 z-10 flex items-center justify-center">
-          <ViewerMessage spinner>Reading spreadsheet…</ViewerMessage>
+          <DocumentViewerState variant="loading" className="min-h-0">
+            Reading spreadsheet…
+          </DocumentViewerState>
         </div>
       )}
       <SpreadsheetShortcutsInfoBar onAutofit={handleAutofit} />
@@ -421,23 +425,6 @@ export default function UniverSpreadsheetViewer({
         className="min-h-0 grow"
         style={{ width: "100%", height: "100%" }}
       />
-    </div>
-  );
-}
-
-function ViewerMessage({
-  spinner,
-  children,
-}: {
-  spinner?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className="text-muted-foreground flex h-64 items-center justify-center">
-      <div className="flex flex-col items-center gap-2">
-        {spinner && <Loader2Icon className="size-6 animate-spin" />}
-        <p>{children}</p>
-      </div>
     </div>
   );
 }

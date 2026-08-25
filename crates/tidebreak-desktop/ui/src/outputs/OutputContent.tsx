@@ -6,11 +6,11 @@
  * on the bounded preview string. Everything else offers export only.
  */
 import { lazy, Suspense } from "react";
-import { Loader2Icon } from "lucide-react";
 
 import { ImageViewer } from "@/components/document/image-viewer";
 import { DocumentViewer, hasOriginalViewer } from "@/document/DocumentViewer";
 import { outputFileSource } from "@/document/useFileDownload";
+import { DocumentViewerState } from "@/document/ViewerPrimitives";
 import {
   isTextDeliverableMediaType,
   type DeliverablePreview,
@@ -108,8 +108,8 @@ export function OutputContent({
 
 function ViewerLoading() {
   return (
-    <div className="flex grow items-center justify-center">
-      <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
-    </div>
+    <DocumentViewerState variant="loading">
+      Loading preview…
+    </DocumentViewerState>
   );
 }
