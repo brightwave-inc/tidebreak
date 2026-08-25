@@ -780,16 +780,15 @@ impl ScopedCode {
         &self,
         session_id: CodeSessionId,
         image: &tidebreak_core::ImageRef,
-    ) -> Result<(), ServerError> {
-        tidebreak_core::db::code::publish_session_image(
+    ) -> Result<bool, ServerError> {
+        Ok(tidebreak_core::db::code::publish_session_image(
             &self.runtime.db,
             &self.owner,
             session_id,
             image,
             chrono::Utc::now(),
         )
-        .await?;
-        Ok(())
+        .await?)
     }
 
     pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {

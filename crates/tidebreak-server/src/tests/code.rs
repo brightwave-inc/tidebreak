@@ -18,13 +18,40 @@ use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserR
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, BrowserListResult, BrowserNavigateArgs,
+    Attention, AttentionSource, AttentionState, BlobStore, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
     BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent, CodeSessionId,
     CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason,
-    HarnessKind, PermissionMode, ReasoningEffort, WorkspaceId,
+    HarnessKind, PermissionMode, ReasoningEffort, Store, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
+
+struct PutGate {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct GatedPutBlobStore {
+    inner: Arc<dyn BlobStore>,
+    gate: Arc<PutGate>,
+}
+
+#[async_trait]
+impl BlobStore for GatedPutBlobStore {
+    async fn put(&self, id: uuid::Uuid, bytes: Vec<u8>) -> tidebreak_core::Result<()> {
+        self.gate.started.notify_one();
+        self.gate.release.notified().await;
+        self.inner.put(id, bytes).await
+    }
+
+    async fn get(&self, id: uuid::Uuid) -> tidebreak_core::Result<Option<Vec<u8>>> {
+        self.inner.get(id).await
+    }
+
+    fn delete(&self, id: uuid::Uuid) -> tidebreak_core::Result<()> {
+        self.inner.delete(id)
+    }
+}
 
 #[derive(Default)]
 struct RecordingBrowserRuntime {
@@ -102,6 +129,21 @@ async fn code_app_with_optional_browser(
     adapter: ScriptedAdapter,
     browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_options(adapter, browser_runtime, None).await
+}
+
+async fn code_app_with_put_gate(
+    adapter: ScriptedAdapter,
+    gate: Arc<PutGate>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_options(adapter, None, Some(gate)).await
+}
+
+async fn code_app_with_options(
+    adapter: ScriptedAdapter,
+    browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
+    put_gate: Option<Arc<PutGate>>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -130,6 +172,12 @@ async fn code_app_with_optional_browser(
             ..AgentConfig::default()
         },
     );
+    if let Some(gate) = put_gate {
+        state.blobs = Arc::new(GatedPutBlobStore {
+            inner: runtime.blobs.clone(),
+            gate,
+        });
+    }
     state.code = Some(runtime.clone());
     let token = state.token.clone();
     (app(state), token, runtime, dir)
@@ -7190,6 +7238,132 @@ async fn reclaim_refuses_a_checkout_tidebreak_did_not_clone() {
 /// `chat_image_publication` since it shipped; this is the code-mode
 /// equivalent, and the assertion is that publishing to one session does not
 /// authorize another.
+#[tokio::test]
+async fn a_live_session_image_upload_is_idempotently_published() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+    let pixels = one_pixel_png();
+    let expected = crate::routes::image_attachment::inspect_image_bytes(&pixels).unwrap();
+
+    for _ in 0..2 {
+        let response = client
+            .post(format!(
+                "http://{addr}/code/sessions/{session}/attachments/images"
+            ))
+            .bearer_auth(&token)
+            .header(reqwest::header::CONTENT_TYPE, "image/png")
+            .body(pixels.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::CREATED,
+            "an exact upload retry must keep its successful publication"
+        );
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["attachment_id"], expected.blob_id.to_string());
+    }
+
+    let session_id: CodeSessionId = session.parse().unwrap();
+    assert_eq!(
+        runtime
+            .db
+            .get_published_code_session_image(
+                &tidebreak_core::OwnerId::local(),
+                session_id,
+                expected.blob_id,
+            )
+            .await
+            .unwrap(),
+        Some(expected)
+    );
+}
+
+#[tokio::test]
+async fn an_image_upload_losing_the_session_end_race_conflicts_and_queues_retirement() {
+    let gate = Arc::new(PutGate {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let (router, token, runtime, dir) =
+        code_app_with_put_gate(ScriptedAdapter::new(plain_text_script()), gate.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+    let session_id: CodeSessionId = session.parse().unwrap();
+    let pixels = one_pixel_png();
+    let image = crate::routes::image_attachment::inspect_image_bytes(&pixels).unwrap();
+    let upload = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session = session.clone();
+        async move {
+            client
+                .post(format!(
+                    "http://{addr}/code/sessions/{session}/attachments/images"
+                ))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "image/png")
+                .body(pixels)
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    gate.started.notified().await;
+
+    let mut row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        session_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Ended;
+    row.child_pid = None;
+    assert!(tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap());
+    gate.release.notify_one();
+
+    let response = upload.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["kind"], "session_ended");
+    assert!(runtime
+        .db
+        .get_published_code_session_image(
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+            image.blob_id,
+        )
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        runtime
+            .db
+            .get_blob_retirement(image.blob_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        tidebreak_core::BlobRetirementStatus::Queued
+    );
+}
+
 #[tokio::test]
 async fn a_session_cannot_attach_an_image_published_to_another_session() {
     // The capability gate refuses attachments before authority is consulted,

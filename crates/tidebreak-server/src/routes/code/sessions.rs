@@ -345,7 +345,17 @@ pub async fn publish_session_image(
     // Storing the bytes is not enough: the blob store is content-addressed and
     // owner-blind, so without this row any known id could be bound into any
     // session and read back through this session's own image route.
-    code.publish_session_image(id, &image).await?;
+    if !code.publish_session_image(id, &image).await? {
+        state
+            .store
+            .ensure_orphan_blob_retirement(image.blob_id)
+            .await?;
+        state.blob_retirement_wake.notify_one();
+        return Err(ServerError::conflict_kind(
+            "session_ended",
+            format!("session {id} ended before the image could be published"),
+        ));
+    }
     Ok((
         StatusCode::CREATED,
         crate::extract::Json(PublishedImageAttachment::from(image)),
