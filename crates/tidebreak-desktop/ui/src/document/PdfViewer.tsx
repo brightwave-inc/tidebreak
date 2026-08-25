@@ -1,5 +1,5 @@
-import type { HTMLAttributes, ReactNode } from "react";
-import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
+import type { HTMLAttributes } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   PDFViewer as ExtendPdfViewer,
@@ -7,14 +7,14 @@ import {
 } from "@/components/extend/pdf-viewer";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { useRegisterPdfControls } from "@/document/PdfControlsContext";
-import {
-  DOCUMENT_VIEWER_SURFACE,
-  useSecureViewerLinks,
-} from "@/document/extendViewerSurface";
+import { useSecureViewerLinks } from "@/document/extendViewerSurface";
 import { useLocalDocumentUrl } from "@/document/useLocalDocumentUrl";
 import { usePdfPageState } from "@/document/usePdfPageState";
 import type { FileBytesSource } from "@/document/useFileDownload";
-import { cn } from "@/lib/utils";
+import {
+  DocumentViewerShell,
+  DocumentViewerState,
+} from "@/document/ViewerPrimitives";
 
 interface Props extends HTMLAttributes<HTMLDivElement> {
   source: FileBytesSource;
@@ -23,7 +23,11 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 }
 
 /** A local, continuous, searchable PDF surface using Extend's viewer chrome. */
-export function PdfViewer({
+export function PdfViewer(props: Props) {
+  return <PdfViewerSource key={props.source.cacheKey} {...props} />;
+}
+
+function PdfViewerSource({
   source,
   targetPage,
   className,
@@ -79,26 +83,34 @@ export function PdfViewer({
 
   if (file.error) {
     return (
-      <ViewerShell className={className} {...restProps}>
-        <ViewerMessage>This document could not be loaded.</ViewerMessage>
-      </ViewerShell>
+      <DocumentViewerShell className={className} {...restProps}>
+        <DocumentViewerState variant="error">
+          This document could not be loaded.
+        </DocumentViewerState>
+      </DocumentViewerShell>
     );
   }
 
   if (!file.objectUrl) {
     return (
-      <ViewerShell className={className} {...restProps}>
+      <DocumentViewerShell className={className} {...restProps}>
         {file.progress ? (
           <FileDownloadProgressIndicator progress={file.progress} />
         ) : (
-          <ViewerMessage>Loading document…</ViewerMessage>
+          <DocumentViewerState variant="loading">
+            Loading document…
+          </DocumentViewerState>
         )}
-      </ViewerShell>
+      </DocumentViewerShell>
     );
   }
 
   return (
-    <ViewerShell ref={containerRef} className={className} {...restProps}>
+    <DocumentViewerShell
+      ref={containerRef}
+      className={className}
+      {...restProps}
+    >
       <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
         <ExtendPdfViewer
           ref={viewerRef}
@@ -114,29 +126,6 @@ export function PdfViewer({
           src={file.objectUrl}
         />
       </div>
-    </ViewerShell>
-  );
-}
-
-const ViewerShell = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div
-      ref={ref}
-      className={cn(
-        "relative flex min-h-0 flex-col overflow-hidden",
-        className,
-        DOCUMENT_VIEWER_SURFACE,
-      )}
-      {...props}
-    />
-  ),
-);
-ViewerShell.displayName = "PdfViewerShell";
-
-function ViewerMessage({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex min-h-64 grow items-center justify-center text-sm text-muted-foreground">
-      {children}
-    </div>
+    </DocumentViewerShell>
   );
 }

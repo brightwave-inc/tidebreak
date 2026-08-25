@@ -3,21 +3,14 @@
  * plus PPTX files the native parser rejects, retain the existing LibreOffice
  * conversion path. Source bytes stay immutable in either path.
  */
-import {
-  FileSpreadsheetIcon,
-  Loader2Icon,
-  PresentationIcon,
-} from "lucide-react";
+import { FileSpreadsheetIcon, PresentationIcon } from "lucide-react";
 import { lazy, useEffect, useMemo, useRef, useState } from "react";
 
 import { PptxViewerPreview } from "@/components/extend/pptx-viewer";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import {
-  DOCUMENT_VIEWER_SURFACE,
-  useSecureViewerLinks,
-} from "@/document/extendViewerSurface";
+import { useSecureViewerLinks } from "@/document/extendViewerSurface";
 import {
   cancelPresentationConverterInstall,
   ConverterMissingError,
@@ -31,6 +24,10 @@ import {
   useFileDownload,
   type FileBytesSource,
 } from "@/document/useFileDownload";
+import {
+  DocumentViewerShell,
+  DocumentViewerState,
+} from "@/document/ViewerPrimitives";
 import { cn } from "@/lib/utils";
 
 // The PDF engine is fetched on first use, same as the direct PDF branch.
@@ -52,6 +49,7 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
   if (mediaType === PPTX_MEDIA_TYPE) {
     return (
       <DirectPresentationViewer
+        key={source.cacheKey}
         source={source}
         mediaType={mediaType}
         className={className}
@@ -71,8 +69,6 @@ export function PresentationViewer({ source, mediaType, className }: Props) {
 
 function DirectPresentationViewer({ source, mediaType, className }: Props) {
   const [renderFailed, setRenderFailed] = useState(false);
-
-  useEffect(() => setRenderFailed(false), [source.cacheKey]);
 
   if (renderFailed) {
     return (
@@ -104,28 +100,20 @@ function DirectPresentationSurface({
   useSecureViewerLinks(containerRef);
 
   return (
-    <div
-      ref={containerRef}
-      className={cn(
-        "relative flex min-h-0 flex-col overflow-hidden",
-        className,
-        DOCUMENT_VIEWER_SURFACE,
-      )}
-    >
+    <DocumentViewerShell ref={containerRef} className={className}>
       {file.error ? (
-        <div className="flex min-h-64 grow items-center justify-center text-sm text-muted-foreground">
+        <DocumentViewerState variant="error">
           This presentation could not be loaded.
-        </div>
+        </DocumentViewerState>
       ) : !file.objectUrl ? (
         file.progress ? (
           <div className="relative min-h-0 grow">
             <FileDownloadProgressIndicator progress={file.progress} />
           </div>
         ) : (
-          <div className="flex min-h-64 grow items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2Icon className="size-4 animate-spin" />
+          <DocumentViewerState variant="loading">
             Loading presentation…
-          </div>
+          </DocumentViewerState>
         )
       ) : (
         <div className="min-h-0 grow overflow-hidden rounded-md border bg-background shadow-xs">
@@ -142,7 +130,7 @@ function DirectPresentationSurface({
           />
         </div>
       )}
-    </div>
+    </DocumentViewerShell>
   );
 }
 
@@ -172,12 +160,9 @@ export function ConvertedOfficeViewer({
 
   if (isLoading) {
     return (
-      <div className="flex grow flex-col items-center justify-center gap-3">
-        <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
-        <p className="text-sm text-muted-foreground" role="status">
-          Preparing preview…
-        </p>
-      </div>
+      <DocumentViewerState variant="loading">
+        Preparing preview…
+      </DocumentViewerState>
     );
   }
 
