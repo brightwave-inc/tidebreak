@@ -69,9 +69,9 @@ pub(crate) struct GatewayRuntime {
     sign_in_generation: std::sync::atomic::AtomicU64,
     /// The machine offer last read from the gateway's `/api/v1/meta`, keyed
     /// by the gateway it was read from so a re-pair reads the new one.
-    /// Process-lifetime: meta is re-read every boot, and opening settings
-    /// twice costs one request.
-    machine_offer: Mutex<Option<(String, Option<String>)>>,
+    /// Only a present offer is cached. An older gateway or a deployment that
+    /// has not published its machine yet is retried while the process runs.
+    machine_offer: Mutex<Option<(String, String)>>,
     /// A deep-link pairing awaiting the sign-in that is its consent.
     ///
     /// Process-ephemeral on purpose: nothing durable exists until the user
@@ -325,10 +325,10 @@ impl GatewayRuntime {
         }
     }
 
-    /// The offer, memoized per gateway. Only a gateway that answered is
-    /// remembered, so a boot that raced the network retries on the next ask,
-    /// and an unmanaged profile that pairs mid-session reads its new gateway
-    /// rather than the absence recorded before it paired.
+    /// The offer, memoized per gateway. Only a valid, present offer is
+    /// remembered, so a boot that raced either the network or the gateway
+    /// rollout retries on the next ask. An unmanaged profile that pairs
+    /// mid-session also reads its new gateway rather than a prior absence.
     async fn read_offered_machine(&self) -> Option<String> {
         let policy = self.policy().ok()?;
         if !policy.managed {
@@ -338,7 +338,7 @@ impl GatewayRuntime {
         let mut memo = self.machine_offer.lock().await;
         if let Some((read_from, offer)) = memo.as_ref() {
             if *read_from == base_url {
-                return offer.clone();
+                return Some(offer.clone());
             }
         }
         let connection = self.connection_at(base_url.clone()).await.ok()?;
@@ -349,7 +349,9 @@ impl GatewayRuntime {
         let offer = meta
             .tidebreak_machine_url
             .filter(|url| GatewayAuthConfig::new(url).is_ok());
-        *memo = Some((base_url, offer.clone()));
+        if let Some(offer) = offer.as_ref() {
+            *memo = Some((base_url, offer.clone()));
+        }
         offer
     }
 
@@ -1733,6 +1735,10 @@ mod tests {
     #[derive(Default)]
     struct FakeGateway {
         refreshes: AtomicUsize,
+        /// Number of metadata reads completed. Tests can delay the machine
+        /// offer until a later read to model a rolling Gateway deployment.
+        meta_reads: AtomicUsize,
+        machine_offer_after_reads: AtomicUsize,
         /// Every refresh token posted to `/oauth/revoke`, in order.
         revoked: std::sync::Mutex<Vec<String>>,
         /// When set, `/api/v1/cli/apps` answers 500 — the outage shape the
@@ -2202,21 +2208,25 @@ mod tests {
         Json(json!({}))
     }
 
+    async fn meta(State(gateway): State<Arc<FakeGateway>>) -> Json<Value> {
+        let read = gateway.meta_reads.fetch_add(1, Ordering::SeqCst);
+        let offer_after = gateway.machine_offer_after_reads.load(Ordering::SeqCst);
+        let mut metadata = json!({
+            "api_version": "v1",
+            "installation_id": "install-1",
+            "gateway_version": "1.0.0",
+            "public_url": "http://gateway.test",
+            "auth_mode": "oidc",
+        });
+        if read >= offer_after {
+            metadata["tidebreak_machine_url"] = json!("https://machine.tidebreak.test");
+        }
+        Json(metadata)
+    }
+
     async fn serve(gateway: Arc<FakeGateway>) -> std::net::SocketAddr {
         let app = AxumRouter::new()
-            .route(
-                "/api/v1/meta",
-                get(|| async {
-                    Json(json!({
-                        "api_version": "v1",
-                        "installation_id": "install-1",
-                        "gateway_version": "1.0.0",
-                        "public_url": "http://gateway.test",
-                        "auth_mode": "oidc",
-                        "tidebreak_machine_url": "https://machine.tidebreak.test",
-                    }))
-                }),
-            )
+            .route("/api/v1/meta", get(meta))
             .route("/oauth/token", post(token))
             .route("/oauth/revoke", post(revoke))
             .route("/api/v1/cli/models", get(models))
@@ -2315,6 +2325,28 @@ mod tests {
             runtime.offered_machine().await.url.as_deref(),
             Some("https://machine.tidebreak.test")
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_machine_offer_is_retried_during_the_same_process() {
+        let gateway = Arc::new(FakeGateway {
+            machine_offer_after_reads: AtomicUsize::new(1),
+            ..Default::default()
+        });
+        let address = serve(gateway.clone()).await;
+        let base = format!("http://{address}");
+        let (runtime, _store, _directory) = signed_in_runtime(&base).await;
+
+        assert!(runtime.offered_machine().await.url.is_none());
+        assert_eq!(
+            runtime.offered_machine().await.url.as_deref(),
+            Some("https://machine.tidebreak.test")
+        );
+        assert_eq!(
+            runtime.offered_machine().await.url.as_deref(),
+            Some("https://machine.tidebreak.test")
+        );
+        assert_eq!(gateway.meta_reads.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
