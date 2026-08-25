@@ -599,6 +599,24 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
+      # Generate this file before checking out the tag. Code from the release
+      # source cannot influence the command that creates the build configuration.
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.TIDEBREAK_VERSION,
+              bundle: { targets: ["app", "dmg"] },
+              // Release bundles register only the real scheme. The dev scheme
+              // stays in tauri.conf.json for debug bundles, but a release
+              // binary refuses tidebreak-dev:// links by design.
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
+            }));
+          '
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
@@ -679,22 +697,6 @@ jobs:
       # drift fails here, before any signing material is loaded.
       - name: Verify the third-party notices match the released graph
         run: node scripts/generate-third-party-notices.mjs --check
-
-      - name: Write tag-derived Tauri configuration
-        env:
-          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
-              version: process.env.TIDEBREAK_VERSION,
-              bundle: { targets: ["app", "dmg"] },
-              // Release bundles register only the real scheme. The dev scheme
-              // stays in tauri.conf.json for debug bundles, but a release
-              // binary refuses tidebreak-dev:// links by design.
-              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
-            }));
-          '
 
       - name: Compile without production credentials or bundles
         id: compile
@@ -1192,6 +1194,25 @@ jobs:
       SCCACHE_GHA_RW_MODE: READ_ONLY
       TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
     steps:
+      # Generate this file before checking out the tag. Code from the release
+      # source cannot influence the command that creates the build configuration.
+      - name: Write tag-derived Tauri configuration
+        env:
+          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
+              version: process.env.TIDEBREAK_VERSION,
+              // NSIS supports per-user installs without elevation and needs
+              // no WiX configuration.
+              bundle: { targets: ["nsis"] },
+              // Release bundles register only the real scheme. A release
+              // binary refuses tidebreak-dev:// links by design.
+              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
+            }));
+          '
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
@@ -1292,23 +1313,6 @@ jobs:
             echo "CMAKE_ASM_COMPILER=$clang_cl"
           } >> "$GITHUB_ENV"
           echo "Using $clang_cl with Ninja for Windows ARM native code"
-
-      - name: Write tag-derived Tauri configuration
-        env:
-          RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
-              version: process.env.TIDEBREAK_VERSION,
-              // NSIS supports per-user installs without elevation and needs
-              // no WiX configuration.
-              bundle: { targets: ["nsis"] },
-              // Release bundles register only the real scheme. A release
-              // binary refuses tidebreak-dev:// links by design.
-              plugins: { "deep-link": { desktop: { schemes: ["tidebreak"] } } }
-            }));
-          '
 
       - name: Compile without production credentials or bundles
         id: compile
