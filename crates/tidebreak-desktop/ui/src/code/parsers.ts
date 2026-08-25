@@ -3609,6 +3609,7 @@ export function parseCodeSessionDigest(
       "workspace",
       "session",
       "kind",
+      "harness_kind",
       "lifecycle",
       "attention",
       "title",
@@ -3625,6 +3626,8 @@ export function parseCodeSessionDigest(
     !nonEmpty(value.workspace) ||
     !nonEmpty(value.session) ||
     !isMember(value.kind, SESSION_KINDS) ||
+    (value.harness_kind !== undefined &&
+      !isMember(value.harness_kind, HARNESS_KINDS)) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     typeof value.title !== "string" ||
     !isFiniteNumber(value.turn_count) ||
@@ -3651,6 +3654,9 @@ export function parseCodeSessionDigest(
     workspace: value.workspace,
     session: value.session,
     kind: value.kind,
+    ...(value.harness_kind !== undefined
+      ? { harness_kind: value.harness_kind }
+      : {}),
     lifecycle: value.lifecycle,
     attention,
     title: value.title,
@@ -3700,6 +3706,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "workspace",
           "session",
           "kind",
+          "harness_kind",
           "lifecycle",
           "attention",
           "title",
@@ -3716,6 +3723,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !nonEmpty(value.workspace) ||
         !nonEmpty(value.session) ||
         !isMember(value.kind, SESSION_KINDS) ||
+        (value.harness_kind !== undefined &&
+          !isMember(value.harness_kind, HARNESS_KINDS)) ||
         !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
         typeof value.title !== "string" ||
         !isFiniteNumber(value.turn_count) ||
@@ -3746,6 +3755,9 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         workspace: value.workspace,
         session: value.session,
         kind: value.kind,
+        ...(value.harness_kind !== undefined
+          ? { harness_kind: value.harness_kind }
+          : {}),
         lifecycle: value.lifecycle,
         attention,
         title: value.title,

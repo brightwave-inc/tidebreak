@@ -434,6 +434,7 @@ async fn build_digest(
         workspace: session.workspace_id,
         session: session.id,
         kind: session.kind,
+        harness_kind: session.harness_kind,
         lifecycle: session.lifecycle,
         attention: session.attention.clone(),
         title: workspace.title,

@@ -1810,6 +1810,12 @@ pub struct CodeSessionDigest {
     pub workspace: WorkspaceId,
     pub session: tidebreak_core::CodeSessionId,
     pub kind: CodeSessionKind,
+    /// Engine identity for list surfaces that collapse several sessions into
+    /// one workspace row. Optional on the wire so a desktop can still read a
+    /// digest from an older server during an update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub harness_kind: Option<HarnessKind>,
     pub lifecycle: CodeSessionLifecycle,
     pub attention: Attention,
     pub title: String,
@@ -1855,6 +1861,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             workspace: digest.workspace,
             session: digest.session,
             kind: digest.kind,
+            harness_kind: Some(digest.harness_kind),
             lifecycle: digest.lifecycle,
             attention: digest.attention,
             title: digest.title,
@@ -1887,6 +1894,10 @@ pub enum CodeUpdateNotice {
         workspace: WorkspaceId,
         session: tidebreak_core::CodeSessionId,
         kind: CodeSessionKind,
+        /// Engine identity for the session represented by this digest.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        harness_kind: Option<HarnessKind>,
         lifecycle: CodeSessionLifecycle,
         attention: Attention,
         title: String,
@@ -1992,6 +2003,7 @@ impl CodeUpdateNotice {
             workspace: wire.workspace,
             session: wire.session,
             kind: wire.kind,
+            harness_kind: wire.harness_kind,
             lifecycle: wire.lifecycle,
             attention: wire.attention,
             title: wire.title,
