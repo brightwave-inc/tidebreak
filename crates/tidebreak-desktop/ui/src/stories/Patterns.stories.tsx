@@ -233,6 +233,7 @@ $ pnpm test -- TaskPlanCard.dom.test.tsx`}
                   last_error_code: null,
                   activity: { kind: "exec", status: "running" },
                   submitted_outputs: [],
+                  terminal_text: null,
                   created_at: "2026-08-24T13:00:00Z",
                   updated_at: "2026-08-24T13:00:00Z",
                 },
