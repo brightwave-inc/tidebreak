@@ -93,11 +93,17 @@ it("offers workspace paths as insertable mention rows", () => {
 
 it("offers only approved folders this conversation has not attached", () => {
   const approved = [
-    { rootId: "root-1", displayName: "Reports", status: "connected" as const },
+    {
+      rootId: "root-1",
+      displayName: "Reports",
+      status: "connected" as const,
+      availableInFutureChats: true,
+    },
     {
       rootId: "root-2",
       displayName: "Contracts",
       status: "connected" as const,
+      availableInFutureChats: false,
     },
   ];
 

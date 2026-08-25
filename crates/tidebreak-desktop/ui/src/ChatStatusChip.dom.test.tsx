@@ -11,6 +11,7 @@ const folder = {
   rootId: "root-1",
   displayName: "Notes",
   status: "connected",
+  availableInFutureChats: true,
   statements: [],
 } as unknown as ChatFolderAccess;
 

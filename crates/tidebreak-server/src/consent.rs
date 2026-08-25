@@ -117,6 +117,8 @@ pub enum ConsentMethodSnapshot {
     ApprovalCard,
     /// A folder chosen through the trusted native picker.
     FolderPicker,
+    /// An approved folder saved for automatic use in future chats.
+    TrustedFolder,
     /// An explicit permission dialog.
     PermissionDialog,
     /// A local operator deliberately provisioned a headless installation.

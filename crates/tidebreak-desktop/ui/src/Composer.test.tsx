@@ -665,6 +665,7 @@ describe("composerFolderChips", () => {
         rootId: "root-1",
         displayName: "Downloads",
         status: "connected",
+        availableInFutureChats: true,
         statements: [],
       },
     ],

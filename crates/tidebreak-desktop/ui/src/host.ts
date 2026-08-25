@@ -11,6 +11,7 @@ export type ConnectedFolder = {
   rootId: string;
   displayName: string;
   status: FolderStatus;
+  availableInFutureChats: boolean;
 };
 
 export type FolderAccessDecision = "allow" | "decline";
@@ -170,6 +171,24 @@ export function connectApprovedFolder(
   });
 }
 
+/** Attach every saved folder before a newly created chat can start work. */
+export function attachTrustedFolders(chat: {
+  id: string;
+}): Promise<ConnectedFolder[]> {
+  if (!hasLocalHostAuthority()) return Promise.resolve([]);
+  return invoke("attach_trusted_folders", { chatId: chat.id });
+}
+
+/** Change whether one approved folder attaches to future chats. */
+export function setTrustedFolder(
+  rootId: string,
+  trusted: boolean,
+): Promise<boolean> {
+  return invoke("set_trusted_folder", {
+    request: { rootId, trusted },
+  });
+}
+
 export function disconnectFolder(chat: Chat, rootId: string): Promise<boolean> {
   return invoke("disconnect_folder", {
     request: { chatId: chat.id, rootId },
@@ -177,10 +196,7 @@ export function disconnectFolder(chat: Chat, rootId: string): Promise<boolean> {
 }
 
 /**
- * Withdraw the host approval for a folder the broker can no longer reach —
- * the remove half of the set-aside surface, for a folder that is gone for
- * good. Refused for live folders, whose exit is the per-chat disconnect.
- * Returns whether anything was revoked.
+ * Withdraw one folder's host approval, grants, and chat attachments everywhere.
  */
 export function forgetFolder(rootId: string): Promise<boolean> {
   return invoke("forget_folder", {

@@ -853,12 +853,16 @@ pub struct HelloResult {
     pub operations: Vec<String>,
 }
 
-/// Safe agent-facing identity for a connected folder.
+/// Safe trusted-control identity for an approved folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootSummary {
     pub root_id: RootId,
     pub display_name: String,
+    /// Original registering subject. Present on trusted management listings
+    /// and current registration receipts so the desktop can revoke the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GrantSubject>,
 }
 
 /// One capability grant with its consent provenance, for the management UI.
@@ -1182,6 +1186,7 @@ mod tests {
             root: RootSummary {
                 root_id: RootId::new(),
                 display_name: "Documents".to_owned(),
+                owner: None,
             },
         });
         let encoded = serde_json::to_string(&control).unwrap();

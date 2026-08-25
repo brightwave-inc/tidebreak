@@ -772,6 +772,7 @@ function StoryChat({
       rootId: "folder-research",
       displayName: "Research notes",
       status: "connected",
+      availableInFutureChats: true,
       statements: [],
     },
   ];

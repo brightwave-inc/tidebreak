@@ -103,6 +103,8 @@ pub enum Scope {
 pub enum ConsentMethod {
     /// The user chose a folder through a trusted native picker.
     FolderPicker,
+    /// The user saved an approved folder for automatic use in future chats.
+    TrustedFolder,
     /// The user approved a capability in an explicit permission dialog.
     PermissionDialog,
     /// A local operator deliberately provisioned a headless installation.

@@ -158,6 +158,7 @@ export function resourceLabel(statement: ConsentStatementSnapshot): string {
 const METHOD_PHRASES: Record<ConsentStatementSnapshot["method"], string> = {
   approval_card: "from an approval card",
   folder_picker: "with the folder picker",
+  trusted_folder: "from a saved folder",
   permission_dialog: "in a permission dialog",
   operator_config: "by operator configuration",
   carried_forward: "carried forward from an earlier approval",

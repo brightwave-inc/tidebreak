@@ -4,8 +4,8 @@ import { create } from "zustand";
  * The one native file-or-folder picker the host will have open at a time.
  *
  * Every surface that opens one — a folder-access decision, connecting a folder,
- * confirming a previously approved one, importing a source, exporting an output
- * — ends up at the same host mutex, and the host rejects a second call outright
+ * importing a source, or exporting an output — ends up at the same host mutex,
+ * and the host rejects a second call outright
  * rather than queueing it. So the latch that keeps a reader from starting a
  * second one has to be app-wide and shared by all of them: a latch held by only
  * one caller does not prevent the collision, it just decides which caller gets
@@ -24,7 +24,6 @@ export type NativePickerLatchStore = {
 /** Stable holders for the surfaces that are not keyed by a call id. */
 export const PICKER_HOLDERS = {
   connectFolder: "connect-folder",
-  confirmApprovedFolder: "confirm-approved-folder",
   grantFolderCapability: "grant-folder-capability",
   importSource: "import-source",
   exportOutput: "export-output",

@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { CodingHarnessesPanel } from "@/settings/CodingHarnessesPanel";
 import { ConnectedAppsPanel } from "@/settings/ConnectedAppsPanel";
@@ -208,6 +208,54 @@ export const ConnectedAppsEmpty: Story = {
       ),
     ).toBeVisible();
   },
+};
+
+const MCP_IMPORT_FILE_NAME =
+  "desktop-mcp-configuration-for-the-customer-support-workspace.json";
+
+const connectedAppsMcpImportPlay = async (canvasElement: HTMLElement) => {
+  const canvas = within(canvasElement);
+  const file = new File(
+    [
+      JSON.stringify({
+        mcpServers: {
+          calendar_sync_for_incident_team: {
+            command: "npx",
+            args: ["-y", "@example/calendar-mcp"],
+            env: {
+              CALENDAR_TOKEN_FOR_THE_CUSTOMER_SUPPORT_INCIDENT_WORKSPACE:
+                "not-imported",
+            },
+          },
+          "invalid.server.name.that.must.wrap": {
+            command: "invalid-server",
+          },
+        },
+      }),
+    ],
+    MCP_IMPORT_FILE_NAME,
+    { type: "application/json" },
+  );
+  await userEvent.upload(
+    await canvas.findByLabelText("Import MCP configuration"),
+    file,
+  );
+  const summary = await canvas.findByRole("status");
+  await expect(summary).toHaveTextContent(
+    `1 server added to the editor from ${MCP_IMPORT_FILE_NAME}. 1 entry was skipped.`,
+  );
+  summary.scrollIntoView({ block: "center" });
+};
+
+export const ConnectedAppsMcpImportSummary: Story = {
+  args: { panel: "connected-apps", state: "empty" },
+  play: ({ canvasElement }) => connectedAppsMcpImportPlay(canvasElement),
+};
+
+export const ConnectedAppsMcpImportSummaryCompact: Story = {
+  args: { panel: "connected-apps", state: "empty" },
+  parameters: { viewport: { defaultViewport: "compact" } },
+  play: ({ canvasElement }) => connectedAppsMcpImportPlay(canvasElement),
 };
 
 export const ConnectedAppsFailure: Story = {

@@ -3,13 +3,13 @@
 //! A skill is a directory whose `SKILL.md` teaches the model how to do one
 //! kind of work through `exec`: which pinned libraries to install, the
 //! conventions for saving deliverables, and the quality checks to run
-//! before declaring the work done. The directory may also carry a `scripts/`
-//! subdirectory of helper files. The host stages each skill into
-//! `<scratch>/.tidebreak/skills/<name>/` before a command runs and
+//! before declaring the work done. The directory may also carry helper files,
+//! scripts, references, and assets. The host stages the complete bounded tree
+//! into `<scratch>/.tidebreak/skills/<name>/` before a command runs and
 //! advertises only the parsed (name, description) catalog in the operating
 //! prompt; the instruction body reaches the model exclusively through
-//! `read_file`, never through prompt composition, and script bytes never
-//! reach it at all.
+//! `read_file`, never through prompt composition, and resource bytes follow
+//! the same on-demand path.
 //!
 //! Skills come from two sources: the built-in packages shipped with the
 //! application, and user-authored packages the host loads from a per-install
@@ -24,7 +24,10 @@
 //! half-understood package: the catalog line and the staged files must come
 //! from the same successfully validated manifest.
 
+use std::borrow::Cow;
 use std::path::Path;
+
+use crate::types::WorkspaceFilePath;
 
 /// Stable workspace-relative directory that staged skills are installed under.
 pub const SKILLS_DIR: &str = ".tidebreak/skills";
@@ -39,7 +42,12 @@ const MAX_NAME_BYTES: usize = 64;
 const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_DEPS_PER_LIST: usize = 8;
 const MAX_DEP_BYTES: usize = 100;
-const MAX_SKILL_SCRIPTS: usize = 16;
+const MAX_SKILL_ENTRIES: usize = 512;
+const MAX_SKILL_RESOURCE_FILES: usize = 256;
+const MAX_SKILL_DIRECTORIES: usize = 128;
+const MAX_SKILL_DEPTH: usize = 8;
+const MAX_SKILL_BYTES: u64 = 32 * 1024 * 1024;
+const ROOT_RELATIVE_RESOURCE_PREFIX: &str = "./";
 
 /// A host-provided tool a skill depends on, from a closed vocabulary.
 ///
@@ -114,19 +122,49 @@ pub struct LoadedSkill {
     pub package: SkillPackage,
     /// The full `SKILL.md` source, staged verbatim.
     pub manifest: String,
-    /// Helper files from the package's `scripts/` directory, staged verbatim
-    /// beside the manifest. Their bytes never enter prompt composition.
+    /// Files from the package tree, staged verbatim beside the manifest with
+    /// their relative paths intact. Their bytes never enter prompt composition.
+    ///
+    /// The field name remains for compatibility with plugin installation code
+    /// that predates general skill resources.
     pub scripts: Vec<SkillScript>,
 }
 
-/// One helper file staged into a skill's `scripts/` directory.
+/// One resource staged into a skill package.
 #[derive(Debug, Clone)]
 pub struct SkillScript {
-    /// The file's own name; always a single path component.
+    /// An encoded package-relative path. Loader-created values preserve the
+    /// complete path. A legacy bare name still means `scripts/<name>`.
     pub name: String,
-    /// The file's bytes, staged verbatim. Scripts are arbitrary text or
-    /// binary payloads the sandbox may run, so they are never decoded here.
+    /// The file's bytes, staged verbatim. Resources may be text or binary, so
+    /// they are never decoded here.
     pub content: Vec<u8>,
+}
+
+impl SkillScript {
+    fn from_skill_relative_path(path: &WorkspaceFilePath, content: Vec<u8>) -> Self {
+        Self {
+            name: format!("{ROOT_RELATIVE_RESOURCE_PREFIX}{}", path.as_str()),
+            content,
+        }
+    }
+
+    /// Return the resource's normalized path relative to the skill root.
+    ///
+    /// Bare names keep the original `scripts/<name>` meaning for callers that
+    /// still construct [`SkillScript`] directly.
+    #[must_use]
+    pub fn staged_relative_path(&self) -> Option<Cow<'_, str>> {
+        if let Some(path) = self.name.strip_prefix(ROOT_RELATIVE_RESOURCE_PREFIX) {
+            WorkspaceFilePath::parse(path.to_owned()).ok()?;
+            return Some(Cow::Borrowed(path));
+        }
+        WorkspaceFilePath::parse(self.name.clone()).ok()?;
+        if self.name.contains('/') {
+            return None;
+        }
+        Some(Cow::Owned(format!("{SKILL_SCRIPTS_DIR}/{}", self.name)))
+    }
 }
 
 /// Why a skill manifest was rejected.
@@ -547,8 +585,8 @@ pub fn load_skills(source: &Path, origin: SkillOrigin) -> Vec<LoadedSkill> {
             );
             continue;
         }
-        let Some(scripts) = load_skill_scripts(&entry.path().join(SKILL_SCRIPTS_DIR)) else {
-            tracing::warn!("skipping skill '{directory_name}': its scripts/ exceeds the limits");
+        let Some(scripts) = load_skill_resources(&entry.path(), manifest.len()) else {
+            tracing::warn!("skipping skill '{directory_name}': its resources are invalid");
             continue;
         };
         skills.push(LoadedSkill {
@@ -561,64 +599,114 @@ pub fn load_skills(source: &Path, origin: SkillOrigin) -> Vec<LoadedSkill> {
     skills
 }
 
-/// Read a skill's optional `scripts/` directory: regular files one level deep,
-/// symlink-safe at every step, sorted by name.
+/// Read every resource below a skill root while preserving its relative path.
 ///
-/// Returns `None` when the directory breaks a bound — more than
-/// [`MAX_SKILL_SCRIPTS`] files, or one larger than the workspace file limit —
-/// so the caller drops the whole package. A half-staged skill whose
-/// instructions reference a script that never arrived fails in the sandbox,
-/// where the model cannot tell a missing helper from a broken one; not
-/// advertising the skill at all is the honest outcome. A missing directory is
-/// simply an empty script set.
-fn load_skill_scripts(source: &Path) -> Option<Vec<SkillScript>> {
-    let is_directory = source
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
-    if !is_directory {
-        return Some(Vec::new());
-    }
-    let entries = match std::fs::read_dir(source) {
-        Ok(entries) => entries,
+/// The loader rejects the complete package when any entry is a symlink, is not
+/// a regular file or directory, cannot be read, or breaks the import bounds.
+/// That keeps the catalog and staged package tree in sync.
+fn load_skill_resources(source: &Path, manifest_bytes: usize) -> Option<Vec<SkillScript>> {
+    let mut limits = SkillResourceLimits {
+        bytes: manifest_bytes as u64,
+        ..SkillResourceLimits::default()
+    };
+    let mut resources = Vec::new();
+    load_skill_resource_directory(source, "", 0, &mut limits, &mut resources)?;
+    resources.sort_by(|left, right| left.name.cmp(&right.name));
+    Some(resources)
+}
+
+#[derive(Default)]
+struct SkillResourceLimits {
+    entries: usize,
+    files: usize,
+    directories: usize,
+    bytes: u64,
+}
+
+fn load_skill_resource_directory(
+    source: &Path,
+    relative_directory: &str,
+    depth: usize,
+    limits: &mut SkillResourceLimits,
+    resources: &mut Vec<SkillScript>,
+) -> Option<()> {
+    let mut entries = match std::fs::read_dir(source) {
+        Ok(entries) => entries.collect::<Result<Vec<_>, _>>().ok()?,
         Err(error) => {
             tracing::warn!(
-                "skill scripts at {} are unreadable: {error}",
+                "skill resources at {} are unreadable: {error}",
                 source.display()
             );
             return None;
         }
     };
-    let mut scripts = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        let regular_file = entry
-            .path()
-            .symlink_metadata()
-            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
-        if !regular_file {
-            // A nested directory or a symlink is not staged; the package's own
-            // files still are.
-            tracing::warn!("skipping skill script '{name}': not a regular file");
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in entries {
+        let name = entry.file_name().into_string().ok()?;
+        if depth == 0 && name == SKILL_MANIFEST_FILE {
             continue;
         }
-        let Ok(content) = std::fs::read(entry.path()) else {
-            tracing::warn!("skill script '{name}' is unreadable");
+        limits.entries += 1;
+        if limits.entries > MAX_SKILL_ENTRIES {
+            tracing::warn!("a skill declares more than {MAX_SKILL_ENTRIES} files and folders");
             return None;
+        }
+
+        let metadata = entry.path().symlink_metadata().ok()?;
+        if metadata.file_type().is_symlink() {
+            tracing::warn!("skill resource '{name}' is a symbolic link");
+            return None;
+        }
+        let relative = if relative_directory.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative_directory}/{name}")
         };
+        let path = WorkspaceFilePath::parse(relative.clone()).ok()?;
+
+        if metadata.is_dir() {
+            if depth >= MAX_SKILL_DEPTH {
+                tracing::warn!("skill resource directory '{relative}' exceeds the depth limit");
+                return None;
+            }
+            limits.directories += 1;
+            if limits.directories > MAX_SKILL_DIRECTORIES {
+                tracing::warn!("a skill declares more than {MAX_SKILL_DIRECTORIES} directories");
+                return None;
+            }
+            load_skill_resource_directory(
+                &entry.path(),
+                path.as_str(),
+                depth + 1,
+                limits,
+                resources,
+            )?;
+            continue;
+        }
+        if !metadata.is_file() {
+            tracing::warn!("skill resource '{relative}' is not a regular file");
+            return None;
+        }
+
+        limits.files += 1;
+        if limits.files > MAX_SKILL_RESOURCE_FILES {
+            tracing::warn!("a skill declares more than {MAX_SKILL_RESOURCE_FILES} resource files");
+            return None;
+        }
+        let content = std::fs::read(entry.path()).ok()?;
         if content.len() > crate::MAX_WORKSPACE_FILE_BYTES {
-            tracing::warn!("skill script '{name}' exceeds the workspace file limit");
+            tracing::warn!("skill resource '{relative}' exceeds the workspace file limit");
             return None;
         }
-        scripts.push(SkillScript { name, content });
-        if scripts.len() > MAX_SKILL_SCRIPTS {
-            tracing::warn!("a skill declares more than {MAX_SKILL_SCRIPTS} scripts");
+        limits.bytes = limits.bytes.checked_add(content.len() as u64)?;
+        if limits.bytes > MAX_SKILL_BYTES {
+            tracing::warn!("a skill's resources exceed the package byte limit");
             return None;
         }
+        resources.push(SkillScript::from_skill_relative_path(&path, content));
     }
-    scripts.sort_by(|a, b| a.name.cmp(&b.name));
-    Some(scripts)
+    Some(())
 }
 
 /// The built-in skills plus the user-authored packages under `user_dir`,
@@ -917,33 +1005,47 @@ Instructions.\n";
         assert!(skills[0].scripts.is_empty());
     }
 
-    /// Contract: a package's `scripts/` directory is collected verbatim beside
-    /// the manifest, and a package that breaks the staging bounds drops out
-    /// whole rather than reaching the catalog with helpers the sandbox will
-    /// not find.
+    /// Contract: the complete package tree is collected with its relative paths
+    /// intact, and a package that breaks the staging bounds drops out whole.
     #[test]
-    fn scripts_are_collected_within_bounds_or_the_skill_drops_out() {
+    fn resources_are_collected_recursively_or_the_skill_drops_out() {
         let source = tempfile::tempdir().unwrap();
         let skill = source.path().join("pdf-documents");
         let scripts = skill.join(SKILL_SCRIPTS_DIR);
-        std::fs::create_dir_all(&scripts).unwrap();
+        let references = skill.join("references").join("formats");
+        let assets = skill.join("assets").join("templates");
+        std::fs::create_dir_all(scripts.join("lib")).unwrap();
+        std::fs::create_dir_all(&references).unwrap();
+        std::fs::create_dir_all(&assets).unwrap();
         std::fs::write(skill.join(SKILL_MANIFEST_FILE), VALID).unwrap();
         std::fs::write(scripts.join("fill.py"), "print('fill')").unwrap();
-        std::fs::write(scripts.join("build.py"), "print('build')").unwrap();
-        // One level only: a nested directory is not staged, and does not cost
-        // the package its catalog entry.
-        std::fs::create_dir(scripts.join("nested")).unwrap();
+        std::fs::write(scripts.join("lib").join("layout.py"), "LAYOUT = 1").unwrap();
+        std::fs::write(references.join("pdf-a.md"), "PDF/A guidance").unwrap();
+        std::fs::write(assets.join("page.bin"), [0, 1, 2]).unwrap();
+        std::fs::write(skill.join("validate.sh"), "exit 0").unwrap();
 
         let loaded = load_skills(source.path(), SkillOrigin::Builtin);
         assert_eq!(
             loaded[0]
                 .scripts
                 .iter()
-                .map(|script| (script.name.as_str(), script.content.as_slice()))
+                .map(|resource| (
+                    resource.staged_relative_path().unwrap().into_owned(),
+                    resource.content.as_slice(),
+                ))
                 .collect::<Vec<_>>(),
             [
-                ("build.py", b"print('build')".as_slice()),
-                ("fill.py", b"print('fill')".as_slice()),
+                (
+                    "assets/templates/page.bin".to_owned(),
+                    b"\0\x01\x02".as_slice(),
+                ),
+                (
+                    "references/formats/pdf-a.md".to_owned(),
+                    b"PDF/A guidance".as_slice(),
+                ),
+                ("scripts/fill.py".to_owned(), b"print('fill')".as_slice()),
+                ("scripts/lib/layout.py".to_owned(), b"LAYOUT = 1".as_slice(),),
+                ("validate.sh".to_owned(), b"exit 0".as_slice()),
             ]
         );
 
@@ -955,7 +1057,7 @@ Instructions.\n";
         assert!(load_skills(source.path(), SkillOrigin::Builtin).is_empty());
         std::fs::remove_file(scripts.join("huge.py")).unwrap();
 
-        for index in 0..=MAX_SKILL_SCRIPTS {
+        for index in 0..=MAX_SKILL_RESOURCE_FILES {
             std::fs::write(scripts.join(format!("extra{index}.py")), "pass").unwrap();
         }
         assert!(load_skills(source.path(), SkillOrigin::Builtin).is_empty());

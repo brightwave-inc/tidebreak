@@ -1,5 +1,6 @@
+import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import type { PluginCatalog, PluginSkillInfo } from "@/api";
 import { PluginDetailView } from "@/plugins/PluginDetailView";
@@ -172,6 +173,77 @@ export const Empty: Story = {
 };
 
 export const DenseCatalog: Story = {};
+
+const importedSkillNames = [
+  "incident-review",
+  "customer-support-incident-review-with-a-long-unbroken-skill-name",
+];
+
+const importReport = {
+  imported: importedSkillNames,
+  skipped: [
+    {
+      name: "draft-helper",
+      reason: "No regular SKILL.md was found",
+    },
+  ],
+  conflicts: [
+    {
+      name: "documents",
+      reason: "A skill included with Tidebreak already uses this name",
+    },
+  ],
+};
+
+const catalogAfterImport: PluginCatalog = {
+  ...catalog,
+  skills: [
+    ...catalog.skills,
+    ...importedSkillNames.map((name) => ({
+      name,
+      description: "Imported from a local skill folder.",
+      origin: "user" as const,
+      enabled: true,
+    })),
+  ],
+};
+
+function ImportResultsStory() {
+  const [storyCatalog, setStoryCatalog] = useState(catalog);
+  return (
+    <PluginsView
+      state={state({
+        catalog: storyCatalog,
+        reload: () => setStoryCatalog(catalogAfterImport),
+      })}
+      loadInstructions={loadInstructions}
+      onOpen={fn()}
+      importSkills={async () => importReport}
+    />
+  );
+}
+
+const importResultsPlay = async (canvasElement: HTMLElement) => {
+  const canvas = within(canvasElement);
+  await userEvent.click(
+    await canvas.findByRole("button", { name: "Import skills" }),
+  );
+  const summary = await canvas.findByText("Skill import complete");
+  await expect(summary).toBeInTheDocument();
+  await expect(await canvas.findAllByText("incident-review")).toHaveLength(2);
+  summary.scrollIntoView({ block: "center" });
+};
+
+export const ImportResults: Story = {
+  render: () => <ImportResultsStory />,
+  play: ({ canvasElement }) => importResultsPlay(canvasElement),
+};
+
+export const ImportResultsCompact: Story = {
+  render: () => <ImportResultsStory />,
+  parameters: { viewport: { defaultViewport: "compact" } },
+  play: ({ canvasElement }) => importResultsPlay(canvasElement),
+};
 
 export const LoadFailure: Story = {
   args: {

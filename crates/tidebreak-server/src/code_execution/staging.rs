@@ -273,9 +273,9 @@ pub(super) async fn prepare_execution_directories(
 }
 
 /// Stage the validated skills (built-in and user-authored) into
-/// `.tidebreak/skills/<name>/`: the manifest, plus any helper files the package
-/// carries under `scripts/`. Anything already staged under a name that is not
-/// in `skills` is removed, so the staged tree is exactly the enabled set.
+/// `.tidebreak/skills/<name>/`: the manifest, plus every bounded resource in
+/// the package tree. Anything already staged is removed before installation,
+/// so deleted resources cannot survive a later staging pass.
 ///
 /// Each destination is resolved a component at a time for the same reason the
 /// helper install is: `.tidebreak/` is writable by local exec, so a planted
@@ -288,26 +288,35 @@ pub(super) async fn install_skills(
     let root = resolve_scratch_directory(host_dir, tidebreak_code_execution::SKILLS_DIR, true)
         .await
         .ok_or_else(|| ExecError::Sandbox("the staged skills directory is unavailable".into()))?;
-    // Staging is the whole set, not an accumulation. A skill the install has
-    // switched off — or one the user deleted — must leave a workspace that
-    // staged it on an earlier turn, or the model could still `read_file`
-    // instructions the catalog no longer advertises. Removal is best effort:
-    // a leftover directory is untidy, but failing the command over it would
-    // take working execution down with it.
-    for entry in root.entries().await.unwrap_or_default() {
-        if skills.iter().any(|skill| skill.package.name == entry.name) {
-            continue;
-        }
+    // Staging is the whole set, not an accumulation. Recreate active skills so
+    // a resource removed from the stored package leaves the workspace too.
+    // Removal remains best effort only for inactive entries, matching the old
+    // cleanup behavior for a disabled or deleted skill.
+    let entries = root
+        .entries()
+        .await
+        .map_err(|_| ExecError::Sandbox("the staged skills directory is unreadable".into()))?;
+    for entry in entries {
+        let active = skills.iter().any(|skill| skill.package.name == entry.name);
         let removed = match entry.kind {
             tidebreak_code_execution::ScratchEntryKind::Directory => {
                 root.remove_dir_all(&entry.name).await
             }
             kind => root.remove(&entry.name, kind).await,
         };
-        if let Err(error) = removed {
-            tracing::warn!(
-                "a skill no longer staged could not be removed from the workspace: {error}"
-            );
+        match removed {
+            Ok(()) => {}
+            Err(_) if active => {
+                return Err(ExecError::Sandbox(format!(
+                    "skill '{}' could not be refreshed",
+                    entry.name
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "a skill no longer staged could not be removed from the workspace: {error}"
+                );
+            }
         }
     }
     for skill in skills {
@@ -326,30 +335,34 @@ pub(super) async fn install_skills(
             )
             .await
             .map_err(|_| ExecError::Sandbox(format!("skill '{name}' could not be installed")))?;
-        if skill.scripts.is_empty() {
-            continue;
-        }
-        let scripts = resolve_scratch_directory(
-            host_dir,
-            &format!(
-                "{}/{name}/{}",
-                tidebreak_code_execution::SKILLS_DIR,
-                tidebreak_code_execution::SKILL_SCRIPTS_DIR
-            ),
-            true,
-        )
-        .await
-        .ok_or_else(|| {
-            ExecError::Sandbox(format!("skill '{name}' scripts directory is unavailable"))
-        })?;
-        for script in &skill.scripts {
-            scripts
-                .write_file(&script.name, &script.content)
+        for resource in &skill.scripts {
+            let relative = resource.staged_relative_path().ok_or_else(|| {
+                ExecError::Sandbox(format!("skill '{name}' contains an invalid resource path"))
+            })?;
+            let (parent, file_name) = relative
+                .rsplit_once('/')
+                .map_or(("", relative.as_ref()), |(parent, file_name)| {
+                    (parent, file_name)
+                });
+            let parent = if parent.is_empty() {
+                format!("{}/{name}", tidebreak_code_execution::SKILLS_DIR)
+            } else {
+                format!("{}/{name}/{parent}", tidebreak_code_execution::SKILLS_DIR)
+            };
+            let destination = resolve_scratch_directory(host_dir, &parent, true)
+                .await
+                .ok_or_else(|| {
+                    ExecError::Sandbox(format!(
+                        "skill '{name}' resource directory '{parent}' is unavailable"
+                    ))
+                })?;
+            destination
+                .write_file(file_name, &resource.content)
                 .await
                 .map_err(|_| {
                     ExecError::Sandbox(format!(
-                        "skill '{name}' script '{}' could not be installed",
-                        script.name
+                        "skill '{name}' resource '{}' could not be installed",
+                        relative
                     ))
                 })?;
         }

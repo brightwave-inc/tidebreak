@@ -1250,7 +1250,7 @@ impl Controller {
         let outcome = match prepared {
             Ok(prepared) => {
                 let existing = preferred_root_alias(&next, &prepared.root);
-                if let Some((root_id, display_name)) = existing {
+                if let Some((root_id, display_name, owner)) = existing {
                     // Picking a folder this conversation already has is the
                     // same non-event as attaching one it already has: it says
                     // where the folder may be used, and the chat is already
@@ -1277,6 +1277,7 @@ impl Controller {
                         root: RootSummary {
                             root_id,
                             display_name,
+                            owner: Some(owner),
                         },
                     })
                 } else {
@@ -1284,6 +1285,7 @@ impl Controller {
                         root: RootSummary {
                             root_id: prepared.root_id,
                             display_name: prepared.root.display_name.clone(),
+                            owner: Some(prepared.root.owner),
                         },
                     };
                     next.roots.insert(prepared.root_id, prepared.root);
@@ -4246,7 +4248,10 @@ fn ensure_subject_grants(
     Ok(())
 }
 
-fn preferred_root_alias(state: &State, candidate: &RegisteredRoot) -> Option<(RootId, String)> {
+fn preferred_root_alias(
+    state: &State,
+    candidate: &RegisteredRoot,
+) -> Option<(RootId, String, GrantSubject)> {
     state
         .roots
         .iter()
@@ -4254,7 +4259,7 @@ fn preferred_root_alias(state: &State, candidate: &RegisteredRoot) -> Option<(Ro
         // Preserve an existing subject's legacy product root ID when possible,
         // then use the opaque UUID as the host-wide deterministic tie-breaker.
         .min_by_key(|(root_id, root)| (root.owner != candidate.owner, root_id.as_uuid()))
-        .map(|(root_id, root)| (*root_id, root.display_name.clone()))
+        .map(|(root_id, root)| (*root_id, root.display_name.clone(), root.owner))
 }
 
 /// Record that an approved folder went dark, without naming its host path.
@@ -4368,6 +4373,7 @@ fn list_approved_roots(state: &State) -> Result<Vec<RootSummary>, ErrorResponse>
         .map(|(root_id, root)| RootSummary {
             root_id: *root_id,
             display_name: root.display_name.clone(),
+            owner: Some(root.owner),
         })
         .collect::<Vec<_>>();
     roots.sort_by(|left, right| {

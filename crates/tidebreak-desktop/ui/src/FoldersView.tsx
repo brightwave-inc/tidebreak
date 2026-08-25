@@ -8,6 +8,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import {
   Empty,
   EmptyContent,
@@ -26,6 +27,7 @@ import {
   listCapabilityConsents,
   listConnectedFolders,
   revokeCapabilityConsent,
+  setTrustedFolder,
   type ConnectedFolder,
   type WidenedFolderCapability,
 } from "./host";
@@ -137,9 +139,29 @@ export function FoldersView({ chat }: { chat: Chat }) {
   }
 
   async function addApprovedFolder(rootId: string) {
-    await withPicker(PICKER_HOLDERS.confirmApprovedFolder, () =>
-      connectApprovedFolder(chat, rootId),
-    );
+    setWorking(true);
+    try {
+      const connected = await connectApprovedFolder(chat, rootId);
+      if (connected) useRefreshSignals.getState().signal("folderAccess");
+    } catch (err) {
+      toast.error(hostErrorMessage(err, "The folder could not be connected."));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function setFutureChats(folder: ConnectedFolder, trusted: boolean) {
+    setWorking(true);
+    try {
+      await setTrustedFolder(folder.rootId, trusted);
+      useRefreshSignals.getState().signal("folderAccess");
+    } catch (err) {
+      toast.error(
+        hostErrorMessage(err, "The future chat setting could not be changed."),
+      );
+    } finally {
+      setWorking(false);
+    }
   }
 
   /**
@@ -182,11 +204,11 @@ export function FoldersView({ chat }: { chat: Chat }) {
    * is deliberately not a button: the attachment and grants are riding out
    * the outage, so the folder comes back on its own when its directory does.
    */
-  async function forgetUnavailableFolder(folder: ConnectedFolder) {
+  async function forgetApprovedFolder(folder: ConnectedFolder) {
     const accepted = await confirm({
       title: `Forget ${folder.displayName}?`,
       description:
-        "Withdraws Tidebreak's approval for this folder everywhere, for all work. If the folder comes back, connect it again from scratch.",
+        "Tidebreak removes this folder from every chat and withdraws its access everywhere. To use it again, connect it from scratch.",
       confirmLabel: "Forget",
       destructive: true,
     });
@@ -271,9 +293,9 @@ export function FoldersView({ chat }: { chat: Chat }) {
               </EmptyMedia>
               <EmptyTitle>No folders connected</EmptyTitle>
               <EmptyDescription>
-                Connect a folder to let Tidebreak work with files on your
-                computer in this conversation. It can reach only the folders you
-                attach here, and each one shows what it allows.
+                Connect a folder once to let Tidebreak read and write it in this
+                chat and future chats. You can still disconnect it from one chat
+                or forget it everywhere.
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>{connectButton}</EmptyContent>
@@ -304,16 +326,33 @@ export function FoldersView({ chat }: { chat: Chat }) {
                       name={folder.displayName}
                       reach={reach}
                       action={
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          disabled={working}
-                          onClick={() => void removeFolder(folder)}
-                        >
-                          Disconnect
-                        </Button>
+                        <div className="flex shrink-0 gap-1">
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            disabled={working}
+                            onClick={() => void removeFolder(folder)}
+                          >
+                            Disconnect
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            disabled={working}
+                            onClick={() => void forgetApprovedFolder(folder)}
+                          >
+                            Forget
+                          </Button>
+                        </div>
                       }
                     >
+                      <FutureChatToggle
+                        folder={folder}
+                        disabled={working}
+                        onChange={(trusted) =>
+                          void setFutureChats(folder, trusted)
+                        }
+                      />
                       {statements.map((statement) => (
                         <div
                           key={
@@ -384,13 +423,20 @@ export function FoldersView({ chat }: { chat: Chat }) {
                           variant="outline"
                           size="xs"
                           disabled={working}
-                          onClick={() => void forgetUnavailableFolder(folder)}
+                          onClick={() => void forgetApprovedFolder(folder)}
                         >
                           Forget
                         </Button>
                       </div>
                     }
                   >
+                    <FutureChatToggle
+                      folder={folder}
+                      disabled={working}
+                      onChange={(trusted) =>
+                        void setFutureChats(folder, trusted)
+                      }
+                    />
                     <p className="text-sm text-muted-foreground">
                       Tidebreak can’t reach this folder right now. It stays
                       connected and returns on its own once the folder is back —
@@ -409,20 +455,40 @@ export function FoldersView({ chat }: { chat: Chat }) {
                     name={folder.displayName}
                     badge={
                       <Badge variant="outline" size="sm">
-                        Previously approved
+                        {folder.availableInFutureChats
+                          ? "Future chats"
+                          : "Previously approved"}
                       </Badge>
                     }
                     action={
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        disabled={working}
-                        onClick={() => void addApprovedFolder(folder.rootId)}
-                      >
-                        Connect
-                      </Button>
+                      <div className="flex shrink-0 gap-1">
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={working}
+                          onClick={() => void addApprovedFolder(folder.rootId)}
+                        >
+                          Connect
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          disabled={working}
+                          onClick={() => void forgetApprovedFolder(folder)}
+                        >
+                          Forget
+                        </Button>
+                      </div>
                     }
-                  />
+                  >
+                    <FutureChatToggle
+                      folder={folder}
+                      disabled={working}
+                      onChange={(trusted) =>
+                        void setFutureChats(folder, trusted)
+                      }
+                    />
+                  </FolderCard>
                 ))}
               </FolderSection>
             )}
@@ -464,7 +530,34 @@ function FolderSection({
   );
 }
 
-function FolderCard({
+export function FutureChatToggle({
+  folder,
+  disabled = false,
+  onChange,
+}: {
+  folder: ConnectedFolder;
+  disabled?: boolean;
+  onChange: (trusted: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-subtle pb-2">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Available in future chats</p>
+        <p className="text-xs text-muted-foreground">
+          Tidebreak attaches this folder before a new chat starts.
+        </p>
+      </div>
+      <Switch
+        aria-label={`Available in future chats for ${folder.displayName}`}
+        checked={folder.availableInFutureChats}
+        disabled={disabled}
+        onCheckedChange={onChange}
+      />
+    </div>
+  );
+}
+
+export function FolderCard({
   name,
   reach,
   badge,

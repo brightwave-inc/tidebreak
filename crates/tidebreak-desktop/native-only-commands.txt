@@ -42,10 +42,10 @@ export_library_document: writes a source document's bytes wherever the native sa
 export_deliverable: writes an output revision to a destination chosen in the native save dialog.
 save_chat_debug_bundle: writes the untruncated debug bundle to a file chosen in the native save dialog.
 copy_chat_debug_bundle: returns the clipboard-sized bundle on the same user gesture the webview requires for a clipboard write.
+import_skills: opens the native folder picker and copies validated local skill packages into this desktop profile.
 
 # Host folder consent that runs through native pickers and permission dialogs
 connect_folder: native folder picker — the host consent path for attaching a folder to a chat.
-connect_approved_folder: reattaches a previously approved folder behind the native confirmation dialog.
 grant_folder_capability: widens a folder's capability only after the native permission dialog is confirmed.
 
 # Host-side execution of client-executed tool calls
@@ -77,6 +77,9 @@ publish_chat_image: TODO(record 7) — publishes pasted image bytes from the ren
 publish_code_image: TODO(record 7) — same as publish_chat_image for a code session; desktop mounts the publish route behind the executor token.
 list_connected_folders: TODO(record 7) — broker read with no native UI; headless consumers need the same listing.
 list_approved_folders: TODO(record 7) — broker read with no native UI.
+attach_trusted_folders: TODO(record 7) — applies this desktop profile's saved folder defaults to a new chat.
+set_trusted_folder: TODO(record 7) — stores this desktop profile's automatic folder attachment defaults.
+connect_approved_folder: TODO(record 7) — attaches an already approved broker root without a native dialog.
 list_capability_consents: TODO(record 7) — broker read with no native UI; the consent projection should be a route.
 revoke_capability_consent: TODO(record 7) — broker mutation with no native dialog; revocation must be reachable headlessly.
 disconnect_folder: TODO(record 7) — broker mutation with no native dialog; record 7 item 4 gives folders a CLI path.

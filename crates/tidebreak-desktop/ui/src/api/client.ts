@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import { attachedRemotely } from "../host";
+import { attachedRemotely, attachTrustedFolders } from "../host";
 
 import {
   APP_INVOKE_REFUSAL_KINDS,
@@ -1033,7 +1033,7 @@ export class ApiClient {
    * correcting PATCH races the first turn, which reads the chat as it was
    * created.
    */
-  createChat(
+  async createChat(
     model?: ModelSelectionKey,
     projectId?: string | null,
     settings?: {
@@ -1042,7 +1042,7 @@ export class ApiClient {
       networkPolicy?: NetworkPolicy;
     },
   ): Promise<Chat> {
-    return this.json("/chats", {
+    const chat = await this.json<Chat>("/chats", {
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({
@@ -1053,6 +1053,14 @@ export class ApiClient {
         network_policy: settings?.networkPolicy,
       }),
     });
+    try {
+      await attachTrustedFolders(chat);
+    } catch (error) {
+      // The chat already exists. Keep it usable if the local folder broker is
+      // unavailable instead of making a retry create a second conversation.
+      console.warn("could not attach saved folders to the new chat", error);
+    }
+    return chat;
   }
 
   listChats(): Promise<Chat[]> {
