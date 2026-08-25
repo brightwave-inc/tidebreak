@@ -162,21 +162,20 @@ automatic.
    also send `teamId`. The project and organization identifiers are non-secret
    workflow constants. A failed build or smoke test leaves the previous docs
    deployment serving production.
-6. The workflow first checks whether that exact tag, commit, and
-   publication date already have a complete immutable release on S3.
-   Credential-free prerequisites — one per platform — otherwise compile the tag
-   with its product version and save unsigned Cargo outputs before any signing
-   or notarization can fail.
-7. The production jobs reuse those prepared compiler outputs — every cache key
-   they can restore names the release commit or, at minimum, the `Cargo.lock`
-   and toolchain hashes, and they delete the linked binaries the archive
-   carries so the products they package are always linked from the tag's own
-   sources. The macOS job then signs the app with the Developer ID identity,
-   notarizes and staples the app and DMG, verifies them with Apple tooling, and
-   creates a signed Tauri updater archive. Parallel Windows and Linux jobs
-   produce x86_64 and ARM64 NSIS, AppImage, and Debian packages; every package
-   is signed with the Tauri updater key after packaging. A fresh release cannot
-   continue unless every operating-system and architecture build succeeds.
+6. The workflow first checks whether that exact tag, commit, and publication
+   date already have a complete immutable release on S3. Credential-free macOS
+   and Windows prerequisites otherwise compile the tag once with its product
+   version. Each prerequisite uploads the final desktop binary, sidecars, and
+   Tauri configuration in a run-scoped archive with SHA-256 manifests.
+7. The macOS and Windows production jobs verify those archives before loading
+   signing material, then run `tauri bundle` against the prepared binaries.
+   They do not compile Rust or rebuild the frontend. The macOS job signs the app
+   with the Developer ID identity, notarizes and staples the app and DMG,
+   verifies them with Apple tooling, and creates a signed Tauri updater archive.
+   Parallel Windows and Linux jobs produce x86_64 and ARM64 NSIS, AppImage, and
+   Debian packages; every package is signed with the Tauri updater key after
+   packaging. A fresh release cannot continue unless every operating-system
+   and architecture build succeeds.
 8. For a release that is not already hosted, a separate least-privilege job
    generates an SPDX JSON SBOM from the exact released source and checksums it
    independently of the package builds. That job has no production environment,
@@ -263,7 +262,10 @@ registry and prepared-build caches. The Windows ARM job keeps the
 `aarch64-pc-windows-msvc` Rust target and compiles whisper.cpp with Ninja plus
 `clang-cl`, because ggml refuses MSVC on ARM. The credential-free prepare job
 restores only caches for the same commit SHA, so a failed MSVC CMake tree from
-an earlier attempt cannot be reused after that compiler switch.
+an earlier attempt cannot be reused after that compiler switch. After the
+compile, the job transfers only the final binary, sidecars, and Tauri
+configuration to the production job. The production job verifies and bundles
+those files without installing a compiler or rebuilding the frontend.
 
 Windows code mode uses the desktop's digest-verified managed Node ZIP and
 pinned harness packages. Setup, archive, and quick-action commands run through
@@ -379,9 +381,17 @@ publication failure cannot prevent that main-tip cache run from finishing. If
 the shared cache is empty or has been evicted, manually run **Warm macOS release
 cache** from `main`; the production release workflow also compiles the exact tag
 and product version in a credential-free prerequisite. That prerequisite saves
-its release-specific unsigned archive before reporting a compile failure. The
-later `desktop-production` jobs are restore-only, so signing and notarization
-can be retried without losing completed Rust work.
+its release-specific unsigned cache before reporting a compile failure. After a
+successful compile, it uploads the final binary, universal sidecars, and Tauri
+configuration in a one-day, run-scoped artifact. The `desktop-production` job
+verifies that artifact before it loads signing material, then packages those
+exact binaries without compiling again.
+
+To use a larger macOS runner for production compiles, set the repository
+variable `PRODUCTION_MACOS_RUNNER` to a provisioned ARM64 organization runner
+label. If you omit the variable, the workflow uses `macos-latest`. The signing
+and notarization job stays on the standard runner because it no longer compiles
+the application.
 
 ### Production environment configuration
 

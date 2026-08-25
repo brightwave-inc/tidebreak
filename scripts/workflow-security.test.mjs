@@ -73,6 +73,13 @@ const docsPackage = JSON.parse(
 const vercelCliPackage = JSON.parse(
   readFileSync(repositoryFile(".github", "vercel-cli", "package.json"), "utf8"),
 );
+const tauriCliPackage = JSON.parse(
+  readFileSync(repositoryFile(".github", "tauri-cli", "package.json"), "utf8"),
+);
+const tauriCliLock = readFileSync(
+  repositoryFile(".github", "tauri-cli", "pnpm-lock.yaml"),
+  "utf8",
+);
 const packagedGhDiscoverySmoke = readFileSync(
   repositoryFile("scripts", "smoke-packaged-gh-discovery.sh"),
   "utf8",
@@ -1399,19 +1406,15 @@ test("cache warming cannot access production credentials or publish", () => {
   }
 });
 
-test("release caches restore only credential-free compiler products", () => {
+test("release compile jobs keep caches and prepared artifacts credential-free", () => {
   const release = workflows["release.yml"];
   const cache = workflows["cache-macos.yml"];
   const prepareJob = workflowJob(release, "prepare_macos");
-  const signedBuildJob = workflowJob(release, "build_macos");
   const releasePrepareCache = prepareJob.match(
     /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
   const releasePrepareCacheSave = prepareJob.match(
     /- name: Save release-specific unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
-  )?.[0];
-  const releaseBuildCache = signedBuildJob.match(
-    /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
   const warmBuildCache = cache.match(
     /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
@@ -1421,40 +1424,50 @@ test("release caches restore only credential-free compiler products", () => {
   )?.[0];
   assert.ok(releasePrepareCache);
   assert.ok(releasePrepareCacheSave);
-  assert.ok(releaseBuildCache);
   assert.ok(warmBuildCache);
   assert.ok(warmBuildCacheSave);
   const universalMacos = /--target universal-apple-darwin/.test(prepareJob);
 
+  assert.match(
+    prepareJob,
+    /runs-on: \$\{\{ vars\.PRODUCTION_MACOS_RUNNER \|\| 'macos-latest' \}\}/,
+  );
   assert.match(prepareJob, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(prepareJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(prepareJob, /cache-targets: false/);
-  assert.match(prepareJob, /--no-bundle --ci/);
+  assert.match(prepareJob, /--config \$\{\{ runner\.temp \}\}\/tidebreak-release\.json/);
+  assert.match(prepareJob, /--no-bundle/);
+  assert.match(prepareJob, /--ci/);
   assert.match(prepareJob, /continue-on-error: true/);
   assert.match(releasePrepareCache, /actions\/cache\/restore@[0-9a-f]{40}/);
   assert.match(releasePrepareCacheSave, /actions\/cache\/save@[0-9a-f]{40}/);
   assert.doesNotMatch(prepareJob, /^    environment:/m);
   assert.doesNotMatch(prepareJob, /secrets\./);
-  assert.doesNotMatch(
-    prepareJob,
-    /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_|actions\/upload-artifact/,
+  assert.doesNotMatch(prepareJob, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
+  assert.ok(
+    prepareJob.indexOf("Write tag-derived Tauri configuration") <
+      prepareJob.indexOf("Compile without production credentials or bundles"),
+    "the release configuration must be embedded during compilation",
   );
   assert.ok(
     prepareJob.indexOf("Save release-specific unsigned Rust build cache") <
       prepareJob.indexOf("Require a successful unsigned compilation"),
     "release compiler outputs must be saved before a failed compile is reported",
   );
-
-  assert.match(signedBuildJob, /SCCACHE_GHA_ENABLED: "true"/);
-  assert.match(signedBuildJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
-  assert.match(signedBuildJob, /cache-targets: false/);
-  assert.match(releaseBuildCache, /actions\/cache\/restore@[0-9a-f]{40}/);
-  assert.doesNotMatch(signedBuildJob, /actions\/cache\/save/);
   assert.ok(
-    signedBuildJob.indexOf("Restore unsigned Rust build cache") <
-      signedBuildJob.indexOf("Validate production signing configuration"),
-    "the build cache must be restored before production secrets are loaded",
+    prepareJob.indexOf("Require a successful unsigned compilation") <
+      prepareJob.indexOf("Archive prepared macOS inputs"),
+    "failed compiles must not publish prepared binaries",
   );
+  assert.match(
+    prepareJob,
+    /name: tidebreak-prepared-macos-universal-\$\{\{ github\.run_id \}\}/,
+  );
+  assert.match(prepareJob, /retention-days: 1/);
+  assert.match(prepareJob, /compression-level: 0/);
+  assert.match(prepareJob, /overwrite: true/);
+  assert.match(prepareJob, /shasum -a 256[\s\S]*> SHA256SUMS/);
+  assert.match(prepareJob, /shasum -a 256 prepared-macos\.tar/);
 
   assert.match(cache, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(cache, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
@@ -1470,7 +1483,6 @@ test("release caches restore only credential-free compiler products", () => {
   for (const cacheStep of [
     releasePrepareCache,
     releasePrepareCacheSave,
-    releaseBuildCache,
     warmBuildCache,
     warmBuildCacheSave,
   ]) {
@@ -1529,24 +1541,16 @@ test("release caches restore only credential-free compiler products", () => {
     assert.doesNotMatch(cacheStep, /bundle|\.app|dmg|signature|keychain/i);
   }
 
-  // `actions/cache` folds the path list into the cache version, so the signing
-  // job can only reach an archive a writing job saved under the same list.
-  // Keeping them identical is what makes the key ladder below, rather than a
-  // silent total miss, the thing that governs what gets restored.
+  // `actions/cache` folds the path list into the cache version. The release
+  // compile and cache-warming jobs must write compatible archives.
   const cachedPaths = (step) =>
     step.match(/path: \|\n([\s\S]*?)\n\s+key:/)?.[1];
-  assert.ok(cachedPaths(releaseBuildCache));
   assert.equal(
-    cachedPaths(releaseBuildCache),
     cachedPaths(releasePrepareCacheSave),
+    cachedPaths(warmBuildCacheSave),
   );
-  assert.equal(cachedPaths(releaseBuildCache), cachedPaths(warmBuildCacheSave));
 
-  for (const restoreStep of [
-    releasePrepareCache,
-    releaseBuildCache,
-    warmBuildCache,
-  ]) {
+  for (const restoreStep of [releasePrepareCache, warmBuildCache]) {
     assert.match(
       restoreStep,
       universalMacos
@@ -1578,58 +1582,85 @@ test("release caches restore only credential-free compiler products", () => {
     );
   }
 
-  // The signing job signs what it restores, so every key it can hit must pin
-  // the source identity of the archive: the release commit SHA, or at minimum
-  // the Cargo.lock and toolchain hashes. An arch-only fallback would restore
-  // an archive warmed from an unrelated `main` commit and sign binaries that
-  // do not correspond to the released tag.
-  const signingCacheKeys = releaseBuildCache
-    .split("\n")
-    .map((line) => line.trim().replace(/^key: /, ""))
-    .filter((line) => line.startsWith("macos-release-"));
-  assert.ok(signingCacheKeys.length >= 4);
-  for (const key of signingCacheKeys) {
+});
+
+test("macOS production packaging uses verified prepared binaries", () => {
+  const buildJob = workflowJob(workflows["release.yml"], "build_macos");
+  const verifyStep = buildJob.match(
+    /- name: Verify prepared macOS inputs[\s\S]*?(?=\n\s+- (?:name:|uses:))/,
+  )?.[0];
+  const bundleStep = buildJob.match(
+    /- name: Bundle, sign, and notarize the prepared Tauri app[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(verifyStep);
+  assert.ok(bundleStep);
+
+  assert.match(
+    buildJob,
+    /name: tidebreak-prepared-macos-universal-\$\{\{ github\.run_id \}\}/,
+  );
+  assert.match(
+    verifyStep,
+    /shasum -a 256 --check prepared-macos\.tar\.sha256/,
+  );
+  assert.match(verifyStep, /shasum -a 256 --check SHA256SUMS/);
+  assert.match(
+    verifyStep,
+    /Prepared macOS archive contains an unexpected file set/,
+  );
+  assert.match(
+    verifyStep,
+    /target\/\$RELEASE_TARGET\/release\/tidebreak-desktop/,
+  );
+  assert.match(
+    verifyStep,
+    /binaries\/tidebreak-host-broker-\$RELEASE_TARGET/,
+  );
+  assert.match(verifyStep, /binaries\/tidebreak-\$RELEASE_TARGET/);
+
+  assert.equal(tauriCliPackage.packageManager, "pnpm@10.18.3");
+  assert.equal(tauriCliPackage.dependencies["@tauri-apps/cli"], "2.11.4");
+  assert.match(
+    tauriCliLock,
+    /'@tauri-apps\/cli':\n\s+specifier: 2\.11\.4\n\s+version: 2\.11\.4/,
+  );
+  assert.match(
+    buildJob,
+    /cache-dependency-path: \.github\/tauri-cli\/pnpm-lock\.yaml/,
+  );
+  assert.match(
+    buildJob,
+    /pnpm --dir \.github\/tauri-cli install --frozen-lockfile --ignore-scripts/,
+  );
+  assert.match(bundleStep, /tauri bundle/);
+  assert.match(bundleStep, /--target universal-apple-darwin/);
+  assert.match(bundleStep, /--bundles app,dmg/);
+  assert.match(bundleStep, /--ci/);
+  assert.doesNotMatch(bundleStep, /TAURI_SIGNING_PRIVATE_KEY/);
+
+  assert.doesNotMatch(buildJob, /tauri-apps\/tauri-action/);
+  assert.doesNotMatch(buildJob, /actions\/cache/);
+  assert.doesNotMatch(buildJob, /mozilla-actions\/sccache-action/);
+  assert.doesNotMatch(buildJob, /Swatinem\/rust-cache/);
+  assert.doesNotMatch(buildJob, /Install UI dependencies/);
+  assert.doesNotMatch(buildJob, /Install Rust target/);
+  assert.doesNotMatch(buildJob, /\btauri build\b/);
+
+  const secretsAt = firstSigningMaterialIndex(
+    buildJob,
+    "Validate production signing configuration",
+  );
+  for (const marker of [
+    "Download prepared macOS inputs",
+    "Verify prepared macOS inputs",
+    "Install pinned Tauri bundler",
+  ]) {
+    const index = buildJob.indexOf(marker);
     assert.ok(
-      key.includes("hashFiles('Cargo.lock',"),
-      `restorable signing-job cache key does not pin the source: ${key}`,
+      index !== -1 && index < secretsAt,
+      `${marker} must run before signing material loads`,
     );
   }
-
-  // Whatever a restore extracts, the products that actually get signed are
-  // relinked from the tag's own sources.
-  const discardProducts = signedBuildJob.match(
-    /- name: Discard restored product binaries[\s\S]*?(?=\n\s+- name:)/,
-  )?.[0];
-  assert.ok(discardProducts);
-  const discardedProducts = universalMacos
-    ? [
-        /aarch64-apple-darwin,x86_64-apple-darwin,universal-apple-darwin.*release\/tidebreak-desktop/,
-        /aarch64-apple-darwin,x86_64-apple-darwin.*release\/tidebreak-host-broker/,
-        /aarch64-apple-darwin,x86_64-apple-darwin.*release\/tidebreak/,
-        /libtidebreak_desktop_lib\./,
-        /binaries\/tidebreak-host-broker-\{aarch64-apple-darwin,x86_64-apple-darwin\}/,
-        /binaries\/tidebreak-\{aarch64-apple-darwin,x86_64-apple-darwin\}/,
-        /binaries\/tidebreak-host-broker-universal-apple-darwin/,
-        /binaries\/tidebreak-universal-apple-darwin/,
-      ]
-    : [
-        /release\/tidebreak-desktop/,
-        /release\/tidebreak-host-broker/,
-        /release\/tidebreak/,
-        /libtidebreak_desktop_lib\./,
-        /binaries\/tidebreak-host-broker-\$RELEASE_TARGET/,
-        /binaries\/tidebreak-\$RELEASE_TARGET/,
-      ];
-  for (const product of discardedProducts) {
-    assert.match(discardProducts, product);
-  }
-  assert.ok(
-    signedBuildJob.indexOf("Discard restored product binaries") >
-      signedBuildJob.indexOf("Restore unsigned Rust build cache") &&
-      signedBuildJob.indexOf("Discard restored product binaries") <
-        signedBuildJob.indexOf("Build, sign, and notarize the Tauri app"),
-    "restored product binaries must be discarded before the signed build",
-  );
 });
 
 test("Windows release jobs mirror the credential-free prepare/build split", () => {
@@ -1639,43 +1670,34 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   const prepareCacheSave = prepareJob.match(
     /- name: Save release-specific unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
-  const buildCacheRestore = buildJob.match(
-    /- name: Restore unsigned Rust build cache[\s\S]*?(?=\n\s+- name:)/,
-  )?.[0];
   assert.ok(prepareCacheSave);
-  assert.ok(buildCacheRestore);
   for (const job of [prepareJob, buildJob]) {
     assert.match(job, /runs-on: \$\{\{ matrix\.runner \}\}/);
     assert.match(job, /target: x86_64-pc-windows-msvc/);
     assert.match(job, /runner: windows-latest/);
     assert.match(job, /target: aarch64-pc-windows-msvc/);
     assert.match(job, /runner: windows-11-arm/);
-    // whisper.cpp refuses MSVC on ARM. Force Ninja + clang-cl only on the
-    // ARM matrix entry so x86_64 keeps the Visual Studio generator.
-    assert.match(job, /if: \$\{\{ matrix\.arch == 'aarch64' \}\}/);
-    assert.match(job, /CMAKE_GENERATOR=Ninja/);
-    assert.match(job, /CMAKE_C_COMPILER=/);
-    assert.match(job, /CMAKE_CXX_COMPILER=/);
-    assert.match(job, /CMAKE_ASM_COMPILER=/);
-    assert.match(job, /echo "CC=\$clang_cl"/);
-    assert.match(job, /echo "CXX=\$clang_cl"/);
-    assert.match(job, /CXXFLAGS=\/EHsc/);
-    assert.match(job, /clang-cl/);
-    assert.match(job, /command -v ninja/);
   }
+  // whisper.cpp refuses MSVC on ARM. Force Ninja + clang-cl only in the
+  // credential-free compile job so the packaging job needs no compiler.
+  assert.match(prepareJob, /if: \$\{\{ matrix\.arch == 'aarch64' \}\}/);
+  assert.match(prepareJob, /CMAKE_GENERATOR=Ninja/);
+  assert.match(prepareJob, /CMAKE_C_COMPILER=/);
+  assert.match(prepareJob, /CMAKE_CXX_COMPILER=/);
+  assert.match(prepareJob, /CMAKE_ASM_COMPILER=/);
+  assert.match(prepareJob, /echo "CC=\$clang_cl"/);
+  assert.match(prepareJob, /echo "CXX=\$clang_cl"/);
+  assert.match(prepareJob, /CXXFLAGS=\/EHsc/);
+  assert.match(prepareJob, /clang-cl/);
+  assert.match(prepareJob, /command -v ninja/);
   assert.ok(
     prepareJob.indexOf("Use clang-cl for Windows ARM native code") <
       prepareJob.indexOf("Compile without production credentials or bundles"),
     "Windows ARM clang-cl must be configured before the unsigned compile",
   );
-  assert.ok(
-    buildJob.indexOf("Use clang-cl for Windows ARM native code") <
-      buildJob.indexOf("Build the Tauri app without Windows code signing"),
-    "Windows ARM clang-cl must be configured before the packaged build",
-  );
 
-  // The prerequisite compiles without any production credential and never
-  // uploads what it built; only the cache carries its outputs forward.
+  // The prerequisite compiles and archives the exact release inputs without
+  // any production credential.
   assert.match(prepareJob, /SCCACHE_GHA_RW_MODE: READ_ONLY/);
   assert.match(prepareJob, /version: 10\.18\.3/);
   assert.match(prepareJob, /pnpm install --frozen-lockfile --ignore-scripts/);
@@ -1683,66 +1705,100 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
     prepareJob,
     /node scripts\/generate-third-party-notices\.mjs --check/,
   );
-  assert.match(prepareJob, /--no-bundle --ci/);
+  assert.match(prepareJob, /--config \$\{\{ runner\.temp \}\}\/tidebreak-release\.json/);
+  assert.match(prepareJob, /--no-bundle/);
+  assert.match(prepareJob, /--ci/);
   assert.match(prepareJob, /continue-on-error: true/);
   assert.doesNotMatch(prepareJob, /^    environment:/m);
   assert.doesNotMatch(prepareJob, /secrets\./);
-  assert.doesNotMatch(
-    prepareJob,
-    /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_|actions\/upload-artifact/,
+  assert.doesNotMatch(prepareJob, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
+  assert.ok(
+    prepareJob.indexOf("Write tag-derived Tauri configuration") <
+      prepareJob.indexOf("Compile without production credentials or bundles"),
+    "the release configuration must be embedded during compilation",
   );
   assert.ok(
     prepareJob.indexOf("Save release-specific unsigned Rust build cache") <
       prepareJob.indexOf("Require a successful unsigned compilation"),
     "release compiler outputs must be saved before a failed compile is reported",
   );
-
-  // The packaging job is restore-only and loads the updater key only after
-  // the credential-free cache restore.
-  assert.doesNotMatch(buildJob, /actions\/cache\/save/);
   assert.ok(
-    buildJob.indexOf("Restore unsigned Rust build cache") <
-      buildJob.indexOf("Validate updater signing configuration"),
-    "the build cache must be restored before the updater secret is loaded",
+    prepareJob.indexOf("Require a successful unsigned compilation") <
+      prepareJob.indexOf("Archive prepared Windows inputs"),
+    "failed compiles must not publish prepared binaries",
   );
-
-  // Identical path lists keep the cache version shared between the writing
-  // and restoring jobs. The credentialed job accepts only the exact cache for
-  // this release SHA and version; broader warm-cache fallback stays confined
-  // to the credential-free prerequisite.
-  const cachedPaths = (step) =>
-    step.match(/path: \|\n([\s\S]*?)\n\s+key:/)?.[1];
-  assert.ok(cachedPaths(buildCacheRestore));
-  assert.equal(cachedPaths(buildCacheRestore), cachedPaths(prepareCacheSave));
   assert.match(
-    buildCacheRestore,
-    /key: windows-release-prepared-v1-\$\{\{ matrix\.arch \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ needs\.validate\.outputs\.sha \}\}-\$\{\{ needs\.validate\.outputs\.version \}\}/,
+    prepareJob,
+    /name: tidebreak-prepared-windows-\$\{\{ matrix\.arch \}\}-\$\{\{ github\.run_id \}\}/,
   );
-  assert.doesNotMatch(buildCacheRestore, /restore-keys:/);
+  assert.match(prepareJob, /retention-days: 1/);
+  assert.match(prepareJob, /compression-level: 0/);
+  assert.match(prepareJob, /overwrite: true/);
+  assert.match(prepareJob, /sha256sum[\s\S]*> SHA256SUMS/);
+  assert.match(prepareJob, /sha256sum prepared-windows\.tar/);
 
-  // Whatever a restore extracts, the products that get packaged are relinked
-  // from the tag's own sources.
-  const discardProducts = buildJob.match(
-    /- name: Discard restored product binaries[\s\S]*?(?=\n\s+- name:)/,
+  const verifyStep = buildJob.match(
+    /- name: Verify prepared Windows inputs[\s\S]*?(?=\n\s+- (?:name:|uses:))/,
   )?.[0];
-  assert.ok(discardProducts);
-  for (const product of [
-    /release\/tidebreak-desktop\.exe/,
-    /release\/tidebreak-host-broker\.exe/,
-    /release\/tidebreak\.exe/,
-    /tidebreak_desktop_lib\./,
-    /binaries\/tidebreak-host-broker-\$RELEASE_TARGET\.exe/,
-    /binaries\/tidebreak-\$RELEASE_TARGET\.exe/,
-  ]) {
-    assert.match(discardProducts, product);
-  }
-  assert.ok(
-    buildJob.indexOf("Discard restored product binaries") >
-      buildJob.indexOf("Restore unsigned Rust build cache") &&
-      buildJob.indexOf("Discard restored product binaries") <
-        buildJob.indexOf("Build the Tauri app without Windows code signing"),
-    "restored product binaries must be discarded before the packaged build",
+  const bundleStep = buildJob.match(
+    /- name: Bundle the prepared Tauri app without Windows code signing[\s\S]*?(?=\n\s+- name:)/,
+  )?.[0];
+  assert.ok(verifyStep);
+  assert.ok(bundleStep);
+  assert.match(
+    buildJob,
+    /name: tidebreak-prepared-windows-\$\{\{ matrix\.arch \}\}-\$\{\{ github\.run_id \}\}/,
   );
+  assert.match(
+    verifyStep,
+    /sha256sum --check --strict prepared-windows\.tar\.sha256/,
+  );
+  assert.match(verifyStep, /sha256sum --check --strict SHA256SUMS/);
+  assert.match(
+    verifyStep,
+    /Prepared Windows archive contains an unexpected file set/,
+  );
+  assert.match(
+    buildJob,
+    /pnpm --dir \.github\/tauri-cli install --frozen-lockfile --ignore-scripts/,
+  );
+  assert.match(
+    buildJob,
+    /cache-dependency-path: \.github\/tauri-cli\/pnpm-lock\.yaml/,
+  );
+  assert.match(buildJob, /Validate the prepared Tauri configuration/);
+  assert.match(bundleStep, /tauri bundle/);
+  assert.match(bundleStep, /--target "\$\{\{ matrix\.target \}\}"/);
+  assert.match(bundleStep, /--bundles nsis/);
+  assert.match(bundleStep, /--no-sign/);
+  assert.match(bundleStep, /--ci/);
+  assert.doesNotMatch(bundleStep, /TAURI_SIGNING_PRIVATE_KEY/);
+
+  assert.doesNotMatch(buildJob, /tauri-apps\/tauri-action/);
+  assert.doesNotMatch(buildJob, /actions\/cache/);
+  assert.doesNotMatch(buildJob, /mozilla-actions\/sccache-action/);
+  assert.doesNotMatch(buildJob, /Swatinem\/rust-cache/);
+  assert.doesNotMatch(buildJob, /Install UI dependencies/);
+  assert.doesNotMatch(buildJob, /Install Rust target/);
+  assert.doesNotMatch(buildJob, /Use clang-cl for Windows ARM native code/);
+  assert.doesNotMatch(buildJob, /\btauri build\b/);
+
+  const secretsAt = firstSigningMaterialIndex(
+    buildJob,
+    "Validate updater signing configuration",
+  );
+  for (const marker of [
+    "Download prepared Windows inputs",
+    "Verify prepared Windows inputs",
+    "Install pinned Tauri bundler",
+    "Validate the prepared Tauri configuration",
+  ]) {
+    const index = buildJob.indexOf(marker);
+    assert.ok(
+      index !== -1 && index < secretsAt,
+      `${marker} must run before signing material loads`,
+    );
+  }
 
   // The packaging job must use distinct variable names for each sidecar so it
   // validates both binaries without overwriting the variable.
@@ -1753,11 +1809,11 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
 
   // v1 ships unsigned Windows artifacts: no Authenticode configuration may
   // creep in, no Apple credential reaches the Windows jobs, and the updater
-  // private key stays out of the Tauri build step.
+  // private key stays out of the Tauri bundle step.
   assert.doesNotMatch(release, /certificateThumbprint|signCommand/);
   assert.doesNotMatch(buildJob, /APPLE_|AWS_|DOWNLOADS_/);
   const buildStep = buildJob.match(
-    /- name: Build the Tauri app without Windows code signing[\s\S]*?(?=\n\s+- name:)/,
+    /- name: Bundle the prepared Tauri app without Windows code signing[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
   assert.ok(buildStep);
   assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
@@ -2058,11 +2114,17 @@ test("GitHub release assets are attached before immutable publication", () => {
 
 test("the updater private key is isolated from compilation", () => {
   const release = workflows["release.yml"];
-  const buildStep = release.match(
-    /- name: Build, sign, and notarize the Tauri app[\s\S]*?(?=\n\s+- name:)/,
+  for (const jobName of ["prepare_macos", "prepare_windows"]) {
+    assert.doesNotMatch(
+      workflowJob(release, jobName),
+      /TAURI_SIGNING_PRIVATE_KEY/,
+    );
+  }
+  const bundleStep = release.match(
+    /- name: Bundle, sign, and notarize the prepared Tauri app[\s\S]*?(?=\n\s+- name:)/,
   )?.[0];
-  assert.ok(buildStep);
-  assert.doesNotMatch(buildStep, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.ok(bundleStep);
+  assert.doesNotMatch(bundleStep, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.doesNotMatch(release, /createUpdaterArtifacts/);
   assert.match(release, /tauri signer sign "\$updater_path"/);
   assert.doesNotMatch(release, /cargo tauri signer sign/);
@@ -2083,43 +2145,44 @@ test("signing jobs do not run untrusted installers next to Apple or Tauri materi
     );
     assert.match(
       job,
-      /pnpm install --frozen-lockfile --ignore-scripts\n/,
-      `${label} must install UI deps without lifecycle scripts`,
-    );
-    assert.match(
-      job,
-      /mozilla-actions\/sccache-action@[0-9a-f]{40}/,
-      `${label} must set up sccache`,
-    );
-    assert.match(
-      job,
-      /Swatinem\/rust-cache@[0-9a-f]{40}/,
-      `${label} must restore the Cargo download cache`,
-    );
-    assert.match(
-      job,
       /actions\/setup-node@[0-9a-f]{40}/,
       `${label} must set up Node`,
-    );
-
-    const rustCache = cargoDownloadCache(job);
-    assert.ok(rustCache, `${label} missing Cargo download cache`);
-    assert.match(
-      rustCache,
-      /save-if: false/,
-      `${label} rust-cache must be restore-only`,
     );
 
     const secretsAt = firstSigningMaterialIndex(job, validate);
     assert.notEqual(secretsAt, -1, `${label} must still load signing material`);
 
+    const bundleOnly =
+      file === "release.yml" &&
+      (name === "build_macos" || name === "build_windows");
     const installerIndexes = [
-      job.search(/mozilla-actions\/sccache-action@[0-9a-f]{40}/),
-      job.search(/Swatinem\/rust-cache@[0-9a-f]{40}/),
       job.search(/pnpm\/action-setup@[0-9a-f]{40}/),
       job.search(/actions\/setup-node@[0-9a-f]{40}/),
-      job.search(/pnpm install --frozen-lockfile --ignore-scripts\n/),
     ];
+    if (bundleOnly) {
+      const install = job.search(
+        /pnpm --dir \.github\/tauri-cli install --frozen-lockfile --ignore-scripts/,
+      );
+      installerIndexes.push(install);
+      assert.doesNotMatch(job, /mozilla-actions\/sccache-action/);
+      assert.doesNotMatch(job, /Swatinem\/rust-cache/);
+    } else {
+      const install = job.search(
+        /pnpm install --frozen-lockfile --ignore-scripts\n/,
+      );
+      installerIndexes.push(
+        job.search(/mozilla-actions\/sccache-action@[0-9a-f]{40}/),
+        job.search(/Swatinem\/rust-cache@[0-9a-f]{40}/),
+        install,
+      );
+      const rustCache = cargoDownloadCache(job);
+      assert.ok(rustCache, `${label} missing Cargo download cache`);
+      assert.match(
+        rustCache,
+        /save-if: false/,
+        `${label} rust-cache must be restore-only`,
+      );
+    }
     assert.ok(
       installerIndexes.every((index) => index !== -1),
       `${label} is missing an installer step`,
@@ -2142,7 +2205,7 @@ test("macOS disk images are explicitly notarized and stapled", () => {
   assert.match(dmgNotarization, /xcrun stapler staple "\$dmg_path"/);
   assert.match(dmgNotarization, /xcrun stapler validate "\$dmg_path"/);
   assert.ok(
-    release.indexOf("Build, sign, and notarize the Tauri app") <
+    release.indexOf("Bundle, sign, and notarize the prepared Tauri app") <
       release.indexOf("Notarize and staple the DMG"),
   );
   assert.ok(
@@ -2152,6 +2215,7 @@ test("macOS disk images are explicitly notarized and stapled", () => {
 });
 
 test("universal macOS release and staging packages contain both slices", () => {
+  const releasePrepare = workflowJob(workflows["release.yml"], "prepare_macos");
   const releaseBuild = workflowJob(workflows["release.yml"], "build_macos");
   if (!/--target universal-apple-darwin/.test(releaseBuild)) {
     return;
@@ -2177,10 +2241,12 @@ test("universal macOS release and staging packages contain both slices", () => {
     /"lipo",\s*\["-create", \.\.\.stagedSidecars, "-output", destination\]/,
   );
 
-  for (const job of [releaseBuild, stagingBuild, warm]) {
+  for (const job of [releasePrepare, stagingBuild, warm]) {
     assert.match(job, /rustup target add aarch64-apple-darwin x86_64-apple-darwin/);
     assert.match(job, /--target universal-apple-darwin/);
   }
+  assert.match(releaseBuild, /--target universal-apple-darwin/);
+  assert.doesNotMatch(releaseBuild, /rustup target add/);
 
   for (const job of [releaseBuild, stagingBuild]) {
     assert.match(job, /timeout-minutes: 90/);
