@@ -1416,9 +1416,8 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
  * attached to a machine elsewhere cannot, while the machine's own answer is
  * identical either way.
  *
- * `chooses_destination` says the machine places clones under the destination
- * its operator configured, so a caller names no path — which is what lets a
- * shared machine keep its filesystem layout to itself.
+ * `chooses_destination` says the machine places clones itself — a stored
+ * destination, or the self-host default — so a caller names no path.
  *
  * Unknown source kinds are ignored by clients rather than rendered, so this
  * set may grow without a client release (decision 17).
