@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 
 import type { ApiClient } from "@/api/client";
 import type {
@@ -357,9 +357,13 @@ type Story = StoryObj<typeof meta>;
 /** Worktree navigation stays a compact, searchable optional pane. */
 export const Files: Story = {};
 
-/** Git state and the changed-file index share one focused surface. */
+/** The tab count and changed-file index share the same live workspace read. */
 export const Changes: Story = {
   args: { tab: "source" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByLabelText("6 changed files")).toBeVisible();
+  },
 };
 
 /** Checks, merge state, and review discussion are one readable review surface. */
