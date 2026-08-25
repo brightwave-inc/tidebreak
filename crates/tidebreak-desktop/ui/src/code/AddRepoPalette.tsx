@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { Folder, GitBranch, Link2 } from "lucide-react";
+import { ChevronDown, Folder, GitBranch, Link2 } from "lucide-react";
 
 import type {
   CodeCloneDefaults,
@@ -27,20 +27,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Progress } from "@/components/ui/progress";
 import {
   attachedRemotely,
   hasLocalHostAuthority,
   pickCodeDirectory,
 } from "@/host";
-import { friendlyErrorMessage } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -830,64 +828,132 @@ function GithubRepoField({
   busy: boolean;
   onChange: (value: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const listed = repositories ?? [];
-  const loading = repositories === null;
-  const typeIn = listFailed || (listed.length === 0 && repositories !== null);
+  const emptySuccess =
+    !listFailed && listed.length === 0 && repositories !== null;
+  const needle = query.trim().toLowerCase();
+  const matches = listed.filter((repository) => {
+    if (!needle) return true;
+    return (
+      repository.full_name.toLowerCase().includes(needle) ||
+      (repository.description ?? "").toLowerCase().includes(needle)
+    );
+  });
+  const typed = query.trim();
+  const typedIsNew =
+    typed.includes("/") &&
+    !listed.some(
+      (repository) =>
+        repository.full_name.toLowerCase() === typed.toLowerCase(),
+    );
 
   return (
     <label className="flex flex-col gap-1 text-sm">
       <span className="font-medium">Repository</span>
-      {typeIn ? (
-        <>
-          <Input
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            placeholder="owner/repo"
-            disabled={busy}
-            autoFocus
-          />
-          {listFailed && (
-            <p
-              className="text-muted-foreground text-xs"
-              data-testid="github-list-failed"
-            >
-              Suggestions did not load. Type owner/repo to clone.
-            </p>
-          )}
-        </>
-      ) : (
-        <Select
+      {emptySuccess ? (
+        <Input
           value={value}
-          onValueChange={onChange}
-          disabled={busy || loading}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="owner/repo"
+          disabled={busy}
+          autoFocus
+        />
+      ) : (
+        <Popover
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (next) setQuery(value);
+          }}
         >
-          <SelectTrigger aria-label="Repository" autoFocus={!loading}>
-            <SelectValue
-              placeholder={
-                loading ? "Loading repositories…" : "Select a repository"
-              }
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              role="combobox"
+              aria-expanded={open}
+              aria-label="Repository"
+              disabled={busy}
+              className={cn(
+                "h-9 w-full justify-between font-normal",
+                !value && "text-muted-foreground",
+              )}
             >
-              {value || null}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {listed.map((repository) => (
-              <SelectItem
-                key={repository.full_name}
-                value={repository.full_name}
-              >
-                <span className="flex min-w-0 flex-col text-left">
-                  <span className="truncate">{repository.full_name}</span>
-                  {repository.description && (
-                    <span className="text-muted-foreground truncate text-xs">
-                      {repository.description}
-                    </span>
-                  )}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+              <span className="truncate">{value || "Select a repository"}</span>
+              <ChevronDown className="size-4 shrink-0 opacity-50" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            className="w-[var(--radix-popover-trigger-width)] p-0"
+          >
+            <Command shouldFilter={false} label="Repositories">
+              <CommandInput
+                value={query}
+                onValueChange={setQuery}
+                placeholder="Search or type owner/repo"
+                aria-label="Search repositories"
+              />
+              <CommandList className="max-h-56">
+                <CommandEmpty className="px-3 py-2 text-xs text-muted-foreground">
+                  {listFailed
+                    ? "Suggestions did not load. Type owner/repo to clone."
+                    : repositories === null
+                      ? "Loading repositories…"
+                      : "Nothing matches. Type owner/repo to clone it."}
+                </CommandEmpty>
+                {typedIsNew && (
+                  <CommandGroup heading="Use this name">
+                    <CommandItem
+                      value={typed}
+                      onSelect={() => {
+                        onChange(typed);
+                        setOpen(false);
+                      }}
+                    >
+                      <span className="truncate">{typed}</span>
+                    </CommandItem>
+                  </CommandGroup>
+                )}
+                {matches.length > 0 && (
+                  <CommandGroup heading="Your repositories">
+                    {matches.slice(0, 50).map((repository) => (
+                      <CommandItem
+                        key={repository.full_name}
+                        value={repository.full_name}
+                        onSelect={() => {
+                          onChange(repository.full_name);
+                          setOpen(false);
+                        }}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">
+                            {repository.full_name}
+                          </span>
+                          {repository.description && (
+                            <span className="text-muted-foreground truncate text-xs">
+                              {repository.description}
+                            </span>
+                          )}
+                        </span>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                )}
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
+      )}
+      {listFailed && (
+        <p
+          className="text-muted-foreground text-xs"
+          data-testid="github-list-failed"
+        >
+          Suggestions did not load. Type owner/repo to clone.
+        </p>
       )}
     </label>
   );

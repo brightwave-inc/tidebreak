@@ -44,8 +44,10 @@ repositories they can already clone. The gateway lists those names itself
 
 3. **The GitHub form offers the caller's repositories.** On a
    gateway-authenticated hosted machine, `GET /code/repos/github` reads the
-   gateway list for this caller and the dialog presents it as a dropdown.
-   A machine with no lender keeps the typed `owner/repo` field.
+   gateway list for this caller and the dialog filters it as they type. A
+   name that is not on the first page can still be typed as `owner/repo`.
+   A failed list keeps that field and says the suggestions did not load.
+   A machine with no lender keeps the typed field.
 
 Deliberately excluded: paging past the gateway's first 100 names, listing
 through `gh` on a desktop, and any change to where worktrees land.

@@ -402,7 +402,7 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
     ).toHaveTextContent("mira-chen/notes");
   });
 
-  it("keeps type-in when the list fails and says the suggestions did not load", async () => {
+  it("keeps the picker when the list fails so a name can still be typed", async () => {
     await renderPalette(
       app({
         getCodeRepoSources: vi.fn(async () => ({
@@ -426,18 +426,21 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
         }),
       } as never),
     );
+    const user = userEvent.setup();
     fireEvent.click(
       await screen.findByRole("option", { name: /GitHub repository/ }),
     );
-    expect(
-      await screen.findByPlaceholderText("owner/repo"),
-    ).toBeInTheDocument();
     expect(await screen.findByTestId("github-list-failed")).toHaveTextContent(
       /Suggestions did not load/,
     );
-    expect(
-      screen.queryByRole("combobox", { name: "Repository" }),
-    ).not.toBeInTheDocument();
+    const picker = await screen.findByRole("combobox", { name: "Repository" });
+    await user.click(picker);
+    await user.type(
+      screen.getByPlaceholderText("Search or type owner/repo"),
+      "acme/app",
+    );
+    await user.click(screen.getByRole("option", { name: "acme/app" }));
+    expect(picker).toHaveTextContent("acme/app");
   });
 
   it("clones from the dropdown with Cmd+Enter", async () => {

@@ -333,7 +333,9 @@ export const HostedGitHubListFailed: Story = {
     await userEvent.click(
       await body.findByRole("option", { name: /GitHub repository/ }),
     );
-    await expect(await body.findByPlaceholderText("owner/repo")).toBeVisible();
+    await expect(
+      await body.findByRole("combobox", { name: "Repository" }),
+    ).toBeVisible();
     await expect(await body.findByTestId("github-list-failed")).toBeVisible();
   },
 };
