@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -20,6 +21,8 @@ const fixturePaths = [
   ".github/CODEOWNERS",
   ".github/release-drafter.yml",
   ".github/e2b-cli/package.json",
+  ".github/tauri-cli/package.json",
+  ".github/tauri-cli/pnpm-lock.yaml",
   ".github/vercel-cli/package.json",
   ".github/vercel-cli/pnpm-lock.yaml",
   "docs-site/package.json",
@@ -43,6 +46,9 @@ function policyFixture() {
   const root = mkdtempSync(join(tmpdir(), "tidebreak-policy-mutation-"));
   for (const path of fixturePaths) {
     const source = join(repositoryRoot, path);
+    if (!existsSync(source)) {
+      continue;
+    }
     const target = join(root, path);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
@@ -69,6 +75,34 @@ function editWorkflowJob(source, name, mutateJob) {
   const mutated = mutateJob(job);
   assert.notEqual(mutated, job, `mutation did not change job ${name}`);
   return source.slice(0, start) + mutated + source.slice(end);
+}
+
+function signingInstallStep(job) {
+  const step = job.match(
+    /      - name: (?:Install UI dependencies|Install pinned Tauri bundler)\n[\s\S]*?(?=\n      - name:)/,
+  )?.[0];
+  assert.ok(step, "missing signing-job dependency install");
+  return step;
+}
+
+function mutateSigningRustCache(job, saveIf) {
+  if (/Install pinned Tauri bundler/.test(job)) {
+    const step = `      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          cache-targets: false
+          save-if: ${saveIf}
+
+`;
+    return job.replace(
+      "      - name: Validate production signing configuration\n",
+      `${step}      - name: Validate production signing configuration\n`,
+    );
+  }
+  return job.replace(
+    /save-if: (?:false|\$\{\{ matrix\.arch == 'aarch64' \}\})/,
+    `save-if: ${saveIf}`,
+  );
 }
 
 function runPolicy(root) {
@@ -439,12 +473,10 @@ const mutations = [
     file: ".github/workflows/release.yml",
     expected: "signing jobs do not run untrusted installers",
     mutate: (source) =>
-      editWorkflowJob(source, "build_macos", (job) =>
-        job.replace(
-          /      - name: Install UI dependencies\n        working-directory: crates\/tidebreak-desktop\/ui\n        run: pnpm install --frozen-lockfile(?: --ignore-scripts)?\n/,
-          "",
-        ),
-      ),
+      editWorkflowJob(source, "build_macos", (job) => {
+        const install = signingInstallStep(job);
+        return job.replace(install, "");
+      }),
   },
   {
     name: "signing job rust-cache writer",
@@ -452,10 +484,7 @@ const mutations = [
     expected: "signing jobs do not run untrusted installers",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
-        job.replace(
-          /save-if: (?:false|\$\{\{ matrix\.arch == 'aarch64' \}\})/,
-          "save-if: true",
-        ),
+        mutateSigningRustCache(job, "true"),
       ),
   },
   {
@@ -474,8 +503,8 @@ const mutations = [
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
         job.replace(
-          "pnpm install --frozen-lockfile --ignore-scripts",
-          "pnpm install --frozen-lockfile",
+          /pnpm(?: --dir \.github\/tauri-cli)? install --frozen-lockfile --ignore-scripts/,
+          (install) => install.replace(" --ignore-scripts", ""),
         ),
       ),
   },
@@ -485,12 +514,10 @@ const mutations = [
     expected: "signing jobs do not run untrusted installers",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) => {
-        const install =
-          "      - name: Install UI dependencies\n        working-directory: crates/tidebreak-desktop/ui\n        run: pnpm install --frozen-lockfile --ignore-scripts\n";
-        assert.ok(job.includes(install));
+        const install = signingInstallStep(job);
         return job.replace(install, "").replace(
           "      - name: Validate production signing configuration\n",
-          `      - name: Validate production signing configuration\n${install}`,
+          `      - name: Validate production signing configuration\n${install}\n`,
         );
       }),
   },
@@ -500,10 +527,7 @@ const mutations = [
     expected: "signing jobs do not run untrusted installers",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
-        job.replace(
-          "save-if: false",
-          "save-if: ${{ matrix.arch == 'aarch64' }}",
-        ),
+        mutateSigningRustCache(job, "${{ matrix.arch == 'aarch64' }}"),
       ),
   },
   {
