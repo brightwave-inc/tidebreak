@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -1038,53 +1038,10 @@ async fn has_uncommitted_work(worktree_path: &Path) -> Result<bool, WorktreeErro
 
 async fn has_non_disposable_ignored_content(worktree_path: &Path) -> Result<bool, WorktreeError> {
     let disposable = archive_disposable_paths(worktree_path).await?;
-    let mut stack = vec![worktree_path.to_path_buf()];
-    let mut candidates = Vec::new();
-    let mut entry_count = 0usize;
-    let mut path_bytes = 0usize;
-
-    while let Some(directory) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&directory).await.map_err(|error| {
-            WorktreeError::archive_uncertain(format!(
-                "archive could not inspect {}: {error}",
-                directory.display()
-            ))
-        })?;
-        while let Some(entry) = entries.next_entry().await.map_err(|error| {
-            WorktreeError::archive_uncertain(format!(
-                "archive could not continue inspecting {}: {error}",
-                directory.display()
-            ))
-        })? {
-            let path = entry.path();
-            let relative = path.strip_prefix(worktree_path).map_err(|_| {
-                WorktreeError::archive_uncertain("archive scan escaped the worktree")
-            })?;
-            if relative == Path::new(".git") || path_is_disposable(relative, &disposable) {
-                continue;
-            }
-            entry_count = entry_count.saturating_add(1);
-            path_bytes = path_bytes.saturating_add(relative.as_os_str().len());
-            if entry_count > ARCHIVE_SCAN_MAX_ENTRIES || path_bytes > ARCHIVE_SCAN_MAX_PATH_BYTES {
-                return Err(WorktreeError::archive_uncertain(format!(
-                    "archive inspection exceeded its {}-entry or {}-byte path budget; configure generated directories with git config --add {ARCHIVE_DISPOSABLE_PATH_KEY} <directory>",
-                    ARCHIVE_SCAN_MAX_ENTRIES, ARCHIVE_SCAN_MAX_PATH_BYTES
-                )));
-            }
-            let file_type = entry.file_type().await.map_err(|error| {
-                WorktreeError::archive_uncertain(format!(
-                    "archive could not inspect {}: {error}",
-                    path.display()
-                ))
-            })?;
-            candidates.push(relative.to_string_lossy().replace('\\', "/"));
-            if file_type.is_dir() {
-                stack.push(path);
-            }
-        }
-    }
-
-    git_check_ignored(worktree_path, &candidates).await
+    let ignored = list_ignored_paths_bounded(worktree_path).await?;
+    Ok(ignored
+        .iter()
+        .any(|path| !path_is_disposable(Path::new(path), &disposable)))
 }
 
 async fn archive_disposable_paths(worktree_path: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -1147,69 +1104,73 @@ fn path_is_disposable(path: &Path, disposable: &[PathBuf]) -> bool {
         .any(|configured| path.starts_with(configured))
 }
 
-async fn git_check_ignored(
-    worktree_path: &Path,
-    candidates: &[String],
-) -> Result<bool, WorktreeError> {
-    if candidates.is_empty() {
-        return Ok(false);
-    }
-    let mut input = Vec::new();
-    for candidate in candidates {
-        input.extend_from_slice(candidate.as_bytes());
-        input.push(0);
-    }
+async fn list_ignored_paths_bounded(worktree_path: &Path) -> Result<Vec<String>, WorktreeError> {
     let mut command = Command::new("git");
     command
-        .args(["check-ignore", "--stdin", "-z"])
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ])
         .current_dir(worktree_path)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("GIT_TERMINAL_PROMPT", "0");
     let mut child = command.spawn().map_err(|error| {
-        WorktreeError::archive_uncertain(format!("git check-ignore failed: {error}"))
+        WorktreeError::archive_uncertain(format!("git ls-files failed: {error}"))
     })?;
-    let mut stdin = child
-        .stdin
+    let mut stdout = child
+        .stdout
         .take()
-        .ok_or_else(|| WorktreeError::archive_uncertain("git check-ignore did not open stdin"))?;
-    let writer = tokio::spawn(async move {
-        let result = stdin.write_all(&input).await;
-        drop(stdin);
-        result
-    });
-    let output = timeout(GIT_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| WorktreeError::archive_uncertain("git check-ignore timed out"))?
-        .map_err(|error| {
-            WorktreeError::archive_uncertain(format!("git check-ignore failed: {error}"))
-        })?;
-    writer
-        .await
-        .map_err(|error| {
-            WorktreeError::archive_uncertain(format!("git check-ignore input failed: {error}"))
-        })?
-        .map_err(|error| {
-            WorktreeError::archive_uncertain(format!("git check-ignore input failed: {error}"))
-        })?;
-    match output.status.code() {
-        Some(0) => {
-            if output.stdout.len() > ARCHIVE_SCAN_MAX_PATH_BYTES {
-                Err(WorktreeError::archive_uncertain(
-                    "git check-ignore output exceeded the archive path budget",
-                ))
-            } else {
-                Ok(!output.stdout.is_empty())
-            }
+        .ok_or_else(|| WorktreeError::archive_uncertain("git ls-files did not open stdout"))?;
+    let mut output = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = timeout(GIT_TIMEOUT, stdout.read(&mut chunk))
+            .await
+            .map_err(|_| WorktreeError::archive_uncertain("git ls-files timed out"))?
+            .map_err(|error| {
+                WorktreeError::archive_uncertain(format!("git ls-files failed: {error}"))
+            })?;
+        if read == 0 {
+            break;
         }
-        Some(1) if output.stdout.is_empty() => Ok(false),
-        _ => Err(WorktreeError::archive_uncertain(format!(
-            "git check-ignore failed during archive: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))),
+        output.extend_from_slice(&chunk[..read]);
+        if output.len() > ARCHIVE_SCAN_MAX_PATH_BYTES {
+            let _ = child.kill().await;
+            return Err(WorktreeError::archive_uncertain(format!(
+                "ignored-content inspection exceeded its {}-byte path budget; configure generated directories with git config --add {ARCHIVE_DISPOSABLE_PATH_KEY} <directory>",
+                ARCHIVE_SCAN_MAX_PATH_BYTES
+            )));
+        }
     }
+    let status = timeout(GIT_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| WorktreeError::archive_uncertain("git ls-files timed out"))?
+        .map_err(|error| {
+            WorktreeError::archive_uncertain(format!("git ls-files failed: {error}"))
+        })?;
+    if !status.success() {
+        return Err(WorktreeError::archive_uncertain(
+            "git ls-files failed during ignored-content inspection",
+        ));
+    }
+    let paths = output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>();
+    if paths.len() > ARCHIVE_SCAN_MAX_ENTRIES {
+        return Err(WorktreeError::archive_uncertain(format!(
+            "ignored-content inspection exceeded its {}-entry budget; configure generated directories with git config --add {ARCHIVE_DISPOSABLE_PATH_KEY} <directory>",
+            ARCHIVE_SCAN_MAX_ENTRIES
+        )));
+    }
+    Ok(paths)
 }
 
 async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool, WorktreeError> {

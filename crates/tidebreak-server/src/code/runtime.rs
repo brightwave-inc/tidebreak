@@ -180,6 +180,8 @@ pub(crate) struct CodeRuntime {
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
+    /// Serializes writer admission with workspace lifecycle transitions.
+    workspace_lifecycles: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     /// One turn at a time per worktree, shared by every session in it.
     ///
     /// Sessions in a workspace share one checkout, so their turns cannot
@@ -395,6 +397,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: Mutex::new(HashMap::new()),
             delivery_nudges: DeliveryNudgeDebounce::default(),
@@ -525,6 +528,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: Mutex::new(HashMap::new()),
             delivery_nudges: DeliveryNudgeDebounce::default(),
@@ -655,6 +659,9 @@ impl CodeRuntime {
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
         self.ensure_stall_sweep();
+        let actions = recovery::recover_running_sessions(&self.db, &self.bus)
+            .await
+            .map_err(ServerError::from)?;
         for workspace in
             list_workspaces_by_status_all_owners(&self.db, CodeWorkspaceStatus::Archiving).await?
         {
@@ -662,6 +669,20 @@ impl CodeRuntime {
                 tracing::warn!(
                     workspace = %workspace.id,
                     "code-mode: archive recovery left a missing checkout fenced as archiving"
+                );
+                continue;
+            }
+            let sessions =
+                list_sessions_for_workspace(&self.db, &workspace.owner, workspace.id).await?;
+            if sessions.iter().any(|session| {
+                matches!(
+                    session.lifecycle,
+                    CodeSessionLifecycle::Running | CodeSessionLifecycle::Fenced
+                )
+            }) {
+                tracing::warn!(
+                    workspace = %workspace.id,
+                    "code-mode: archive recovery kept lifecycle exclusion because a worker may still exist"
                 );
                 continue;
             }
@@ -680,9 +701,6 @@ impl CodeRuntime {
                 );
             }
         }
-        let actions = recovery::recover_running_sessions(&self.db, &self.bus)
-            .await
-            .map_err(ServerError::from)?;
         let recovered_sessions = list_sessions_all_owners(&self.db).await?;
         for session in &recovered_sessions {
             super::approval_sweep::abandon_for_restart(
@@ -1166,6 +1184,18 @@ impl CodeRuntime {
         &self,
         workspace: &CodeWorkspace,
     ) -> Result<(), ServerError> {
+        let lifecycle = self.workspace_lifecycle_lock(workspace.id);
+        let _lifecycle_guard = lifecycle.lock().await;
+        let current = self.get_workspace(&workspace.owner, workspace.id).await?;
+        if current.status != workspace.status {
+            return Err(ServerError::conflict_kind(
+                "workspace_lifecycle_changed",
+                format!(
+                    "workspace became {} before the update was saved",
+                    current.status.as_str()
+                ),
+            ));
+        }
         if !save_workspace(&self.db, workspace).await? {
             return Err(ServerError::not_found(format!(
                 "workspace {} not found",
@@ -1217,26 +1247,41 @@ impl CodeRuntime {
                 }
             }
         }
-        if !compare_and_set_workspace_status(
-            &self.db,
-            owner,
-            id,
-            CodeWorkspaceStatus::Active,
-            CodeWorkspaceStatus::Archiving,
-        )
-        .await?
         {
-            return Err(ServerError::conflict_kind(
-                "workspace_lifecycle_busy",
-                "another workspace lifecycle operation started first",
-            ));
+            let lifecycle = self.workspace_lifecycle_lock(id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            workspace = self.get_workspace(owner, id).await?;
+            if workspace.status != CodeWorkspaceStatus::Active {
+                return Err(ServerError::conflict_kind(
+                    "workspace_lifecycle_busy",
+                    format!("workspace is {}", workspace.status.as_str()),
+                ));
+            }
+            self.refuse_running_sessions(owner, id, force).await?;
+            if !compare_and_set_workspace_status(
+                &self.db,
+                owner,
+                id,
+                CodeWorkspaceStatus::Active,
+                CodeWorkspaceStatus::Archiving,
+            )
+            .await?
+            {
+                return Err(ServerError::conflict_kind(
+                    "workspace_lifecycle_busy",
+                    "another workspace lifecycle operation started first",
+                ));
+            }
         }
         workspace.status = CodeWorkspaceStatus::Archiving;
 
         let archived = self
             .archive_workspace_exclusive(owner, workspace, repo, force, terminals)
             .await;
-        if archived.is_err() && path.exists() {
+        if archived
+            .as_ref()
+            .is_err_and(|error| archive_failure_can_reopen(error) && path.exists())
+        {
             if !compare_and_set_workspace_status(
                 &self.db,
                 owner,
@@ -2719,6 +2764,8 @@ impl CodeRuntime {
             fast_mode,
         }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
+        let lifecycle = self.workspace_lifecycle_lock(workspace_id);
+        let _lifecycle_guard = lifecycle.lock().await;
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(
@@ -4602,7 +4649,16 @@ impl CodeRuntime {
         &self,
         workspace_id: WorkspaceId,
     ) -> Arc<tokio::sync::Mutex<()>> {
-        self.worktree_turn_lock(workspace_id)
+        self.workspace_lifecycle_lock(workspace_id)
+    }
+
+    fn workspace_lifecycle_lock(&self, workspace_id: WorkspaceId) -> Arc<tokio::sync::Mutex<()>> {
+        self.workspace_lifecycles
+            .lock()
+            .expect("workspace lifecycle locks")
+            .entry(workspace_id)
+            .or_default()
+            .clone()
     }
 
     fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
@@ -5180,6 +5236,18 @@ fn map_worktree(err: WorktreeError) -> ServerError {
             ServerError::conflict_kind("archive_inspection_uncertain", message)
         }
     }
+}
+
+fn archive_failure_can_reopen(error: &ServerError) -> bool {
+    matches!(
+        error.kind(),
+        "archive_script_failed"
+            | "archive_inspection_uncertain"
+            | "ignored_content"
+            | "uncommitted"
+            | "unpushed"
+            | "uncommitted_and_unpushed"
+    )
 }
 
 fn map_worker(err: WorkerError) -> ServerError {
