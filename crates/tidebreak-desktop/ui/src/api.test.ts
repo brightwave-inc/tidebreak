@@ -21,6 +21,46 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("repository setup request cancellation", () => {
+  it("passes the caller's abort signal to every setup read", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ repositories: [] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sources: [], chooses_destination: false }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            parent_dir: "/tmp/src",
+            gh_found: true,
+            gh_authenticated: true,
+            gh_remediation: "",
+          }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+    const controller = new AbortController();
+
+    await client.listCodeGithubRepositories(controller.signal);
+    await client.getCodeRepoSources(controller.signal);
+    await client.getCodeCloneDefaults(controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    for (const call of fetchMock.mock.calls) {
+      const [, init] = call as [string, RequestInit];
+      expect(init.signal).toBe(controller.signal);
+    }
+  });
+});
+
 describe("parseFolderAccessRequest", () => {
   it("accepts only the closed renderer-safe consent projection", () => {
     expect(

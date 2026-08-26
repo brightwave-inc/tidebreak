@@ -2073,29 +2073,38 @@ export class ApiClient {
    * on a shared machine the person adding a repository is usually not an
    * administrator, and a dialog that cannot read its own options is no dialog.
    */
-  async listCodeGithubRepositories(): Promise<CodeGithubRepositories> {
+  async listCodeGithubRepositories(
+    signal?: AbortSignal,
+  ): Promise<CodeGithubRepositories> {
     return requireParsed(
       parseCodeGithubRepositories(
-        await this.json("/code/repos/github", { headers: this.headers() }),
+        await this.json("/code/repos/github", {
+          headers: this.headers(),
+          signal,
+        }),
       ),
       "github repositories",
     );
   }
 
-  async getCodeRepoSources(): Promise<CodeRepoSources> {
+  async getCodeRepoSources(signal?: AbortSignal): Promise<CodeRepoSources> {
     return requireParsed(
       parseCodeRepoSources(
-        await this.json("/code/repos/sources", { headers: this.headers() }),
+        await this.json("/code/repos/sources", {
+          headers: this.headers(),
+          signal,
+        }),
       ),
       "repo sources",
     );
   }
 
-  async getCodeCloneDefaults(): Promise<CodeCloneDefaults> {
+  async getCodeCloneDefaults(signal?: AbortSignal): Promise<CodeCloneDefaults> {
     return requireParsed(
       parseCodeCloneDefaults(
         await this.json("/code/repos/clone-defaults", {
           headers: this.headers(),
+          signal,
         }),
       ),
       "clone defaults",
