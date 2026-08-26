@@ -35,7 +35,8 @@ mod text;
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
 pub use child::{
     current_process_identity, spawn_process_tree, spawned_process_identity,
-    terminate_recorded_process, ChildPid, ProcessTreeChild, RecordedProcessReap,
+    terminate_recorded_process, BoundedOutput, BoundedProcessOutput, ChildPid, OutputBudget,
+    OutputRetention, ProcessTreeChild, RecordedProcessReap,
 };
 pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
