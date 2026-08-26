@@ -340,6 +340,7 @@ pub(crate) struct NewSessionSettings {
 }
 
 impl CodeRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         db: Arc<DbStore>,
         data_dir: PathBuf,
