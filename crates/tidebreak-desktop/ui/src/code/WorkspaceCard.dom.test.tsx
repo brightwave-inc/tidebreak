@@ -38,6 +38,7 @@ function renderCard(overrides?: {
   density?: "compact" | "detailed";
   visibleMeta?: { repoChip: boolean; branch: boolean };
   detailDefaultOpen?: boolean;
+  canOpenWorktree?: boolean;
 }) {
   const onOpen = vi.fn();
   const onCommand = vi.fn();
@@ -59,6 +60,7 @@ function renderCard(overrides?: {
       commands={workspaceCommands({
         hasPr: Boolean(overrides?.pr),
         archived: merged.status === "archived",
+        canOpenWorktree: overrides?.canOpenWorktree,
       })}
       detailDefaultOpen={overrides?.detailDefaultOpen}
       onOpen={onOpen}
@@ -110,6 +112,33 @@ describe("WorkspaceCard", () => {
     expect(menu).toHaveTextContent("Archive");
     await user.click(screen.getByRole("menuitem", { name: "Toggle terminal" }));
     expect(onCommand).toHaveBeenCalledWith("toggle-terminal");
+  });
+
+  it("opens a local worktree from the hover detail and context menu", async () => {
+    const user = userEvent.setup();
+    const { onCommand } = renderCard({
+      canOpenWorktree: true,
+      detailDefaultOpen: true,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Open folder" }));
+    expect(onCommand).toHaveBeenCalledWith("open-worktree");
+
+    fireEvent.contextMenu(screen.getByRole("button", { name: /^Fix login/ }));
+    expect(
+      await screen.findByRole("menuitem", { name: "Open worktree folder" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Copy worktree path" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Copy path as the unsupported or remote fallback", async () => {
+    const user = userEvent.setup();
+    const { onCommand } = renderCard({ detailDefaultOpen: true });
+
+    await user.click(screen.getByRole("button", { name: "Copy path" }));
+    expect(onCommand).toHaveBeenCalledWith("copy-worktree");
   });
 
   it("announces a queued pull request and uses its orange chip", () => {

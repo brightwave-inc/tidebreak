@@ -26,6 +26,7 @@
 server_info: hands the renderer the embedded server's address and per-launch token — the handshake that makes every HTTP route reachable, so it cannot itself be one.
 request_user_attention: native window attention hint when a parked question needs the user.
 code_browser_command: creates and controls sandboxed native child webviews whose bounds and lifecycle exist only in the desktop shell.
+open_code_worktree: opens a local Code worktree through this operating system's folder handler; a headless server cannot open desktop UI.
 
 # Attaching this client to a machine it does not host (ADR 0047)
 remote_machine_state: reports which machine this client is attached to, from shell-held state that exists before any machine is reachable.

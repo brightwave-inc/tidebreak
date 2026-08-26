@@ -34,6 +34,7 @@ mod channel;
 mod chat_debug;
 mod client_execution;
 mod code_browser;
+mod code_worktree;
 #[cfg(test)]
 mod command_parity;
 mod deep_link;
@@ -810,6 +811,7 @@ pub fn run() {
             put_native_mcp_servers,
             request_user_attention,
             code_browser::code_browser_command,
+            code_worktree::open_code_worktree,
             attachments::attach_chat_files,
             attachments::attach_dropped_chat_files,
             image_attachments::publish_chat_image,

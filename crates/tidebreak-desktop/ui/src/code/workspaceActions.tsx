@@ -32,6 +32,11 @@ import { Input } from "@/components/ui/input";
 import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
+import {
+  canOpenLocalCodeWorktree,
+  codeWorktreeOpenFailureMessage,
+  openCodeWorktree,
+} from "./codeWorktreeHost";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 
@@ -44,6 +49,7 @@ export type WorkspaceCommandId =
   | "new-session"
   | "rename"
   | "copy-branch"
+  | "open-worktree"
   | "copy-worktree"
   | "copy-debug-json"
   | "open-pr"
@@ -80,6 +86,7 @@ export function workspaceCommands(input: {
   archived: boolean;
   hasSession?: boolean;
   attentionPinned?: boolean;
+  canOpenWorktree?: boolean;
 }): WorkspaceCommand[] {
   // An archived workspace has no worktree: nothing to open a terminal in,
   // no session to steer. What is left is reading, copying the branch that
@@ -97,7 +104,7 @@ export function workspaceCommands(input: {
     { id: "new-session", label: "New session" },
     { id: "rename", label: "Rename…" },
     { id: "copy-branch", label: "Copy branch name" },
-    { id: "copy-worktree", label: "Copy worktree path" },
+    worktreePathCommand(input.canOpenWorktree ?? canOpenLocalCodeWorktree()),
   ];
   if (input.hasPr) {
     items.push({ id: "open-pr", label: "Open pull request" });
@@ -126,18 +133,24 @@ export function workspaceCommands(input: {
 }
 
 /**
- * Header overflow: rename, pin/clear, repo quick actions, then archive.
- * Card-only items (open, copy, terminal) stay off this surface.
+ * Header overflow: worktree access, rename, pin/clear, repo quick actions,
+ * then archive. Opening the workspace and its terminal remain card-only.
  */
 export function workspaceHeaderCommands(input: {
   archived: boolean;
   hasSession: boolean;
   attentionPinned: boolean;
   quickActions: readonly { name: string }[];
+  canOpenWorktree?: boolean;
   /** The shown agent has a transcript worth handing to a sibling. */
   canFork?: boolean;
 }): WorkspaceCommand[] {
-  const items: WorkspaceCommand[] = [{ id: "rename", label: "Rename…" }];
+  const items: WorkspaceCommand[] = [
+    worktreePathCommand(
+      !input.archived && (input.canOpenWorktree ?? canOpenLocalCodeWorktree()),
+    ),
+    { id: "rename", label: "Rename…" },
+  ];
   if (input.hasSession) {
     items.push(
       input.attentionPinned
@@ -172,6 +185,12 @@ export function workspaceHeaderCommands(input: {
     items.push({ id: "restore", label: "Restore workspace", separated: true });
   }
   return items;
+}
+
+function worktreePathCommand(canOpenWorktree: boolean): WorkspaceCommand {
+  return canOpenWorktree
+    ? { id: "open-worktree", label: "Open worktree folder" }
+    : { id: "copy-worktree", label: "Copy worktree path" };
 }
 
 export function WorkspaceOverflowMenu({
@@ -463,6 +482,22 @@ export function useWorkspaceCardCommands(): {
           .then(() => toast.success("Branch name copied"))
           .catch(() => toast.error("Could not copy branch name"));
         return;
+      case "open-worktree":
+        void openCodeWorktree(context.workspace.id).catch((error) => {
+          const notice = worktreeOpenFailureNotice(error);
+          toast.error(notice.title, {
+            description: notice.description,
+            action: {
+              label: notice.actionLabel,
+              onClick: () => {
+                void copyPlainText(context.workspace.worktree_path)
+                  .then(() => toast.success("Worktree path copied"))
+                  .catch(() => toast.error("Could not copy worktree path"));
+              },
+            },
+          });
+        });
+        return;
       case "copy-worktree":
         void copyPlainText(context.workspace.worktree_path)
           .then(() => toast.success("Worktree path copied"))
@@ -648,6 +683,18 @@ export function useWorkspaceCardCommands(): {
         {outputDialog}
       </>
     ),
+  };
+}
+
+export function worktreeOpenFailureNotice(error: unknown): {
+  title: string;
+  description: string;
+  actionLabel: string;
+} {
+  return {
+    title: "Could not open worktree folder",
+    description: codeWorktreeOpenFailureMessage(error),
+    actionLabel: "Copy path",
   };
 }
 
