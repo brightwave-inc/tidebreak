@@ -417,9 +417,11 @@ impl HarnessAdapter for ScriptedAdapter {
     }
 
     fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
-        (self.reasoning_levels == CapLevel::Supported)
-            .then(|| ReasoningEffort::ALL.to_vec())
-            .unwrap_or_default()
+        if self.reasoning_levels == CapLevel::Supported {
+            ReasoningEffort::ALL.to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     async fn list_models(&self, _probe: &HarnessProbe) -> Vec<ListedHarnessModel> {
