@@ -15,6 +15,25 @@ use crate::PermissionMode;
 use super::super::super::{entities, store_err, DbStore};
 use super::acquire_code_session_write_lock;
 
+/// One durable permission-mode transition owned by an exact worker epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionModeChangeIntent {
+    pub session_id: CodeSessionId,
+    pub owner: OwnerId,
+    pub revision: i64,
+    pub previous_mode: PermissionMode,
+    pub requested_mode: PermissionMode,
+    pub lifecycle: CodeSessionLifecycle,
+    pub worker_epoch: i64,
+}
+
+/// A session plus the unresolved mode transition that blocks recovery.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingPermissionModeChange {
+    pub session: CodeSession,
+    pub intent: PermissionModeChangeIntent,
+}
+
 /// Insert a session row. The row belongs to `session.owner`, denormalized
 /// from the workspace it runs in.
 pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()> {
@@ -27,6 +46,11 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
         harness_version: Set(session.harness_version.clone()),
         harness_resume_ref: Set(session.harness_resume_ref.clone()),
         permission_mode: Set(session.permission_mode.as_str().to_owned()),
+        permission_mode_revision: Set(0),
+        permission_mode_intent: Set(None),
+        permission_mode_intent_revision: Set(None),
+        permission_mode_intent_epoch: Set(None),
+        permission_mode_intent_lifecycle: Set(None),
         model: Set(session.model.clone()),
         reasoning_effort: Set(session
             .reasoning_effort
@@ -93,6 +117,445 @@ pub async fn get_session_all_owners(
         return Ok(None);
     };
     Ok(Some(session_from_row(row)?))
+}
+
+/// Persist a versioned mode-change intent before any live engine mutation.
+///
+/// The exact owner, lifecycle, worker epoch, confirmed mode, and committed
+/// revision form the claim. `None` means that one of them changed or another
+/// transition already owns the row, so the caller must not contact the engine.
+pub async fn begin_permission_mode_change(
+    store: &DbStore,
+    owner: &OwnerId,
+    expected: &CodeSession,
+    requested_mode: PermissionMode,
+) -> Result<Option<PermissionModeChangeIntent>> {
+    if &expected.owner != owner {
+        return Ok(None);
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_permission_mode_change_write_lock(&transaction, owner, expected.id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(row) = entities::code_session::Entity::find_by_id(expected.id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let matches = row.lifecycle == expected.lifecycle.as_str()
+        && row.spawn_epoch == expected.spawn_epoch
+        && row.permission_mode == expected.permission_mode.as_str()
+        && row.permission_mode_intent.is_none()
+        && row.permission_mode_intent_revision.is_none()
+        && row.permission_mode_intent_epoch.is_none()
+        && row.permission_mode_intent_lifecycle.is_none();
+    if !matches {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let revision = row.permission_mode_revision.checked_add(1).ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} permission-mode revision overflow",
+            expected.id
+        ))
+    })?;
+    let intent = PermissionModeChangeIntent {
+        session_id: expected.id,
+        owner: owner.clone(),
+        revision,
+        previous_mode: expected.permission_mode,
+        requested_mode,
+        lifecycle: expected.lifecycle,
+        worker_epoch: expected.spawn_epoch,
+    };
+    let updated = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntent,
+            sea_orm::sea_query::Expr::value(Some(requested_mode.as_str().to_owned())),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentRevision,
+            sea_orm::sea_query::Expr::value(Some(revision)),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentEpoch,
+            sea_orm::sea_query::Expr::value(Some(expected.spawn_epoch)),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentLifecycle,
+            sea_orm::sea_query::Expr::value(Some(expected.lifecycle.as_str().to_owned())),
+        )
+        .filter(permission_mode_change_base(owner, &intent))
+        .filter(entities::code_session::Column::PermissionModeIntent.is_null())
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(intent))
+}
+
+/// Commit one acknowledged native mode change through its exact intent.
+pub async fn confirm_permission_mode_change(
+    store: &DbStore,
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+) -> Result<bool> {
+    update_permission_mode_intent(store, owner, intent, PermissionModeIntentUpdate::Confirm).await
+}
+
+/// Drop an intent after the engine proves that it did not apply the request.
+pub async fn cancel_permission_mode_change(
+    store: &DbStore,
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+) -> Result<bool> {
+    update_permission_mode_intent(store, owner, intent, PermissionModeIntentUpdate::Cancel).await
+}
+
+/// Clear an intent whose lifecycle or worker epoch has already moved on.
+///
+/// The intent identity and reserved revision still have to match. This only
+/// drops a transition that can no longer confirm; it never changes the
+/// durable permission mode or the newer session state that superseded it.
+pub async fn discard_permission_mode_change(
+    store: &DbStore,
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+) -> Result<bool> {
+    if &intent.owner != owner {
+        return Ok(false);
+    }
+    let result = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntent,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentRevision,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentEpoch,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentLifecycle,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .filter(permission_mode_change_identity(owner, intent))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Fence an exact unresolved intent after its engine worker has stopped.
+pub async fn fence_permission_mode_change(
+    store: &DbStore,
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+    reason: &FenceReason,
+) -> Result<Option<CodeSession>> {
+    if &intent.owner != owner {
+        return Ok(None);
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_permission_mode_change_write_lock(&transaction, owner, intent.session_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(row) = exact_permission_mode_intent(&transaction, owner, intent).await? else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let mut session = session_from_row(row)?;
+    let attention = Attention::new(
+        AttentionState::Fenced {
+            reason: reason.clone(),
+        },
+        AttentionSource::Lifecycle,
+    );
+    if crate::attention::should_replace(&session.attention, &attention) {
+        session.attention = attention;
+    }
+    let updated = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::Lifecycle,
+            sea_orm::sea_query::Expr::value(CodeSessionLifecycle::Fenced.as_str()),
+        )
+        .col_expr(
+            entities::code_session::Column::FenceReason,
+            sea_orm::sea_query::Expr::value(Some(serde_json::to_value(reason)?)),
+        )
+        .col_expr(
+            entities::code_session::Column::ChildPid,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::AttentionState,
+            sea_orm::sea_query::Expr::value(serde_json::to_value(&session.attention.state)?),
+        )
+        .col_expr(
+            entities::code_session::Column::AttentionSource,
+            sea_orm::sea_query::Expr::value(session.attention.source.as_str()),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntent,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentRevision,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentEpoch,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentLifecycle,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .filter(permission_mode_change_exact(owner, intent))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    get_session(store, owner, intent.session_id).await
+}
+
+/// List unresolved intents so startup fences them before attaching workers.
+pub async fn list_pending_permission_mode_changes(
+    store: &DbStore,
+    owner: &OwnerId,
+) -> Result<Vec<PendingPermissionModeChange>> {
+    entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session::Column::PermissionModeIntent.is_not_null())
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|row| {
+            let intent = permission_mode_intent_from_row(&row)?;
+            let session = session_from_row(row)?;
+            Ok(PendingPermissionModeChange { session, intent })
+        })
+        .collect()
+}
+
+enum PermissionModeIntentUpdate {
+    Confirm,
+    Cancel,
+}
+
+async fn acquire_permission_mode_change_write_lock<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    let locked = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::UnrecognizedEventCount,
+            sea_orm::sea_query::Expr::col(entities::code_session::Column::UnrecognizedEventCount),
+        )
+        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(locked.rows_affected == 1)
+}
+
+async fn update_permission_mode_intent(
+    store: &DbStore,
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+    update: PermissionModeIntentUpdate,
+) -> Result<bool> {
+    if &intent.owner != owner {
+        return Ok(false);
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_permission_mode_change_write_lock(&transaction, owner, intent.session_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    if exact_permission_mode_intent(&transaction, owner, intent)
+        .await?
+        .is_none()
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let mut query = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntent,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentRevision,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentEpoch,
+            sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::PermissionModeIntentLifecycle,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        );
+    if matches!(update, PermissionModeIntentUpdate::Confirm) {
+        query = query
+            .col_expr(
+                entities::code_session::Column::PermissionMode,
+                sea_orm::sea_query::Expr::value(intent.requested_mode.as_str()),
+            )
+            .col_expr(
+                entities::code_session::Column::PermissionModeRevision,
+                sea_orm::sea_query::Expr::value(intent.revision),
+            );
+    }
+    let updated = query
+        .filter(permission_mode_change_exact(owner, intent))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
+fn permission_mode_change_base(owner: &OwnerId, intent: &PermissionModeChangeIntent) -> Condition {
+    Condition::all()
+        .add(entities::code_session::Column::Id.eq(intent.session_id.0))
+        .add(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .add(entities::code_session::Column::Lifecycle.eq(intent.lifecycle.as_str()))
+        .add(entities::code_session::Column::SpawnEpoch.eq(intent.worker_epoch))
+        .add(entities::code_session::Column::PermissionMode.eq(intent.previous_mode.as_str()))
+        .add(entities::code_session::Column::PermissionModeRevision.eq(intent.revision - 1))
+}
+
+fn permission_mode_change_exact(owner: &OwnerId, intent: &PermissionModeChangeIntent) -> Condition {
+    Condition::all()
+        .add(permission_mode_change_base(owner, intent))
+        .add(permission_mode_change_identity(owner, intent))
+}
+
+fn permission_mode_change_identity(
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+) -> Condition {
+    Condition::all()
+        .add(entities::code_session::Column::Id.eq(intent.session_id.0))
+        .add(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .add(entities::code_session::Column::PermissionModeRevision.eq(intent.revision - 1))
+        .add(
+            entities::code_session::Column::PermissionModeIntent.eq(intent.requested_mode.as_str()),
+        )
+        .add(entities::code_session::Column::PermissionModeIntentRevision.eq(intent.revision))
+        .add(entities::code_session::Column::PermissionModeIntentEpoch.eq(intent.worker_epoch))
+        .add(
+            entities::code_session::Column::PermissionModeIntentLifecycle
+                .eq(intent.lifecycle.as_str()),
+        )
+}
+
+async fn exact_permission_mode_intent<C>(
+    conn: &C,
+    owner: &OwnerId,
+    intent: &PermissionModeChangeIntent,
+) -> Result<Option<entities::code_session::Model>>
+where
+    C: ConnectionTrait,
+{
+    entities::code_session::Entity::find_by_id(intent.session_id.0)
+        .filter(permission_mode_change_exact(owner, intent))
+        .one(conn)
+        .await
+        .map_err(store_err)
+}
+
+fn permission_mode_intent_from_row(
+    row: &entities::code_session::Model,
+) -> Result<PermissionModeChangeIntent> {
+    let requested = row.permission_mode_intent.as_deref().ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} has an incomplete permission-mode intent",
+            row.id
+        ))
+    })?;
+    let requested_mode = PermissionMode::from_str(requested).ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} has unknown permission-mode intent {}",
+            row.id, requested
+        ))
+    })?;
+    let previous_mode = PermissionMode::from_str(&row.permission_mode).ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} has unknown permission_mode {}",
+            row.id, row.permission_mode
+        ))
+    })?;
+    let lifecycle_token = row
+        .permission_mode_intent_lifecycle
+        .as_deref()
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "code session {} has an incomplete permission-mode intent",
+                row.id
+            ))
+        })?;
+    let lifecycle = CodeSessionLifecycle::from_str(lifecycle_token).ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} has unknown permission-mode intent lifecycle {}",
+            row.id, lifecycle_token
+        ))
+    })?;
+    let revision = row.permission_mode_intent_revision.ok_or_else(|| {
+        AgentError::Store(format!(
+            "code session {} has an incomplete permission-mode intent",
+            row.id
+        ))
+    })?;
+    if revision != row.permission_mode_revision + 1 {
+        return Err(AgentError::Store(format!(
+            "code session {} has non-sequential permission-mode intent revision {} after {}",
+            row.id, revision, row.permission_mode_revision
+        )));
+    }
+    Ok(PermissionModeChangeIntent {
+        session_id: CodeSessionId(row.id),
+        owner: OwnerId::new(&row.owner)?,
+        revision,
+        previous_mode,
+        requested_mode,
+        lifecycle,
+        worker_epoch: row.permission_mode_intent_epoch.ok_or_else(|| {
+            AgentError::Store(format!(
+                "code session {} has an incomplete permission-mode intent",
+                row.id
+            ))
+        })?,
+    })
 }
 
 /// Advance the spawn epoch and record the new child pid. Returns the new epoch.
@@ -214,9 +677,10 @@ pub async fn list_sessions_by_lifecycle_all_owners(
 }
 
 /// Persist mutable session fields. `id`, `workspace_id`, `created_at`,
-/// `attention`, `subagents`, and a missing resume ref stay as stored. Attention,
-/// subagents, and resume-ref clearing have targeted writes so a full-row save
-/// from a stale worker cannot clobber a concurrent structured update.
+/// `permission_mode`, `attention`, `subagents`, and a missing resume ref stay
+/// as stored. Permission mode, attention, subagents, and resume-ref clearing
+/// have targeted writes so a full-row save from a stale worker cannot clobber
+/// a concurrent structured update.
 ///
 /// `spawn_epoch` must be non-decreasing, and `Ended` is terminal: a caller
 /// that is not `Ended` cannot overwrite that lifecycle. Returns `false` when
@@ -240,10 +704,6 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
         .col_expr(
             entities::code_session::Column::HarnessVersion,
             sea_orm::sea_query::Expr::value(session.harness_version.clone()),
-        )
-        .col_expr(
-            entities::code_session::Column::PermissionMode,
-            sea_orm::sea_query::Expr::value(session.permission_mode.as_str().to_owned()),
         )
         .col_expr(
             entities::code_session::Column::Model,

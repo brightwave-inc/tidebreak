@@ -118,6 +118,7 @@ pub(crate) struct ScriptedAdapter {
     /// engine onto. Shared with the session so both survive a relaunch.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
     modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
+    shutdowns: Arc<AtomicU64>,
     /// What each turn actually handed the engine, for a test that cares how
     /// an attachment travelled rather than that it was accepted.
     inputs: Arc<std::sync::Mutex<Vec<ScriptedTurnInput>>>,
@@ -167,6 +168,7 @@ impl ScriptedAdapter {
             posture_fixed: false,
             turns: Arc::new(std::sync::Mutex::new(Vec::new())),
             modes: Arc::new(std::sync::Mutex::new(Vec::new())),
+            shutdowns: Arc::new(AtomicU64::new(0)),
             inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
             child_pid: None,
             session_long_child: false,
@@ -330,6 +332,11 @@ impl ScriptedAdapter {
         self
     }
 
+    /// How many engine sessions the worker terminated.
+    pub(crate) fn shutdown_count(&self) -> u64 {
+        self.shutdowns.load(Ordering::SeqCst)
+    }
+
     /// How many times a session of this adapter has been parked.
     pub(crate) fn park_count(&self) -> u64 {
         self.parks.load(Ordering::SeqCst)
@@ -431,6 +438,7 @@ impl HarnessAdapter for ScriptedAdapter {
             posture_fixed: self.posture_fixed,
             turns: self.turns.clone(),
             modes: self.modes.clone(),
+            shutdowns: self.shutdowns.clone(),
             inputs: self.inputs.clone(),
             worktree: spec.worktree.clone(),
             writes: self.writes.clone(),
@@ -466,6 +474,7 @@ struct ScriptedSession {
     /// after the runtime has dropped and relaunched the session.
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
     modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
+    shutdowns: Arc<AtomicU64>,
     inputs: Arc<std::sync::Mutex<Vec<ScriptedTurnInput>>>,
     worktree: PathBuf,
     writes: Vec<ScriptedWrite>,
@@ -648,6 +657,7 @@ impl HarnessSession for ScriptedSession {
     }
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
+        self.shutdowns.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }

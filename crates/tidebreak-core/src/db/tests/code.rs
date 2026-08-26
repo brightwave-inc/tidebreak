@@ -1,5 +1,5 @@
 use super::temp_store;
-use crate::attention::{Attention, AttentionSource};
+use crate::attention::{Attention, AttentionSource, FenceReason};
 use crate::code::{
     CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn,
     CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
@@ -8,16 +8,18 @@ use crate::code::{
 };
 use crate::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
-    bump_spawn_epoch, claim_approval, clear_session_harness_resume_ref, delete_queued_turn,
-    delete_session_queued_turns, enqueue_queued_turn, get_approval, get_repo,
-    get_repo_by_root_path, get_session, get_turn, get_workspace, insert_approval,
-    insert_approval_for_worker, insert_repo, insert_session, insert_turn, insert_workspace,
-    list_approvals, list_events, list_queued_turns, list_repos, list_sessions, list_turn_metrics,
-    list_turns, mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
-    recover_interrupted_session, replace_session_attention, save_session, save_turn,
-    set_queue_paused, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
-    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
-    CodeJournalError, MAX_REPLAY_EVENTS,
+    begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change, claim_approval,
+    clear_session_harness_resume_ref, confirm_permission_mode_change, delete_queued_turn,
+    delete_session_queued_turns, discard_permission_mode_change, enqueue_queued_turn,
+    fence_permission_mode_change, get_approval, get_repo, get_repo_by_root_path, get_session,
+    get_turn, get_workspace, insert_approval, insert_approval_for_worker, insert_repo,
+    insert_session, insert_turn, insert_workspace, list_approvals, list_events,
+    list_pending_permission_mode_changes, list_queued_turns, list_repos, list_sessions,
+    list_turn_metrics, list_turns, mark_repo_removed, promote_queued_turn, queue_paused,
+    queued_turn_head, recover_interrupted_session, replace_session_attention, save_session,
+    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
+    set_turn_narrative, set_workspace_title_if, settle_approval_claim, update_queued_turn,
+    ClaimedApprovalSettlement, CodeJournalError, MAX_REPLAY_EVENTS,
 };
 use crate::{BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, Store};
 use chrono::Utc;
@@ -318,6 +320,213 @@ async fn stale_session_saves_preserve_resume_refs_until_an_explicit_clear() {
             .unwrap()
             .harness_resume_ref,
         None
+    );
+}
+
+#[tokio::test]
+async fn permission_mode_changes_reserve_and_confirm_one_revision_at_a_time() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let stale = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let intent = begin_permission_mode_change(&store, &owner, &stale, PermissionMode::Auto)
+        .await
+        .unwrap()
+        .expect("the first change owns the row");
+    assert_eq!(intent.revision, 1);
+    assert_eq!(
+        get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        PermissionMode::Ask,
+        "an intent is not a confirmed mode"
+    );
+    assert!(
+        begin_permission_mode_change(&store, &owner, &stale, PermissionMode::Plan)
+            .await
+            .unwrap()
+            .is_none(),
+        "a second change cannot replace the pending revision"
+    );
+    assert!(confirm_permission_mode_change(&store, &owner, &intent)
+        .await
+        .unwrap());
+
+    let confirmed = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirmed.permission_mode, PermissionMode::Auto);
+    assert!(list_pending_permission_mode_changes(&store, &owner)
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert!(save_session(&store, &stale).await.unwrap());
+    let confirmed = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        confirmed.permission_mode,
+        PermissionMode::Auto,
+        "a stale full-row save cannot restore the previous mode"
+    );
+    let next = begin_permission_mode_change(&store, &owner, &confirmed, PermissionMode::Plan)
+        .await
+        .unwrap()
+        .expect("the confirmed revision releases the next change");
+    assert_eq!(next.revision, 2);
+}
+
+#[tokio::test]
+async fn a_concurrent_session_end_makes_permission_mode_confirmation_zero_rows() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let intent = begin_permission_mode_change(&store, &owner, &session, PermissionMode::Auto)
+        .await
+        .unwrap()
+        .unwrap();
+
+    session.lifecycle = CodeSessionLifecycle::Ended;
+    assert!(save_session(&store, &session).await.unwrap());
+    assert!(!confirm_permission_mode_change(&store, &owner, &intent)
+        .await
+        .unwrap());
+    let ended = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.lifecycle, CodeSessionLifecycle::Ended);
+    assert_eq!(ended.permission_mode, PermissionMode::Ask);
+    assert!(discard_permission_mode_change(&store, &owner, &intent)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn a_newer_worker_epoch_makes_permission_mode_confirmation_zero_rows() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let intent = begin_permission_mode_change(&store, &owner, &session, PermissionMode::Auto)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(bump_spawn_epoch(&store, session_id, None).await.unwrap(), 1);
+    assert!(!confirm_permission_mode_change(&store, &owner, &intent)
+        .await
+        .unwrap());
+    let newer = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(newer.spawn_epoch, 1);
+    assert_eq!(newer.permission_mode, PermissionMode::Ask);
+    assert!(discard_permission_mode_change(&store, &owner, &intent)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn another_owner_cannot_see_or_settle_permission_mode_changes() {
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::new("alice").unwrap();
+    let bob = OwnerId::new("bob").unwrap();
+    let (alice_session_id, _alice_turn) = seed_owner(&store, &alice, "alice").await;
+    let (_bob_session_id, _bob_turn) = seed_owner(&store, &bob, "bob").await;
+    let alice_session = get_session(&store, &alice, alice_session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut forged_session = alice_session.clone();
+    forged_session.owner = bob.clone();
+
+    assert!(
+        begin_permission_mode_change(&store, &bob, &forged_session, PermissionMode::Auto)
+            .await
+            .unwrap()
+            .is_none(),
+        "the query must match the caller's owner in storage"
+    );
+    let intent = begin_permission_mode_change(&store, &alice, &alice_session, PermissionMode::Auto)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(list_pending_permission_mode_changes(&store, &bob)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        list_pending_permission_mode_changes(&store, &alice)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut forged_intent = intent.clone();
+    forged_intent.owner = bob.clone();
+    assert!(
+        !confirm_permission_mode_change(&store, &bob, &forged_intent)
+            .await
+            .unwrap()
+    );
+    assert!(!cancel_permission_mode_change(&store, &bob, &forged_intent)
+        .await
+        .unwrap());
+    assert!(
+        !discard_permission_mode_change(&store, &bob, &forged_intent)
+            .await
+            .unwrap()
+    );
+    let reason = FenceReason::ProbeAmbiguous {
+        detail: "foreign owner must not fence this session".into(),
+    };
+    assert!(
+        fence_permission_mode_change(&store, &bob, &forged_intent, &reason)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let unchanged = get_session(&store, &alice, alice_session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.permission_mode, PermissionMode::Ask);
+    assert_eq!(unchanged.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(
+        list_pending_permission_mode_changes(&store, &alice)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "foreign writes must leave the owner's intent intact"
+    );
+
+    assert!(confirm_permission_mode_change(&store, &alice, &intent)
+        .await
+        .unwrap());
+    assert_eq!(
+        get_session(&store, &alice, alice_session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        PermissionMode::Auto
     );
 }
 
