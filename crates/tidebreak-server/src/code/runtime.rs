@@ -1281,8 +1281,7 @@ impl CodeRuntime {
         if archived
             .as_ref()
             .is_err_and(|error| archive_failure_can_reopen(error) && path.exists())
-        {
-            if !compare_and_set_workspace_status(
+            && !compare_and_set_workspace_status(
                 &self.db,
                 owner,
                 id,
@@ -1290,12 +1289,11 @@ impl CodeRuntime {
                 CodeWorkspaceStatus::Active,
             )
             .await?
-            {
-                tracing::warn!(
-                    workspace = %id,
-                    "code-mode: failed to restore Active after a refused archive"
-                );
-            }
+        {
+            tracing::warn!(
+                workspace = %id,
+                "code-mode: failed to restore Active after a refused archive"
+            );
         }
         archived
     }
