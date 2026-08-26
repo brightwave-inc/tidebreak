@@ -160,6 +160,11 @@ pub struct CodeTurnSnapshot {
     pub session_id: tidebreak_core::CodeSessionId,
     pub ordinal: i64,
     pub status: CodeTurnStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub fast_mode: bool,
     pub user_input: String,
     pub attachments: Vec<tidebreak_core::ImageRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +189,8 @@ impl From<CodeTurn> for CodeTurnSnapshot {
             session_id: turn.session_id,
             ordinal: turn.ordinal,
             status: turn.status,
+            model: turn.model,
+            fast_mode: turn.fast_mode,
             user_input: turn.user_input,
             attachments: turn.attachments,
             usage: turn.usage,

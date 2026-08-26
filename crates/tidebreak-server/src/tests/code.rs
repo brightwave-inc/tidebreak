@@ -25,7 +25,9 @@ use tidebreak_core::{
     CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, PermissionMode, ReasoningEffort,
     RepoId, Store, WorkspaceId,
 };
-use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
+use tidebreak_harness::{
+    AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent, ListedHarnessModel,
+};
 
 struct PutGate {
     started: tokio::sync::Notify,
@@ -539,6 +541,21 @@ async fn serve(router: Router) -> std::net::SocketAddr {
         let _ = axum::serve(listener, router).await;
     });
     addr
+}
+
+fn listed_model(
+    id: &str,
+    default: bool,
+    reasoning_efforts: &[ReasoningEffort],
+    fast_mode: bool,
+) -> ListedHarnessModel {
+    ListedHarnessModel {
+        id: id.into(),
+        label: id.into(),
+        default,
+        reasoning_efforts: reasoning_efforts.to_vec(),
+        fast_mode,
+    }
 }
 
 /// Auto is gated by its own capability flag (decision 0038): an engine with
@@ -2130,6 +2147,538 @@ async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
     );
 }
 
+/// opencode advertises no reasoning control, so neither creation nor a turn
+/// may store a level that its prompt API drops.
+#[tokio::test]
+async fn opencode_reasoning_is_never_reported_as_active() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_kind(HarnessKind::Opencode);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let create_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    let refused = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "opencode",
+            "permission_mode": "plan",
+            "reasoning_effort": "high",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "reasoning_effort_unsupported", "{body}");
+
+    let created = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "opencode",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id = json_id(&session);
+
+    for (path, body) in [
+        (
+            "turns",
+            serde_json::json!({ "message": "reason", "reasoning_effort": "high" }),
+        ),
+        ("effort", serde_json::json!({ "reasoning_effort": "high" })),
+    ] {
+        let refused = client
+            .post(format!("http://{addr}/code/sessions/{session_id}/{path}"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value = refused.json().await.unwrap();
+        assert_eq!(body["kind"], "reasoning_effort_unsupported", "{body}");
+    }
+
+    let debug: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(debug["session"]["reasoning_effort"].is_null(), "{debug}");
+}
+
+/// An explicit model outside the catalog cannot inherit the engine's broad
+/// reasoning ladder. The implicit default still uses that fallback when the
+/// catalog does not identify a default row.
+#[tokio::test]
+async fn an_unknown_explicit_model_cannot_inherit_engine_reasoning() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![listed_model("listed", false, &[], false)]);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let create_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    let implicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "reasoning_effort": "high",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(implicit.status(), reqwest::StatusCode::CREATED);
+
+    let explicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "unlisted",
+            "reasoning_effort": "high",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(explicit.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = explicit.json().await.unwrap();
+    assert_eq!(body["kind"], "reasoning_effort_unsupported", "{body}");
+}
+
+/// An unlisted explicit model cannot inherit fast mode from the catalog's
+/// default row. Omitting the model still uses that advertised default.
+#[tokio::test]
+async fn an_unknown_explicit_model_cannot_inherit_default_fast_mode() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_models(vec![listed_model(
+        "fast-default",
+        true,
+        &[],
+        true,
+    )]);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let create_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    let implicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(implicit.status(), reqwest::StatusCode::CREATED);
+
+    let explicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "unlisted",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(explicit.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = explicit.json().await.unwrap();
+    assert_eq!(body["kind"], "fast_mode_unsupported", "{body}");
+}
+
+/// A model without a fast service tier cannot make the session or the picker
+/// report fast mode as active.
+#[tokio::test]
+async fn unsupported_fast_mode_is_refused_on_create_and_live_update() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_models(vec![listed_model(
+        "steady",
+        true,
+        &[],
+        false,
+    )]);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let create_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    let refused = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "steady",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "fast_mode_unsupported", "{body}");
+
+    let created = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "steady",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let session: serde_json::Value = created.json().await.unwrap();
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/fast-mode",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "fast_mode": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "fast_mode_unsupported", "{body}");
+}
+
+/// A model switch keeps the model but clears settings the new row cannot
+/// honor before the turn or its snapshot sees them.
+#[tokio::test]
+async fn a_model_switch_deactivates_incompatible_execution_settings() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![
+            listed_model("fast-thinker", true, &[ReasoningEffort::High], true),
+            listed_model("steady", false, &[ReasoningEffort::Low], false),
+        ]);
+    let engine = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "fast-thinker",
+            "reasoning_effort": "high",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id = json_id(&session);
+
+    let turn = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "switch", "model": "steady" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = turn.json().await.unwrap();
+    assert_eq!(turn["model"], "steady", "{turn}");
+    assert_eq!(turn["fast_mode"], false, "{turn}");
+    assert_eq!(engine.turn_efforts(), vec![None]);
+    let inputs = engine.turn_inputs();
+    assert_eq!(inputs[0].model.as_deref(), Some("steady"));
+    assert!(!inputs[0].fast_mode);
+
+    let debug: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}/debug"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(debug["session"]["model"], "steady", "{debug}");
+    assert!(debug["session"]["reasoning_effort"].is_null(), "{debug}");
+    assert_eq!(debug["session"]["fast_mode"], false, "{debug}");
+}
+
+/// A composer change made during one turn becomes the durable effective
+/// settings for the queued turn, after unsupported inherited values clear.
+#[tokio::test]
+async fn a_queued_turn_receives_the_validated_effective_settings() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_delay(Duration::from_millis(100))
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![
+            listed_model("fast-thinker", true, &[ReasoningEffort::High], true),
+            listed_model("steady", false, &[ReasoningEffort::Low], false),
+        ]);
+    let engine = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "fast-thinker",
+            "reasoning_effort": "high",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+
+    let first = {
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "first" }))
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    let _ = wait_for_open_turn(&runtime, parsed).await;
+    let queued = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "second", "model": "steady" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued.status(), reqwest::StatusCode::ACCEPTED);
+    let queued: serde_json::Value = queued.json().await.unwrap();
+    assert_eq!(queued["message"], "second", "{queued}");
+    assert_eq!(first.await.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if engine.turn_inputs().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the queued turn did not run");
+    assert_eq!(
+        engine.turn_efforts(),
+        vec![Some(ReasoningEffort::High), None]
+    );
+    let inputs = engine.turn_inputs();
+    assert_eq!(inputs[1].model.as_deref(), Some("steady"));
+    assert!(!inputs[1].fast_mode);
+}
+
+/// A queued worker waiting on a sibling still accepts the transaction-safe
+/// settings reservation, and the held turn uses the committed value.
+#[tokio::test]
+async fn a_live_setting_update_reaches_a_turn_waiting_for_the_worktree() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_delay(Duration::from_millis(2_000))
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![listed_model(
+            "balanced",
+            true,
+            &[ReasoningEffort::Low],
+            false,
+        )]);
+    let engine = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
+
+    let holder_id = ids[0].clone();
+    let holder = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{holder_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "hold the worktree" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    wait_for_open_turn(&runtime, ids[0].parse().unwrap()).await;
+
+    let queued = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "use the committed setting" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(
+        queued
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+            .get("position")
+            .is_some(),
+        "the sibling turn must wait in the durable queue"
+    );
+
+    let updated = tokio::time::timeout(
+        Duration::from_secs(1),
+        client
+            .post(format!("http://{addr}/code/sessions/{}/effort", ids[1]))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "reasoning_effort": "low" }))
+            .send(),
+    )
+    .await
+    .expect("the settings reservation waited for the sibling turn")
+    .unwrap();
+    assert_eq!(updated.status(), reqwest::StatusCode::OK);
+
+    assert_eq!(
+        holder.await.unwrap().status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    wait_until(|| engine.turn_inputs().len() == 2).await;
+    assert_eq!(
+        engine.turn_efforts(),
+        vec![None, Some(ReasoningEffort::Low)]
+    );
+}
+
+/// A failed targeted write cannot make a live setting appear active or reach
+/// the next turn.
+#[tokio::test]
+async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![listed_model(
+            "balanced",
+            true,
+            &[ReasoningEffort::Low],
+            false,
+        )]);
+    let engine = adapter.clone();
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "balanced",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id = json_id(&session);
+
+    execute_code_db_unprepared(
+        &dir,
+        "CREATE TRIGGER ignore_reasoning_effort_update
+         BEFORE UPDATE OF reasoning_effort ON code_session
+         WHEN NEW.reasoning_effort IS NOT OLD.reasoning_effort
+         BEGIN
+           SELECT RAISE(IGNORE);
+         END",
+    )
+    .await;
+
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/effort"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "reasoning_effort": "low" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["kind"], "session_settings_changed", "{body}");
+
+    let turn = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "still default" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(engine.turn_efforts(), vec![None]);
+}
+
 /// The engines set an effort per turn, so a level chosen mid-conversation has
 /// to reach the next turn without a new session. Before this the picker was a
 /// local map that forgot on reload and never left the renderer.
@@ -2137,6 +2686,12 @@ async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
 async fn reasoning_effort_is_chosen_mid_conversation_and_reaches_the_next_turn() {
     let adapter = ScriptedAdapter::new(plain_text_script())
         .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![listed_model(
+            "scripted",
+            true,
+            ReasoningEffort::ALL,
+            false,
+        )])
         .with_live_mode_switch();
     let engine = adapter.clone();
     let (router, token, _runtime, dir) = code_app_with(adapter).await;

@@ -11,6 +11,7 @@ use crate::code::{
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 use crate::PermissionMode;
+use crate::ReasoningEffort;
 
 use super::super::super::{entities, store_err, DbStore};
 use super::acquire_code_session_write_lock;
@@ -32,6 +33,27 @@ pub struct PermissionModeChangeIntent {
 pub struct PendingPermissionModeChange {
     pub session: CodeSession,
     pub intent: PermissionModeChangeIntent,
+}
+
+/// The model-dependent execution settings one session actively uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeSessionExecutionSettings {
+    /// Engine model id, when the session selected one.
+    pub model: Option<String>,
+    /// Reasoning effort, or the engine default when absent.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether turns use the selected model's fast service tier.
+    pub fast_mode: bool,
+}
+
+impl From<&CodeSession> for CodeSessionExecutionSettings {
+    fn from(session: &CodeSession) -> Self {
+        Self {
+            model: session.model.clone(),
+            reasoning_effort: session.reasoning_effort,
+            fast_mode: session.fast_mode,
+        }
+    }
 }
 
 /// Insert a session row. The row belongs to `session.owner`, denormalized
@@ -117,6 +139,80 @@ pub async fn get_session_all_owners(
         return Ok(None);
     };
     Ok(Some(session_from_row(row)?))
+}
+
+/// Replace active execution settings only while the caller still owns the
+/// exact session lifecycle, worker epoch, and preceding settings.
+///
+/// When a worker is live, the caller holds its local session copy until this
+/// transaction commits. `None` means a concurrent lifecycle or settings
+/// change won, so the caller must release the worker without applying `next`.
+pub async fn replace_session_execution_settings(
+    store: &DbStore,
+    owner: &OwnerId,
+    expected: &CodeSession,
+    next: &CodeSessionExecutionSettings,
+) -> Result<Option<CodeSession>> {
+    if &expected.owner != owner {
+        return Ok(None);
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, expected.id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(row) = entities::code_session::Entity::find_by_id(expected.id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let current = session_from_row(row)?;
+    if current.lifecycle != expected.lifecycle
+        || current.spawn_epoch != expected.spawn_epoch
+        || current.model != expected.model
+        || current.reasoning_effort != expected.reasoning_effort
+        || current.fast_mode != expected.fast_mode
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::Model,
+            sea_orm::sea_query::Expr::value(next.model.clone()),
+        )
+        .col_expr(
+            entities::code_session::Column::ReasoningEffort,
+            sea_orm::sea_query::Expr::value(
+                next.reasoning_effort
+                    .map(|effort| effort.as_str().to_owned()),
+            ),
+        )
+        .col_expr(
+            entities::code_session::Column::FastMode,
+            sea_orm::sea_query::Expr::value(next.fast_mode),
+        )
+        .filter(entities::code_session::Column::Id.eq(expected.id.0))
+        .filter(entities::code_session::Column::Owner.eq(expected.owner.as_str()))
+        .filter(entities::code_session::Column::Lifecycle.eq(expected.lifecycle.as_str()))
+        .filter(entities::code_session::Column::SpawnEpoch.eq(expected.spawn_epoch))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    let mut current = current;
+    current.model.clone_from(&next.model);
+    current.reasoning_effort = next.reasoning_effort;
+    current.fast_mode = next.fast_mode;
+    Ok(Some(current))
 }
 
 /// Persist a versioned mode-change intent before any live engine mutation.
@@ -677,10 +773,10 @@ pub async fn list_sessions_by_lifecycle_all_owners(
 }
 
 /// Persist mutable session fields. `id`, `workspace_id`, `created_at`,
-/// `permission_mode`, `attention`, `subagents`, and a missing resume ref stay
-/// as stored. Permission mode, attention, subagents, and resume-ref clearing
-/// have targeted writes so a full-row save from a stale worker cannot clobber
-/// a concurrent structured update.
+/// `permission_mode`, execution settings, `attention`, `subagents`, and a
+/// missing resume ref stay as stored. These fields have targeted writes so a
+/// full-row save from a stale worker cannot clobber a concurrent structured
+/// update.
 ///
 /// `spawn_epoch` must be non-decreasing, and `Ended` is terminal: a caller
 /// that is not `Ended` cannot overwrite that lifecycle. Returns `false` when
@@ -704,22 +800,6 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
         .col_expr(
             entities::code_session::Column::HarnessVersion,
             sea_orm::sea_query::Expr::value(session.harness_version.clone()),
-        )
-        .col_expr(
-            entities::code_session::Column::Model,
-            sea_orm::sea_query::Expr::value(session.model.clone()),
-        )
-        .col_expr(
-            entities::code_session::Column::ReasoningEffort,
-            sea_orm::sea_query::Expr::value(
-                session
-                    .reasoning_effort
-                    .map(|effort| effort.as_str().to_owned()),
-            ),
-        )
-        .col_expr(
-            entities::code_session::Column::FastMode,
-            sea_orm::sea_query::Expr::value(session.fast_mode),
         )
         .col_expr(
             entities::code_session::Column::Lifecycle,

@@ -20,7 +20,7 @@ use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
     AdapterRegistry, ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef,
     HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv,
-    SessionSpec, TurnInput, TurnOutcome,
+    ListedHarnessModel, SessionSpec, TurnInput, TurnOutcome,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -109,6 +109,7 @@ pub(crate) struct ScriptedAdapter {
     allow_mode: CapLevel,
     image_input: CapLevel,
     reasoning_levels: CapLevel,
+    models: Vec<ListedHarnessModel>,
     /// Whether this engine takes a new mode without being relaunched.
     live_mode_switch: bool,
     /// Whether this engine fixes its posture when it creates its session and
@@ -164,6 +165,7 @@ impl ScriptedAdapter {
             allow_mode: CapLevel::Unsupported,
             image_input: CapLevel::Unknown,
             reasoning_levels: CapLevel::Unsupported,
+            models: Vec::new(),
             live_mode_switch: false,
             posture_fixed: false,
             turns: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -257,6 +259,18 @@ impl ScriptedAdapter {
     /// Declares an effort ladder, the way every adapter but opencode has one.
     pub(crate) fn with_reasoning_levels(mut self, level: CapLevel) -> Self {
         self.reasoning_levels = level;
+        self
+    }
+
+    /// Use another adapter identity while keeping the scripted engine.
+    pub(crate) fn with_kind(mut self, kind: HarnessKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Publish an exact model catalog for capability-validation tests.
+    pub(crate) fn with_models(mut self, models: Vec<ListedHarnessModel>) -> Self {
+        self.models = models;
         self
     }
 
@@ -402,6 +416,18 @@ impl HarnessAdapter for ScriptedAdapter {
         }
     }
 
+    fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        if self.reasoning_levels == CapLevel::Supported {
+            ReasoningEffort::ALL.to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    async fn list_models(&self, _probe: &HarnessProbe) -> Vec<ListedHarnessModel> {
+        self.models.clone()
+    }
+
     fn relaunch_composes_permission_mode(&self) -> bool {
         !self.posture_fixed
     }
@@ -486,6 +512,10 @@ struct ScriptedSession {
 pub(crate) struct ScriptedTurnInput {
     /// The prompt text, which is not always the message the person typed.
     pub text: String,
+    /// Model selected for this turn.
+    pub model: Option<String>,
+    /// Whether the turn was marked for the fast service tier.
+    pub fast_mode: bool,
     /// How many images rode the protocol.
     pub images: usize,
 }
@@ -558,6 +588,8 @@ impl HarnessSession for ScriptedSession {
             .expect("scripted inputs")
             .push(ScriptedTurnInput {
                 text: _input.text.clone(),
+                model: _input.model.clone(),
+                fast_mode: _input.fast_mode,
                 images: _input.images.len(),
             });
         if let Some(detail) = &self.lost_resume {

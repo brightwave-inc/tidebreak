@@ -1069,8 +1069,6 @@ mod tests {
             .commands
             .send(crate::code::session_worker::WorkerCommand::RunTurn {
                 message: "hello".into(),
-                model: None,
-                reasoning_effort: None,
                 attachments: Vec::new(),
                 trigger_delivery: None,
                 reply,

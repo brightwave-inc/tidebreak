@@ -375,6 +375,7 @@ const TURN = {
   session_id: "sess-1",
   ordinal: 1,
   status: "completed",
+  fast_mode: false,
   user_input: "list the files",
   attachments: [],
   started_at: "2026-08-15T12:00:00.000Z",
@@ -399,6 +400,11 @@ describe("parseCodeTurnList", () => {
     const withUsage = { ...TURN, usage: USAGE };
     expect(parseCodeTurn(withUsage)).toEqual(withUsage);
     expect(parseCodeTurnList([withUsage])).toEqual([withUsage]);
+  });
+
+  it("keeps the execution settings snapshotted for the turn", () => {
+    const selected = { ...TURN, model: "steady", fast_mode: true };
+    expect(parseCodeTurn(selected)).toEqual(selected);
   });
 
   it("reads a turn journaled before context_tokens existed as no reading", () => {

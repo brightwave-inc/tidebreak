@@ -27,14 +27,14 @@ use tidebreak_core::db::code::{
     get_open_turn, get_session, get_session_all_owners, get_workspace, insert_approval_for_worker,
     insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
     save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
-    set_session_subagents, CodeJournalError,
+    set_session_subagents, CodeJournalError, CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
     CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspaceStatus, DbStore, FenceReason,
-    HarnessNoticeLevel, OwnerId, PermissionMode, ReasoningEffort, ToolOutcome,
+    HarnessNoticeLevel, OwnerId, PermissionMode, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -49,8 +49,6 @@ const SHORT_FIRST_TURN_INPUT_CHARS: usize = 2_000;
 pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
-        model: Option<String>,
-        reasoning_effort: Option<ReasoningEffort>,
         attachments: Vec<tidebreak_core::ImageRef>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
@@ -58,6 +56,11 @@ pub(crate) enum WorkerCommand {
     SetPermissionMode {
         mode: PermissionMode,
         settlement: oneshot::Receiver<PermissionModeSettlement>,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
+    },
+    SetExecutionSettings {
+        settings: CodeSessionExecutionSettings,
+        settlement: oneshot::Receiver<ExecutionSettingsSettlement>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Decide {
@@ -78,6 +81,12 @@ pub(crate) enum WorkerCommand {
 
 /// The durable outcome that releases a worker after native mode acceptance.
 pub(crate) enum PermissionModeSettlement {
+    Confirmed,
+    Abort,
+}
+
+/// The durable outcome that releases a worker after a settings reservation.
+pub(crate) enum ExecutionSettingsSettlement {
     Confirmed,
     Abort,
 }
@@ -204,8 +213,6 @@ pub(crate) struct AttachmentStore {
 
 pub(crate) struct QueuedFollowUp {
     pub message: String,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
     pub attachments: Vec<tidebreak_core::ImageRef>,
     pub trigger_delivery: Option<TriggerDeliveryClaim>,
     /// The durable queue row this turn promotes, when the message came from
@@ -734,8 +741,6 @@ async fn run_worker(
             command = commands.recv() => match command {
                 Some(WorkerCommand::RunTurn {
                     message,
-                    model,
-                    reasoning_effort,
                     attachments,
                     trigger_delivery,
                     reply,
@@ -752,8 +757,6 @@ async fn run_worker(
                         },
                         QueuedFollowUp {
                             message,
-                            model,
-                            reasoning_effort,
                             attachments,
                             trigger_delivery,
                             queued_row: None,
@@ -779,6 +782,22 @@ async fn run_worker(
                         } else {
                             break;
                         }
+                    }
+                }
+                Some(WorkerCommand::SetExecutionSettings {
+                    settings,
+                    settlement,
+                    reply,
+                }) => {
+                    if !reserve_execution_settings(
+                        &mut session,
+                        settings,
+                        settlement,
+                        reply,
+                    )
+                    .await
+                    {
+                        break;
                     }
                 }
                 Some(command) => {
@@ -837,6 +856,7 @@ async fn reject_pending_commands_after_permission_mode_abort(
                 let _ = reply.send(Err(turn_error()));
             }
             WorkerCommand::SetPermissionMode { reply, .. }
+            | WorkerCommand::SetExecutionSettings { reply, .. }
             | WorkerCommand::Decide { reply, .. }
             | WorkerCommand::Interrupt { reply }
             | WorkerCommand::Steer { reply, .. } => {
@@ -929,6 +949,7 @@ enum WorktreeWait<'a> {
 }
 
 async fn await_worktree_turn<'a>(
+    session: &mut CodeSession,
     engine: &dyn HarnessSession,
     worktree_turn: &'a tokio::sync::Mutex<()>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
@@ -945,10 +966,19 @@ async fn await_worktree_turn<'a>(
                     return WorktreeWait::Stopped;
                 }
                 Some(WorkerCommand::Shutdown) | None => return WorktreeWait::Shutdown,
+                Some(WorkerCommand::SetExecutionSettings {
+                    settings,
+                    settlement,
+                    reply,
+                }) => {
+                    if !reserve_execution_settings(session, settings, settlement, reply).await {
+                        return WorktreeWait::Shutdown;
+                    }
+                }
                 // There is no turn yet, so steering has nothing to steer, a
-                // second RunTurn is a conflict, and a mode switch belongs to
-                // whichever loop owns the session row. `apply_control` answers
-                // all three that way already.
+                // second RunTurn is a conflict, and a permission-mode switch
+                // belongs to whichever loop owns the session row.
+                // `apply_control` answers all three that way already.
                 Some(command) => {
                     if apply_control(engine, command, None).await == ControlFlow::Shutdown {
                         return WorktreeWait::Shutdown;
@@ -956,6 +986,31 @@ async fn await_worktree_turn<'a>(
                 }
             },
         }
+    }
+}
+
+/// Hold the worker's session copy until the matching targeted write settles.
+///
+/// A queued turn can wait on a sibling's worktree turn while the session is
+/// otherwise idle. The worker must accept settings reservations during that
+/// wait, or the live route cannot use the same reserve-commit-release boundary
+/// that protects ordinary idle updates.
+async fn reserve_execution_settings(
+    session: &mut CodeSession,
+    settings: CodeSessionExecutionSettings,
+    settlement: oneshot::Receiver<ExecutionSettingsSettlement>,
+    reply: oneshot::Sender<Result<(), WorkerError>>,
+) -> bool {
+    let _ = reply.send(Ok(()));
+    match settlement.await {
+        Ok(ExecutionSettingsSettlement::Confirmed) => {
+            session.model = settings.model;
+            session.reasoning_effort = settings.reasoning_effort;
+            session.fast_mode = settings.fast_mode;
+            true
+        }
+        Ok(ExecutionSettingsSettlement::Abort) => true,
+        Err(_) => false,
     }
 }
 
@@ -1052,6 +1107,12 @@ async fn apply_control(
             )));
             ControlFlow::Continue
         }
+        WorkerCommand::SetExecutionSettings { reply, .. } => {
+            let _ = reply.send(Err(WorkerError::Conflict(
+                "finish or interrupt the running turn before changing session settings".into(),
+            )));
+            ControlFlow::Continue
+        }
         WorkerCommand::Shutdown => ControlFlow::Shutdown,
     }
 }
@@ -1081,8 +1142,9 @@ async fn set_permission_mode(
 /// [`promote_queued_turn`] deletes the row and inserts the turn together, so
 /// an edit, reorder, or retraction that lands after the snapshot surfaces as
 /// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings
-/// resolve at promotion: the turn runs under the session's model and effort
-/// as they are now, not as they were at enqueue — same contract as the chat
+/// resolve when the worker promotes the row after acquiring the worktree: the
+/// turn runs under the session's model, effort, and fast mode then, including
+/// confirmed reservations accepted during the wait. Same contract as the chat
 /// queue. A pause holds the whole drain; the resume, the next enqueue, or
 /// send-now wakes the worker again.
 async fn drain_queued(
@@ -1123,8 +1185,6 @@ async fn drain_queued(
         };
         let follow_up = QueuedFollowUp {
             message: head.message.clone(),
-            model: session.model.clone(),
-            reasoning_effort: session.reasoning_effort,
             attachments: head.attachments.clone(),
             trigger_delivery: None,
             queued_row: Some(Box::new(head.clone())),
@@ -1279,8 +1339,6 @@ async fn drive_turn_inner(
     worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
         message,
-        model,
-        reasoning_effort,
         attachments,
         trigger_delivery,
         queued_row,
@@ -1305,6 +1363,25 @@ async fn drive_turn_inner(
     // never be held against a sibling session waiting for the checkout.
     let hydrated = hydrate_turn_images(store.blobs.as_deref(), &attachments).await?;
 
+    // A queued row is already accepted. Bring the worker up to the committed
+    // settings before it waits for the checkout. Reservations accepted during
+    // that wait then update this same session copy, so the turn sees the last
+    // committed settings when the lock becomes available.
+    if matches!(worktree.wait, TurnWait::Queued) {
+        let current = get_session(db, &session.owner, session.id)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+            .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
+        if current.spawn_epoch != session.spawn_epoch {
+            return Err(WorkerError::Conflict(
+                "the session worker was superseded before the turn started".into(),
+            ));
+        }
+        session.model = current.model;
+        session.reasoning_effort = current.reasoning_effort;
+        session.fast_mode = current.fast_mode;
+    }
+
     // The workspace's checkout takes one turn at a time (record 55). Taking
     // the lock *is* the reservation: a pre-flight database read cannot be,
     // because two idle siblings both pass it before either marks itself
@@ -1319,15 +1396,17 @@ async fn drive_turn_inner(
         // Already acknowledged, so waiting costs nobody a connection. The wait
         // still listens for control: an interrupt that arrives while a turn is
         // queued has to stop it before it starts, not after.
-        TurnWait::Queued => match await_worktree_turn(engine, worktree.lock, commands).await {
-            WorktreeWait::Acquired(guard) => guard,
-            WorktreeWait::Stopped => return Err(WorkerError::QueuedTurnStopped),
-            WorktreeWait::Shutdown => {
-                return Err(WorkerError::Conflict(
-                    "the session worker is shutting down".into(),
-                ))
+        TurnWait::Queued => {
+            match await_worktree_turn(session, engine, worktree.lock, commands).await {
+                WorktreeWait::Acquired(guard) => guard,
+                WorktreeWait::Stopped => return Err(WorkerError::QueuedTurnStopped),
+                WorktreeWait::Shutdown => {
+                    return Err(WorkerError::Conflict(
+                        "the session worker is shutting down".into(),
+                    ))
+                }
             }
-        },
+        }
     };
     // Ending a session during that wait has to win. The lifecycle checks above
     // read a session that may be minutes stale by now.
@@ -1345,9 +1424,28 @@ async fn drive_turn_inner(
         )));
     }
 
-    if let Some(model) = model.clone() {
-        session.model = Some(model);
-    }
+    // An idle send resolves settings after it owns the worktree, so a
+    // reservation that committed while this request was in flight reaches the
+    // engine. A queued row uses the worker copy initialized before the wait and
+    // updated by every confirmed reservation accepted during that wait.
+    let turn_settings = match worktree.wait {
+        TurnWait::Queued => CodeSessionExecutionSettings::from(&*session),
+        TurnWait::Send => {
+            let current = get_session(db, &session.owner, session.id)
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()))?
+                .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
+            if current.spawn_epoch != session.spawn_epoch {
+                return Err(WorkerError::Conflict(
+                    "the session worker was superseded before the turn started".into(),
+                ));
+            }
+            session.model = current.model;
+            session.reasoning_effort = current.reasoning_effort;
+            session.fast_mode = current.fast_mode;
+            CodeSessionExecutionSettings::from(&*session)
+        }
+    };
 
     let ordinal = next_turn_ordinal(db, &session.owner, session.id)
         .await
@@ -1362,8 +1460,8 @@ async fn drive_turn_inner(
         session_id: session.id,
         ordinal,
         status: CodeTurnStatus::Running,
-        model: session.model.clone(),
-        fast_mode: session.fast_mode,
+        model: turn_settings.model.clone(),
+        fast_mode: turn_settings.fast_mode,
         user_input: message.clone(),
         user_input_blob_id: None,
         attachments,
@@ -1455,13 +1553,6 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    // Adopt what the turn was sent with before this worker persists general
-    // session fields. The route already wrote the session's choice, but the
-    // worker's copy predates it and would otherwise restore the old value.
-    if let Some(model) = model {
-        session.model = Some(model);
-    }
-    session.reasoning_effort = reasoning_effort;
     // What the engine is handed is not always what the person wrote: an engine
     // that cannot take images over its own protocol is given paths instead, and
     // `turn.user_input` above keeps the message as typed.
@@ -1478,9 +1569,9 @@ async fn drive_turn_inner(
     };
     let run = engine.run_turn(TurnInput {
         text: engine_text,
-        model: session.model.clone(),
-        reasoning_effort: session.reasoning_effort,
-        fast_mode: session.fast_mode,
+        model: turn_settings.model.clone(),
+        reasoning_effort: turn_settings.reasoning_effort,
+        fast_mode: turn_settings.fast_mode,
         images,
     });
     tokio::pin!(run);
@@ -2497,14 +2588,17 @@ impl From<HarnessError> for WorkerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
     use chrono::Utc;
     use tidebreak_core::db::code::{
-        get_session, insert_repo, insert_session, insert_workspace, list_events, MAX_REPLAY_EVENTS,
+        enqueue_queued_turn, get_session, insert_repo, insert_session, insert_workspace,
+        list_events, list_turns, replace_session_execution_settings, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
-        ImageMediaType, ImageRef, PermissionMode, RepoId, ToolDetail, WorkspaceId,
+        ImageMediaType, ImageRef, PermissionMode, ReasoningEffort, RepoId, ToolDetail, WorkspaceId,
     };
+    use tidebreak_harness::{HarnessAdapter as _, SessionSpec};
 
     fn subagent(call_id: &str, status: CodeSubagentStatus) -> CodeSubagentSummary {
         CodeSubagentSummary {
@@ -2589,8 +2683,6 @@ mod tests {
         assert!(commands
             .send(WorkerCommand::RunTurn {
                 message: "must not disappear".into(),
-                model: None,
-                reasoning_effort: None,
                 attachments: Vec::new(),
                 trigger_delivery: None,
                 reply,
@@ -2732,6 +2824,240 @@ mod tests {
             None,
         );
         (directory, store, sink, session_id)
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+        let stale = CodeSessionExecutionSettings {
+            model: Some("stale".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: true,
+        };
+        session = replace_session_execution_settings(&store, &owner, &session, &stale)
+            .await
+            .unwrap()
+            .expect("the initial settings commit");
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(plain_text_script());
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                env: Vec::new(),
+                approval: None,
+                binary: std::path::PathBuf::from("/scripted/engine"),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+
+        let committed = CodeSessionExecutionSettings {
+            model: Some("committed".into()),
+            reasoning_effort: None,
+            fast_mode: false,
+        };
+        let (reservation_reply, reservation_response) = oneshot::channel();
+        let (settlement, release) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::SetExecutionSettings {
+                settings: committed.clone(),
+                settlement: release,
+                reply: reservation_reply,
+            })
+            .await
+            .unwrap();
+        reservation_response.await.unwrap().unwrap();
+
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "use the committed settings".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+
+        let updated = replace_session_execution_settings(&store, &owner, &session, &committed)
+            .await
+            .unwrap()
+            .expect("the reserved settings commit");
+        assert!(settlement
+            .send(ExecutionSettingsSettlement::Confirmed)
+            .is_ok());
+
+        let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the turn completes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.model, updated.model);
+        assert_eq!(turn.fast_mode, updated.fast_mode);
+        assert_eq!(adapter.turn_efforts(), vec![updated.reasoning_effort]);
+        let inputs = adapter.turn_inputs();
+        assert_eq!(inputs[0].model, updated.model);
+        assert_eq!(inputs[0].fast_mode, updated.fast_mode);
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+        let held = CodeSessionExecutionSettings {
+            model: Some("held".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: true,
+        };
+        session = replace_session_execution_settings(&store, &owner, &session, &held)
+            .await
+            .unwrap()
+            .expect("the held settings commit");
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(plain_text_script());
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                env: Vec::new(),
+                approval: None,
+                binary: std::path::PathBuf::from("/scripted/engine"),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let now = Utc::now();
+        enqueue_queued_turn(
+            &store,
+            &owner,
+            &CodeQueuedTurn {
+                id: CodeTurnId::new(),
+                session_id,
+                message: "use the held settings".into(),
+                attachments: Vec::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+        let worktree_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let checkout = worktree_lock.lock().await;
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            worktree_lock.clone(),
+        );
+
+        let later = CodeSessionExecutionSettings {
+            model: Some("later".into()),
+            reasoning_effort: None,
+            fast_mode: false,
+        };
+        let (reservation_reply, reservation_response) = oneshot::channel();
+        let (settlement, release) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::SetExecutionSettings {
+                settings: later.clone(),
+                settlement: release,
+                reply: reservation_reply,
+            })
+            .await
+            .unwrap();
+        reservation_response.await.unwrap().unwrap();
+        let _updated = replace_session_execution_settings(&store, &owner, &session, &later)
+            .await
+            .unwrap()
+            .expect("the later settings commit");
+        assert!(settlement
+            .send(ExecutionSettingsSettlement::Confirmed)
+            .is_ok());
+
+        drop(checkout);
+        let turn = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turns = list_turns(&store, &owner, session_id).await.unwrap();
+                if let Some(turn) = turns.into_iter().find(|turn| {
+                    turn.status != CodeTurnStatus::Running && !turn.user_input.is_empty()
+                }) {
+                    return turn;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the queued turn completes");
+        assert_eq!(turn.model, later.model);
+        assert_eq!(turn.fast_mode, later.fast_mode);
+        assert_eq!(adapter.turn_efforts(), vec![later.reasoning_effort]);
+        let inputs = adapter.turn_inputs();
+        assert_eq!(inputs[0].model, later.model);
+        assert_eq!(inputs[0].fast_mode, later.fast_mode);
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
     }
 
     #[tokio::test]

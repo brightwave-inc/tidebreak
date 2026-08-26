@@ -1015,7 +1015,8 @@ pub struct CodeSession {
     /// spend decision rather than a quality one — unlike the effort ladder,
     /// which trades thinking depth for the same rate. Off is the engines' own
     /// default, so `false` is the honest starting value rather than a missing
-    /// opinion, and a model that cannot serve fast mode ignores it.
+    /// opinion. The server keeps this false when the selected model cannot
+    /// serve fast mode.
     #[serde(default)]
     pub fast_mode: bool,
     /// Session lifecycle.

@@ -234,14 +234,16 @@ pub struct TurnInput {
     /// Model for this turn, when the engine takes one per child.
     pub model: Option<String>,
     /// Reasoning effort for this turn. `None` leaves the engine's own default
-    /// alone. The adapter maps the level onto whatever its engine spells, and
-    /// degrades one the engine does not offer rather than refusing the turn.
+    /// alone. The server validates this against the selected adapter and model
+    /// before the turn starts. The adapter maps the level onto whatever its
+    /// engine spells and may still degrade it if the external catalog changes
+    /// between validation and launch.
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Whether this turn runs in the engine's fast mode.
     ///
-    /// An adapter whose engine has no fast mode, or whose selected model
-    /// cannot serve one, ignores this rather than refusing the turn — the
-    /// same degrade-don't-refuse rule effort follows.
+    /// The server sets this only when the selected model advertises the tier.
+    /// Adapters still omit an unsupported tier defensively if an external
+    /// catalog changes between validation and launch.
     pub fast_mode: bool,
     /// Images already published to the blob store and hydrated for this turn.
     pub images: Vec<TurnImage>,
@@ -487,8 +489,9 @@ pub trait HarnessAdapter: Send + Sync {
     /// Every effort level this engine accepts, ascending, across all models.
     ///
     /// The ladder a *model* takes can be narrower — Codex states one per row —
-    /// so this is the outer bound, for a caller holding a model row the engine
-    /// did not list. Empty means the engine takes no effort control.
+    /// so callers use this only for the implicit engine default when the
+    /// catalog does not identify one. Empty means the engine takes no effort
+    /// control.
     fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
         let _ = probe;
         Vec::new()
