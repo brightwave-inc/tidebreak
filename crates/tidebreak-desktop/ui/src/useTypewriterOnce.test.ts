@@ -9,7 +9,7 @@ afterEach(() => vi.useRealTimers());
 
 describe("phase label typing", () => {
   it("never renders a blank frame", () => {
-    // The row it labels also pulses while its phase is live, so an empty frame
+    // The row it labels also shimmers while its phase is live, so an empty frame
     // does not read as text arriving — it reads as something that failed to
     // load. This was visible for most of a second on a real phase line.
     const { result } = renderHook(() =>

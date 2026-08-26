@@ -140,6 +140,39 @@ const streamingMessages: ChatMessage[] = [
   },
 ];
 
+const streamingReasoningMessages: ChatMessage[] = [
+  streamingMessages[0],
+  {
+    id: "stream-reasoning",
+    role: "assistant",
+    reasoning:
+      "I am comparing the dense tool phase with the compact transcript and checking which details should stay collapsed.",
+    text: "",
+    sources: [],
+    createdAt: "2026-08-24T14:02:06.000Z",
+  },
+];
+
+const runningToolMessages: ChatMessage[] = [
+  {
+    id: "run-user",
+    role: "user",
+    text: "Review the current Storybook coverage, run the focused checks, and summarize the gaps.",
+    createdAt: "2026-08-24T14:10:00.000Z",
+  },
+  {
+    id: "run-search",
+    role: "tool",
+    callId: "call-search",
+    name: "search",
+    status: "running",
+    preview: {
+      tool: "search",
+      query: "title: Conversation/ OR title: Composer/ OR title: Chat/",
+    },
+  },
+];
+
 const toolHeavyMessages: ChatMessage[] = [
   {
     id: "tools-user",
@@ -330,6 +363,20 @@ export const LoadingHistory: Story = {
 
 export const StreamingResponse: Story = {
   args: { messages: streamingMessages, busy: true, pinLastTurn: true },
+};
+
+/** Reasoning is still arriving, so Thinking shimmers and the body stays open. */
+export const StreamingReasoning: Story = {
+  args: {
+    messages: streamingReasoningMessages,
+    busy: true,
+    pinLastTurn: true,
+  },
+};
+
+/** A live tool phase shimmers on the folded line until the call settles. */
+export const RunningTools: Story = {
+  args: { messages: runningToolMessages, busy: true, pinLastTurn: true },
 };
 
 export const StalledStream: Story = {
