@@ -1,6 +1,6 @@
 //! Process-wide code-mode runtime: adapters, workers, worktrees, recovery.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,8 +15,9 @@ use tidebreak_core::db::code::{
     get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_workspace,
     insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_repos,
     list_sessions, list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo,
-    list_turns, list_workspaces, mark_repo_removed, save_repo, save_session, save_workspace,
-    settle_approval_claim, update_trigger_enabled, ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
+    list_turns, list_workspaces, mark_repo_removed, queued_turn_head, save_repo, save_session,
+    save_workspace, settle_approval_claim, update_trigger_enabled, ClaimedApprovalSettlement,
+    MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -3928,13 +3929,56 @@ impl CodeRuntime {
             super::scratch::workspace_root(&self.data_dir, workspace.id).map_err(|err| {
                 ServerError::internal(format!("could not open private storage: {err}"))
             })?;
+
+        // A session-level fork promises all accepted work through the newest
+        // turn. Reserve the checkout long enough to take that snapshot so a
+        // turn cannot start or finish halfway through preparation. An
+        // explicit earlier turn is already a stable seam and stays available
+        // while later work runs.
+        let turn_lock = at_turn
+            .is_none()
+            .then(|| self.worktree_turn_lock(workspace.id));
+        let _turn_guard = turn_lock
+            .as_ref()
+            .map(|lock| {
+                lock.try_lock().map_err(|_| {
+                    ServerError::conflict_kind(
+                        "fork_turn_unsettled",
+                        "a turn is still changing this workspace; wait for it to finish, or fork from an earlier completed turn",
+                    )
+                })
+            })
+            .transpose()?;
+
         let turns = list_turns(&self.db, owner, session_id).await?;
-        let Some(cut) = fork::cut_at(&turns, at_turn) else {
-            return Err(ServerError::bad_request(
-                "that turn is not part of this session",
-            ));
-        };
         let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
+        let pending_approval_turns: HashSet<CodeTurnId> = list_approvals(
+            &self.db,
+            owner,
+            Some(CodeApprovalState::Pending),
+            Some(session_id),
+        )
+        .await?
+        .into_iter()
+        .map(|approval| approval.turn_id)
+        .collect();
+        let has_queued_follow_up = at_turn.is_none()
+            && queued_turn_head(&self.db, owner, session_id)
+                .await?
+                .is_some();
+        let cut = fork::cut_at_settled_boundary(
+            &turns,
+            &events.events,
+            &pending_approval_turns,
+            has_queued_follow_up,
+            at_turn,
+        )
+        .map_err(|error| match error {
+            fork::ForkBoundaryError::UnknownTurn => ServerError::bad_request(error.message()),
+            _ => ServerError::conflict_kind(error.kind(), error.message()),
+        })?;
+        drop(_turn_guard);
+
         fork::write_transcript(
             &private_root,
             self.blobs.as_ref(),

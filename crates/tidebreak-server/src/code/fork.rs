@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tidebreak_core::{
-    BlobStore, CodeEvent, CodeSession, CodeTurn, CodeTurnId, DocumentBlob, HarnessKind,
-    HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
+    BlobStore, CodeEvent, CodeSession, CodeTurn, CodeTurnId, CodeTurnStatus, DocumentBlob,
+    HarnessKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
 };
 
 /// Directory holding fork transcripts below the workspace's private root.
@@ -92,6 +92,58 @@ pub(crate) struct ForkCut<'a> {
     pub(crate) excluded: usize,
 }
 
+/// Why a requested fork does not name a settled turn boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkBoundaryError {
+    /// The session has no turn to hand off.
+    NoTurns,
+    /// The requested turn does not belong to this session.
+    UnknownTurn,
+    /// The selected turn is still running.
+    Running { ordinal: i64 },
+    /// A selected turn still has an approval that can reach the engine.
+    PendingApproval { ordinal: i64 },
+    /// The terminal row exists, but its final journal event has not landed.
+    Settling { ordinal: i64 },
+    /// A session-level fork would silently omit accepted future input.
+    QueuedFollowUp,
+}
+
+impl ForkBoundaryError {
+    /// Stable HTTP error kind for this refusal.
+    pub(crate) const fn kind(self) -> &'static str {
+        match self {
+            Self::UnknownTurn => "fork_turn_not_found",
+            Self::NoTurns
+            | Self::Running { .. }
+            | Self::PendingApproval { .. }
+            | Self::Settling { .. } => "fork_turn_unsettled",
+            Self::QueuedFollowUp => "fork_queue_pending",
+        }
+    }
+
+    /// Reader-facing recovery instruction.
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::NoTurns => "this session has no completed turn to fork".to_owned(),
+            Self::UnknownTurn => "that turn is not part of this session".to_owned(),
+            Self::Running { ordinal } => format!(
+                "turn {ordinal} is still running; wait for it to finish, or fork from an earlier completed turn"
+            ),
+            Self::PendingApproval { ordinal } => format!(
+                "turn {ordinal} still has a pending approval; settle it before forking from this turn"
+            ),
+            Self::Settling { ordinal } => format!(
+                "turn {ordinal} is still settling; retry after its final event is recorded, or fork from an earlier completed turn"
+            ),
+            Self::QueuedFollowUp => {
+                "this session has a queued follow-up; wait for it to finish, or fork from an earlier completed turn"
+                    .to_owned()
+            }
+        }
+    }
+}
+
 /// Slice a session's turns at the end of `at_turn`.
 ///
 /// `None` forks at the newest turn. Returns `None` when `at_turn` names a
@@ -106,6 +158,117 @@ pub(crate) fn cut_at(turns: &[CodeTurn], at_turn: Option<CodeTurnId>) -> Option<
         turns: &turns[..=position],
         excluded: turns.len() - position - 1,
     })
+}
+
+/// Select a fork only at a turn whose durable work has settled.
+///
+/// A session-level fork means "everything accepted so far," so a queued
+/// follow-up blocks it. An explicit turn fork may leave later running or
+/// queued work behind because the reader selected that earlier seam.
+pub(crate) fn cut_at_settled_boundary<'a>(
+    turns: &'a [CodeTurn],
+    events: &[SequencedCodeEvent],
+    pending_approval_turns: &HashSet<CodeTurnId>,
+    has_queued_follow_up: bool,
+    at_turn: Option<CodeTurnId>,
+) -> Result<ForkCut<'a>, ForkBoundaryError> {
+    let Some(cut) = cut_at(turns, at_turn) else {
+        return Err(ForkBoundaryError::UnknownTurn);
+    };
+    let Some(boundary) = cut.turns.last() else {
+        return Err(ForkBoundaryError::NoTurns);
+    };
+    if boundary.status == CodeTurnStatus::Running {
+        return Err(ForkBoundaryError::Running {
+            ordinal: boundary.ordinal,
+        });
+    }
+    if let Some(pending) = cut
+        .turns
+        .iter()
+        .find(|turn| pending_approval_turns.contains(&turn.id))
+    {
+        return Err(ForkBoundaryError::PendingApproval {
+            ordinal: pending.ordinal,
+        });
+    }
+    if at_turn.is_none() && has_queued_follow_up {
+        return Err(ForkBoundaryError::QueuedFollowUp);
+    }
+    // A later turn row proves that the selected earlier turn crossed its
+    // terminal boundary. The newest turn needs its matching journal event:
+    // the worker writes the terminal row before that event, and accepting the
+    // short gap would preserve an incomplete immutable transcript.
+    let boundary_status = match turn_boundary_evidence(events, boundary.id) {
+        TurnBoundaryEvidence::Settled(status) => Some(status),
+        TurnBoundaryEvidence::Open => None,
+        TurnBoundaryEvidence::StartNotVisible => latest_turn_boundary(events),
+    };
+    if cut.excluded == 0 && boundary_status != Some(boundary.status) {
+        return Err(ForkBoundaryError::Settling {
+            ordinal: boundary.ordinal,
+        });
+    }
+    Ok(cut)
+}
+
+/// What the bounded journal proves about one turn's final boundary.
+enum TurnBoundaryEvidence {
+    /// The turn start fell before the replay window.
+    StartNotVisible,
+    /// The start is visible without its terminal event.
+    Open,
+    /// The matching terminal event is visible.
+    Settled(CodeTurnStatus),
+}
+
+fn turn_boundary_evidence(
+    events: &[SequencedCodeEvent],
+    turn_id: CodeTurnId,
+) -> TurnBoundaryEvidence {
+    let mut inside = false;
+    let mut found = false;
+    for entry in events {
+        match &entry.event {
+            CodeEvent::TurnStarted { turn_id: started } => {
+                if inside {
+                    return TurnBoundaryEvidence::Open;
+                }
+                inside = *started == turn_id;
+                found |= inside;
+            }
+            CodeEvent::TurnCompleted { .. } if inside => {
+                return TurnBoundaryEvidence::Settled(CodeTurnStatus::Completed);
+            }
+            CodeEvent::TurnFailed { .. } if inside => {
+                return TurnBoundaryEvidence::Settled(CodeTurnStatus::Failed);
+            }
+            CodeEvent::TurnInterrupted if inside => {
+                return TurnBoundaryEvidence::Settled(CodeTurnStatus::Interrupted);
+            }
+            _ => {}
+        }
+    }
+    if found {
+        TurnBoundaryEvidence::Open
+    } else {
+        TurnBoundaryEvidence::StartNotVisible
+    }
+}
+
+/// Terminal status of the newest turn whose boundary is visible in `events`.
+///
+/// Looking at boundary events in reverse also works when a long turn pushed
+/// its `TurnStarted` event out of the bounded replay window. If the newest
+/// visible boundary is a start, the turn is still running.
+fn latest_turn_boundary(events: &[SequencedCodeEvent]) -> Option<CodeTurnStatus> {
+    events.iter().rev().find_map(|entry| match &entry.event {
+        CodeEvent::TurnCompleted { .. } => Some(Some(CodeTurnStatus::Completed)),
+        CodeEvent::TurnFailed { .. } => Some(Some(CodeTurnStatus::Failed)),
+        CodeEvent::TurnInterrupted => Some(Some(CodeTurnStatus::Interrupted)),
+        CodeEvent::TurnStarted { .. } => Some(None),
+        _ => None,
+    })?
 }
 
 /// A written fork, as the route reports it.
@@ -1080,6 +1243,16 @@ mod tests {
             .collect()
     }
 
+    fn completed_events(turn_id: CodeTurnId) -> Vec<SequencedCodeEvent> {
+        seq(vec![
+            CodeEvent::TurnStarted { turn_id },
+            CodeEvent::TurnCompleted {
+                usage: Default::default(),
+                checkpoint: None,
+            },
+        ])
+    }
+
     fn test_root(directory: &tempfile::TempDir) -> super::super::scratch::ScratchRoot {
         super::super::scratch::ScratchRoot::open_for_test(directory.path()).expect("scratch root")
     }
@@ -1233,6 +1406,128 @@ mod tests {
         assert_eq!(whole.excluded, 0);
 
         assert!(cut_at(&turns, Some(CodeTurnId::new())).is_none());
+    }
+
+    /// A session-level fork must not turn the partial journal prefix of the
+    /// newest running turn into an immutable handoff.
+    #[test]
+    fn refuses_a_running_newest_turn() {
+        let session = session();
+        let completed = turn(session.id, 1, "first");
+        let mut running = turn(session.id, 2, "keep working");
+        running.status = CodeTurnStatus::Running;
+        let events = seq(vec![
+            CodeEvent::TurnStarted {
+                turn_id: completed.id,
+            },
+            CodeEvent::TurnCompleted {
+                usage: Default::default(),
+                checkpoint: None,
+            },
+            CodeEvent::TurnStarted {
+                turn_id: running.id,
+            },
+        ]);
+        let turns = [completed.clone(), running];
+
+        let result = cut_at_settled_boundary(&turns, &events, &HashSet::new(), false, None);
+
+        assert!(matches!(
+            result,
+            Err(ForkBoundaryError::Running { ordinal: 2 })
+        ));
+
+        let earlier =
+            cut_at_settled_boundary(&turns, &events, &HashSet::new(), false, Some(completed.id))
+                .expect("earlier completed boundary");
+        assert_eq!(earlier.turns.len(), 1);
+        assert_eq!(earlier.excluded, 1);
+    }
+
+    /// The turn row can become terminal before approval cleanup commits. A
+    /// pending approval keeps that boundary open until the settlement lands.
+    #[test]
+    fn refuses_a_terminal_turn_with_a_parked_approval() {
+        let session = session();
+        let completed = turn(session.id, 1, "run the command");
+        let pending = HashSet::from([completed.id]);
+        let events = completed_events(completed.id);
+        let turns = [completed];
+
+        let result = cut_at_settled_boundary(&turns, &events, &pending, false, None);
+
+        assert!(matches!(
+            result,
+            Err(ForkBoundaryError::PendingApproval { ordinal: 1 })
+        ));
+    }
+
+    /// A session-level fork cannot claim to include an accepted queued
+    /// follow-up. The explicit seam remains available because it names the
+    /// exact completed boundary the reader chose.
+    #[test]
+    fn queued_follow_up_requires_an_explicit_turn_boundary() {
+        let session = session();
+        let completed = turn(session.id, 1, "first");
+        let events = completed_events(completed.id);
+
+        let ordinary = cut_at_settled_boundary(
+            std::slice::from_ref(&completed),
+            &events,
+            &HashSet::new(),
+            true,
+            None,
+        );
+        assert!(matches!(ordinary, Err(ForkBoundaryError::QueuedFollowUp)));
+
+        let explicit = cut_at_settled_boundary(
+            std::slice::from_ref(&completed),
+            &events,
+            &HashSet::new(),
+            true,
+            Some(completed.id),
+        )
+        .expect("explicit settled boundary");
+        assert_eq!(explicit.turns.len(), 1);
+    }
+
+    /// If the turn finishes after preparation read its row, the mixed
+    /// running-row and terminal-event snapshot is refused. A fresh retry sees
+    /// one finalized boundary and succeeds.
+    #[test]
+    fn retries_after_a_turn_finishes_during_preparation() {
+        let session = session();
+        let mut stale = turn(session.id, 1, "finish while forking");
+        stale.status = CodeTurnStatus::Running;
+        let started = seq(vec![CodeEvent::TurnStarted { turn_id: stale.id }]);
+        let completed = completed_events(stale.id);
+
+        let mixed = cut_at_settled_boundary(
+            std::slice::from_ref(&stale),
+            &completed,
+            &HashSet::new(),
+            false,
+            None,
+        );
+        assert!(matches!(
+            mixed,
+            Err(ForkBoundaryError::Running { ordinal: 1 })
+        ));
+
+        let mut settled = stale;
+        settled.status = CodeTurnStatus::Completed;
+        let settled_turns = [settled];
+        let row_ahead =
+            cut_at_settled_boundary(&settled_turns, &started, &HashSet::new(), false, None);
+        assert!(matches!(
+            row_ahead,
+            Err(ForkBoundaryError::Settling { ordinal: 1 })
+        ));
+
+        let retry =
+            cut_at_settled_boundary(&settled_turns, &completed, &HashSet::new(), false, None)
+                .expect("fresh settled snapshot");
+        assert_eq!(retry.turns.len(), 1);
     }
 
     /// The header names the fork point and the tail that ran after it: the
