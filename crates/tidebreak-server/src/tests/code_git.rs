@@ -25,6 +25,13 @@ async fn code_app() -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
 async fn code_app_with(
     lender: Option<Arc<dyn GitCredentialLender>>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_principal(lender, None).await
+}
+
+async fn code_app_with_principal(
+    lender: Option<Arc<dyn GitCredentialLender>>,
+    member_token: Option<&str>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code-git.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -35,8 +42,19 @@ async fn code_app_with(
         runtime = runtime.with_git_credentials(lender);
     }
     let runtime = Arc::new(runtime);
+    let mut config = Config::desktop(dir.path());
+    if let Some(member_token) = member_token {
+        let tokens_file = dir.path().join("tokens");
+        std::fs::write(
+            &tokens_file,
+            format!("alice {ALICE_TOKEN} admin\nbob {member_token}\n"),
+        )
+        .unwrap();
+        config.profile = tidebreak_core::Profile::SelfHost;
+        config.auth_tokens_file = Some(tokens_file);
+    }
     let mut state = AppState::new(
-        Config::desktop(dir.path()),
+        config,
         store_trait,
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
@@ -47,7 +65,9 @@ async fn code_app_with(
         },
     );
     state.code = Some(runtime.clone());
-    let token = state.token.clone();
+    let token = member_token
+        .map(Arc::<str>::from)
+        .unwrap_or_else(|| state.token.clone());
     (app(state), token, runtime, dir)
 }
 
@@ -2355,8 +2375,11 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
     let forge_addr = serve(forge).await;
 
     let lender = Arc::new(FakeLender::offering_person("mira-chen"));
-    let (router, token, runtime, dir) =
-        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    let (router, token, runtime, dir) = code_app_with_principal(
+        Some(lender.clone() as Arc<dyn GitCredentialLender>),
+        Some(BOB_TOKEN),
+    )
+    .await;
     runtime.set_gh_search_path(Some("/path/with/no/gh".into()));
     runtime.set_forge_api_base(Some(format!("http://{forge_addr}")));
     let addr = serve(router).await;
