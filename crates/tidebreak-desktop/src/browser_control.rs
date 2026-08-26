@@ -62,7 +62,9 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // not advertise acting until the adapter sends trusted native
             // input to the freshly resolved target.
             semantic_actions: false,
-            screenshot: cfg!(target_os = "macos"),
+            // WKWebView can consume parser-created closed shadow roots before
+            // Tidebreak can prove that their rendered content is safe.
+            screenshot: false,
             cross_origin_frames: false,
             profile_reset: false,
         },
@@ -2553,9 +2555,10 @@ mod tests {
     }
 
     #[test]
-    fn macos_does_not_claim_trusted_semantic_input_before_it_exists() {
+    fn platform_does_not_claim_unverified_agent_capabilities() {
         let descriptor = platform_default_engine();
         assert!(!descriptor.capabilities.semantic_actions);
+        assert!(!descriptor.capabilities.screenshot);
     }
 
     #[tokio::test]

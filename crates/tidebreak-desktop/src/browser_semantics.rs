@@ -159,6 +159,13 @@ struct RawScreenshotPrivacyScan {
     changed: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTextProbe {
+    contains: bool,
+    uninspectable_regions: usize,
+}
+
 pub(crate) async fn browser_semantic_snapshot(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -821,12 +828,14 @@ fn wait_result(
 async fn page_contains_text(webview: &Webview, text: &str) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
-        let safe_text = text.replace('\\', "\\\\").replace('\'', "\\'");
-        let script = format!(
-            "JSON.stringify(Boolean(document.body && document.body.innerText.indexOf('{safe_text}') !== -1))"
-        );
-        let raw: String = evaluate_json(webview, &script).await?;
-        Ok(raw == "true")
+        let raw: RawTextProbe = evaluate_json(webview, &wait_text_script(text)?).await?;
+        if raw.uninspectable_regions > 0 {
+            return Err(
+                "browser text wait requires human takeover because visible page content cannot be inspected safely"
+                    .to_owned(),
+            );
+        }
+        Ok(raw.contains)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -849,6 +858,16 @@ pub(crate) async fn browser_screenshot(
     // Observation chained from a prior snapshot: use begin_agent_observation
     // so the stored snapshot survives for validate_snapshot_id below.
     let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    if !host_snapshot
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.capabilities.screenshot)
+    {
+        return Err(
+            "browser screenshot requires human takeover because this engine cannot prove closed-shadow privacy"
+                .to_owned(),
+        );
+    }
     let origin = host_snapshot
         .url
         .as_deref()
@@ -1326,6 +1345,13 @@ fn action_script(
         .replace("__PAYLOAD__", &payload))
 }
 
+fn wait_text_script(text: &str) -> Result<String, String> {
+    let text = serde_json::to_string(text).map_err(|error| error.to_string())?;
+    Ok(WAIT_TEXT_SCRIPT
+        .replace("__WAIT_TEXT__", &text)
+        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY))
+}
+
 fn inspect_overlay_script() -> String {
     INSPECT_OVERLAY_SCRIPT.replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
 }
@@ -1426,13 +1452,22 @@ async fn evaluate_json<T: serde::de::DeserializeOwned>(
 
 const SENSITIVE_FIELD_POLICY: &str = r##"
   const tidebreakFieldSelector = "input, textarea, [contenteditable]:not([contenteditable='false']), [role='textbox']";
-  const tidebreakTextWithoutFieldDescendants = (element) => {
-    let text = clean(element?.innerText || element?.textContent);
-    for (const field of element?.querySelectorAll?.(tidebreakFieldSelector) || []) {
-      const fieldText = clean(field.innerText || field.textContent);
-      if (fieldText) text = clean(text.split(fieldText).join(" "));
-    }
-    return text;
+  const tidebreakTextWithoutFieldDescendants = (element, limit = 240) => {
+    const parts = [];
+    const visit = (node, insideField) => {
+      if (!node) return;
+      if (node.nodeType === 3) {
+        if (!insideField) parts.push(node.nodeValue || "");
+        return;
+      }
+      const nextInsideField = insideField
+        || (node !== element && Boolean(node.matches?.(tidebreakFieldSelector)));
+      for (const child of Array.from(node.childNodes || [])) {
+        visit(child, nextInsideField);
+      }
+    };
+    visit(element, Boolean(element?.matches?.(tidebreakFieldSelector)));
+    return clean(parts.join(" "), limit);
   };
   const tidebreakReferencedText = (element) => {
     if (!element || element.matches?.(tidebreakFieldSelector)) return "";
@@ -1546,6 +1581,9 @@ const SENSITIVE_FIELD_POLICY: &str = r##"
       element.getAttribute("aria-label"),
       accessibleName,
     ].some(looksLikeShortDigits);
+    if (numeric && !benignNumeric && (element.isContentEditable || role === "textbox")) {
+      return true;
+    }
     if (numeric && !benignNumeric && (shortConstraint || shortDigitPattern || digitExample)) {
       return true;
     }
@@ -1567,6 +1605,78 @@ const SENSITIVE_FIELD_POLICY: &str = r##"
     return false;
   };
 "##;
+
+const WAIT_TEXT_SCRIPT: &str = r#"
+(() => {
+  const NEEDLE = __WAIT_TEXT__;
+  const TEXT_LIMIT = 1_000_000;
+  const clean = (value, limit = 240) => String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+  __SENSITIVE_FIELD_POLICY__
+
+  const isVisible = (element, win) => {
+    const style = win.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none"
+      && style.visibility !== "hidden"
+      && Number(style.opacity || 1) !== 0
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const ordinaryFieldText = (element) => {
+    if ("value" in element) return clean(element.value, TEXT_LIMIT);
+    return clean(element.textContent, TEXT_LIMIT);
+  };
+  const collectRoot = (root, doc, win, seen) => {
+    if (seen.has(root)) return { parts: [], uninspectableRegions: 0 };
+    seen.add(root);
+    const parts = [];
+    let uninspectableRegions = 0;
+    if (root.body || root.nodeType === 11) {
+      const text = tidebreakTextWithoutFieldDescendants(root.body || root, TEXT_LIMIT);
+      if (text) parts.push(text);
+    }
+    for (const field of root.querySelectorAll(tidebreakFieldSelector)) {
+      if (!isVisible(field, win) || tidebreakIsSensitiveField(field, doc)) continue;
+      const text = ordinaryFieldText(field);
+      if (text) parts.push(text);
+    }
+    for (const host of root.querySelectorAll("*")) {
+      if (!host.shadowRoot) continue;
+      const child = collectRoot(host.shadowRoot, doc, win, seen);
+      parts.push(...child.parts);
+      uninspectableRegions += child.uninspectableRegions;
+    }
+    for (const frame of root.querySelectorAll("iframe, frame, object, embed")) {
+      if (!isVisible(frame, win)) continue;
+      if (frame.localName === "embed") {
+        uninspectableRegions += 1;
+        continue;
+      }
+      try {
+        const childDoc = frame.contentDocument;
+        const childWin = frame.contentWindow || childDoc?.defaultView;
+        if (!childDoc || !childWin) throw new Error("nested document unavailable");
+        const child = collectRoot(childDoc, childDoc, childWin, seen);
+        parts.push(...child.parts);
+        uninspectableRegions += child.uninspectableRegions;
+      } catch (_) {
+        uninspectableRegions += 1;
+      }
+    }
+    return { parts, uninspectableRegions };
+  };
+
+  const projection = collectRoot(document, document, window, new Set());
+  const text = clean(projection.parts.join(" "), TEXT_LIMIT);
+  return JSON.stringify({
+    contains: text.includes(NEEDLE),
+    uninspectableRegions: projection.uninspectableRegions,
+  });
+})()
+"#;
 
 const SNAPSHOT_SCRIPT: &str = r#"
 (() => {
@@ -2284,6 +2394,17 @@ pub(crate) async fn browser_inject_inspect_overlay(
     workspace_id: &str,
 ) -> Result<(), String> {
     registry.ensure_workspace(browser_id, workspace_id)?;
+    let snapshot = registry.snapshot(browser_id, workspace_id)?;
+    if !snapshot
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.capabilities.screenshot)
+    {
+        return Err(
+            "browser inspect requires human takeover because this engine cannot prove closed-shadow privacy"
+                .to_owned(),
+        );
+    }
     let label = crate::code_browser::browser_label(browser_id)?;
     let webview = app
         .get_webview(&label)

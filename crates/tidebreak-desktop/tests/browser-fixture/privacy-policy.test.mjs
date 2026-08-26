@@ -26,6 +26,14 @@ const buildClassifier = new Function(`
   return tidebreakIsSensitiveField;
 `);
 const classify = buildClassifier();
+const projectText = new Function(`
+  const clean = (value, limit = 240) => String(value || "")
+    .replace(/\\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+  ${policyMatch[1]}
+  return tidebreakTextWithoutFieldDescendants;
+`)();
 
 function runSensitiveSnapshot({ tag, attrs, secret }) {
   const normalized = new Map(
@@ -142,7 +150,15 @@ function field({
     isContentEditable: normalized.has("contenteditable"),
     innerText: text,
     textContent: text,
-    labels: label ? [{ textContent: label }] : [],
+    labels: label
+      ? [{
+          nodeType: 1,
+          childNodes: [{ nodeType: 3, nodeValue: label }],
+          matches() {
+            return false;
+          },
+        }]
+      : [],
     form: null,
     getAttribute(name) {
       if (name === "id") return id || null;
@@ -192,8 +208,8 @@ test("the shared policy requires human takeover for unannotated verification fie
     field({ tag: "div", text: "314159", attrs: { role: "textbox", contenteditable: "", inputmode: "numeric" } }),
   ];
 
-  for (const element of sensitive) {
-    assert.equal(classify(element, documentStub), true);
+  for (const [index, element] of sensitive.entries()) {
+    assert.equal(classify(element, documentStub), true, `sensitive fixture ${index + 1}`);
   }
 });
 
@@ -213,6 +229,7 @@ test("the shared policy preserves ordinary numeric controls", () => {
 test("every browser surface injects the shared policy", () => {
   for (const constant of [
     "SNAPSHOT_SCRIPT",
+    "WAIT_TEXT_SCRIPT",
     "INSPECT_OVERLAY_SCRIPT",
     "SCREENSHOT_PRIVACY_SCRIPT",
     "ACTION_SCRIPT",
@@ -227,8 +244,36 @@ test("every browser surface injects the shared policy", () => {
 
 test("snapshot text strips editable descendants before serialization", () => {
   assert.match(semanticsSource, /const tidebreakTextWithoutFieldDescendants/);
-  assert.match(semanticsSource, /text\.split\(fieldText\)\.join\(" "\)/);
+  assert.match(semanticsSource, /node\.nodeType === 3/);
+  assert.match(semanticsSource, /node\.matches\?\.\(tidebreakFieldSelector\)/);
   assert.match(semanticsSource, /const text = sensitive \? "" : contentText\(element\)/);
+});
+
+test("parent text never reads or serializes editable descendant values", () => {
+  let valueReads = 0;
+  const text = (value) => ({ nodeType: 3, nodeValue: value });
+  const sensitiveInput = {
+    nodeType: 1,
+    childNodes: [],
+    matches: () => true,
+    get value() {
+      valueReads += 1;
+      return "831204";
+    },
+  };
+  const sensitiveEditable = {
+    nodeType: 1,
+    childNodes: [text("314159")],
+    matches: () => true,
+  };
+  const parent = {
+    nodeType: 1,
+    childNodes: [text("Public status"), sensitiveInput, sensitiveEditable],
+    matches: () => false,
+  };
+
+  assert.equal(projectText(parent), "Public status");
+  assert.equal(valueReads, 0);
 });
 
 test("sensitive textarea and contenteditable values never reach snapshot fields", () => {
