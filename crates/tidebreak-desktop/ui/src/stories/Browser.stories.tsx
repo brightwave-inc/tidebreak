@@ -35,6 +35,9 @@ type BrowserScenario =
   | "viewport-tablet"
   | "viewport-mobile"
   | "viewport-custom"
+  | "same-document"
+  | "inspect-enable-failure"
+  | "inspect-remove-failure"
   | "inspect-off"
   | "inspect-on";
 
@@ -148,12 +151,38 @@ function BrowserStory({
         : scenario === "failure"
           ? "failed"
           : "ready";
-  const session = browserSession(loadState);
+  const baseSession = browserSession(loadState);
+  const sameDocumentUrl =
+    "http://localhost:4173/review/browser?view=replaced#summary";
+  const session =
+    scenario === "same-document"
+      ? {
+          ...baseSession,
+          url: sameDocumentUrl,
+          address: "localhost:4173/review/browser?view=replaced#summary",
+          title: "Browser review — summary",
+          history: [
+            ...baseSession.history,
+            {
+              url: sameDocumentUrl,
+              title: "Browser review — summary",
+            },
+          ],
+          historyIndex: baseSession.history.length,
+        }
+      : baseSession;
   const [address, setAddress] = useState(session.address);
   const [viewportState, setViewportState] = useState<BrowserViewport>(
     viewport ?? { preset: "fit", customWidth: 1024 },
   );
-  const inspectEnabled = scenario === "inspect-on";
+  const inspectEnabled =
+    scenario === "inspect-on" || scenario === "inspect-remove-failure";
+  const inspectFailure =
+    scenario === "inspect-enable-failure"
+      ? "Could not show inspect highlights"
+      : scenario === "inspect-remove-failure"
+        ? "Could not hide inspect highlights"
+        : null;
   const controller =
     scenario === "agent"
       ? activeAgent
@@ -244,6 +273,13 @@ function BrowserStory({
             message="Downloads stay blocked until Tidebreak has a bounded destination"
             actionLabel="Open externally"
             onAction={fn()}
+            onDismiss={fn()}
+          />
+        )}
+        {inspectFailure && (
+          <BrowserNoticeRow
+            tone="critical"
+            message={inspectFailure}
             onDismiss={fn()}
           />
         )}
@@ -552,7 +588,16 @@ export const HumanTakeoverRequired: Story = { args: { scenario: "takeover" } };
 
 export const SlowPage: Story = { args: { scenario: "slow" } };
 
-export const Failure: Story = { args: { scenario: "failure" } };
+export const Failure: Story = {
+  args: { scenario: "failure" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "Reload" })).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Try again" }),
+    ).toBeVisible();
+  },
+};
 
 export const PopupBlocked: Story = { args: { scenario: "popup" } };
 
@@ -664,6 +709,42 @@ export const InspectOn: Story = {
     ).toBeVisible();
     const btn = canvas.getByRole("button", { name: "Hide inspect highlights" });
     await expect(btn).toHaveAttribute("aria-pressed", "true");
+  },
+};
+
+export const SameDocumentNavigation: Story = {
+  args: { scenario: "same-document" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("localhost:4173/review/browser?view=replaced#summary");
+  },
+};
+
+export const InspectEnableFailure: Story = {
+  args: { scenario: "inspect-enable-failure" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByText("Could not show inspect highlights"),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Inspect page elements" }),
+    ).toHaveAttribute("aria-pressed", "false");
+  },
+};
+
+export const InspectRemovalFailure: Story = {
+  args: { scenario: "inspect-remove-failure" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByText("Could not hide inspect highlights"),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Hide inspect highlights" }),
+    ).toHaveAttribute("aria-pressed", "true");
   },
 };
 

@@ -141,6 +141,12 @@
         <a href="/?view=details" data-route="details">SPA details</a>
         <a href="/redirect">Server redirect</a>
       </nav>
+      <div class="actions" aria-label="Same-document navigation controls">
+        <button id="replace-route" type="button">Replace route</button>
+        <button id="hash-route" type="button">Change hash</button>
+        <button id="route-back" type="button">Route back</button>
+        <button id="route-forward" type="button">Route forward</button>
+      </div>
       <p id="route-state" aria-live="polite">Route: home</p>
     </header>
 
@@ -308,7 +314,7 @@
 
       function renderRoute() {
         const view = new URL(location.href).searchParams.get("view") ?? "home";
-        routeState.textContent = `Route: ${view}`;
+        routeState.textContent = `Route: ${view}${location.hash}`;
       }
 
       document.querySelectorAll("[data-route]").forEach((link) => {
@@ -319,6 +325,20 @@
         });
       });
       addEventListener("popstate", renderRoute);
+      addEventListener("hashchange", renderRoute);
+      document.querySelector("#replace-route").addEventListener("click", () => {
+        history.replaceState({}, "", "/?view=replaced");
+        renderRoute();
+      });
+      document.querySelector("#hash-route").addEventListener("click", () => {
+        location.hash = location.hash === "#summary" ? "#details" : "#summary";
+      });
+      document.querySelector("#route-back").addEventListener("click", () => {
+        history.back();
+      });
+      document.querySelector("#route-forward").addEventListener("click", () => {
+        history.forward();
+      });
 
       document.querySelector("#add-item-form").addEventListener("submit", async (event) => {
         event.preventDefault();

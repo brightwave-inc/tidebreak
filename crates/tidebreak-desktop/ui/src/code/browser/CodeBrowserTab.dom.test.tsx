@@ -18,7 +18,10 @@ import type {
   BrowserHostSnapshot,
   CodeBrowserHost,
 } from "./browserHost";
-import { writeStoredBrowserSession } from "./browserPersistence";
+import {
+  readStoredBrowserSession,
+  writeStoredBrowserSession,
+} from "./browserPersistence";
 import { beginBrowserNavigation, createBrowserSession } from "./browserSession";
 import { CodeBrowserTab } from "./CodeBrowserTab";
 
@@ -59,8 +62,10 @@ function agentAccess(
 function browserHost(options?: {
   createGate?: Promise<void>;
   createError?: string;
+  createErrors?: Array<string | null>;
   existing?: boolean;
   snapshotGate?: Promise<void>;
+  actionErrors?: Partial<Record<BrowserHostAction["type"], string>>;
   runtime?: Partial<BrowserHostSnapshot>;
 }): {
   host: CodeBrowserHost;
@@ -69,6 +74,8 @@ function browserHost(options?: {
   openExternal: ReturnType<typeof vi.fn>;
 } {
   const calls: CommandCall[] = [];
+  let createAttempt = 0;
+  let inspectEnabled = options?.runtime?.inspectEnabled ?? false;
   let handler: ((event: BrowserHostEvent) => void) | null = null;
   const openExternal = vi.fn().mockResolvedValue(undefined);
   const host: CodeBrowserHost = {
@@ -79,36 +86,50 @@ function browserHost(options?: {
         handler = null;
       };
     }),
-    command: vi.fn(async (workspaceId, browserId, action) => {
-      calls.push({ workspaceId, browserId, action });
-      if (action.type === "snapshot") {
-        if (options?.snapshotGate) await options.snapshotGate;
-        return options?.existing
-          ? {
-              exists: true,
-              ...options.runtime,
-              workspaceId,
-              browserId,
-              url: "https://example.com/restored",
-              title: "Restored page",
-              loadState: "ready" as const,
-            }
-          : { exists: false, workspaceId, browserId };
-      }
-      if (action.type === "create" && options?.createError) {
-        throw new Error(options.createError);
-      }
-      if (action.type === "create" && options?.createGate) {
-        await options.createGate;
-      }
-      return {
-        exists: true,
-        ...options?.runtime,
-        workspaceId,
-        browserId,
-        url: "url" in action ? action.url : options?.runtime?.url,
-      } satisfies BrowserHostSnapshot;
-    }),
+    command: vi.fn(
+      async (
+        workspaceId: string,
+        browserId: string,
+        action: BrowserHostAction,
+      ) => {
+        calls.push({ workspaceId, browserId, action });
+        if (action.type === "snapshot") {
+          if (options?.snapshotGate) await options.snapshotGate;
+          return options?.existing
+            ? {
+                exists: true,
+                ...options.runtime,
+                workspaceId,
+                browserId,
+                url: "https://example.com/restored",
+                title: "Restored page",
+                loadState: "ready" as const,
+              }
+            : { exists: false, workspaceId, browserId };
+        }
+        const actionError = options?.actionErrors?.[action.type];
+        if (actionError) throw new Error(actionError);
+        if (action.type === "create") {
+          const createError =
+            options?.createErrors?.[createAttempt] ?? options?.createError;
+          createAttempt += 1;
+          if (createError) throw new Error(createError);
+        }
+        if (action.type === "create" && options?.createGate) {
+          await options.createGate;
+        }
+        if (action.type === "set_inspect") inspectEnabled = action.enabled;
+        if (action.type === "remove_inspect") inspectEnabled = false;
+        return {
+          exists: true,
+          ...options?.runtime,
+          workspaceId,
+          browserId,
+          inspectEnabled,
+          url: "url" in action ? action.url : options?.runtime?.url,
+        } satisfies BrowserHostSnapshot;
+      },
+    ),
     openExternal,
   };
   return {
@@ -209,6 +230,49 @@ describe("CodeBrowserTab", () => {
         action: { type: "back" },
       }),
     );
+  });
+
+  it("updates the toolbar and persisted session for same-document navigation", async () => {
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
+    );
+
+    for (const url of [
+      "https://example.com/?view=details",
+      "https://example.com/?view=replaced",
+      "https://example.com/?view=replaced#summary",
+      "https://example.com/?view=details",
+      "https://example.com/?view=replaced#summary",
+    ]) {
+      await act(async () => {
+        runtime.emit({
+          workspaceId: "workspace-1",
+          browserId: "browser-1",
+          type: "same_document_navigation",
+          url,
+          documentEpoch: 4,
+        });
+      });
+
+      expect(
+        screen.getByRole("textbox", { name: "Address or search" }),
+      ).toHaveValue(url.replace("https://", ""));
+      await waitFor(() =>
+        expect(readStoredBrowserSession("browser-1")?.url).toBe(url),
+      );
+    }
   });
 
   it("keeps invalid input in the omnibox and reports the precise error", async () => {
@@ -385,6 +449,73 @@ describe("CodeBrowserTab", () => {
         action: { type: "set_visible", visible: false },
       }),
     );
+  });
+
+  it("navigates to the newest address entered while native creation is in flight", async () => {
+    let releaseCreate: (() => void) | undefined;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const runtime = browserHost({ createGate });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/first"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(1),
+    );
+
+    const input = screen.getByRole("textbox", { name: "Address or search" });
+    await userEvent.clear(input);
+    await userEvent.type(input, "example.com/second{enter}");
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/first",
+        documentEpoch: 1,
+      });
+    });
+    expect(input).toHaveValue("example.com/second");
+    releaseCreate?.();
+
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: {
+          type: "navigate",
+          url: "https://example.com/second",
+        },
+      }),
+    );
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(1);
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_started",
+        url: "https://example.com/second",
+        documentEpoch: 2,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/first",
+        documentEpoch: 1,
+      });
+    });
+    expect(input).toHaveValue("example.com/second");
   });
 
   it.each([
@@ -1011,6 +1142,95 @@ describe("CodeBrowserTab", () => {
     });
   });
 
+  it("creates exactly once after a zero-sized mount receives a nonzero measurement", async () => {
+    let width = 0;
+    const observerCallbacks: ResizeObserverCallback[] = [];
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({
+        x: 120,
+        y: 180,
+        width,
+        height: width === 0 ? 0 : 560,
+        top: 180,
+        right: 120 + width,
+        bottom: width === 0 ? 180 : 740,
+        left: 120,
+        toJSON: () => ({}),
+      }),
+    );
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          observerCallbacks.push(callback);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+
+    const runtime = browserHost();
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(({ action }) => action.type === "snapshot"),
+      ).toBe(true),
+    );
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(0);
+
+    width = 840;
+    const entry = {
+      target: document.body,
+      contentRect: {
+        width: 840,
+        height: 560,
+        top: 180,
+        left: 120,
+        right: 960,
+        bottom: 740,
+        x: 120,
+        y: 180,
+      },
+    } as unknown as ResizeObserverEntry;
+    await act(async () => {
+      for (const callback of observerCallbacks) {
+        callback([entry], {} as ResizeObserver);
+      }
+      await new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() => resolve()),
+      );
+    });
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(1),
+    );
+
+    await act(async () => {
+      for (const callback of observerCallbacks) {
+        callback([entry], {} as ResizeObserver);
+      }
+      await new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() => resolve()),
+      );
+    });
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
+
   it("renders a retryable failure without losing the requested address", async () => {
     const runtime = browserHost({ createError: "native view failed" });
     render(
@@ -1030,6 +1250,118 @@ describe("CodeBrowserTab", () => {
       screen.getByRole("textbox", { name: "Address or search" }),
     ).toHaveValue("example.com/docs");
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
+  it("keeps the failure visible when toolbar Reload creation fails again", async () => {
+    const runtime = browserHost({
+      createErrors: ["native create failed", "native retry failed"],
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/docs"
+        host={runtime.host}
+      />,
+    );
+
+    expect(await screen.findByText("native create failed")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Reload" }));
+
+    expect(await screen.findByText("native retry failed")).toBeVisible();
+    expect(screen.getByText("This page did not open")).toBeVisible();
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(2);
+  });
+
+  it("recreates and reconciles a missing view through toolbar Reload", async () => {
+    const runtime = browserHost({
+      createErrors: ["native create failed", null],
+      runtime: {
+        engine: inspectEngine,
+        controller: {
+          kind: "agent",
+          label: "Review agent",
+          action: "Checking the recovered page",
+        },
+        agentAccess: agentAccess({
+          shared: true,
+          scope: "origin",
+          canObserve: true,
+          canControl: true,
+        }),
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/docs"
+        host={runtime.host}
+      />,
+    );
+
+    expect(await screen.findByText("native create failed")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Reload" }));
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: true },
+      }),
+    );
+    expect(screen.queryByText("This page did not open")).toBeNull();
+    expect(
+      await screen.findByText("Review agent is using this tab"),
+    ).toBeVisible();
+    expect(screen.getByText("example.com shared")).toBeVisible();
+
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/docs",
+      });
+    });
+    expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled();
+  });
+
+  it("uses native Reload when the browser view already exists", async () => {
+    const runtime = browserHost({ existing: true });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(({ action }) => action.type === "snapshot"),
+      ).toBe(true),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Reload" }));
+
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "reload" },
+      }),
+    );
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(0);
   });
 
   it("does not create an iframe fallback outside the native desktop", async () => {
@@ -1687,6 +2019,62 @@ describe("BrowserToolbar inspect mode", () => {
     expect(
       screen.queryByRole("button", { name: "Inspect page elements" }),
     ).toBeNull();
+  });
+
+  it("keeps inspect disabled when native injection fails", async () => {
+    const runtime = browserHost({
+      existing: true,
+      actionErrors: { set_inspect: "inspect injection failed" },
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+        inspectEnabled: false,
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    const inspect = await screen.findByRole("button", {
+      name: "Inspect page elements",
+    });
+    await userEvent.click(inspect);
+
+    expect(await screen.findByText("inspect injection failed")).toBeVisible();
+    expect(inspect).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("keeps inspect enabled when native removal fails", async () => {
+    const runtime = browserHost({
+      existing: true,
+      actionErrors: { remove_inspect: "inspect removal failed" },
+      runtime: {
+        engine: inspectEngine,
+        agentAccess: agentAccess(),
+        inspectEnabled: true,
+      },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+
+    const inspect = await screen.findByRole("button", {
+      name: "Hide inspect highlights",
+    });
+    await userEvent.click(inspect);
+
+    expect(await screen.findByText("inspect removal failed")).toBeVisible();
+    expect(inspect).toHaveAttribute("aria-pressed", "true");
   });
 
   it("remains usable in compact toolbar layouts", async () => {
