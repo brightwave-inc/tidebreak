@@ -1966,6 +1966,110 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
     );
 }
 
+/// A failed detached submit releases only its own reservation. The retry can
+/// reserve the same head, while a duplicate sweep cannot reserve it twice.
+#[tokio::test]
+async fn watch_submission_failure_retries_without_consuming_the_head() {
+    use crate::code::{CodeWatch, CodeWatchId, CodeWatchState};
+    use crate::db::code::{
+        accept_watch_submission, insert_watch, latest_watch_for_workspace,
+        release_watch_submission, reserve_watch_submission,
+    };
+
+    let (_dir, store, session_id, _turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+    let created_at = now() - chrono::Duration::minutes(1);
+    let watch = CodeWatch {
+        id: CodeWatchId::new(),
+        owner: owner.clone(),
+        workspace_id,
+        session_id,
+        pr_number: 42,
+        state: CodeWatchState::Watching,
+        detail: None,
+        last_fix_head: None,
+        cycles: 0,
+        created_at,
+        updated_at: created_at,
+    };
+    insert_watch(&store, &watch).await.unwrap();
+
+    let first_detail = "submitting failing checks for head abc123";
+    let first_reserved_at = created_at + chrono::Duration::seconds(1);
+    let first_claim = reserve_watch_submission(&store, &watch, first_detail, first_reserved_at)
+        .await
+        .unwrap()
+        .expect("first reservation");
+    assert!(
+        reserve_watch_submission(&store, &watch, first_detail, first_reserved_at)
+            .await
+            .unwrap()
+            .is_none(),
+        "a duplicate sweep must not reserve the same transition"
+    );
+    let reserved = latest_watch_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reserved.state, CodeWatchState::Fixing);
+    assert_eq!(reserved.detail.as_deref(), Some(first_detail));
+    assert_eq!(reserved.last_fix_head, None);
+    assert_eq!(reserved.cycles, 0);
+
+    let released_at = first_reserved_at + chrono::Duration::seconds(1);
+    assert!(release_watch_submission(&store, &first_claim, released_at)
+        .await
+        .unwrap());
+    let retry = latest_watch_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.state, CodeWatchState::Watching);
+    assert_eq!(retry.detail, None);
+    assert_eq!(retry.last_fix_head, None);
+    assert_eq!(retry.cycles, 0);
+
+    let second_detail = "submitting failing checks for head abc123";
+    let second_reserved_at = released_at + chrono::Duration::seconds(1);
+    let second_claim = reserve_watch_submission(&store, &retry, second_detail, second_reserved_at)
+        .await
+        .unwrap()
+        .expect("retry reservation");
+    let accepted_at = second_reserved_at + chrono::Duration::seconds(1);
+    assert!(accept_watch_submission(
+        &store,
+        &second_claim,
+        Some("abc123"),
+        "fixing failing checks",
+        accepted_at,
+    )
+    .await
+    .unwrap());
+    assert!(
+        !release_watch_submission(
+            &store,
+            &second_claim,
+            accepted_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap(),
+        "a late failure must not release an accepted retry"
+    );
+    let accepted = latest_watch_for_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.state, CodeWatchState::Fixing);
+    assert_eq!(accepted.detail.as_deref(), Some("fixing failing checks"));
+    assert_eq!(accepted.last_fix_head.as_deref(), Some("abc123"));
+    assert_eq!(accepted.cycles, 1);
+}
+
 /// Removing a repository must not take its history with it.
 ///
 /// A hard delete cannot do this. SQLite does not enforce the workspace
