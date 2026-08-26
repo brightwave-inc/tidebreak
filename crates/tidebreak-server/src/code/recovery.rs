@@ -930,6 +930,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reap_does_not_clear_a_fence_that_changed_during_process_settlement() {
+        let pid = 4_245;
+        let identity = format!("test:{pid}");
+        let replacement_identity = format!("{identity}:replacement");
+        let (_dir, store, bus, session, turn_id, approval_id) = seeded_fenced_orphan(pid).await;
+        let old_epoch = session.spawn_epoch;
+        let reaper = StubReaper::new(pid, &identity, StubReap::Exited);
+        let mut changed = session.clone();
+        changed.child_process_identity = Some(replacement_identity.clone());
+        assert!(save_session(&store, &changed).await.unwrap());
+
+        let error = reap_session_with(
+            &store,
+            &bus,
+            session,
+            &reaper,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ReapSessionError::SessionChanged));
+        assert_eq!(reaper.calls.load(Ordering::SeqCst), 1);
+        assert_fenced_orphan_unchanged(
+            &store,
+            pid,
+            &replacement_identity,
+            old_epoch,
+            turn_id,
+            approval_id,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn runtime_fence_settles_running_subagents_as_failed() {
         let (_dir, store, session_id) = seeded_session(None, CodeSessionLifecycle::Running).await;
         seed_running_subagent(&store, session_id).await;
