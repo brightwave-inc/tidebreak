@@ -7,18 +7,21 @@ use crate::code::{
     CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
 };
 use crate::db::code::{
-    append_event, bump_spawn_epoch, clear_session_harness_resume_ref, delete_queued_turn,
+    abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
+    bump_spawn_epoch, claim_approval, clear_session_harness_resume_ref, delete_queued_turn,
     delete_session_queued_turns, enqueue_queued_turn, get_approval, get_repo,
-    get_repo_by_root_path, get_session, get_turn, get_workspace, insert_approval, insert_repo,
-    insert_session, insert_turn, insert_workspace, list_approvals, list_events, list_queued_turns,
-    list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
-    promote_queued_turn, queue_paused, queued_turn_head, replace_session_attention, save_session,
-    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
-    set_turn_narrative, set_workspace_title_if, update_queued_turn, CodeJournalError,
+    get_repo_by_root_path, get_session, get_turn, get_workspace, insert_approval,
+    insert_approval_for_worker, insert_repo, insert_session, insert_turn, insert_workspace,
+    list_approvals, list_events, list_queued_turns, list_repos, list_sessions, list_turn_metrics,
+    list_turns, mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
+    recover_interrupted_session, replace_session_attention, save_session, save_turn,
+    set_queue_paused, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
+    set_workspace_title_if, settle_approval_claim, update_queued_turn, CodeJournalError,
     MAX_REPLAY_EVENTS,
 };
 use crate::{BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, Store};
 use chrono::Utc;
+use sea_orm::ConnectionTrait;
 
 fn now() -> chrono::DateTime<Utc> {
     Utc::now()
@@ -432,6 +435,12 @@ async fn entity_graph_round_trips() {
                 paths: vec!["probe.txt".into()],
             },
             harness_raw: serde_json::json!({"tool":"Write"}),
+            native_call_id: Some("toolu_local".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(0),
+            decision_claim: None,
+            claimed_at: None,
             state: CodeApprovalState::Pending,
             feedback: None,
             requested_at: now(),
@@ -445,6 +454,544 @@ async fn entity_graph_round_trips() {
         .unwrap()
         .unwrap();
     assert_eq!(approval.state, CodeApprovalState::Pending);
+}
+
+#[tokio::test]
+async fn approval_claim_and_abandonment_have_one_winner() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &session).await.unwrap());
+    let approval_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: approval_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "run command".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"toolu_claim"}),
+            native_call_id: Some("toolu_claim".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(session.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let claim = uuid::Uuid::new_v4();
+    let (claimed, abandoned) = tokio::join!(
+        claim_approval(
+            &store,
+            &owner,
+            approval_id,
+            session_id,
+            session.spawn_epoch,
+            claim,
+            now(),
+        ),
+        abandon_pending_approval(
+            &store,
+            &owner,
+            approval_id,
+            session_id,
+            session.spawn_epoch,
+            now(),
+        ),
+    );
+    let claimed = claimed.unwrap();
+    let abandoned = abandoned.unwrap();
+    assert_ne!(
+        claimed.is_some(),
+        abandoned.is_some(),
+        "exactly one transition wins"
+    );
+
+    if claimed.is_some() {
+        assert!(settle_approval_claim(
+            &store,
+            &owner,
+            approval_id,
+            session_id,
+            session.spawn_epoch,
+            claim,
+            crate::code::ApprovalDecisionKind::Approve,
+            now(),
+        )
+        .await
+        .unwrap()
+        .is_some());
+        assert_eq!(
+            get_approval(&store, &owner, approval_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            CodeApprovalState::Approved
+        );
+    } else {
+        assert_eq!(
+            get_approval(&store, &owner, approval_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            CodeApprovalState::Abandoned
+        );
+    }
+}
+
+#[tokio::test]
+async fn approval_request_rolls_back_when_its_journal_event_fails() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &session).await.unwrap());
+    let approval_id = CodeApprovalId::new();
+    let approval = CodeApproval {
+        id: approval_id,
+        session_id,
+        turn_id,
+        kind: CodeApprovalKind::Other {
+            summary: "run command".into(),
+        },
+        harness_raw: serde_json::json!({"call_id":"toolu_request_rollback"}),
+        native_call_id: Some("toolu_request_rollback".into()),
+        server_capability: Some("cap_request_rollback".into()),
+        request_sha256: Some("sha_request_rollback".into()),
+        worker_epoch: Some(session.spawn_epoch),
+        decision_claim: None,
+        claimed_at: None,
+        state: CodeApprovalState::Pending,
+        feedback: None,
+        requested_at: now(),
+        decided_at: None,
+    };
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_approval_request_event BEFORE INSERT ON code_event \
+             BEGIN SELECT RAISE(ABORT, 'forced approval request journal failure'); END",
+        )
+        .await
+        .unwrap();
+
+    assert!(insert_approval_for_worker(&store, &owner, &approval)
+        .await
+        .is_err());
+    assert!(get_approval(&store, &owner, approval_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &session).await.unwrap());
+    let approval_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: approval_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "run command".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"toolu_settle_rollback"}),
+            native_call_id: Some("toolu_settle_rollback".into()),
+            server_capability: Some("cap_settle_rollback".into()),
+            request_sha256: Some("sha_settle_rollback".into()),
+            worker_epoch: Some(session.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let claim = uuid::Uuid::new_v4();
+    assert!(claim_approval(
+        &store,
+        &owner,
+        approval_id,
+        session_id,
+        session.spawn_epoch,
+        claim,
+        now(),
+    )
+    .await
+    .unwrap()
+    .is_some());
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_approval_resolution_event BEFORE INSERT ON code_event \
+             BEGIN SELECT RAISE(ABORT, 'forced approval resolution journal failure'); END",
+        )
+        .await
+        .unwrap();
+
+    assert!(settle_approval_claim(
+        &store,
+        &owner,
+        approval_id,
+        session_id,
+        session.spawn_epoch,
+        claim,
+        crate::code::ApprovalDecisionKind::Approve,
+        now(),
+    )
+    .await
+    .is_err());
+    let approval = get_approval(&store, &owner, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.state, CodeApprovalState::Pending);
+    assert_eq!(approval.decision_claim, Some(claim));
+    assert!(
+        list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_worker_cannot_insert_a_late_approval() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &session).await.unwrap());
+    let stale_epoch = session.spawn_epoch;
+    assert_eq!(bump_spawn_epoch(&store, session_id, None).await.unwrap(), 1);
+    let approval_id = CodeApprovalId::new();
+    let approval = CodeApproval {
+        id: approval_id,
+        session_id,
+        turn_id,
+        kind: CodeApprovalKind::Other {
+            summary: "run command".into(),
+        },
+        harness_raw: serde_json::json!({"call_id":"toolu_stale"}),
+        native_call_id: Some("toolu_stale".into()),
+        server_capability: Some("cap_stale".into()),
+        request_sha256: Some("sha_stale".into()),
+        worker_epoch: Some(stale_epoch),
+        decision_claim: None,
+        claimed_at: None,
+        state: CodeApprovalState::Pending,
+        feedback: None,
+        requested_at: now(),
+        decided_at: None,
+    };
+
+    assert!(insert_approval_for_worker(&store, &owner, &approval)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(get_approval(&store, &owner, approval_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &session).await.unwrap());
+    let claimed_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: claimed_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "run command".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"toolu_restart"}),
+            native_call_id: Some("toolu_restart".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(session.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let claim = uuid::Uuid::new_v4();
+    assert!(claim_approval(
+        &store,
+        &owner,
+        claimed_id,
+        session_id,
+        session.spawn_epoch,
+        claim,
+        now(),
+    )
+    .await
+    .unwrap()
+    .is_some());
+
+    let unclaimed_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: unclaimed_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "edit file".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"toolu_restart_unclaimed"}),
+            native_call_id: Some("toolu_restart_unclaimed".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(session.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let stale_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: stale_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "stale worker command".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"toolu_restart_stale"}),
+            native_call_id: Some("toolu_restart_stale".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(session.spawn_epoch - 1),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(abandon_pending_approvals_for_stopped_session(
+        &store,
+        &owner,
+        session_id,
+        session.spawn_epoch,
+        now(),
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    let still_claimed = get_approval(&store, &owner, claimed_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_claimed.state, CodeApprovalState::Pending);
+    assert_eq!(still_claimed.decision_claim, Some(claim));
+    assert_eq!(
+        get_approval(&store, &owner, unclaimed_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        CodeApprovalState::Pending
+    );
+
+    session.lifecycle = CodeSessionLifecycle::Idle;
+    assert!(save_session(&store, &session).await.unwrap());
+
+    let abandoned = abandon_pending_approvals_for_stopped_session(
+        &store,
+        &owner,
+        session_id,
+        session.spawn_epoch,
+        now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(abandoned.len(), 2);
+    assert!(abandoned.iter().any(|row| row.approval.id == claimed_id));
+    assert!(abandoned.iter().any(|row| row.approval.id == unclaimed_id));
+    let approval = get_approval(&store, &owner, claimed_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.state, CodeApprovalState::Abandoned);
+    assert!(approval.decision_claim.is_none());
+    assert!(approval.decided_at.is_some());
+    assert_eq!(
+        get_approval(&store, &owner, unclaimed_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        CodeApprovalState::Abandoned
+    );
+    assert_eq!(
+        get_approval(&store, &owner, stale_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        CodeApprovalState::Pending,
+        "restart cleanup must not cross worker epochs"
+    );
+}
+
+#[tokio::test]
+async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(&store, &session).await.unwrap());
+    set_session_subagents(
+        &store,
+        &owner,
+        session_id,
+        &[CodeSubagentSummary {
+            call_id: "task-recovery".into(),
+            name: "Still running".into(),
+            status: CodeSubagentStatus::Running,
+        }],
+    )
+    .await
+    .unwrap();
+    let approval_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: approval_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "run command".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"toolu_rollback"}),
+            native_call_id: Some("toolu_rollback".into()),
+            server_capability: Some("cap_rollback".into()),
+            request_sha256: Some("sha_rollback".into()),
+            worker_epoch: Some(session.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    store
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_code_recovery_event BEFORE INSERT ON code_event \
+             BEGIN SELECT RAISE(ABORT, 'forced recovery journal failure'); END",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        recover_interrupted_session(&store, &owner, session_id, session.spawn_epoch,)
+            .await
+            .is_err()
+    );
+    let session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.lifecycle, CodeSessionLifecycle::Running);
+    assert_eq!(session.subagents[0].status, CodeSubagentStatus::Running);
+    assert_eq!(
+        get_turn(&store, &owner, turn_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        CodeTurnStatus::Running
+    );
+    assert_eq!(
+        get_approval(&store, &owner, approval_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        CodeApprovalState::Pending
+    );
+    assert!(
+        list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
 }
 
 /// A worker that has been superseded still holds a snapshot of the row and
@@ -1117,6 +1664,12 @@ async fn owner_scoped_code_queries_partition_every_table() {
                 paths: vec!["secret.txt".into()],
             },
             harness_raw: serde_json::json!({"tool":"Write"}),
+            native_call_id: Some("toolu_alice".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(0),
+            decision_claim: None,
+            claimed_at: None,
             state: CodeApprovalState::Pending,
             feedback: None,
             requested_at: now(),

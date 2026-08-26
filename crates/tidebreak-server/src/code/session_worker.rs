@@ -25,7 +25,7 @@ use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
     accept_trigger_turn_delivery, append_event, bump_spawn_epoch, delete_queued_turn,
-    get_open_turn, get_session, get_session_all_owners, insert_approval, insert_turn,
+    get_open_turn, get_session, get_session_all_owners, insert_approval_for_worker, insert_turn,
     next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
     save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
     CodeJournalError,
@@ -95,6 +95,10 @@ pub(crate) enum WorkerError {
     SteeringUnavailable(String),
     #[error("{0}")]
     SteeringRejected(String),
+    #[error("{0}")]
+    ApprovalDeliveryFailed(String),
+    #[error("{0}")]
+    ApprovalDeliveryUnknown(String),
     /// The engine fixes its posture at launch, so the caller relaunches.
     #[error("{0}")]
     RelaunchRequired(String),
@@ -126,6 +130,9 @@ pub(crate) struct WorkerHandle {
     pub commands: mpsc::Sender<WorkerCommand>,
     pub queue: TurnQueue,
     pub sink: Arc<LiveSink>,
+    /// Serializes native approval delivery and durable finalization with
+    /// every path that stops or replaces this worker.
+    pub approval_decisions: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// How a worker gets its next turn, and when it may start one.
@@ -369,36 +376,85 @@ impl LiveSink {
         }
     }
 
-    async fn record_approval(
+    pub(crate) async fn record_external_approval(
         &self,
+        approval_id: CodeApprovalId,
         harness_ref: &tidebreak_harness::HarnessApprovalRef,
         raw: &serde_json::Value,
-    ) {
+    ) -> Result<CodeApproval, WorkerError> {
+        let Some(capability) = harness_ref.capability.as_ref() else {
+            return Err(WorkerError::Failed(
+                "external approval is missing its server capability".into(),
+            ));
+        };
+        if capability.approval_id != approval_id.to_string()
+            || capability.owner_id != self.owner.as_str()
+            || capability.session_id != self.session_id.to_string()
+            || capability.spawn_epoch != self.spawn_epoch
+        {
+            return Err(WorkerError::Failed(
+                "approval capability does not match its session, row, and worker epoch".into(),
+            ));
+        }
+        self.record_approval(approval_id, harness_ref, raw).await
+    }
+
+    async fn record_approval(
+        &self,
+        approval_id: CodeApprovalId,
+        harness_ref: &tidebreak_harness::HarnessApprovalRef,
+        raw: &serde_json::Value,
+    ) -> Result<CodeApproval, WorkerError> {
         let existing = *self.turn_id.lock().expect("code sink turn");
         let turn_id = match existing {
             Some(id) => id,
             None => match get_open_turn(&self.db, &self.owner, self.session_id).await {
                 Ok(Some(turn)) => turn.id,
-                _ => return,
+                Ok(None) => {
+                    return Err(WorkerError::Failed(format!(
+                        "session {} has no open turn for approval {approval_id}",
+                        self.session_id
+                    )))
+                }
+                Err(err) => return Err(WorkerError::Failed(err.to_string())),
             },
         };
+        if let Some(capability) = harness_ref.capability.as_ref() {
+            if capability.turn_id != turn_id.to_string() {
+                return Err(WorkerError::Failed(
+                    "approval capability does not match its open turn".into(),
+                ));
+            }
+        }
+        let capability = harness_ref.capability.as_ref();
         let approval = CodeApproval {
-            id: CodeApprovalId::new(),
+            id: approval_id,
             session_id: self.session_id,
             turn_id,
             kind: kind_from_raw(raw),
             harness_raw: persist_harness_raw(&harness_ref.call_id, raw),
+            native_call_id: Some(harness_ref.call_id.clone()),
+            server_capability: capability.map(|binding| binding.token.clone()),
+            request_sha256: capability.map(|binding| binding.request_sha256.clone()),
+            worker_epoch: Some(self.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
             state: CodeApprovalState::Pending,
             feedback: None,
             requested_at: Utc::now(),
             decided_at: None,
         };
-        if insert_approval(&self.db, &self.owner, &approval)
+        let Some(event) = insert_approval_for_worker(&self.db, &self.owner, &approval)
             .await
-            .is_err()
-        {
-            return;
-        }
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+        else {
+            return Err(WorkerError::Failed(
+                "the approval worker or turn is no longer active".into(),
+            ));
+        };
+        self.bus.publish(self.session_id, event);
+        let _ = super::attention::note_activity(&self.db, &self.bus, &self.owner, self.session_id)
+            .await;
         let _ = super::attention::apply_attention(
             &self.db,
             &self.bus,
@@ -408,17 +464,7 @@ impl LiveSink {
             false,
         )
         .await;
-        let _ = persist_and_publish(
-            &self.db,
-            &self.bus,
-            &self.owner,
-            self.session_id,
-            self.spawn_epoch,
-            CodeEvent::ApprovalRequested {
-                approval_id: approval.id,
-            },
-        )
-        .await;
+        Ok(approval)
     }
 }
 
@@ -473,7 +519,17 @@ impl HarnessEventSink for LiveSink {
             self.persist_pending_resume_ref().await;
         }
         if let HarnessEvent::ApprovalRequested { harness_ref, raw } = &event {
-            self.record_approval(harness_ref, raw).await;
+            if let Err(error) = self
+                .record_approval(CodeApprovalId::new(), harness_ref, raw)
+                .await
+            {
+                warn!(
+                    session = %self.session_id,
+                    call_id = %harness_ref.call_id,
+                    error = %error,
+                    "could not persist an engine approval request"
+                );
+            }
             return;
         }
         if matches!(event, HarnessEvent::ApprovalResolved { .. }) {
@@ -605,6 +661,7 @@ pub(crate) fn spawn_session_worker(
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
     let queue = TurnQueue::new(worktree_turn);
+    let approval_decisions = Arc::new(tokio::sync::Mutex::new(()));
     tokio::spawn(run_worker(
         session,
         engine,
@@ -618,6 +675,7 @@ pub(crate) fn spawn_session_worker(
         commands: tx,
         queue,
         sink,
+        approval_decisions,
     }
 }
 
@@ -728,6 +786,10 @@ enum ControlFlow {
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(not(test))]
+const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long a session sits between turns — no turn, no queued follow-up, no
 /// command — before its engine child is released (decision 0064). Sits well
@@ -836,10 +898,22 @@ async fn apply_control(
             decision,
             reply,
         } => {
-            let result = engine
-                .decide(approval, decision)
-                .await
-                .map_err(|err| WorkerError::Failed(err.to_string()));
+            let result = match tokio::time::timeout(
+                APPROVAL_CONTROL_TIMEOUT,
+                engine.decide(approval, decision),
+            )
+            .await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(HarnessError::ApprovalAcknowledgementLost(message))) => {
+                    Err(WorkerError::ApprovalDeliveryUnknown(message))
+                }
+                Ok(Err(err)) => Err(WorkerError::ApprovalDeliveryFailed(err.to_string())),
+                Err(_) => Err(WorkerError::ApprovalDeliveryUnknown(
+                    "the native approval decision timed out; delivery could not be confirmed"
+                        .into(),
+                )),
+            };
             let _ = reply.send(result);
             ControlFlow::Continue
         }
@@ -1665,6 +1739,8 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
         Err(WorkerError::StaleTurn(_)) => "stale_turn",
         Err(WorkerError::SteeringUnavailable(_)) => "steering_unavailable",
         Err(WorkerError::SteeringRejected(_)) => "steering_rejected",
+        Err(WorkerError::ApprovalDeliveryFailed(_)) => "approval_delivery_failed",
+        Err(WorkerError::ApprovalDeliveryUnknown(_)) => "approval_delivery_unknown",
         Err(WorkerError::RelaunchRequired(_)) => "relaunch_required",
         Err(WorkerError::QueuedTurnStale) => "queued_turn_stale",
         Err(WorkerError::QueuedTurnStopped) => "queued_turn_stopped",

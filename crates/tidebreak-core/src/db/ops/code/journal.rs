@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 
 use crate::code::{CodeEvent, CodeSessionId, SequencedCodeEvent};
@@ -43,11 +43,26 @@ pub async fn append_event(
             current: session.spawn_epoch,
         });
     }
+    let seq = append_event_on_locked(&transaction, owner, session_id, event).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(seq)
+}
+
+/// Append after the caller has locked and fenced the session row.
+pub(in crate::db) async fn append_event_on_locked<C>(
+    conn: &C,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    event: &CodeEvent,
+) -> Result<i64>
+where
+    C: ConnectionTrait,
+{
     let last = entities::code_event::Entity::find()
         .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_event::Column::SessionId.eq(session_id.0))
         .order_by_desc(entities::code_event::Column::Seq)
-        .one(&transaction)
+        .one(conn)
         .await
         .map_err(store_err)?;
     let seq = last
@@ -64,10 +79,9 @@ pub async fn append_event(
         event: Set(serde_json::to_value(event).map_err(AgentError::from)?),
         created_at: Set(Utc::now()),
     }
-    .insert(&transaction)
+    .insert(conn)
     .await
     .map_err(store_err)?;
-    transaction.commit().await.map_err(store_err)?;
     Ok(seq)
 }
 

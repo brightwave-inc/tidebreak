@@ -129,7 +129,7 @@ mod tests {
     impl crate::ApprovalCompleter for NoopCompleter {
         async fn complete(
             &self,
-            _call_id: &str,
+            _approval: &crate::HarnessApprovalRef,
             _decision: crate::ApprovalDecision,
         ) -> Result<(), crate::HarnessError> {
             Ok(())

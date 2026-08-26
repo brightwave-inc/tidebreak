@@ -175,7 +175,7 @@ impl CodexStreamParser {
                 .unwrap_or_else(|| value.get("id").map(id_key).unwrap_or_default());
             self.pending_approvals.remove(&call_id);
             return vec![HarnessEvent::ApprovalResolved {
-                harness_ref: HarnessApprovalRef { call_id },
+                harness_ref: HarnessApprovalRef::engine(call_id),
                 decision,
             }];
         }
@@ -371,7 +371,7 @@ impl CodexStreamParser {
             self.pending_approvals.insert(call_id.clone(), id.clone());
         }
         vec![HarnessEvent::ApprovalRequested {
-            harness_ref: HarnessApprovalRef { call_id },
+            harness_ref: HarnessApprovalRef::engine(call_id),
             raw: params.clone(),
         }]
     }

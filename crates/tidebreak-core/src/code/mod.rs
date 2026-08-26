@@ -1215,6 +1215,24 @@ pub struct CodeApproval {
     pub kind: CodeApprovalKind,
     /// Size-capped raw engine payload.
     pub harness_raw: serde_json::Value,
+    /// Engine-native call ID. Older rows may predate the binding migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_call_id: Option<String>,
+    /// Opaque server capability for the exact parked native request.
+    #[serde(default, skip_serializing)]
+    pub server_capability: Option<String>,
+    /// SHA-256 of the exact approval request before display capping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_sha256: Option<String>,
+    /// Worker epoch that owned the native request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_epoch: Option<i64>,
+    /// Atomic claim held while one decision reaches the engine.
+    #[serde(default, skip_serializing)]
+    pub decision_claim: Option<uuid::Uuid>,
+    /// When the decision claim was acquired.
+    #[serde(default, skip_serializing)]
+    pub claimed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Decision state.
     pub state: CodeApprovalState,
     /// Denial feedback, when denied with a reason.

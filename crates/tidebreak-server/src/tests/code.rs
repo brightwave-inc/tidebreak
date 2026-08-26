@@ -220,9 +220,7 @@ fn write_approval_script(call_id: &str, content: &str) -> Vec<HarnessEvent> {
         },
         HarnessEvent::TurnStarted,
         HarnessEvent::ApprovalRequested {
-            harness_ref: HarnessApprovalRef {
-                call_id: call_id.into(),
-            },
+            harness_ref: HarnessApprovalRef::engine(call_id),
             raw: serde_json::json!({
                 "tool_name": "Write",
                 "input": { "file_path": "/workspace/probe.txt", "content": content },
@@ -271,9 +269,7 @@ fn undecided_approval_script(call_id: &str) -> Vec<HarnessEvent> {
         },
         HarnessEvent::TurnStarted,
         HarnessEvent::ApprovalRequested {
-            harness_ref: HarnessApprovalRef {
-                call_id: call_id.into(),
-            },
+            harness_ref: HarnessApprovalRef::engine(call_id),
             raw: serde_json::json!({
                 "tool_name": "Bash",
                 "input": { "command": "rm -rf /tmp/scratch" },
@@ -5128,6 +5124,484 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
 }
 
 #[tokio::test]
+async fn concurrent_approval_decisions_deliver_exactly_once() {
+    let adapter = ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported);
+    let observed = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+    let approval_id = approval["id"].as_str().unwrap().to_owned();
+    let decide = |decision: &'static str| {
+        let client = client.clone();
+        let token = token.clone();
+        let approval_id = approval_id.clone();
+        async move {
+            client
+                .post(format!(
+                    "http://{addr}/code/approvals/{approval_id}/decision"
+                ))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "decision": decision }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let (approve, deny) = tokio::join!(decide("approve"), decide("deny"));
+    let statuses = [approve.status(), deny.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    assert_eq!(observed.observed_decisions().len(), 1);
+
+    let finished = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("the winning decision did not release the turn")
+        .unwrap();
+    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+    let rows = approvals_for(
+        &client,
+        addr,
+        &token,
+        session_id.parse::<CodeSessionId>().unwrap(),
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(
+        rows[0]["state"].as_str(),
+        Some("approved" | "denied")
+    ));
+    let resolutions =
+        journaled_resolutions(&runtime.db, session_id.parse::<CodeSessionId>().unwrap()).await;
+    assert_eq!(resolutions.len(), 1);
+}
+
+#[tokio::test]
+async fn a_definite_native_approval_delivery_failure_is_abandoned() {
+    let adapter = ScriptedAdapter::new(approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_approval_delivery_error("the native waiter closed");
+    let observed = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/approvals/{}/decision",
+            approval["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "approval_delivery_failed");
+    assert!(observed.observed_decisions().is_empty());
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let rows = approvals_for(&client, addr, &token, parsed).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["state"], "abandoned");
+    assert_eq!(
+        journaled_resolutions(&runtime.db, parsed).await,
+        vec![tidebreak_core::ApprovalDecisionKind::Abandoned]
+    );
+
+    let interrupted = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id}/interrupt"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
+    let _ = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("interrupt did not release the failed approval turn");
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_an_accepted_approval_to_finish_durably() {
+    let adapter = ScriptedAdapter::new(approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_approval_ack_delay(Duration::from_millis(500));
+    let observed = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+    let approval_id = approval["id"].as_str().unwrap().to_owned();
+
+    let decision = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let approval_id = approval_id.clone();
+        async move {
+            client
+                .post(format!(
+                    "http://{addr}/code/approvals/{approval_id}/decision"
+                ))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "decision": "approve" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while observed.observed_decisions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the scripted engine never accepted the approval");
+
+    let archive = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let workspace_id = json_id(&workspace).to_owned();
+        async move {
+            client
+                .post(format!(
+                    "http://{addr}/code/workspaces/{workspace_id}/archive"
+                ))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "force": true }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    let decided = tokio::time::timeout(Duration::from_secs(3), decision)
+        .await
+        .expect("the delayed approval acknowledgement never completed")
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+    let archived = tokio::time::timeout(Duration::from_secs(5), archive)
+        .await
+        .expect("archive did not resume after approval finalization")
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let rows = approvals_for(&client, addr, &token, parsed).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["state"], "approved");
+    assert_eq!(
+        journaled_resolutions(&runtime.db, parsed).await,
+        vec![tidebreak_core::ApprovalDecisionKind::Approve]
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(5), turn).await;
+}
+
+#[tokio::test]
+async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
+    let adapter = ScriptedAdapter::new(approval_script())
+        .with_approvals(CapLevel::Supported)
+        .with_approval_ack_delay(Duration::from_secs(2));
+    let observed = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "write it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = client
+                .get(format!("http://{addr}/code/approvals?state=pending"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap();
+            if let Some(row) = listed.into_iter().next() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("pending approval never appeared");
+    let approval_id = approval["id"]
+        .as_str()
+        .unwrap()
+        .parse::<tidebreak_core::CodeApprovalId>()
+        .unwrap();
+
+    let unknown = client
+        .post(format!(
+            "http://{addr}/code/approvals/{approval_id}/decision"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = unknown.json().await.unwrap();
+    assert_eq!(body["kind"], "approval_delivery_unknown");
+    assert_eq!(
+        observed.observed_decisions().len(),
+        1,
+        "the timeout is ambiguous because the native engine accepted the decision"
+    );
+
+    let claimed = tidebreak_core::db::code::get_approval(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        approval_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claimed.state, tidebreak_core::CodeApprovalState::Pending);
+    assert!(claimed.decision_claim.is_some());
+    assert!(claimed.decided_at.is_none());
+
+    let finished = tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("the turn did not resume after the decision timeout")
+        .unwrap();
+    assert_eq!(finished.status(), reqwest::StatusCode::ACCEPTED);
+
+    let restarted = Arc::new(CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        {
+            let mut registry = AdapterRegistry::new();
+            registry.register(Arc::new(
+                ScriptedAdapter::new(plain_text_script()).with_approvals(CapLevel::Supported),
+            ));
+            registry
+        },
+    ));
+    restarted.recover().await.unwrap();
+
+    let recovered = tidebreak_core::db::code::get_approval(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        approval_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        recovered.state,
+        tidebreak_core::CodeApprovalState::Abandoned
+    );
+    assert!(recovered.decision_claim.is_none());
+    assert!(recovered.decided_at.is_some());
+    assert_eq!(
+        journaled_resolutions(&runtime.db, session_id.parse::<CodeSessionId>().unwrap()).await,
+        vec![tidebreak_core::ApprovalDecisionKind::Abandoned]
+    );
+}
+
+#[tokio::test]
 async fn deny_feedback_reaches_the_scripted_engine() {
     let adapter = ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported);
     let observed = adapter.clone();
@@ -5257,7 +5731,7 @@ async fn deny_feedback_reaches_the_scripted_engine() {
 }
 
 #[tokio::test]
-async fn pending_approval_survives_restart_and_is_decidable() {
+async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
     let first = ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported);
     let (router, token, runtime, dir) = code_app_with(first).await;
     let addr = serve(router).await;
@@ -5350,8 +5824,22 @@ async fn pending_approval_survives_restart_and_is_decidable() {
         .json::<Vec<serde_json::Value>>()
         .await
         .unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0]["id"], approval["id"]);
+    assert!(pending.is_empty());
+
+    let rows = reqwest::Client::new()
+        .get(format!(
+            "http://{addr2}/code/approvals?session_id={session_id}"
+        ))
+        .bearer_auth(&token2)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], approval["id"]);
+    assert_eq!(rows[0]["state"], "abandoned");
 
     let parsed: CodeSessionId = session_id.parse().unwrap();
     let row = tidebreak_core::db::code::get_session(
@@ -5362,9 +5850,12 @@ async fn pending_approval_survives_restart_and_is_decidable() {
     .await
     .unwrap()
     .unwrap();
-    assert!(matches!(
+    assert!(!matches!(
         row.attention.state,
-        AttentionState::NeedsYou { .. }
+        AttentionState::NeedsYou {
+            source: AttentionSource::Structured,
+            ..
+        }
     ));
 
     let decided = reqwest::Client::new()
@@ -5377,10 +5868,8 @@ async fn pending_approval_survives_restart_and_is_decidable() {
         .send()
         .await
         .unwrap();
-    assert_eq!(decided.status(), reqwest::StatusCode::OK);
-    let seen = observed.observed_decisions();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].1, ApprovalDecision::Approve);
+    assert_eq!(decided.status(), reqwest::StatusCode::CONFLICT);
+    assert!(observed.observed_decisions().is_empty());
 }
 
 /// The bug this fixes: an engine that times its own tool call out leaves the
@@ -5424,10 +5913,111 @@ async fn an_approval_is_abandoned_when_its_tool_call_resolves_undecided() {
     );
 }
 
-/// Deciding a settled approval must fail out loud. The bridge accepts a
-/// decision with nothing parked on purpose — that is the restart path — so the
-/// row's state is the only thing that can tell the user their approval would
-/// reach nothing.
+#[tokio::test]
+async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).parse::<CodeSessionId>().unwrap();
+    let turn = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "finish" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let turn_id = json_id(&turn).parse::<CodeTurnId>().unwrap();
+    let row = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        session_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stale_epoch = row.spawn_epoch - 1;
+    let stale_id = tidebreak_core::CodeApprovalId::new();
+    let current_id = tidebreak_core::CodeApprovalId::new();
+    for (id, worker_epoch) in [(stale_id, stale_epoch), (current_id, row.spawn_epoch)] {
+        tidebreak_core::db::code::insert_approval(
+            &runtime.db,
+            &row.owner,
+            &tidebreak_core::CodeApproval {
+                id,
+                session_id,
+                turn_id,
+                kind: tidebreak_core::CodeApprovalKind::Other {
+                    summary: "run command".into(),
+                },
+                harness_raw: serde_json::json!({"call_id":"toolu_reused"}),
+                native_call_id: Some("toolu_reused".into()),
+                server_capability: None,
+                request_sha256: None,
+                worker_epoch: Some(worker_epoch),
+                decision_claim: None,
+                claimed_at: None,
+                state: tidebreak_core::CodeApprovalState::Pending,
+                feedback: None,
+                requested_at: chrono::Utc::now(),
+                decided_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    crate::code::approval_sweep::abandon_for_call(
+        &runtime.db,
+        &runtime.bus,
+        &row.owner,
+        session_id,
+        stale_epoch,
+        "toolu_reused",
+    )
+    .await;
+
+    assert_eq!(
+        tidebreak_core::db::code::get_approval(&runtime.db, &row.owner, stale_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        tidebreak_core::CodeApprovalState::Abandoned
+    );
+    assert_eq!(
+        tidebreak_core::db::code::get_approval(&runtime.db, &row.owner, current_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        tidebreak_core::CodeApprovalState::Pending,
+        "a stale completion must not settle the replacement worker's approval"
+    );
+}
+
+/// Deciding a settled approval must fail out loud. A missing native waiter is
+/// a delivery failure, so the durable row prevents a later false success.
 #[tokio::test]
 async fn deciding_an_abandoned_approval_is_refused() {
     let adapter = ScriptedAdapter::new(timed_out_approval_script())

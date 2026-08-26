@@ -53,7 +53,104 @@ impl MigratorTrait for Migrator {
             Box::new(CodePullRequestEtags),
             Box::new(CodeTurnModelSnapshot),
             Box::new(PrePinCodeLifecycleRepair),
+            Box::new(CodeApprovalBinding),
         ]
+    }
+}
+
+/// Bind every approval to one native request and serialize decisions.
+struct CodeApprovalBinding;
+
+impl MigrationName for CodeApprovalBinding {
+    fn name(&self) -> &str {
+        "m20260825_000016_code_approval_binding"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeApprovalBinding {
+    fn use_transaction(&self) -> Option<bool> {
+        Some(true)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let columns = [
+            (
+                "native_call_id",
+                ColumnDef::new(idens::CodeApproval::NativeCallId)
+                    .text()
+                    .to_owned(),
+            ),
+            (
+                "server_capability",
+                ColumnDef::new(idens::CodeApproval::ServerCapability)
+                    .text()
+                    .to_owned(),
+            ),
+            (
+                "request_sha256",
+                ColumnDef::new(idens::CodeApproval::RequestSha256)
+                    .text()
+                    .to_owned(),
+            ),
+            (
+                "worker_epoch",
+                ColumnDef::new(idens::CodeApproval::WorkerEpoch)
+                    .big_integer()
+                    .to_owned(),
+            ),
+            (
+                "decision_claim",
+                ColumnDef::new(idens::CodeApproval::DecisionClaim)
+                    .uuid()
+                    .to_owned(),
+            ),
+            (
+                "claimed_at",
+                ColumnDef::new(idens::CodeApproval::ClaimedAt)
+                    .timestamp_with_time_zone()
+                    .to_owned(),
+            ),
+        ];
+        for (name, column) in columns {
+            if !manager.has_column("code_approval", name).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(idens::CodeApproval::Table)
+                            .add_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_code_approval_native_request")
+                    .table(idens::CodeApproval::Table)
+                    .col(idens::CodeApproval::SessionId)
+                    .col(idens::CodeApproval::WorkerEpoch)
+                    .col(idens::CodeApproval::NativeCallId)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        let update = Query::update()
+            .table(idens::CodeApproval::Table)
+            .value(idens::CodeApproval::State, "abandoned")
+            .value(idens::CodeApproval::DecidedAt, Expr::current_timestamp())
+            .and_where(Expr::col(idens::CodeApproval::State).eq("pending"))
+            .to_owned();
+        manager.exec_stmt(update).await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Removing the binding would make persisted decisions unsafe.
+        Ok(())
     }
 }
 
@@ -1942,6 +2039,7 @@ mod tests {
                 "m20260824_000013_code_pull_request_etags",
                 "m20260824_000014_code_turn_model_snapshot",
                 "m20260825_000015_pre_pin_code_lifecycle_repair",
+                "m20260825_000016_code_approval_binding",
             ]
         );
         assert!(db
