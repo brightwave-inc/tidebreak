@@ -724,12 +724,9 @@ impl ClaudeSession {
             return None;
         }
         let response = value.get("response")?;
-        let Some(response_request_id) = response
+        let response_request_id = response
             .get("request_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return None;
-        };
+            .and_then(serde_json::Value::as_str)?;
         if response_request_id != request_id {
             return None;
         }
