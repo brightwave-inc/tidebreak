@@ -2345,7 +2345,7 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     );
     assert_eq!(
         lender.minted(),
-        vec!["acme/demo".to_owned(); 13],
+        vec!["acme/demo".to_owned(); 14],
         "every read and action borrows only for the registered repository"
     );
 }
