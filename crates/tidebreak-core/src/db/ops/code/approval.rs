@@ -22,6 +22,23 @@ pub struct ApprovalSettlement {
     pub event: SequencedCodeEvent,
 }
 
+/// The exact durable claim and decision that settle one approval.
+#[derive(Debug)]
+pub struct ClaimedApprovalSettlement {
+    /// Approval to settle.
+    pub approval_id: CodeApprovalId,
+    /// Session that owns the approval.
+    pub session_id: CodeSessionId,
+    /// Worker epoch that created the approval.
+    pub worker_epoch: i64,
+    /// Claim token reserved before native delivery.
+    pub claim: uuid::Uuid,
+    /// Decision acknowledged by the engine.
+    pub decision: ApprovalDecisionKind,
+    /// Time when the engine acknowledged the decision.
+    pub decided_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Insert an approval row under its session's owner.
 pub async fn insert_approval(
     store: &DbStore,
@@ -195,22 +212,17 @@ pub async fn claim_approval(
 pub async fn settle_approval_claim(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeApprovalId,
-    session_id: CodeSessionId,
-    worker_epoch: i64,
-    claim: uuid::Uuid,
-    decision: ApprovalDecisionKind,
-    decided_at: chrono::DateTime<chrono::Utc>,
+    settlement: ClaimedApprovalSettlement,
 ) -> Result<Option<ApprovalSettlement>> {
     settle_approval(
         store,
         owner,
-        id,
-        session_id,
-        worker_epoch,
-        ApprovalClaim::Exact(claim),
-        decision,
-        decided_at,
+        settlement.approval_id,
+        settlement.session_id,
+        settlement.worker_epoch,
+        ApprovalClaim::Exact(settlement.claim),
+        settlement.decision,
+        settlement.decided_at,
     )
     .await
 }

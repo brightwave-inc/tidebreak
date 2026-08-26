@@ -1,7 +1,7 @@
 //! Reconcile approvals whose tool call resolved before anyone decided.
 //!
 //! An approval is parked on the engine's `tool_use_id`, and the same id comes
-//! back on [`CodeEvent::ToolCompleted`]. When a completion arrives for a call
+//! back on [`tidebreak_core::CodeEvent::ToolCompleted`]. When a completion arrives for a call
 //! that still has a pending approval, nobody's decision can reach the engine
 //! any more: the engine timed the call out, denied it itself, or ran it under
 //! a rule of its own. Leaving the row `Pending` would list a request that can
@@ -10,7 +10,7 @@
 //!
 //! So the row moves to [`CodeApprovalState::Abandoned`] and the session
 //! journals an `ApprovalResolved` carrying
-//! [`ApprovalDecisionKind::Abandoned`]. The turn and session boundaries sweep
+//! [`tidebreak_core::ApprovalDecisionKind::Abandoned`]. The turn and session boundaries sweep
 //! the same way, because a tool call that never reports completion must not
 //! leave a row pending forever.
 
@@ -19,8 +19,7 @@ use tidebreak_core::db::code::{
     list_approvals, list_turns,
 };
 use tidebreak_core::{
-    ApprovalDecisionKind, CodeApproval, CodeApprovalState, CodeEvent, CodeSessionId,
-    CodeTurnStatus, DbStore, OwnerId,
+    CodeApproval, CodeApprovalState, CodeSessionId, CodeTurnStatus, DbStore, OwnerId,
 };
 
 use super::bus::CodeEventBus;

@@ -307,8 +307,8 @@ mod tests {
     use tidebreak_core::{
         ApprovalDecisionKind, Attention, CodeApproval, CodeApprovalId, CodeApprovalKind,
         CodeApprovalState, CodeEvent, CodeRepo, CodeSessionId, CodeSessionKind,
-        CodeSubagentSummary, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
-        PermissionMode, RepoId, WorkspaceId,
+        CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+        CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 

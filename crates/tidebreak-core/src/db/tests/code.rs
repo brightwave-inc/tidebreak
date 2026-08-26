@@ -16,8 +16,8 @@ use crate::db::code::{
     list_turns, mark_repo_removed, promote_queued_turn, queue_paused, queued_turn_head,
     recover_interrupted_session, replace_session_attention, save_session, save_turn,
     set_queue_paused, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
-    set_workspace_title_if, settle_approval_claim, update_queued_turn, CodeJournalError,
-    MAX_REPLAY_EVENTS,
+    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
+    CodeJournalError, MAX_REPLAY_EVENTS,
 };
 use crate::{BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, Store};
 use chrono::Utc;
@@ -525,12 +525,14 @@ async fn approval_claim_and_abandonment_have_one_winner() {
         assert!(settle_approval_claim(
             &store,
             &owner,
-            approval_id,
-            session_id,
-            session.spawn_epoch,
-            claim,
-            crate::code::ApprovalDecisionKind::Approve,
-            now(),
+            ClaimedApprovalSettlement {
+                approval_id,
+                session_id,
+                worker_epoch: session.spawn_epoch,
+                claim,
+                decision: crate::code::ApprovalDecisionKind::Approve,
+                decided_at: now(),
+            },
         )
         .await
         .unwrap()
@@ -664,12 +666,14 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
     assert!(settle_approval_claim(
         &store,
         &owner,
-        approval_id,
-        session_id,
-        session.spawn_epoch,
-        claim,
-        crate::code::ApprovalDecisionKind::Approve,
-        now(),
+        ClaimedApprovalSettlement {
+            approval_id,
+            session_id,
+            worker_epoch: session.spawn_epoch,
+            claim,
+            decision: crate::code::ApprovalDecisionKind::Approve,
+            decided_at: now(),
+        },
     )
     .await
     .is_err());

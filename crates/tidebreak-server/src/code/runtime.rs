@@ -16,7 +16,7 @@ use tidebreak_core::db::code::{
     insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_repos,
     list_sessions, list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo,
     list_turns, list_workspaces, mark_repo_removed, save_repo, save_session, save_workspace,
-    settle_approval_claim, update_trigger_enabled, MAX_REPLAY_EVENTS,
+    settle_approval_claim, update_trigger_enabled, ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -28,8 +28,8 @@ use tidebreak_core::{
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
-    HarnessApprovalCapability, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
-    HarnessProbe, HostEnv, SessionSpec,
+    HarnessApprovalCapability, HarnessApprovalRef, HarnessError, HarnessEventSink, HarnessProbe,
+    HostEnv, SessionSpec,
 };
 
 use super::approval_bridge::ApprovalBridge;
@@ -47,8 +47,8 @@ use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, Worksp
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, journal_event, spawn_session_worker, wake_queue, AttachmentStore,
-    TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
+    attach_engine, spawn_session_worker, wake_queue, AttachmentStore, TriggerDeliveryClaim,
+    WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -4232,16 +4232,6 @@ impl CodeRuntime {
         })
     }
 
-    pub(crate) async fn ingest_harness_event(
-        &self,
-        session_id: CodeSessionId,
-        event: HarnessEvent,
-    ) -> Result<(), ServerError> {
-        let handle = self.require_worker(session_id)?;
-        handle.sink.emit(event).await;
-        Ok(())
-    }
-
     pub(crate) async fn list_approvals(
         &self,
         owner: &OwnerId,
@@ -4400,12 +4390,14 @@ impl CodeRuntime {
         if let Some(settlement) = settle_approval_claim(
             &self.db,
             owner,
-            approval_id,
-            session_id,
-            worker_epoch,
-            claim,
-            ApprovalDecisionKind::Abandoned,
-            Utc::now(),
+            ClaimedApprovalSettlement {
+                approval_id,
+                session_id,
+                worker_epoch,
+                claim,
+                decision: ApprovalDecisionKind::Abandoned,
+                decided_at: Utc::now(),
+            },
         )
         .await?
         {
@@ -4561,12 +4553,14 @@ impl CodeRuntime {
         let Some(settlement) = settle_approval_claim(
             &self.db,
             owner,
-            id,
-            approval.session_id,
-            worker_epoch,
-            claim,
-            event_decision,
-            Utc::now(),
+            ClaimedApprovalSettlement {
+                approval_id: id,
+                session_id: approval.session_id,
+                worker_epoch,
+                claim,
+                decision: event_decision,
+                decided_at: Utc::now(),
+            },
         )
         .await?
         else {
