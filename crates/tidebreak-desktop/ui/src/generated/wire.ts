@@ -1045,7 +1045,8 @@ in_merge_queue?: boolean,
 comment_count?: number, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, 
 /**
  * The host stack this pull request belongs to (GitHub stacked pull
- * requests), when the host reported one. Identifies the stack, not the PR.
+ * requests), when the host reported one. Identifies the stack, not the
+ * PR.
  */
 stack_number?: number, 
 /**
