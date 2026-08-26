@@ -18,6 +18,7 @@
 //! application.
 
 use std::future::Future;
+#[cfg(any(test, target_os = "macos"))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -541,6 +542,7 @@ fn relaunch_after_update(app: &AppHandle) -> ! {
 }
 
 /// Walk `…/Name.app/Contents/MacOS/<exe>` up to `Name.app`.
+#[cfg(any(test, target_os = "macos"))]
 fn app_bundle_from_binary(binary: &Path) -> Option<PathBuf> {
     let macos = binary.parent()?;
     if macos.file_name()? != "MacOS" {
@@ -590,6 +592,8 @@ exec /usr/bin/open "$1""#,
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
     use super::*;
