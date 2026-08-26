@@ -36,6 +36,7 @@ cap-fs-ext.workspace = true
 cap-std.workspace = true
 futures.workspace = true
 flate2 = "=1.1.9"
+minisign-verify.workspace = true
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["keychain"] }
 tidebreak-host-broker = { path = "../tidebreak-host-broker" }
@@ -58,7 +59,6 @@ tokio-util = { workspace = true }
 unicode-general-category = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-whisper-rs = { workspace = true }
 tempfile.workspace = true
 tar = "=0.4.46"
 zip.workspace = true

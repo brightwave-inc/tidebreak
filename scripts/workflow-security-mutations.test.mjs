@@ -34,6 +34,8 @@ const fixturePaths = [
   "crates/tidebreak-desktop/src/lib.rs",
   "crates/tidebreak-desktop/src/updater.rs",
   "crates/tidebreak-desktop/src/broker.rs",
+  "crates/tidebreak-desktop/src/voice_transcription.rs",
+  "crates/tidebreak-desktop/src/whisper_install.rs",
   "crates/tidebreak-desktop/scripts/prepare-sidecar.mjs",
   "crates/tidebreak-server/build.rs",
   "deploy/self-host/Dockerfile",
