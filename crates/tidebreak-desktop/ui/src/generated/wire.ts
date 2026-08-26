@@ -1314,7 +1314,10 @@ at_turn_ordinal?: number,
 truncated: boolean, };
 
 /**
- * Whether the local GitHub CLI can serve delivery requests.
+ * Whether this caller's GitHub path can serve Delivery requests.
+ *
+ * Desktops and self-host machines report the local GitHub CLI. A
+ * gateway-authenticated hosted machine reports the caller's connected forge.
  */
 export type CodeGitHubCapability = { found: boolean, authenticated?: boolean, viewer_login?: string, remediation: string, };
 
