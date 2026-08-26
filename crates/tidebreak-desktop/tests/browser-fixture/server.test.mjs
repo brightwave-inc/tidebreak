@@ -41,6 +41,18 @@ test("the primary page covers verification privacy and ordinary numeric controls
   assert.match(source, /name="search" inputmode="numeric"/);
 });
 
+test("the primary page exposes every same-document navigation sequence", async () => {
+  const source = await fetch(fixture.origin).then((response) => response.text());
+
+  assert.match(source, /history\.pushState\(\{\}, "", link\.href\)/);
+  assert.match(source, /history\.replaceState\(\{\}, "", "\/\?view=replaced"\)/);
+  assert.match(source, /location\.hash = location\.hash === "#summary"/);
+  assert.match(source, /addEventListener\("popstate", renderRoute\)/);
+  assert.match(source, /addEventListener\("hashchange", renderRoute\)/);
+  assert.match(source, /history\.back\(\)/);
+  assert.match(source, /history\.forward\(\)/);
+});
+
 test("the item API is deterministic and resettable", async () => {
   const initial = await fetch(`${fixture.origin}/api/items`).then((response) =>
     response.json(),

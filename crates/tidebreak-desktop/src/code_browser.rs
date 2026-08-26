@@ -26,7 +26,10 @@ use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
     BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
 };
-use crate::browser_semantics::{browser_inject_inspect_overlay, browser_remove_inspect_overlay};
+use crate::browser_semantics::{
+    browser_inject_inspect_overlay, browser_install_same_document_navigation_observer,
+    browser_read_same_document_navigation_observer, browser_remove_inspect_overlay,
+};
 
 const BROWSER_LABEL_PREFIX: &str = "code-browser-";
 const CODE_BROWSER_EVENT: &str = "code-browser:event";
@@ -35,6 +38,8 @@ const MAX_WORKSPACE_ID_CHARS: usize = 200;
 const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+const SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,13 +180,13 @@ pub(crate) async fn code_browser_command(
                 .await?;
                 registry.set_inspect(&request.browser_id, &request.workspace_id, true)?;
             } else {
-                let _ = browser_remove_inspect_overlay(
+                browser_remove_inspect_overlay(
                     &app,
                     &registry,
                     &request.browser_id,
                     &request.workspace_id,
                 )
-                .await;
+                .await?;
                 registry.set_inspect(&request.browser_id, &request.workspace_id, false)?;
             }
             registry.snapshot(&request.browser_id, &request.workspace_id)
@@ -191,13 +196,13 @@ pub(crate) async fn code_browser_command(
                 registry.remove(&request.browser_id, &request.workspace_id)?;
                 return Err("browser session is not open".to_owned());
             }
-            let _ = browser_remove_inspect_overlay(
+            browser_remove_inspect_overlay(
                 &app,
                 &registry,
                 &request.browser_id,
                 &request.workspace_id,
             )
-            .await;
+            .await?;
             registry.clear_inspect(&request.browser_id, &request.workspace_id)?;
             registry.snapshot(&request.browser_id, &request.workspace_id)
         }
@@ -509,7 +514,7 @@ fn create_browser(
             );
             NewWindowResponse::Deny
         })
-        .on_page_load(move |_webview, payload| {
+        .on_page_load(move |webview, payload| {
             let snapshot = match payload.event() {
                 PageLoadEvent::Started => load_registry.page_started(
                     &load_browser,
@@ -546,6 +551,19 @@ fn create_browser(
                     origin: None,
                 },
             );
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Some(document_epoch) = snapshot.document_epoch {
+                    start_same_document_navigation_observer(
+                        load_main.clone(),
+                        load_registry.clone(),
+                        load_browser.clone(),
+                        load_workspace.clone(),
+                        instance_id,
+                        document_epoch,
+                        webview,
+                    );
+                }
+            }
         })
         .on_document_title_changed(move |webview, title| {
             let url = webview.url().ok().map(|url| url.to_string());
@@ -617,6 +635,98 @@ fn create_browser(
         }
     }
     registry.snapshot(browser_id, workspace_id)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the observer fence keeps native view, workspace, and document identity explicit"
+)]
+fn start_same_document_navigation_observer(
+    main: Webview,
+    registry: BrowserRegistry,
+    browser_id: String,
+    workspace_id: String,
+    instance_id: u64,
+    document_epoch: u64,
+    webview: Webview,
+) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) else {
+            return;
+        };
+        if snapshot.document_epoch != Some(document_epoch) {
+            return;
+        }
+        let Some(expected_origin) = snapshot.url.as_deref().and_then(BrowserOrigin::from_url)
+        else {
+            return;
+        };
+        let renderer_url = main.url().ok();
+        let Ok(initial) = browser_install_same_document_navigation_observer(&webview).await else {
+            return;
+        };
+        let mut last_sequence = initial.sequence;
+        let mut interval = tokio::time::interval(SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) else {
+                return;
+            };
+            if snapshot.document_epoch != Some(document_epoch) {
+                return;
+            }
+
+            let observation = match browser_read_same_document_navigation_observer(&webview).await {
+                Ok(Some(observation)) => observation,
+                Ok(None) => match browser_install_same_document_navigation_observer(&webview).await
+                {
+                    Ok(observation) => observation,
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            };
+            if observation.sequence == last_sequence
+                && snapshot.url.as_deref() == Some(observation.url.as_str())
+            {
+                continue;
+            }
+            last_sequence = observation.sequence;
+            let Ok(url) = validated_same_document_url(
+                &observation.url,
+                renderer_url.as_ref(),
+                &expected_origin,
+            ) else {
+                continue;
+            };
+            let Some(snapshot) = registry.same_document_navigation(
+                &browser_id,
+                &workspace_id,
+                instance_id,
+                document_epoch,
+                url.to_string(),
+            ) else {
+                continue;
+            };
+            emit_event(
+                &main,
+                CodeBrowserEvent {
+                    workspace_id: workspace_id.clone(),
+                    browser_id: browser_id.clone(),
+                    kind: "same_document_navigation",
+                    url: snapshot.url,
+                    title: snapshot.title,
+                    message: None,
+                    load_state: snapshot.load_state,
+                    document_epoch: snapshot.document_epoch,
+                    controller: snapshot.controller,
+                    agent_access: snapshot.agent_access,
+                    origin: None,
+                },
+            );
+        }
+    });
 }
 
 async fn share_browser_with_agent(
@@ -794,6 +904,20 @@ fn validated_url(value: &str, renderer_url: Option<&Url>) -> Result<Url, String>
     Ok(url)
 }
 
+fn validated_same_document_url(
+    value: &str,
+    renderer_url: Option<&Url>,
+    expected_origin: &BrowserOrigin,
+) -> Result<Url, String> {
+    let url = validated_url(value, renderer_url)?;
+    let observed_origin = BrowserOrigin::from_url(url.as_str())
+        .ok_or_else(|| "browser same-document address has no HTTP origin".to_owned())?;
+    if &observed_origin != expected_origin {
+        return Err("browser same-document address changed origin".to_owned());
+    }
+    Ok(url)
+}
+
 fn same_app_origin(left: &Url, right: &Url) -> bool {
     if left.scheme() != right.scheme()
         || left.port_or_known_default() != right.port_or_known_default()
@@ -928,6 +1052,24 @@ mod tests {
         assert!(browser_label("").is_err());
         assert!(browser_label("has/slash").is_err());
         assert!(browser_label(&"a".repeat(MAX_BROWSER_ID_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn same_document_observer_accepts_only_valid_urls_on_the_loaded_origin() {
+        let origin = BrowserOrigin::from_url("https://example.com/start").unwrap();
+        assert_eq!(
+            validated_same_document_url(
+                "https://example.com/next?view=details#summary",
+                None,
+                &origin,
+            )
+            .unwrap()
+            .as_str(),
+            "https://example.com/next?view=details#summary"
+        );
+        assert!(validated_same_document_url("not a url", None, &origin).is_err());
+        assert!(validated_same_document_url("javascript:alert(1)", None, &origin).is_err());
+        assert!(validated_same_document_url("https://other.example/", None, &origin).is_err());
     }
 
     #[test]

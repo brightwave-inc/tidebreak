@@ -166,6 +166,54 @@ struct RawTextProbe {
     uninspectable_regions: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SameDocumentNavigationObservation {
+    pub(crate) sequence: u64,
+    pub(crate) url: String,
+}
+
+pub(crate) async fn browser_install_same_document_navigation_observer(
+    webview: &Webview,
+) -> Result<SameDocumentNavigationObservation, String> {
+    #[cfg(target_os = "macos")]
+    {
+        evaluate_json(webview, same_document_navigation_observer_script()).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        webview
+            .eval(same_document_navigation_observer_script())
+            .map_err(|error| format!("browser host: {error}"))?;
+        let url = webview
+            .url()
+            .map_err(|error| format!("browser host: {error}"))?;
+        Ok(SameDocumentNavigationObservation {
+            sequence: 0,
+            url: url.to_string(),
+        })
+    }
+}
+
+pub(crate) async fn browser_read_same_document_navigation_observer(
+    webview: &Webview,
+) -> Result<Option<SameDocumentNavigationObservation>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        evaluate_json(webview, same_document_navigation_observer_read_script()).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let url = webview
+            .url()
+            .map_err(|error| format!("browser host: {error}"))?;
+        Ok(Some(SameDocumentNavigationObservation {
+            sequence: 0,
+            url: url.to_string(),
+        }))
+    }
+}
+
 pub(crate) async fn browser_semantic_snapshot(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -797,15 +845,34 @@ async fn evaluate_wait_condition(
 ) -> bool {
     use tidebreak_core::BrowserWaitCondition;
 
+    if let Some(satisfied) = registry_wait_condition(condition, snapshot, start_url) {
+        return satisfied;
+    }
+
     match condition {
-        BrowserWaitCondition::LoadState { state } => snapshot.load_state == Some(*state),
-        BrowserWaitCondition::UrlChanged => snapshot.url.as_deref() != start_url,
         BrowserWaitCondition::TextPresent { text } => {
             page_contains_text(webview, text).await.unwrap_or(false)
         }
         BrowserWaitCondition::TextAbsent { text } => {
             !page_contains_text(webview, text).await.unwrap_or(true)
         }
+        BrowserWaitCondition::LoadState { .. } | BrowserWaitCondition::UrlChanged => {
+            unreachable!("registry-only waits returned above")
+        }
+    }
+}
+
+fn registry_wait_condition(
+    condition: &tidebreak_core::BrowserWaitCondition,
+    snapshot: &BrowserSnapshot,
+    start_url: Option<&str>,
+) -> Option<bool> {
+    use tidebreak_core::BrowserWaitCondition;
+
+    match condition {
+        BrowserWaitCondition::LoadState { state } => Some(snapshot.load_state == Some(*state)),
+        BrowserWaitCondition::UrlChanged => Some(snapshot.url.as_deref() != start_url),
+        BrowserWaitCondition::TextPresent { .. } | BrowserWaitCondition::TextAbsent { .. } => None,
     }
 }
 
@@ -1356,6 +1423,14 @@ fn inspect_overlay_script() -> String {
     INSPECT_OVERLAY_SCRIPT.replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
 }
 
+fn same_document_navigation_observer_script() -> &'static str {
+    SAME_DOCUMENT_NAVIGATION_OBSERVER_SCRIPT
+}
+
+fn same_document_navigation_observer_read_script() -> &'static str {
+    SAME_DOCUMENT_NAVIGATION_OBSERVER_READ_SCRIPT
+}
+
 fn screenshot_privacy_script(watch_key: &str, finish: bool) -> Result<String, String> {
     let watch_key = serde_json::to_string(watch_key).map_err(|error| error.to_string())?;
     Ok(SCREENSHOT_PRIVACY_SCRIPT
@@ -1903,7 +1978,22 @@ const INSPECT_OVERLAY_SCRIPT: &str = r##"
     .slice(0, limit);
   __SENSITIVE_FIELD_POLICY__
 
-  const state = { cancelled: false, frame: null, host: null, observers: [], schedule: null };
+  const MAX_OVERLAY_ENTRIES = 500;
+  const MAX_OBSERVED_ROOTS = 64;
+  const MAX_SCANNED_NODES = 5000;
+  const OBSERVED_ATTRIBUTES = [
+    "aria-describedby", "aria-hidden", "aria-label", "aria-labelledby", "autocomplete",
+    "class", "contenteditable", "disabled", "hidden", "href", "id", "inputmode",
+    "name", "open", "placeholder", "readonly", "role", "style", "tabindex", "type",
+  ];
+  const state = {
+    cancelled: false,
+    frame: null,
+    host: null,
+    listeners: [],
+    observers: [],
+    schedule: null,
+  };
   window[STATE_KEY] = state;
 
   const isVisible = (element, win) => {
@@ -1931,42 +2021,58 @@ const INSPECT_OVERLAY_SCRIPT: &str = r##"
       ? "." + element.className.split(" ").filter(Boolean).slice(0, 2).join(".")
       : "");
   const addMask = (entries, rect, label = "Sensitive region · human takeover") => {
+    if (entries.length >= MAX_OVERLAY_ENTRIES) return;
     entries.push({ rect, sensitive: true, label });
   };
 
-  const scanRoot = (root, doc, win, offsetX, offsetY, entries, roots) => {
+  const scanRoot = (root, doc, win, offsetX, offsetY, entries, roots, budget) => {
+    if (
+      roots.length >= MAX_OBSERVED_ROOTS
+      || entries.length >= MAX_OVERLAY_ENTRIES
+      || budget.nodes <= 0
+    ) {
+      return true;
+    }
     roots.push({ root, win });
     let containsSensitive = false;
-    for (const element of root.querySelectorAll(FIELD_SELECTOR)) {
-      if (tidebreakIsSensitiveField(element, doc)) containsSensitive = true;
-    }
-    for (const element of root.querySelectorAll(INTERACTIVE_SELECTOR)) {
-      const sensitive = tidebreakIsSensitiveField(element, doc);
-      if (!isVisible(element, win)) continue;
-      entries.push({
-        rect: absoluteRect(element.getBoundingClientRect(), offsetX, offsetY),
-        sensitive,
-        label: sensitive ? "Sensitive field · human takeover" : ordinaryLabel(element),
-      });
-    }
+    const treeDocument = root.nodeType === 9 ? root : root.ownerDocument;
+    if (!treeDocument) return true;
+    const walker = treeDocument.createTreeWalker(root, 1);
+    while (walker.nextNode()) {
+      if (budget.nodes <= 0) return true;
+      budget.nodes -= 1;
+      const element = walker.currentNode;
+      if (element.matches?.(FIELD_SELECTOR) && tidebreakIsSensitiveField(element, doc)) {
+        containsSensitive = true;
+      }
+      if (element.matches?.(INTERACTIVE_SELECTOR)) {
+        if (entries.length >= MAX_OVERLAY_ENTRIES) return true;
+        const sensitive = tidebreakIsSensitiveField(element, doc);
+        if (isVisible(element, win)) {
+          entries.push({
+            rect: absoluteRect(element.getBoundingClientRect(), offsetX, offsetY),
+            sensitive,
+            label: sensitive ? "Sensitive field · human takeover" : ordinaryLabel(element),
+          });
+        }
+      }
 
-    for (const element of root.querySelectorAll("*")) {
       if (element.shadowRoot) {
-        const shadowEntries = [];
+        const entryStart = entries.length;
         const shadowSensitive = scanRoot(
           element.shadowRoot,
           doc,
           win,
           offsetX,
           offsetY,
-          shadowEntries,
+          entries,
           roots,
+          budget,
         );
         if (shadowSensitive) {
+          entries.splice(entryStart);
           addMask(entries, absoluteRect(element.getBoundingClientRect(), offsetX, offsetY));
           containsSensitive = true;
-        } else {
-          entries.push(...shadowEntries);
         }
       } else if (element.localName?.includes("-")) {
         if (isVisible(element, win)) {
@@ -1974,35 +2080,34 @@ const INSPECT_OVERLAY_SCRIPT: &str = r##"
         }
         containsSensitive = true;
       }
-    }
-
-    for (const frame of root.querySelectorAll("iframe")) {
-      const frameRect = absoluteRect(frame.getBoundingClientRect(), offsetX, offsetY);
-      try {
-        const childDoc = frame.contentDocument;
-        const childWin = frame.contentWindow;
-        if (!childDoc || !childWin) throw new Error("frame unavailable");
-        const childEntries = [];
-        const childSensitive = scanRoot(
-          childDoc,
-          childDoc,
-          childWin,
-          frameRect.left,
-          frameRect.top,
-          childEntries,
-          roots,
-        );
-        if (childSensitive) {
-          addMask(entries, frameRect);
+      if (element.localName === "iframe") {
+        const frameRect = absoluteRect(element.getBoundingClientRect(), offsetX, offsetY);
+        try {
+          const childDoc = element.contentDocument;
+          const childWin = element.contentWindow;
+          if (!childDoc || !childWin) throw new Error("frame unavailable");
+          const entryStart = entries.length;
+          const childSensitive = scanRoot(
+            childDoc,
+            childDoc,
+            childWin,
+            frameRect.left,
+            frameRect.top,
+            entries,
+            roots,
+            budget,
+          );
+          if (childSensitive) {
+            entries.splice(entryStart);
+            addMask(entries, frameRect);
+            containsSensitive = true;
+          }
+        } catch (_) {
+          if (isVisible(element, win)) {
+            addMask(entries, frameRect, "Uninspectable frame · human takeover");
+          }
           containsSensitive = true;
-        } else {
-          entries.push(...childEntries);
         }
-      } catch (_) {
-        if (isVisible(frame, win)) {
-          addMask(entries, frameRect, "Uninspectable frame · human takeover");
-        }
-        containsSensitive = true;
       }
     }
     return containsSensitive;
@@ -2061,7 +2166,17 @@ const INSPECT_OVERLAY_SCRIPT: &str = r##"
     if (state.cancelled) return;
     const entries = [];
     const roots = [];
-    const takeoverRequired = scanRoot(document, document, window, 0, 0, entries, roots);
+    const budget = { nodes: MAX_SCANNED_NODES };
+    const takeoverRequired = scanRoot(
+      document,
+      document,
+      window,
+      0,
+      0,
+      entries,
+      roots,
+      budget,
+    );
     if (takeoverRequired) {
       entries.splice(0, entries.length, {
         rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
@@ -2086,6 +2201,10 @@ const INSPECT_OVERLAY_SCRIPT: &str = r##"
 
     for (const observer of state.observers) observer.disconnect();
     state.observers = [];
+    for (const [target, type] of state.listeners) {
+      target.removeEventListener(type, schedule, true);
+    }
+    state.listeners = [];
     if (state.host?.isConnected) state.host.replaceWith(host);
     else document.documentElement.appendChild(host);
     if (typeof host.showPopover === "function") {
@@ -2094,21 +2213,34 @@ const INSPECT_OVERLAY_SCRIPT: &str = r##"
     }
     state.host = host;
 
+    const listen = (target, type) => {
+      if (state.listeners.some(([activeTarget, activeType]) => (
+        activeTarget === target && activeType === type
+      ))) return;
+      target.addEventListener(type, schedule, true);
+      state.listeners.push([target, type]);
+    };
     for (const observed of roots) {
-      const observer = new observed.win.MutationObserver(schedule);
+      const observer = new observed.win.MutationObserver(() => schedule());
       observer.observe(observed.root, {
         subtree: true,
         childList: true,
         characterData: true,
         attributes: true,
+        attributeFilter: OBSERVED_ATTRIBUTES,
       });
       state.observers.push(observer);
+      listen(observed.win, "scroll");
+      listen(observed.win, "resize");
+      const observedDocument = observed.root.nodeType === 9
+        ? observed.root
+        : observed.root.ownerDocument;
+      if (observedDocument) {
+        listen(observedDocument, "fullscreenchange");
+      }
     }
   };
 
-  window.addEventListener("scroll", schedule, true);
-  window.addEventListener("resize", schedule, true);
-  document.addEventListener("fullscreenchange", schedule, true);
   render();
   return "injected";
 })()
@@ -2121,9 +2253,9 @@ const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
     state.cancelled = true;
     if (state.frame !== null) window.cancelAnimationFrame(state.frame);
     for (const observer of state.observers || []) observer.disconnect();
-    window.removeEventListener("scroll", state.schedule, true);
-    window.removeEventListener("resize", state.schedule, true);
-    document.removeEventListener("fullscreenchange", state.schedule, true);
+    for (const [target, type] of state.listeners || []) {
+      target.removeEventListener(type, state.schedule, true);
+    }
     state.host?.remove();
     delete window.__tidebreak_inspect_state__;
   }
@@ -2131,6 +2263,62 @@ const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
   document.getElementById("__tidebreak_inspect_style__")?.remove();
   delete window.__tidebreak_highlight_inspect__;
   return "removed";
+})()
+"#;
+
+const SAME_DOCUMENT_NAVIGATION_OBSERVER_SCRIPT: &str = r#"
+(() => {
+  const STATE_KEY = "__tidebreak_same_document_navigation__";
+  const active = window[STATE_KEY];
+  if (active && !active.cancelled) {
+    active.capture("reconcile");
+    return JSON.stringify({ sequence: active.sequence, url: active.url });
+  }
+
+  const state = {
+    cancelled: false,
+    interval: null,
+    sequence: 0,
+    url: String(location.href),
+    capture: null,
+  };
+  const capture = () => {
+    if (state.cancelled) return;
+    const next = String(location.href);
+    if (next === state.url) return;
+    state.url = next;
+    state.sequence += 1;
+  };
+  state.capture = capture;
+
+  for (const method of ["pushState", "replaceState"]) {
+    const original = history[method].bind(history);
+    history[method] = (...args) => {
+      const result = original(...args);
+      capture(method);
+      return result;
+    };
+  }
+  addEventListener("popstate", capture, true);
+  addEventListener("hashchange", capture, true);
+  state.interval = setInterval(capture, 100);
+  addEventListener("pagehide", () => {
+    state.cancelled = true;
+    clearInterval(state.interval);
+    removeEventListener("popstate", capture, true);
+    removeEventListener("hashchange", capture, true);
+  }, { once: true });
+  window[STATE_KEY] = state;
+  return JSON.stringify({ sequence: state.sequence, url: state.url });
+})()
+"#;
+
+const SAME_DOCUMENT_NAVIGATION_OBSERVER_READ_SCRIPT: &str = r#"
+(() => {
+  const state = window.__tidebreak_same_document_navigation__;
+  if (!state || state.cancelled) return "null";
+  state.capture("native_read");
+  return JSON.stringify({ sequence: state.sequence, url: state.url });
 })()
 "#;
 
@@ -2557,6 +2745,36 @@ mod tests {
     }
 
     #[test]
+    fn same_document_navigation_observer_covers_history_and_location_events() {
+        let script = same_document_navigation_observer_script();
+        assert!(script.contains("[\"pushState\", \"replaceState\"]"));
+        assert!(script.contains("addEventListener(\"popstate\""));
+        assert!(script.contains("addEventListener(\"hashchange\""));
+        assert!(script.contains("setInterval(capture, 100)"));
+        assert!(script.contains("clearInterval(state.interval)"));
+        assert!(!script.contains("__TAURI_INTERNALS__"));
+        assert!(!script.contains("window.ipc"));
+    }
+
+    #[test]
+    fn same_document_url_changes_satisfy_registry_waits_without_advancing_epoch() {
+        let mut snapshot = BrowserSnapshot::missing("browser-1", "workspace-1");
+        snapshot.url = Some("https://example.com/?view=details#summary".to_owned());
+        snapshot.load_state = Some(BrowserLoadState::Ready);
+        snapshot.document_epoch = Some(7);
+
+        assert_eq!(
+            registry_wait_condition(
+                &tidebreak_core::BrowserWaitCondition::UrlChanged,
+                &snapshot,
+                Some("https://example.com/"),
+            ),
+            Some(true)
+        );
+        assert_eq!(snapshot.document_epoch, Some(7));
+    }
+
+    #[test]
     fn sensitive_snapshot_nodes_hide_values_labels_and_actions() {
         let script = snapshot_script(25, "__marker");
         assert!(script.contains("const tidebreakTextWithoutFieldDescendants"));
@@ -2575,7 +2793,17 @@ mod tests {
         let screenshot = screenshot_privacy_script("__watch", false).unwrap();
         assert!(inspect.contains("attachShadow({ mode: \"closed\" })"));
         assert!(inspect.contains("window.requestAnimationFrame(() =>"));
-        assert!(inspect.contains("new observed.win.MutationObserver(schedule)"));
+        assert!(inspect.contains("new observed.win.MutationObserver(() => schedule())"));
+        assert!(inspect.contains("attributeFilter: OBSERVED_ATTRIBUTES"));
+        assert!(inspect.contains("const MAX_OVERLAY_ENTRIES = 500"));
+        assert!(inspect.contains("const MAX_OBSERVED_ROOTS = 64"));
+        assert!(inspect.contains("const MAX_SCANNED_NODES = 5000"));
+        assert!(inspect.contains("createTreeWalker(root, 1)"));
+        assert!(inspect.contains("budget.nodes -= 1"));
+        assert!(inspect.contains("observed.win.addEventListener(\"scroll\""));
+        assert!(inspect.contains("observed.win.addEventListener(\"resize\""));
+        assert!(inspect.contains("state.listeners.push([observedDocument, \"fullscreenchange\"]"));
+        assert!(inspect.contains("target.removeEventListener(type, state.schedule, true)"));
         assert!(inspect.contains("addMask(entries, frameRect"));
         assert!(inspect.contains("Sensitive content · human takeover"));
         assert!(screenshot.contains("tidebreakIsSensitiveField(element, doc)"));

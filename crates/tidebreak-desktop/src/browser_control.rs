@@ -1374,6 +1374,34 @@ impl BrowserRegistry {
         })
     }
 
+    /// Record a validated same-document URL change without advancing the
+    /// document epoch. The instance and epoch fence prevents a late observer
+    /// from writing into a replacement view or a later document.
+    pub(crate) fn same_document_navigation(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        instance_id: u64,
+        document_epoch: u64,
+        url: String,
+    ) -> Option<BrowserSnapshot> {
+        let mut state = self.lock();
+        {
+            let record = state.records.get_mut(browser_id)?;
+            if record.workspace_id != workspace_id
+                || record.instance_id != instance_id
+                || record.document_epoch != document_epoch
+                || record.url.as_deref() == Some(url.as_str())
+            {
+                return None;
+            }
+            record.url = Some(url);
+            record.load_state = BrowserLoadState::Ready;
+        }
+        let record = state.records.get(browser_id)?;
+        Some(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
     pub(crate) fn title_changed(
         &self,
         browser_id: &str,
@@ -2188,6 +2216,140 @@ mod tests {
         assert_eq!(first.document_epoch, Some(1));
         assert_eq!(first.load_state, Some(BrowserLoadState::Loading));
         assert_eq!(second.document_epoch, Some(2));
+    }
+
+    #[test]
+    fn same_document_navigation_updates_every_registry_projection_without_advancing_epoch() {
+        let registry = BrowserRegistry::default();
+        let instance = registry
+            .register(
+                "browser-1",
+                "workspace-1",
+                "https://example.com/".to_owned(),
+                true,
+            )
+            .unwrap();
+        let ready = registry
+            .page_started(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/".to_owned(),
+            )
+            .and_then(|_| {
+                registry.page_finished(
+                    "browser-1",
+                    "workspace-1",
+                    instance,
+                    "https://example.com/".to_owned(),
+                )
+            })
+            .unwrap();
+        let epoch = ready.document_epoch.unwrap();
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                epoch,
+                "snapshot-1".to_owned(),
+                HashMap::from([("@e1".to_owned(), target("Continue"))]),
+            )
+            .unwrap();
+        registry
+            .record_screenshot_epoch("browser-1", "workspace-1", epoch)
+            .unwrap();
+
+        for url in [
+            "https://example.com/?view=details",
+            "https://example.com/?view=replaced",
+            "https://example.com/?view=replaced#summary",
+            "https://example.com/?view=details",
+            "https://example.com/?view=replaced#summary",
+        ] {
+            let snapshot = registry
+                .same_document_navigation(
+                    "browser-1",
+                    "workspace-1",
+                    instance,
+                    epoch,
+                    url.to_owned(),
+                )
+                .unwrap();
+            assert_eq!(snapshot.url.as_deref(), Some(url));
+            assert_eq!(snapshot.document_epoch, Some(epoch));
+            assert_eq!(snapshot.load_state, Some(BrowserLoadState::Ready));
+            assert_eq!(
+                registry.list_for_workspace("workspace-1")[0].url.as_deref(),
+                Some(url)
+            );
+            registry
+                .validate_snapshot_id("browser-1", "workspace-1", "snapshot-1", epoch)
+                .expect("same-document navigation keeps semantic targets live");
+            assert_eq!(
+                registry
+                    .lock()
+                    .records
+                    .get("browser-1")
+                    .and_then(|record| record.screenshot_epoch),
+                Some(epoch)
+            );
+        }
+
+        registry
+            .page_started(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/full-navigation".to_owned(),
+            )
+            .unwrap();
+        assert!(registry
+            .validate_snapshot_id("browser-1", "workspace-1", "snapshot-1", epoch)
+            .is_err());
+        assert_eq!(
+            registry
+                .lock()
+                .records
+                .get("browser-1")
+                .and_then(|record| record.screenshot_epoch),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_same_document_observers_cannot_update_a_later_document() {
+        let (registry, instance) = ready_registry(true);
+        let epoch = registry
+            .snapshot("browser-1", "workspace-1")
+            .unwrap()
+            .document_epoch
+            .unwrap();
+        registry
+            .page_started(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/full-navigation".to_owned(),
+            )
+            .unwrap();
+
+        assert!(registry
+            .same_document_navigation(
+                "browser-1",
+                "workspace-1",
+                instance,
+                epoch,
+                "https://example.com/stale".to_owned(),
+            )
+            .is_none());
+        assert_eq!(
+            registry
+                .snapshot("browser-1", "workspace-1")
+                .unwrap()
+                .url
+                .as_deref(),
+            Some("https://example.com/full-navigation")
+        );
     }
 
     #[test]

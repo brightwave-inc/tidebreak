@@ -96,6 +96,7 @@ export type BrowserHostEvent = {
   type:
     | "navigation_started"
     | "navigation_finished"
+    | "same_document_navigation"
     | "title_changed"
     | "popup_blocked"
     | "download_blocked"

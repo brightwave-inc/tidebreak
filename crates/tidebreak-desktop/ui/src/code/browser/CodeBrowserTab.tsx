@@ -113,6 +113,9 @@ function CodeBrowserTabSession({
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
   const nativeReady = useRef(false);
+  const nativePresence = useRef<"unknown" | "missing" | "present">("unknown");
+  const nativeCreateInFlight = useRef<Promise<void> | null>(null);
+  const resizeCreateAttempted = useRef(false);
   const nativeHistoryAvailable = useRef(false);
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
   const nativeRevealFrame = useRef<number | null>(null);
@@ -213,15 +216,7 @@ function CodeBrowserTabSession({
     nativeRevealFrame.current = frame;
   }, [browserId, cancelNativeReveal, host, workspaceId]);
 
-  /**
-   * Shared post-ready reconciliation for create and existing-view paths.
-   *
-   * Reads the live viewport-surface bounds (not a stale pre-await capture),
-   * applies them, then reveals the native surface through the existing
-   * cancellable one-animation-frame mechanism so an in-flight overlay
-   * handoff is never overpainted.  Hides immediately when the tab is
-   * unmounted or obscured.
-   */
+  /** Reconcile live bounds and visibility after a native view becomes ready. */
   const reconcileAfterNativeReady = useCallback(async () => {
     if (!mountedRef.current) {
       nativeReady.current = false;
@@ -263,6 +258,56 @@ function CodeBrowserTabSession({
     scheduleNativeReveal,
     workspaceId,
   ]);
+
+  const createAndReconcileNative = useCallback(
+    async (url: string): Promise<boolean> => {
+      if (!host.available()) return false;
+      if (nativeReady.current) {
+        await reconcileAfterNativeReady();
+        return true;
+      }
+      const pending = nativeCreateInFlight.current;
+      if (pending) {
+        await pending;
+        return nativeReady.current;
+      }
+      const bounds = readBrowserBounds(viewportSurfaceRef.current);
+      if (!bounds) return false;
+
+      resizeCreateAttempted.current = true;
+      const operation = (async () => {
+        try {
+          recordRuntime(
+            await host.command(workspaceId, browserId, {
+              type: "create",
+              url,
+              bounds,
+              visible: false,
+            }),
+          );
+          nativePresence.current = "present";
+          lastNativeBounds.current = bounds;
+          await reconcileAfterNativeReady();
+          nativeHistoryAvailable.current =
+            sessionRef.current.history.length <= 1;
+        } catch (error) {
+          nativeReady.current = false;
+          nativePresence.current = "missing";
+          throw error;
+        }
+      })();
+      nativeCreateInFlight.current = operation;
+      try {
+        await operation;
+        return true;
+      } finally {
+        if (nativeCreateInFlight.current === operation) {
+          nativeCreateInFlight.current = null;
+        }
+      }
+    },
+    [browserId, host, reconcileAfterNativeReady, recordRuntime, workspaceId],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -371,8 +416,6 @@ function CodeBrowserTabSession({
       }
 
       if (!current.url) return;
-      const bounds = readBrowserBounds(viewportSurfaceRef.current);
-      if (!bounds) return;
 
       try {
         const snapshot = await host.command(workspaceId, browserId, {
@@ -389,6 +432,7 @@ function CodeBrowserTabSession({
         }
         recordRuntime(snapshot);
         if (snapshot.exists) {
+          nativePresence.current = "present";
           nativeReady.current = true;
           nativeHistoryAvailable.current = true;
           if (snapshot.url) {
@@ -404,17 +448,8 @@ function CodeBrowserTabSession({
           }
           await reconcileAfterNativeReady();
         } else {
-          recordRuntime(
-            await host.command(workspaceId, browserId, {
-              type: "create",
-              url: current.url,
-              bounds,
-              visible: false,
-            }),
-          );
-          lastNativeBounds.current = bounds;
-          await reconcileAfterNativeReady();
-          nativeHistoryAvailable.current = current.history.length <= 1;
+          nativePresence.current = "missing";
+          await createAndReconcileNative(current.url);
         }
       } catch (error) {
         if (!cancelled) {
@@ -441,6 +476,12 @@ function CodeBrowserTabSession({
           finishBrowserNavigation(current, event.url!),
         );
         setAddress(browserDisplayAddress(event.url));
+      } else if (event.type === "same_document_navigation" && event.url) {
+        updateSession((current) =>
+          observeBrowserNavigation(current, event.url!, "ready"),
+        );
+        setAddress(browserDisplayAddress(event.url));
+        setAddressError(null);
       } else if (event.type === "title_changed" && event.title) {
         updateSession((current) =>
           event.url && event.url !== current.url
@@ -505,6 +546,7 @@ function CodeBrowserTabSession({
     };
   }, [
     browserId,
+    createAndReconcileNative,
     host,
     recordRuntime,
     reconcileAfterNativeReady,
@@ -522,13 +564,40 @@ function CodeBrowserTabSession({
       frame = window.requestAnimationFrame(() => {
         frame = null;
         const bounds = readBrowserBounds(surface);
-        if (
-          !bounds ||
-          !nativeReady.current ||
-          sameBrowserBounds(lastNativeBounds.current, bounds)
-        ) {
+        if (!bounds) return;
+        if (!nativeReady.current) {
+          const url = sessionRef.current.url;
+          if (
+            nativePresence.current === "missing" &&
+            !resizeCreateAttempted.current &&
+            url
+          ) {
+            resizeCreateAttempted.current = true;
+            void createAndReconcileNative(url)
+              .then((created) => {
+                if (!created || !mountedRef.current) return;
+                updateSession((current) => ({
+                  ...current,
+                  loadState: "loading",
+                  error: null,
+                }));
+              })
+              .catch((error) => {
+                if (!mountedRef.current) return;
+                updateSession((current) =>
+                  failBrowserSession(
+                    current,
+                    friendlyErrorMessage(
+                      error,
+                      "Could not open the in-app browser",
+                    ),
+                  ),
+                );
+              });
+          }
           return;
         }
+        if (sameBrowserBounds(lastNativeBounds.current, bounds)) return;
         lastNativeBounds.current = bounds;
         void host
           .command(workspaceId, browserId, { type: "set_bounds", bounds })
@@ -549,7 +618,7 @@ function CodeBrowserTabSession({
       window.removeEventListener("resize", sync);
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [browserId, host, workspaceId]);
+  }, [browserId, createAndReconcileNative, host, updateSession, workspaceId]);
 
   useEffect(() => {
     if (!nativeReady.current || !host.available()) return;
@@ -594,19 +663,8 @@ function CodeBrowserTabSession({
         );
         return;
       }
-      const bounds = readBrowserBounds(viewportSurfaceRef.current);
-      if (!bounds) throw new Error("The browser surface is not ready");
-      recordRuntime(
-        await host.command(workspaceId, browserId, {
-          type: "create",
-          url: target.url,
-          bounds,
-          visible: false,
-        }),
-      );
-      lastNativeBounds.current = bounds;
-      await reconcileAfterNativeReady();
-      nativeHistoryAvailable.current = sessionRef.current.history.length <= 1;
+      const created = await createAndReconcileNative(target.url);
+      if (!created) throw new Error("The browser surface is not ready");
     } catch (error) {
       if (mountedRef.current) {
         updateSession((current) =>
@@ -680,12 +738,66 @@ function CodeBrowserTabSession({
 
   async function reload() {
     if (!session.url) return;
+    if (!nativeReady.current) {
+      await retryNativeCreate();
+      return;
+    }
     updateSession((current) => ({
       ...current,
       loadState: "loading",
       error: null,
     }));
     await runHostCommand("reload");
+  }
+
+  async function retryNativeCreate() {
+    const url = sessionRef.current.url;
+    if (!url || !host.available()) return;
+    try {
+      const created = await createAndReconcileNative(url);
+      if (!created) return;
+      updateSession((current) => ({
+        ...current,
+        loadState: "loading",
+        error: null,
+      }));
+    } catch (error) {
+      if (!mountedRef.current) return;
+      updateSession((current) =>
+        failBrowserSession(
+          current,
+          friendlyErrorMessage(error, "Could not open the in-app browser"),
+        ),
+      );
+    }
+  }
+
+  async function toggleInspect() {
+    if (!host.available() || !nativeReady.current) return;
+    const next = !sessionRef.current.inspectEnabled;
+    try {
+      recordRuntime(
+        await host.command(
+          workspaceId,
+          browserId,
+          next
+            ? { type: "set_inspect", enabled: true }
+            : { type: "remove_inspect" },
+        ),
+      );
+    } catch (error) {
+      updateSession((current) =>
+        setBrowserNotice(current, {
+          kind: "blocked",
+          message: friendlyErrorMessage(
+            error,
+            next
+              ? "Could not show inspect highlights"
+              : "Could not hide inspect highlights",
+          ),
+        }),
+      );
+    }
   }
 
   async function stop() {
@@ -768,15 +880,7 @@ function CodeBrowserTabSession({
         onOverlayOpenChange={setHistoryOpen}
         onAgentAccessOpenChange={setAgentAccessOpen}
         agentAccessOpen={agentAccessOpen}
-        onToggleInspect={() => {
-          const next = !session.inspectEnabled;
-          updateSession((current) => ({ ...current, inspectEnabled: next }));
-          void runHostAction(
-            next
-              ? { type: "set_inspect", enabled: true }
-              : { type: "remove_inspect" },
-          );
-        }}
+        onToggleInspect={() => void toggleInspect()}
         inspectEnabled={session.inspectEnabled}
         viewportControl={
           <BrowserViewportControl
@@ -819,7 +923,7 @@ function CodeBrowserTabSession({
             <BrowserFallback
               error={session.error}
               hasUrl={Boolean(session.url)}
-              onRetry={session.url ? () => void navigate() : undefined}
+              onRetry={session.url ? () => void retryNativeCreate() : undefined}
               onOpenExternal={
                 session.url ? () => void openExternal() : undefined
               }

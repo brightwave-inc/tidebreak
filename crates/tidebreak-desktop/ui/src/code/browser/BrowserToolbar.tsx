@@ -279,7 +279,7 @@ export function BrowserToolbar({
                 variant={inspectEnabled ? "secondary" : "ghost"}
                 size={compactToolbar ? "icon-xs" : "icon-sm"}
                 onClick={onToggleInspect}
-                aria-pressed={inspectEnabled || undefined}
+                aria-pressed={inspectEnabled}
                 aria-label={
                   inspectEnabled
                     ? "Hide inspect highlights"
