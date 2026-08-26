@@ -559,6 +559,8 @@ impl CodeRuntime {
             recap: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_final_save: AtomicBool::new(false),
         }
     }
 
