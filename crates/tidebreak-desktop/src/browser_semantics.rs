@@ -2800,9 +2800,11 @@ mod tests {
         assert!(inspect.contains("const MAX_SCANNED_NODES = 5000"));
         assert!(inspect.contains("createTreeWalker(root, 1)"));
         assert!(inspect.contains("budget.nodes -= 1"));
-        assert!(inspect.contains("observed.win.addEventListener(\"scroll\""));
-        assert!(inspect.contains("observed.win.addEventListener(\"resize\""));
-        assert!(inspect.contains("state.listeners.push([observedDocument, \"fullscreenchange\"]"));
+        assert!(inspect.contains("target.addEventListener(type, schedule, true)"));
+        assert!(inspect.contains("state.listeners.push([target, type])"));
+        assert!(inspect.contains("listen(observed.win, \"scroll\")"));
+        assert!(inspect.contains("listen(observed.win, \"resize\")"));
+        assert!(inspect.contains("listen(observedDocument, \"fullscreenchange\")"));
         assert!(inspect.contains("target.removeEventListener(type, state.schedule, true)"));
         assert!(inspect.contains("addMask(entries, frameRect"));
         assert!(inspect.contains("Sensitive content · human takeover"));
