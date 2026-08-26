@@ -157,6 +157,18 @@ function firstSigningMaterialIndex(job, validate) {
   return positions.length === 0 ? -1 : Math.min(...positions);
 }
 
+function assertCachesRestoreBeforeSigningMaterial(job, name, validate) {
+  const secretsAt = firstSigningMaterialIndex(job, validate);
+  assert.notEqual(secretsAt, -1, `${name} must load signing material`);
+  const restores = job.matchAll(/^\s+- name: (.*Restore.*cache.*)$/gim);
+  for (const restore of restores) {
+    assert.ok(
+      restore.index < secretsAt,
+      `${name} must restore ${restore[1]} before loading secrets`,
+    );
+  }
+}
+
 function stripRustCommentsAndStrings(source) {
   const masked = [...source];
   const erase = (start, end) => {
@@ -1482,16 +1494,21 @@ test("credentialed packaging jobs restore caches before loading secrets", () => 
     { name: "build_windows", validate: "Validate updater signing configuration" },
   ]) {
     const job = workflowJob(release, name);
-    const secretsAt = firstSigningMaterialIndex(job, validate);
-    assert.notEqual(secretsAt, -1, `${name} must load signing material`);
-    const names = stepNames(job);
-    const restoreIdx = names.findIndex((n) => /Restore.*cache/i.test(n));
-    if (restoreIdx !== -1) {
-      assert.ok(restoreIdx < secretsAt, `${name} must restore cache before loading secrets`);
-    }
+    assertCachesRestoreBeforeSigningMaterial(job, name, validate);
     // Credentialed jobs must never save a cache.
     assert.doesNotMatch(job, /actions\/cache\/save/);
   }
+});
+
+test("credentialed packaging policy rejects cache restores after signing material", () => {
+  const release = workflows["release.yml"];
+  const name = "build_macos";
+  const validate = "Validate production signing configuration";
+  const job = `${workflowJob(release, name)}\n    - name: Restore unsigned Rust build cache\n      run: echo unsafe\n`;
+  assert.throws(
+    () => assertCachesRestoreBeforeSigningMaterial(job, name, validate),
+    /must restore Restore unsigned Rust build cache before loading secrets/,
+  );
 });
 
 test("the updater private key is isolated from compilation", () => {
