@@ -4288,7 +4288,7 @@ impl CodeRuntime {
 
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
-            allowed_read_roots: vec![private_root.clone()],
+            allowed_read_roots: vec![private_root.path().to_path_buf()],
             permission_mode: session.permission_mode,
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort,

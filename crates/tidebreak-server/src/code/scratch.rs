@@ -7,6 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
@@ -16,6 +17,33 @@ use tokio::io::AsyncWriteExt as _;
 
 const CODE_DIR: &str = "code";
 const PRIVATE_DIR: &str = "private";
+
+/// A workspace's private storage root, pinned to the directory that passed
+/// validation.
+///
+/// `path` is only the name that engines receive for reading published files.
+/// Every Tidebreak mutation stays relative to `dir`, so replacing that name or
+/// one of its ancestors cannot redirect the operation.
+#[derive(Clone)]
+pub(crate) struct ScratchRoot {
+    dir: Arc<Dir>,
+    path: PathBuf,
+}
+
+impl ScratchRoot {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_for_test(path: &Path) -> io::Result<Self> {
+        let path = absolute_path(path)?;
+        Ok(Self {
+            dir: Arc::new(open_root(&path)?),
+            path,
+        })
+    }
+}
 
 /// An open scratch directory whose path components were all opened without
 /// following symlinks.
@@ -96,18 +124,24 @@ impl Drop for ScratchScope {
 }
 
 /// Create the private root for one workspace under the profile data directory.
-pub(crate) fn workspace_root(data_dir: &Path, workspace_id: WorkspaceId) -> io::Result<PathBuf> {
+pub(crate) fn workspace_root(
+    data_dir: &Path,
+    workspace_id: WorkspaceId,
+) -> io::Result<ScratchRoot> {
     let data_dir = absolute_path(data_dir)?;
     let root = open_root(&data_dir)?;
     reject_git_indexable_root(&std::fs::canonicalize(&data_dir)?)?;
     let code = ensure_child_dir(&root, OsStr::new(CODE_DIR))?;
     let private = ensure_child_dir(&code, OsStr::new(PRIVATE_DIR))?;
     let workspace_name = workspace_id.to_string();
-    ensure_child_dir(&private, OsStr::new(&workspace_name))?;
-    Ok(data_dir
-        .join(CODE_DIR)
-        .join(PRIVATE_DIR)
-        .join(workspace_name))
+    let workspace = ensure_child_dir(&private, OsStr::new(&workspace_name))?;
+    Ok(ScratchRoot {
+        dir: Arc::new(workspace),
+        path: data_dir
+            .join(CODE_DIR)
+            .join(PRIVATE_DIR)
+            .join(workspace_name),
+    })
 }
 
 fn absolute_path(path: &Path) -> io::Result<PathBuf> {
@@ -140,9 +174,9 @@ fn reject_git_indexable_root(root: &Path) -> io::Result<()> {
 }
 
 /// Open or create one directory below a workspace's private root.
-pub(crate) fn scratch_dir(root: &Path, relative: &str) -> io::Result<ScratchDir> {
+pub(crate) fn scratch_dir(root: &ScratchRoot, relative: &str) -> io::Result<ScratchDir> {
     let components = scratch_components(relative)?;
-    let mut current = open_root(root)?;
+    let mut current = root.dir.try_clone()?;
     for component in components {
         current = ensure_child_dir(&current, &component)?;
     }
@@ -150,9 +184,12 @@ pub(crate) fn scratch_dir(root: &Path, relative: &str) -> io::Result<ScratchDir>
 }
 
 /// Open an existing scratch directory without creating any path component.
-pub(crate) fn scratch_dir_if_exists(root: &Path, relative: &str) -> io::Result<Option<ScratchDir>> {
+pub(crate) fn scratch_dir_if_exists(
+    root: &ScratchRoot,
+    relative: &str,
+) -> io::Result<Option<ScratchDir>> {
     let components = scratch_components(relative)?;
-    let mut current = open_root(root)?;
+    let mut current = root.dir.try_clone()?;
     for component in components {
         let metadata = match current.symlink_metadata(&component) {
             Ok(metadata) => metadata,
@@ -172,7 +209,7 @@ pub(crate) fn scratch_dir_if_exists(root: &Path, relative: &str) -> io::Result<O
 
 /// Create a session-and-turn-specific directory below `relative`.
 pub(crate) fn scratch_scope(
-    root: &Path,
+    root: &ScratchRoot,
     relative: &str,
     session_id: uuid::Uuid,
     turn_id: uuid::Uuid,
@@ -196,7 +233,7 @@ pub(crate) fn scratch_scope(
 /// Only UUID-named session directories and legacy UUID-named image files are
 /// Tidebreak-owned. Unknown entries stay untouched. Symlinks are unlinked,
 /// never followed.
-pub(crate) fn sweep_scopes(root: &Path, relative: &str) -> io::Result<()> {
+pub(crate) fn sweep_scopes(root: &ScratchRoot, relative: &str) -> io::Result<()> {
     let Some(root) = scratch_dir_if_exists(root, relative)? else {
         return Ok(());
     };
@@ -418,6 +455,10 @@ fn is_legacy_attachment_name(name: &OsStr) -> bool {
 mod tests {
     use super::*;
 
+    fn test_root(path: &Path) -> ScratchRoot {
+        ScratchRoot::open_for_test(path).expect("scratch root")
+    }
+
     fn git(worktree: &Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new("git")
             .args(args)
@@ -445,7 +486,7 @@ mod tests {
         let root = parent.path().join("private");
         std::os::unix::fs::symlink(outside.path(), &root).unwrap();
 
-        let result = scratch_dir(&root, "attachments");
+        let result = ScratchRoot::open_for_test(&root);
 
         assert!(result.is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -454,11 +495,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn rejects_a_symlinked_nested_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("attachments")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("attachments")).unwrap();
+        let root = test_root(directory.path());
 
-        let result = scratch_dir(root.path(), "attachments");
+        let result = scratch_dir(&root, "attachments");
 
         assert!(result.is_err());
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
@@ -484,7 +526,9 @@ mod tests {
         let data_dir = worktree.path().join("data");
         std::fs::create_dir(&data_dir).unwrap();
 
-        let error = workspace_root(&data_dir, WorkspaceId::new()).unwrap_err();
+        let error = workspace_root(&data_dir, WorkspaceId::new())
+            .err()
+            .expect("symlinked Git marker should be rejected");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
@@ -508,12 +552,12 @@ mod tests {
             .await
             .unwrap();
 
-        let private_mode = std::fs::metadata(&private_root)
+        let private_mode = std::fs::metadata(private_root.path())
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        let attachments = private_root.join("attachments");
+        let attachments = private_root.path().join("attachments");
         let attachment_mode = std::fs::metadata(&attachments)
             .unwrap()
             .permissions()
@@ -549,7 +593,9 @@ mod tests {
         let data_dir = worktree.path().join(".tidebreak");
         std::fs::create_dir(&data_dir).unwrap();
 
-        let error = workspace_root(&data_dir, WorkspaceId::new()).unwrap_err();
+        let error = workspace_root(&data_dir, WorkspaceId::new())
+            .err()
+            .expect("repository-local data directory should be rejected");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_git_success(worktree.path(), &["add", "-A"]);
@@ -573,7 +619,8 @@ mod tests {
 
         let session_id = uuid::Uuid::new_v4();
         let turn_id = uuid::Uuid::new_v4();
-        let scope = scratch_scope(private.path(), "attachments", session_id, turn_id).unwrap();
+        let private_root = test_root(private.path());
+        let scope = scratch_scope(&private_root, "attachments", session_id, turn_id).unwrap();
         scope
             .publish(OsStr::new("image.png"), b"private")
             .await
@@ -609,9 +656,10 @@ mod tests {
     #[tokio::test]
     async fn scope_cleanup_removes_only_its_session_tree() {
         let private = tempfile::tempdir().unwrap();
+        let private_root = test_root(private.path());
         let session_id = uuid::Uuid::new_v4();
         let turn_id = uuid::Uuid::new_v4();
-        let scope = scratch_scope(private.path(), "attachments", session_id, turn_id).unwrap();
+        let scope = scratch_scope(&private_root, "attachments", session_id, turn_id).unwrap();
         scope
             .publish(OsStr::new("image.png"), b"private")
             .await
@@ -640,9 +688,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let private = tempfile::tempdir().unwrap();
+        let private_root = test_root(private.path());
         let session_id = uuid::Uuid::new_v4();
         let turn_id = uuid::Uuid::new_v4();
-        let mut scope = scratch_scope(private.path(), "attachments", session_id, turn_id).unwrap();
+        let mut scope = scratch_scope(&private_root, "attachments", session_id, turn_id).unwrap();
         scope
             .publish(OsStr::new("image.png"), b"private")
             .await
@@ -665,6 +714,7 @@ mod tests {
     #[test]
     fn sweep_unlinks_scoped_symlinks_without_touching_their_targets() {
         let private = tempfile::tempdir().unwrap();
+        let private_root = test_root(private.path());
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("keep.txt"), b"keep").unwrap();
         let root = private.path().join("attachments");
@@ -672,12 +722,54 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         std::os::unix::fs::symlink(outside.path(), root.join(session_id.to_string())).unwrap();
 
-        sweep_scopes(private.path(), "attachments").unwrap();
+        sweep_scopes(&private_root, "attachments").unwrap();
 
         assert!(!root.join(session_id.to_string()).exists());
         assert_eq!(
             std::fs::read(outside.path().join("keep.txt")).unwrap(),
             b"keep"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_root_stays_bound_after_an_ancestor_is_replaced() {
+        let parent = tempfile::tempdir().unwrap();
+        let storage = parent.path().join("storage");
+        let held = parent.path().join("held-storage");
+        let redirected = parent.path().join("redirected-storage");
+        std::fs::create_dir_all(storage.join("data")).unwrap();
+        std::fs::create_dir_all(redirected.join("data")).unwrap();
+        let workspace_id = WorkspaceId::new();
+        let private_root = workspace_root(&storage.join("data"), workspace_id).unwrap();
+
+        std::fs::rename(&storage, &held).unwrap();
+        std::os::unix::fs::symlink(&redirected, &storage).unwrap();
+        let redirected_workspace = redirected
+            .join("data")
+            .join(CODE_DIR)
+            .join(PRIVATE_DIR)
+            .join(workspace_id.to_string());
+        std::fs::create_dir_all(&redirected_workspace).unwrap();
+
+        let session_id = uuid::Uuid::new_v4();
+        let turn_id = uuid::Uuid::new_v4();
+        let scope = scratch_scope(&private_root, "attachments", session_id, turn_id).unwrap();
+        scope
+            .publish(OsStr::new("private.png"), b"private")
+            .await
+            .unwrap();
+        scope.keep();
+
+        let relative = Path::new("data")
+            .join(CODE_DIR)
+            .join(PRIVATE_DIR)
+            .join(workspace_id.to_string())
+            .join("attachments")
+            .join(session_id.to_string())
+            .join(turn_id.to_string())
+            .join("private.png");
+        assert_eq!(std::fs::read(held.join(&relative)).unwrap(), b"private");
+        assert!(!redirected.join(relative).exists());
     }
 }

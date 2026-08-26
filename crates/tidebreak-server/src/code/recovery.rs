@@ -675,6 +675,8 @@ mod tests {
         );
         let private_root = _dir.path().join("private");
         std::fs::create_dir(&private_root).unwrap();
+        let private_root =
+            crate::code::scratch::ScratchRoot::open_for_test(&private_root).expect("scratch root");
         let child_pid = i64::from(std::process::id());
         let engine = crate::scripted_harness::ScriptedAdapter::new(vec![
             tidebreak_harness::HarnessEvent::TurnStarted,
