@@ -49,9 +49,6 @@ const SHORT_FIRST_TURN_INPUT_CHARS: usize = 2_000;
 pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
-        model: Option<String>,
-        reasoning_effort: Option<ReasoningEffort>,
-        fast_mode: bool,
         attachments: Vec<tidebreak_core::ImageRef>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
@@ -216,9 +213,6 @@ pub(crate) struct AttachmentStore {
 
 pub(crate) struct QueuedFollowUp {
     pub message: String,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub fast_mode: bool,
     pub attachments: Vec<tidebreak_core::ImageRef>,
     pub trigger_delivery: Option<TriggerDeliveryClaim>,
     /// The durable queue row this turn promotes, when the message came from
@@ -747,9 +741,6 @@ async fn run_worker(
             command = commands.recv() => match command {
                 Some(WorkerCommand::RunTurn {
                     message,
-                    model,
-                    reasoning_effort,
-                    fast_mode,
                     attachments,
                     trigger_delivery,
                     reply,
@@ -766,9 +757,6 @@ async fn run_worker(
                         },
                         QueuedFollowUp {
                             message,
-                            model,
-                            reasoning_effort,
-                            fast_mode,
                             attachments,
                             trigger_delivery,
                             queued_row: None,
@@ -1195,9 +1183,6 @@ async fn drain_queued(
         };
         let follow_up = QueuedFollowUp {
             message: head.message.clone(),
-            model: session.model.clone(),
-            reasoning_effort: session.reasoning_effort,
-            fast_mode: session.fast_mode,
             attachments: head.attachments.clone(),
             trigger_delivery: None,
             queued_row: Some(Box::new(head.clone())),
@@ -1352,9 +1337,6 @@ async fn drive_turn_inner(
     worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
         message,
-        model: _,
-        reasoning_effort: _,
-        fast_mode: _,
         attachments,
         trigger_delivery,
         queued_row,
@@ -2587,7 +2569,7 @@ mod tests {
     };
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
-        ImageMediaType, ImageRef, PermissionMode, RepoId, ToolDetail, WorkspaceId,
+        ImageMediaType, ImageRef, PermissionMode, ReasoningEffort, RepoId, ToolDetail, WorkspaceId,
     };
     use tidebreak_harness::{HarnessAdapter as _, SessionSpec};
 
@@ -2894,9 +2876,6 @@ mod tests {
             .commands
             .send(WorkerCommand::RunTurn {
                 message: "use the committed settings".into(),
-                model: session.model.clone(),
-                reasoning_effort: session.reasoning_effort,
-                fast_mode: session.fast_mode,
                 attachments: Vec::new(),
                 trigger_delivery: None,
                 reply: turn_reply,
@@ -2908,9 +2887,9 @@ mod tests {
             .await
             .unwrap()
             .expect("the reserved settings commit");
-        settlement
+        assert!(settlement
             .send(ExecutionSettingsSettlement::Confirmed)
-            .unwrap();
+            .is_ok());
 
         let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
             .await

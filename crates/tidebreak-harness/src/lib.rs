@@ -489,8 +489,9 @@ pub trait HarnessAdapter: Send + Sync {
     /// Every effort level this engine accepts, ascending, across all models.
     ///
     /// The ladder a *model* takes can be narrower — Codex states one per row —
-    /// so this is the outer bound, for a caller holding a model row the engine
-    /// did not list. Empty means the engine takes no effort control.
+    /// so callers use this only for the implicit engine default when the
+    /// catalog does not identify one. Empty means the engine takes no effort
+    /// control.
     fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
         let _ = probe;
         Vec::new()

@@ -16,12 +16,15 @@ use crate::db::code::{
     insert_session, insert_turn, insert_workspace, list_approvals, list_events,
     list_pending_permission_mode_changes, list_queued_turns, list_repos, list_sessions,
     list_turn_metrics, list_turns, mark_repo_removed, promote_queued_turn, queue_paused,
-    queued_turn_head, recover_interrupted_session, replace_session_attention, save_session,
-    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
-    set_turn_narrative, set_workspace_title_if, settle_approval_claim, update_queued_turn,
-    ClaimedApprovalSettlement, CodeJournalError, MAX_REPLAY_EVENTS,
+    queued_turn_head, recover_interrupted_session, replace_session_attention,
+    replace_session_execution_settings, save_session, save_turn, set_queue_paused,
+    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
+    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
+    CodeJournalError, CodeSessionExecutionSettings, MAX_REPLAY_EVENTS,
 };
-use crate::{BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, Store};
+use crate::{
+    BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, ReasoningEffort, Store,
+};
 use chrono::Utc;
 use sea_orm::ConnectionTrait;
 

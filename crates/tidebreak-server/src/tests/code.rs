@@ -2222,6 +2222,104 @@ async fn opencode_reasoning_is_never_reported_as_active() {
     assert!(debug["session"]["reasoning_effort"].is_null(), "{debug}");
 }
 
+/// An explicit model outside the catalog cannot inherit the engine's broad
+/// reasoning ladder. The implicit default still uses that fallback when the
+/// catalog does not identify a default row.
+#[tokio::test]
+async fn an_unknown_explicit_model_cannot_inherit_engine_reasoning() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![listed_model("listed", false, &[], false)]);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let create_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    let implicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "reasoning_effort": "high",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(implicit.status(), reqwest::StatusCode::CREATED);
+
+    let explicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "unlisted",
+            "reasoning_effort": "high",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(explicit.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = explicit.json().await.unwrap();
+    assert_eq!(body["kind"], "reasoning_effort_unsupported", "{body}");
+}
+
+/// An unlisted explicit model cannot inherit fast mode from the catalog's
+/// default row. Omitting the model still uses that advertised default.
+#[tokio::test]
+async fn an_unknown_explicit_model_cannot_inherit_default_fast_mode() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_models(vec![listed_model(
+        "fast-default",
+        true,
+        &[],
+        true,
+    )]);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let create_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    let implicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(implicit.status(), reqwest::StatusCode::CREATED);
+
+    let explicit = client
+        .post(&create_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+            "model": "unlisted",
+            "fast_mode": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(explicit.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = explicit.json().await.unwrap();
+    assert_eq!(body["kind"], "fast_mode_unsupported", "{body}");
+}
+
 /// A model without a fast service tier cannot make the session or the picker
 /// report fast mode as active.
 #[tokio::test]
@@ -2526,7 +2624,7 @@ async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits
             false,
         )]);
     let engine = adapter.clone();
-    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());

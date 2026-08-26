@@ -3335,9 +3335,6 @@ impl CodeRuntime {
             .commands
             .send(WorkerCommand::RunTurn {
                 message: message.clone(),
-                model: session.model.clone(),
-                reasoning_effort: session.reasoning_effort,
-                fast_mode: session.fast_mode,
                 attachments: attachments.clone(),
                 trigger_delivery,
                 reply,
@@ -4284,8 +4281,9 @@ impl CodeRuntime {
             None => model.default,
         });
         let reasoning_efforts = if caps.reasoning_levels == CapLevel::Supported {
-            model.map_or_else(
-                || {
+            match (selected, model) {
+                (_, Some(model)) => model.reasoning_efforts.clone(),
+                (None, None) => {
                     let mut levels = adapter.reasoning_efforts(probe);
                     if levels.is_empty() {
                         levels = listed
@@ -4296,9 +4294,9 @@ impl CodeRuntime {
                             .collect();
                     }
                     levels
-                },
-                |model| model.reasoning_efforts.clone(),
-            )
+                }
+                (Some(_), None) => Vec::new(),
+            }
         } else {
             Vec::new()
         };
