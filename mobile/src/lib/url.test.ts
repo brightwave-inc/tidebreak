@@ -28,6 +28,12 @@ describe("validatedBaseUrl", () => {
     );
   });
 
+  it("lowercases the host so resource hashing is stable", () => {
+    expect(validatedBaseUrl("https://Machine.Example.COM")).toBe(
+      "https://machine.example.com",
+    );
+  });
+
   it("refuses cleartext off loopback", () => {
     expect(reason("http://machine.example.com")).toBe(REASON_REQUIRES_TLS);
     expect(reason("http://10.0.0.4:8080")).toBe(REASON_REQUIRES_TLS);

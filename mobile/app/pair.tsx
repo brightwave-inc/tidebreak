@@ -58,16 +58,11 @@ export default function PairScreen() {
         refreshToken: tokens.refresh_token,
         installationId: meta.installation_id,
         machinePrefillUrl: meta.tidebreak_machine_url ?? undefined,
-        accessTokens: [
-          {
-            resource: RESOURCE_CONTROL,
-            accessToken: tokens.access_token,
-            expiresAtMs: Date.now() + tokens.expires_in * 1000,
-          },
-        ],
+        accessTokens: [],
       });
       try {
-        const identity = await fetchIdentity(gatewayUrl, tokens.access_token);
+        const controlToken = await tokenStore.getAccessToken(RESOURCE_CONTROL);
+        const identity = await fetchIdentity(gatewayUrl, controlToken);
         await tokenStore.update({ identity });
       } catch {
         // Identity is shown later from a control-scoped mint.
