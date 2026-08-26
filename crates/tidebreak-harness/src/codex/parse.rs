@@ -267,10 +267,12 @@ impl CodexStreamParser {
                 }
                 Vec::new()
             }
+            "thread/started" => self.emit_session_started(&params),
             "account/rateLimits/updated"
             | "hook/completed"
             | "hook/started"
             | "item/commandExecution/outputDelta"
+            | "item/commandExecution/terminalInteraction"
             | "item/fileChange/outputDelta"
             | "item/fileChange/patchUpdated"
             | "item/mcpToolCall/progress"
@@ -285,7 +287,6 @@ impl CodexStreamParser {
             | "thread/goal/updated"
             | "thread/queue/changed"
             | "thread/settings/updated"
-            | "thread/started"
             | "thread/status/changed"
             | "thread/goal/cleared"
             | "turn/diff/updated"
@@ -296,7 +297,7 @@ impl CodexStreamParser {
                 Vec::new()
             }
             other => {
-                self.count_unrecognized(other, value);
+                self.count_unrecognized_notification(other, value);
                 Vec::new()
             }
         }
@@ -755,19 +756,22 @@ impl CodexStreamParser {
     }
 
     fn emit_session_started(&mut self, result: &Value) -> Vec<HarnessEvent> {
+        if self.emitted_session {
+            return Vec::new();
+        }
         let thread = result.get("thread").cloned().unwrap_or(Value::Null);
-        if let Some(id) = thread
+        let Some(id) = thread
             .get("id")
             .and_then(Value::as_str)
             .or_else(|| thread.get("sessionId").and_then(Value::as_str))
-        {
-            self.resume_ref = Some(id.to_owned());
-        }
-        if let Some(version) = thread.get("cliVersion").and_then(Value::as_str) {
-            self.version = Some(version.to_owned());
-        }
-        if self.emitted_session {
+            .filter(|id| !id.is_empty())
+        else {
+            self.count_unrecognized("session-start/missing-thread-id", result);
             return Vec::new();
+        };
+        self.resume_ref = Some(id.to_owned());
+        if let Some(version) = thread.get("cliVersion").and_then(Value::as_str) {
+            self.version = Some(super::normalize_codex_version(version));
         }
         self.emitted_session = true;
         vec![HarnessEvent::SessionStarted {
@@ -775,6 +779,24 @@ impl CodexStreamParser {
             harness_version: self.version.clone().unwrap_or_else(|| "unknown".into()),
             resume_ref: self.resume_ref.clone(),
         }]
+    }
+
+    fn count_unrecognized_notification(&mut self, method: &str, payload: &Value) {
+        self.unrecognized += 1;
+        let mut rendered = payload.to_string();
+        crate::text::truncate_on_char_boundary(&mut rendered, MAX_UNRECOGNIZED_LOG);
+        tracing::info!(
+            target: "tidebreak_harness::codex",
+            unrecognized = self.unrecognized,
+            kind = method,
+            "unrecognized engine event"
+        );
+        tracing::debug!(
+            target: "tidebreak_harness::codex",
+            method = method,
+            payload = %rendered,
+            "unrecognized engine notification payload"
+        );
     }
 
     fn emit_tool_started(
@@ -1331,10 +1353,75 @@ mod tests {
     }
 
     #[test]
+    fn session_started_emits_once_with_the_resume_ref_in_either_start_order() {
+        let cases = [
+            (
+                "result first",
+                r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"abc","cliVersion":"codex-cli 0.147.0"}}}}
+{"dir":"in","msg":{"method":"thread/started","params":{"thread":{"id":"abc","cliVersion":"0.147.0"}}}}
+"#,
+            ),
+            (
+                "notification first",
+                r#"
+{"dir":"in","msg":{"method":"thread/started","params":{"thread":{"id":"abc","cliVersion":"codex-cli 0.147.0"}}}}
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"abc","cliVersion":"0.147.0"}}}}
+"#,
+            ),
+        ];
+
+        for (order, input) in cases {
+            let out = CodexStreamParser::parse_ndjson(input);
+            assert_eq!(out.unrecognized, 0, "{order}");
+            assert_eq!(out.resume_ref.as_deref(), Some("abc"), "{order}");
+            let started = out
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    HarnessEvent::SessionStarted {
+                        harness_kind,
+                        harness_version,
+                        resume_ref,
+                    } => Some((harness_kind, harness_version, resume_ref)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(started.len(), 1, "{order}");
+            assert_eq!(*started[0].0, HarnessKind::Codex, "{order}");
+            assert_eq!(started[0].1, "0.147.0", "{order}");
+            assert_eq!(started[0].2.as_deref(), Some("abc"), "{order}");
+        }
+    }
+
+    #[test]
+    fn session_started_waits_for_a_nonempty_thread_id() {
+        let input = r#"
+{"dir":"out","msg":{"id":1,"method":"thread/start","params":{}}}
+{"dir":"in","msg":{"id":1,"result":{"thread":{"id":"","cliVersion":"0.147.0"}}}}
+{"dir":"in","msg":{"method":"thread/started","params":{"thread":{"id":"abc","cliVersion":"0.147.0"}}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+
+        assert_eq!(out.unrecognized, 1);
+        assert_eq!(out.resume_ref.as_deref(), Some("abc"));
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|event| matches!(event, HarnessEvent::SessionStarted { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn known_streaming_telemetry_does_not_count_as_protocol_drift() {
         let input = r#"
 {"method":"item/reasoning/summaryTextDelta","params":{"delta":"thinking"}}
 {"method":"item/commandExecution/outputDelta","params":{"delta":"output"}}
+{"method":"item/commandExecution/terminalInteraction","params":{"itemId":"command-1"}}
 {"method":"turn/diff/updated","params":{"diff":"patch"}}
 {"method":"thread/compacted","params":{}}
 "#;
