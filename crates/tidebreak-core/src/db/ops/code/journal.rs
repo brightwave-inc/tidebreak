@@ -463,7 +463,7 @@ pub async fn list_recent_events(
 #[cfg(test)]
 mod fork_replay_tests {
     use super::*;
-    use crate::code::{ToolDetail, ToolOutcome};
+    use crate::code::{Diffstat, HarnessNoticeLevel, ToolDetail, ToolOutcome};
 
     fn sequenced(events: Vec<CodeEvent>) -> Vec<SequencedCodeEvent> {
         events
@@ -564,6 +564,45 @@ mod fork_replay_tests {
         assert_eq!(page.events.len(), limit);
         assert_eq!(page.complete_turns, HashSet::from([newest]));
         assert!(!page.truncated);
+    }
+
+    #[test]
+    fn keeps_a_complete_turn_when_checkpoint_work_follows_its_terminal_event() {
+        for checkpoint_event in [
+            CodeEvent::CheckpointRecorded {
+                turn_id: CodeTurnId::new(),
+                diffstat: Diffstat {
+                    files: 1,
+                    insertions: 2,
+                    deletions: 0,
+                    truncated: false,
+                },
+            },
+            CodeEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Warning,
+                message: "checkpoint failed".to_owned(),
+            },
+        ] {
+            let turn_id = match &checkpoint_event {
+                CodeEvent::CheckpointRecorded { turn_id, .. } => *turn_id,
+                _ => CodeTurnId::new(),
+            };
+            let mut events = completed_turn(
+                turn_id,
+                vec![CodeEvent::AssistantMessage {
+                    text: "done".to_owned(),
+                    parent_call_id: None,
+                }],
+            );
+            events.push(checkpoint_event);
+
+            let page = select(events, turn_id, 3);
+
+            assert_eq!(page.events.len(), 3);
+            assert_eq!(page.complete_turns, HashSet::from([turn_id]));
+            assert_eq!(page.boundary_status, Some(CodeTurnStatus::Completed));
+            assert!(!page.truncated);
+        }
     }
 
     #[test]
