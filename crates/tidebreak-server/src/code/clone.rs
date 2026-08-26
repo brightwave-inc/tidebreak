@@ -1,8 +1,9 @@
 //! Bounded `git clone` jobs for adding a remote repository.
 //!
-//! The user's own `git` binary does the work. Arguments are an argv array,
-//! never a shell string. Credential helpers may authenticate; the process
-//! never prompts and never stores secrets.
+//! The machine's `git` binary does the work. Arguments are an argv array,
+//! never a shell string. Local-owner clones may use the operator's credential
+//! setup. Named-member clones receive only an explicit borrowed credential
+//! inside an isolated process and never store secrets.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
+use url::Url;
 use uuid::Uuid;
 
 use tidebreak_core::db::code::get_repo_by_root_path;
@@ -36,6 +38,8 @@ const MAX_STDERR_CHARS: usize = 4_096;
 const COMPLETED_JOB_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_COMPLETED_JOBS: usize = 256;
 pub(crate) const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
+const HOSTED_CLONE_SCHEMES: [&str; 4] = ["git", "http", "https", "ssh"];
+const SAFE_GIT_ENV: [&str; 5] = ["COMSPEC", "PATH", "PATHEXT", "SystemRoot", "WINDIR"];
 
 /// In-memory clone jobs for this process. Not journaled; a restart drops them.
 #[derive(Debug, Default)]
@@ -199,6 +203,19 @@ impl CodeRuntime {
         let github = if let Some(lender) = self.git_credentials() {
             let outcome = lender.git_forge_identity(owner).await;
             hosted_github_source(git, no_git(), outcome)
+        } else if !owner.is_local() {
+            CodeRepoSource {
+                kind: "github".to_owned(),
+                available: git,
+                remediation: if git {
+                    Some(
+                        "Public GitHub repositories clone without credentials. Private repositories require a connected forge that lends your credential."
+                            .to_owned(),
+                    )
+                } else {
+                    no_git()
+                },
+            }
         } else {
             // GitHub needs exactly what a git URL needs. Without a `gh`
             // credential `resolve_github_clone_url` falls back to the public
@@ -331,6 +348,7 @@ impl CodeRuntime {
             &request,
             self.gh_search_path(),
             self.git_credentials().is_some(),
+            !owner.is_local(),
         )
         .await?;
         let name = request
@@ -415,6 +433,7 @@ impl CodeRuntime {
             &source.url,
             &target,
             credential.as_ref(),
+            source.isolate_ambient_credentials,
             |phase, percent| {
                 self.touch_clone(owner, id, |job| {
                     job.phase = phase.to_owned();
@@ -520,12 +539,14 @@ pub(crate) async fn registered_legacy_clone_target(
 struct CloneSource {
     url: String,
     github_slug: Option<String>,
+    isolate_ambient_credentials: bool,
 }
 
 async fn resolve_clone_source(
     request: &CloneRequest,
     gh_search_path: Option<String>,
     gateway_credentials: bool,
+    hosted_member: bool,
 ) -> Result<CloneSource, ServerError> {
     let url = request
         .url
@@ -546,10 +567,7 @@ async fn resolve_clone_source(
             "clone_invalid_source",
             "provide url or github",
         )),
-        (Some(url), None) => Ok(CloneSource {
-            url: url.to_owned(),
-            github_slug: None,
-        }),
+        (Some(url), None) => clone_source(url.to_owned(), None, hosted_member),
         (None, Some(github)) => {
             if !valid_github_slug(github) {
                 return Err(ServerError::bad_request_kind(
@@ -557,26 +575,175 @@ async fn resolve_clone_source(
                     "github must be owner/repo",
                 ));
             }
-            if gateway_credentials {
-                // A hosted machine never consults `gh` — there is none, and
-                // nothing to observe if there were. The URL shape is fixed,
-                // and the credential arrives per operation at clone time.
-                return Ok(CloneSource {
-                    url: format!("https://github.com/{github}.git"),
-                    github_slug: Some(github.to_owned()),
-                });
+            if hosted_member || gateway_credentials {
+                // A named user never consults the service account's `gh`.
+                // The URL shape is fixed, and an available gateway credential
+                // arrives per operation at clone time.
+                return clone_source(
+                    format!("https://github.com/{github}.git"),
+                    gateway_credentials.then(|| github.to_owned()),
+                    hosted_member,
+                );
             }
-            resolve_github_clone_url(github, gh_search_path.as_deref())
+            let url = resolve_github_clone_url(github, gh_search_path.as_deref())
                 .await
-                .map(|url| CloneSource {
-                    url,
-                    github_slug: None,
-                })
                 .map_err(|err| {
                     ServerError::bad_request_kind("clone_github_unresolved", err.to_string())
-                })
+                })?;
+            clone_source(url, None, hosted_member)
         }
     }
+}
+
+fn clone_source(
+    url: String,
+    github_slug: Option<String>,
+    hosted_member: bool,
+) -> Result<CloneSource, ServerError> {
+    validate_clone_url(&url, hosted_member)?;
+    Ok(CloneSource {
+        url,
+        github_slug,
+        isolate_ambient_credentials: hosted_member,
+    })
+}
+
+/// Refuse secrets in a remote before git can persist the value in
+/// `.git/config`. Named users also cannot make the hosted process read a local
+/// path or invoke an arbitrary remote helper.
+fn validate_clone_url(value: &str, hosted_member: bool) -> Result<(), ServerError> {
+    if value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(ServerError::bad_request_kind(
+            "clone_invalid_url",
+            "clone URLs must not contain control characters",
+        ));
+    }
+    if query_contains_secret(value) {
+        return Err(invalid_clone_url(
+            "clone URLs must not contain secret query parameters",
+        ));
+    }
+    if !value.contains("://") && is_scp_remote(value) {
+        return Ok(());
+    }
+
+    match Url::parse(value) {
+        Ok(url) => {
+            let scheme = url.scheme().to_ascii_lowercase();
+            if url.fragment().is_some() {
+                return Err(ServerError::bad_request_kind(
+                    "clone_invalid_url",
+                    "clone URLs must not contain fragments",
+                ));
+            }
+            if url.password().is_some()
+                || (!url.username().is_empty()
+                    && (!matches!(scheme.as_str(), "ssh") || secret_query_name(url.username())))
+            {
+                return Err(invalid_clone_url(
+                    "clone URLs must not contain usernames, passwords, or tokens",
+                ));
+            }
+            if hosted_member
+                && (!HOSTED_CLONE_SCHEMES.contains(&scheme.as_str()) || url.host().is_none())
+            {
+                return Err(hosted_clone_transport_refused());
+            }
+        }
+        Err(_) => {
+            if hosted_member {
+                return Err(hosted_clone_transport_refused());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn invalid_clone_url(message: &'static str) -> ServerError {
+    ServerError::bad_request_kind("clone_credentials_in_url", message)
+}
+
+fn hosted_clone_transport_refused() -> ServerError {
+    ServerError::bad_request_kind(
+        "clone_transport_refused",
+        "hosted clones require a remote git, HTTP, HTTPS, or SSH URL",
+    )
+}
+
+fn query_contains_secret(value: &str) -> bool {
+    value.split_once('?').is_some_and(|(_, query)| {
+        url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| secret_query_name(&name))
+    })
+}
+
+fn secret_query_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    let parts_match = normalized
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .any(|part| {
+            matches!(
+                part,
+                "apikey"
+                    | "auth"
+                    | "authorization"
+                    | "credential"
+                    | "key"
+                    | "oauth"
+                    | "password"
+                    | "passwd"
+                    | "secret"
+                    | "sig"
+                    | "signature"
+                    | "token"
+            )
+        });
+    let compact = normalized
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>();
+    parts_match
+        || compact.contains("accesskey")
+        || compact.contains("apikey")
+        || compact.contains("credential")
+        || compact.contains("password")
+        || compact.contains("secret")
+        || compact.contains("signature")
+        || compact.ends_with("token")
+}
+
+/// Git's scp-like remote syntax has no URL scheme: `[user@]host:path`.
+/// Keep that remote form for hosted members while refusing filesystem paths,
+/// Windows drive letters, and external remote-helper syntax.
+fn is_scp_remote(value: &str) -> bool {
+    if value.contains("::") || value.contains(['/', '\\']) && !value.contains(':') {
+        return false;
+    }
+    let Some((authority, path)) = value.split_once(':') else {
+        return false;
+    };
+    if authority.len() == 1 && authority.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return false;
+    }
+    let (user, host) = authority
+        .rsplit_once('@')
+        .map_or((None, authority), |(user, host)| (Some(user), host));
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    valid_part(host)
+        && !host.starts_with('-')
+        && user.is_none_or(|user| valid_part(user) && !secret_query_name(user))
+        && !path.is_empty()
+        && !path.starts_with(':')
+        && !path.bytes().any(|byte| byte.is_ascii_whitespace())
+        && path.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'~')
+        })
 }
 
 /// The `github` repo source as a gateway-authenticated hosted machine offers
@@ -742,10 +909,9 @@ async fn validate_parent_dir(parent: &Path) -> Result<(), ServerError> {
 
 /// The clone URL with any embedded credentials removed.
 ///
-/// A user may clone `https://token@host/org/repo.git`, and this string is
-/// persisted and shown back. Keep the origin, drop the secret: the userinfo
-/// segment is the credential, and nothing downstream needs it — the checkout's
-/// own remote holds whatever git needs to fetch again.
+/// Source validation rejects userinfo before clone. This redaction remains a
+/// defense at the registration boundary so a future resolver cannot expose a
+/// credential through `cloned_from`.
 pub(crate) fn redact_clone_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         // scp-style `git@host:org/repo` carries a username, not a secret.
@@ -761,9 +927,49 @@ async fn clone_into(
     url: &str,
     target: &Path,
     credential: Option<&GitCredential>,
+    isolate_ambient_credentials: bool,
     mut on_progress: impl FnMut(&str, u8),
 ) -> Result<(), String> {
-    let mut command = Command::new("git");
+    clone_into_with_command(
+        Command::new("git"),
+        url,
+        target,
+        credential,
+        isolate_ambient_credentials,
+        &mut on_progress,
+    )
+    .await
+}
+
+async fn clone_into_with_command(
+    mut command: Command,
+    url: &str,
+    target: &Path,
+    credential: Option<&GitCredential>,
+    isolate_ambient_credentials: bool,
+    on_progress: &mut impl FnMut(&str, u8),
+) -> Result<(), String> {
+    let target = if isolate_ambient_credentials && target.is_relative() {
+        std::env::current_dir()
+            .map_err(|err| format!("could not resolve clone destination: {err}"))?
+            .join(target)
+    } else {
+        target.to_path_buf()
+    };
+    let _isolated_home = if isolate_ambient_credentials {
+        let home = tempfile::Builder::new()
+            .prefix("tidebreak-git-")
+            .tempdir()
+            .map_err(|err| format!("could not isolate git credentials: {err}"))?;
+        tokio::fs::write(home.path().join("gitconfig"), b"")
+            .await
+            .map_err(|err| format!("could not isolate git configuration: {err}"))?;
+        isolate_git_command(&mut command, home.path());
+        Some(home)
+    } else {
+        None
+    };
+
     // The credential rides the environment into a one-shot helper, never the
     // URL: the URL is persisted and shown back, and the helper reset keeps
     // any configured helper from storing the dying token (decision 63).
@@ -776,7 +982,7 @@ async fn clone_into(
     }
     command
         .args(["clone", "--progress", "--", url])
-        .arg(target)
+        .arg(&target)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -816,6 +1022,42 @@ async fn clone_into(
         } else {
             tail
         })
+    }
+}
+
+/// Give a named member's git subprocess a blank home and configuration.
+/// `env_clear` removes credential helpers, askpass programs, SSH agents,
+/// proxy credentials, and every `GIT_CONFIG_*` override before the command
+/// receives the small environment it needs to locate git and its shell.
+fn isolate_git_command(command: &mut Command, home: &Path) {
+    let safe_env = SAFE_GIT_ENV
+        .into_iter()
+        .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+        .collect::<Vec<_>>();
+    command.env_clear();
+    command.envs(safe_env);
+    command
+        .current_dir(home)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("TMPDIR", home)
+        .env("TMP", home)
+        .env("TEMP", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", home.join("gitconfig"))
+        .env("GIT_CONFIG_SYSTEM", home.join("gitconfig"))
+        .env("GIT_SSH_COMMAND", isolated_ssh_command());
+}
+
+fn isolated_ssh_command() -> &'static str {
+    #[cfg(windows)]
+    {
+        "ssh -F NUL -oBatchMode=yes -oIdentitiesOnly=yes -oIdentityAgent=none -oIdentityFile=NUL"
+    }
+    #[cfg(not(windows))]
+    {
+        "ssh -F /dev/null -oBatchMode=yes -oIdentitiesOnly=yes -oIdentityAgent=none -oIdentityFile=/dev/null"
     }
 }
 
@@ -954,6 +1196,9 @@ fn bound_stderr(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     fn job(owner: &OwnerId, done: bool, finished_at: Option<Instant>) -> CloneJob {
         CloneJob {
             id: Uuid::new_v4(),
@@ -1034,8 +1279,151 @@ mod tests {
         assert!(!valid_github_slug("acme/de mo"));
     }
 
-    /// A clone URL is persisted and shown back, so a credential embedded in it
-    /// must not be what gets stored.
+    #[test]
+    fn clone_urls_reject_embedded_credentials() {
+        for url in [
+            "https://ghp_secret@github.com/acme/demo.git",
+            "https://user:password@git.example.com/acme/demo.git",
+            "ssh://git:password@git.example.com/acme/demo.git",
+            "https://github.com/acme/demo.git?access_token=secret",
+            "https://github.com/acme/demo.git?X-Amz-Signature=secret",
+        ] {
+            let error = validate_clone_url(url, false).expect_err(url);
+            assert_eq!(error.kind(), "clone_credentials_in_url");
+        }
+
+        assert!(validate_clone_url("ssh://git@github.com/acme/demo.git", false).is_ok());
+        assert!(validate_clone_url("https://example.com/repo.git?ref=main", false).is_ok());
+    }
+
+    #[test]
+    fn hosted_member_clone_urls_require_remote_transports() {
+        for local in [
+            "/srv/repos/demo.git",
+            "../demo.git",
+            "file:///srv/repos/demo.git",
+            r"C:\repos\demo.git",
+            "ext::sh -c exploit",
+        ] {
+            let error = validate_clone_url(local, true).expect_err(local);
+            assert_eq!(error.kind(), "clone_transport_refused");
+            assert!(
+                validate_clone_url(local, false).is_ok(),
+                "the local owner keeps local clone support: {local}"
+            );
+        }
+
+        for remote in [
+            "https://github.com/acme/demo.git",
+            "ssh://git@github.com/acme/demo.git",
+            "git@github.com:acme/demo.git",
+        ] {
+            assert!(validate_clone_url(remote, true).is_ok(), "{remote}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_github_resolution_does_not_consult_ambient_gh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf called > \"$0.called\"\nprintf '{\"url\":\"/ambient/private.git\"}\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap();
+
+        let source = resolve_clone_source(
+            &CloneRequest {
+                url: None,
+                github: Some("acme/demo".to_owned()),
+                parent_dir: None,
+                name: None,
+            },
+            Some(dir.path().display().to_string()),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(source.url, "https://github.com/acme/demo.git");
+        assert!(source.github_slug.is_none());
+        assert!(!dir.path().join("gh.called").exists());
+    }
+
+    /// A named user's clone sees only the borrowed credential. Ambient git,
+    /// home, and SSH state cannot answer, and the remote keeps the clean URL.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_clone_isolates_ambient_credentials_and_persists_a_clean_remote() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shim = dir.path().join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+all_args="$*"
+while [ "$#" -gt 2 ]; do shift; done
+url="$1"
+target="$2"
+mkdir -p "$target/.git"
+env | sort > "$target/environment"
+printf '%s\n' "$all_args" > "$target/arguments"
+printf '[remote "origin"]\n\turl = %s\n' "$url" > "$target/.git/config"
+printf 'Receiving objects: 100%% (1/1), done.\n' >&2
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim, permissions).unwrap();
+
+        let target = dir.path().join("checkout");
+        let mut command = Command::new(&shim);
+        command
+            .current_dir(dir.path())
+            .env("HOME", "/ambient/home")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", "store")
+            .env("GIT_ASKPASS", "/ambient/askpass")
+            .env("SSH_AUTH_SOCK", "/ambient/agent.sock");
+        let credential = GitCredential {
+            username: "x-access-token".to_owned(),
+            secret: "borrowed-secret".to_owned(),
+        };
+        clone_into_with_command(
+            command,
+            "https://github.com/acme/demo.git",
+            &target,
+            Some(&credential),
+            true,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        let environment = std::fs::read_to_string(target.join("environment")).unwrap();
+        assert!(!environment.contains("/ambient/"), "{environment}");
+        assert!(!environment.contains("SSH_AUTH_SOCK="), "{environment}");
+        assert!(!environment.contains("GIT_CONFIG_COUNT="), "{environment}");
+        let ambient_pwd = format!("PWD={}", dir.path().display());
+        assert!(!environment.contains(ambient_pwd.as_str()));
+        assert!(environment.contains("GIT_CONFIG_NOSYSTEM=1"));
+        assert!(environment.contains("TIDEBREAK_GIT_CREDENTIAL_HOST=github.com"));
+        assert!(environment.contains("TIDEBREAK_GIT_CREDENTIAL_SECRET=borrowed-secret"));
+
+        let arguments = std::fs::read_to_string(target.join("arguments")).unwrap();
+        assert!(!arguments.contains("borrowed-secret"), "{arguments}");
+        let config = std::fs::read_to_string(target.join(".git/config")).unwrap();
+        assert!(config.contains("url = https://github.com/acme/demo.git"));
+        assert!(!config.contains("borrowed-secret"), "{config}");
+    }
+
+    /// Registration keeps a final redaction guard even though source
+    /// validation now rejects embedded credentials before clone.
     #[test]
     fn a_clone_url_keeps_its_origin_and_loses_its_credential() {
         assert_eq!(
