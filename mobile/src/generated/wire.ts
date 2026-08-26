@@ -1073,7 +1073,7 @@ export type CodeDeliveryRepositoriesSnapshot = { capability: CodeGitHubCapabilit
  */
 export type CodeDeliveryRerunOutcome = { workflow_run_id: number, success: boolean, error?: string, };
 
-export type CodeDeliveryRunAction = { "type": "rerun_failed" };
+export type CodeDeliveryRunAction = { "type": "rerun" } | { "type": "rerun_failed" };
 
 export type CodeDeliveryRunActionBody = { target: CodeDeliveryRunTarget, action: CodeDeliveryRunAction, };
 
