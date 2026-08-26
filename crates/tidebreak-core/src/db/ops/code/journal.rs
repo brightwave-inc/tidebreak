@@ -200,7 +200,7 @@ pub async fn list_fork_events(
 
     let mut builder =
         ForkEventPageBuilder::new(through_turn, usize::try_from(limit).unwrap_or(usize::MAX));
-    let batch = limit.max(MIN_SCAN_BATCH).min(MAX_REPLAY_EVENTS);
+    let batch = limit.clamp(MIN_SCAN_BATCH, MAX_REPLAY_EVENTS);
     let mut before = None;
 
     loop {
