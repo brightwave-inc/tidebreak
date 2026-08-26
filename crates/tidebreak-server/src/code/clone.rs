@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use tidebreak_core::db::code::get_repo_by_root_path;
 use tidebreak_core::{OwnerId, RepoId, Store};
 
 use super::bus::{CloneProgress, CodeLiveUpdate};
@@ -21,6 +22,7 @@ use super::gh::{self, resolve_github_clone_url};
 use super::runtime::CodeRuntime;
 use crate::error::ServerError;
 use crate::obo_gateway::{GitCredential, GitForgeAttribution, GitForgeError, GitForgeIdentity};
+use crate::principal::{legacy_owner_path_segment, owner_path_segment};
 use crate::routes::code::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeRepoSource,
     CodeRepoSources,
@@ -139,31 +141,17 @@ impl CloneJob {
 /// parent, because there is exactly one owner and its paths are the ones users
 /// already have.
 ///
-/// Owner keys are visible ASCII and may contain characters that are not safe
-/// in a path segment, so everything outside a conservative set is replaced.
+/// Only paths created after the collision-resistant encoding use this root.
+/// Existing repositories and worktrees remain reachable through the absolute
+/// paths stored on their rows.
 pub(crate) fn owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
-    if owner.is_local() {
-        return parent.to_path_buf();
-    }
-    let segment: String = owner
-        .as_str()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // A key of only separators must not resolve to the parent itself, and
-    // must never climb out of it.
-    let segment = segment.trim_matches('.').to_owned();
-    if segment.is_empty() {
-        parent.join("owner")
-    } else {
-        parent.join(segment)
-    }
+    owner_path_segment(owner).map_or_else(|| parent.to_path_buf(), |segment| parent.join(segment))
+}
+
+/// The pre-SEC-6 owner directory, used only for compatibility reads.
+pub(crate) fn legacy_owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
+    legacy_owner_path_segment(owner)
+        .map_or_else(|| parent.to_path_buf(), |segment| parent.join(segment))
 }
 
 /// Body fields after the route has rejected an empty or mixed source.
@@ -370,6 +358,15 @@ impl CodeRuntime {
                 format!("destination {} already exists", target.display()),
             ));
         }
+        let legacy_target = legacy_owner_dir(&parent, owner).join(&name);
+        if legacy_target != target
+            && registered_legacy_clone_target(&self.db, owner, &legacy_target).await?
+        {
+            return Err(ServerError::conflict_kind(
+                "clone_target_exists",
+                format!("destination {} already exists", legacy_target.display()),
+            ));
+        }
         write_clone_parent_dir(&*self.db, &parent).await?;
 
         let id = Uuid::new_v4();
@@ -491,6 +488,29 @@ impl CodeRuntime {
         #[cfg(not(test))]
         None
     }
+}
+
+/// Whether an existing live row proves that the legacy target belongs to this
+/// exact owner.
+///
+/// A bare existence check would reintroduce the collision: another owner may
+/// occupy the same lossy legacy directory. The owner-scoped row is the proof
+/// that lets clone setup preserve the old conflict behavior safely.
+pub(crate) async fn registered_legacy_clone_target(
+    store: &tidebreak_core::DbStore,
+    owner: &OwnerId,
+    target: &Path,
+) -> Result<bool, ServerError> {
+    let canonical = match tokio::fs::canonicalize(target).await {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Ok(false),
+    };
+    Ok(
+        get_repo_by_root_path(store, owner, &canonical.display().to_string())
+            .await?
+            .is_some(),
+    )
 }
 
 /// Where a clone reads from, plus the GitHub slug when the caller named one.

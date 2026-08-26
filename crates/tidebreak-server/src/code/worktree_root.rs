@@ -41,7 +41,8 @@ impl CodeRuntime {
     /// The setting is one deployment-wide path, so a multi-user machine needs
     /// the same per-owner segment clones take ([`owner_dir`]) — otherwise two
     /// users' repositories of the same name share a folder. The local profile
-    /// has exactly one owner and keeps the root itself.
+    /// has exactly one owner and keeps the root itself. Existing workspaces do
+    /// not use this derivation: they keep the absolute path stored on the row.
     pub(crate) async fn owner_worktree_root(
         &self,
         owner: &OwnerId,
