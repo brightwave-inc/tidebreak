@@ -1944,7 +1944,9 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   assert.match(prepareJob, /compression-level: 0/);
   assert.match(prepareJob, /overwrite: true/);
   assert.match(prepareJob, /sha256sum[\s\S]*> SHA256SUMS/);
+  assert.match(prepareJob, /tar -cf prepared-windows\.tar -C "\$PREPARED_ROOT"/);
   assert.match(prepareJob, /sha256sum prepared-windows\.tar/);
+  assert.doesNotMatch(prepareJob, /tar -[cx]f "\$/);
 
   const verifyStep = buildJob.match(
     /- name: Verify prepared Windows inputs[\s\S]*?(?=\n\s+- (?:name:|uses:))/,
@@ -1962,6 +1964,8 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
     verifyStep,
     /sha256sum --check --strict prepared-windows\.tar\.sha256/,
   );
+  assert.match(verifyStep, /tar -xf prepared-windows\.tar -C "\$PREPARED_ROOT"/);
+  assert.doesNotMatch(verifyStep, /tar -[cx]f "\$/);
   assert.match(verifyStep, /sha256sum --check --strict SHA256SUMS/);
   assert.match(
     verifyStep,
