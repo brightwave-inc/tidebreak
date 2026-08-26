@@ -2863,7 +2863,7 @@ export class ApiClient {
       parseCodeTrigger(
         await this.json(`/code/repos/${encodeURIComponent(repoId)}/triggers`, {
           method: "POST",
-          headers: this.headers(),
+          headers: this.headers(true),
           body: JSON.stringify({ condition, action }),
         }),
       ),
@@ -2883,7 +2883,7 @@ export class ApiClient {
           `/code/repos/${encodeURIComponent(repoId)}/triggers/${encodeURIComponent(triggerId)}`,
           {
             method: "PATCH",
-            headers: this.headers(),
+            headers: this.headers(true),
             body: JSON.stringify({ enabled }),
           },
         ),
