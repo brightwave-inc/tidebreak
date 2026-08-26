@@ -96,4 +96,25 @@ describe("connectWithBackoff", () => {
     expect(sockets.length).toBeGreaterThanOrEqual(2);
     conn.dispose();
   });
+
+  it("refresh closes the live socket and opens another immediately", async () => {
+    const sockets: FakeSocket[] = [];
+    const conn = connectWithBackoff(
+      async () => {
+        const socket = new FakeSocket("wss://example/code/updates");
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      { onMessage: () => undefined },
+      { random: () => 0.5 },
+    );
+    conn.start();
+    await Promise.resolve();
+    sockets[0]?.onopen?.(new Event("open"));
+    conn.refresh();
+    await Promise.resolve();
+    expect(sockets[0]?.closed).toBe(true);
+    expect(sockets).toHaveLength(2);
+    conn.dispose();
+  });
 });

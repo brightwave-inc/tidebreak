@@ -170,9 +170,8 @@ export function connectWithBackoff(
         const current = socket;
         socket = null;
         current.close();
-      } else {
-        void connect();
       }
+      void connect();
     },
     dispose() {
       disposed = true;
