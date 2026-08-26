@@ -57,6 +57,7 @@ pub(crate) enum WorkerCommand {
     },
     SetPermissionMode {
         mode: PermissionMode,
+        settlement: oneshot::Receiver<PermissionModeSettlement>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Decide {
@@ -73,6 +74,12 @@ pub(crate) enum WorkerCommand {
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Shutdown,
+}
+
+/// The durable outcome that releases a worker after native mode acceptance.
+pub(crate) enum PermissionModeSettlement {
+    Confirmed,
+    Abort,
 }
 
 /// One live outbox lease propagated only to the sink acceptance boundary.
@@ -755,15 +762,25 @@ async fn run_worker(
                     .await;
                     let _ = reply.send(result);
                 }
-                Some(WorkerCommand::SetPermissionMode { mode, reply }) => {
+                Some(WorkerCommand::SetPermissionMode {
+                    mode,
+                    settlement,
+                    reply,
+                }) => {
                     let result = set_permission_mode(engine.as_ref(), mode).await;
-                    // The worker's own copy is what every later `persist_session`
-                    // writes, so a switch the engine accepted has to land here
-                    // too — otherwise the next turn writes the old mode back.
-                    if result.is_ok() {
-                        session.permission_mode = mode;
-                    }
+                    let accepted = result.is_ok();
                     let _ = reply.send(result);
+                    if accepted {
+                        // Stay inside this command until the matching database
+                        // intent commits. A turn sent during confirmation can
+                        // queue on the channel, but it cannot reach the engine.
+                        match settlement.await {
+                            Ok(PermissionModeSettlement::Confirmed) => {
+                                session.permission_mode = mode;
+                            }
+                            Ok(PermissionModeSettlement::Abort) | Err(_) => break,
+                        }
+                    }
                 }
                 Some(command) => {
                     if apply_control(engine.as_ref(), command, None).await

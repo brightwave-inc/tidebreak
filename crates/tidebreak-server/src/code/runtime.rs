@@ -11,14 +11,17 @@ use tokio::sync::oneshot;
 use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
-    abandon_pending_approval, arm_trigger, claim_approval, compare_and_set_workspace_status,
-    complete_workspace_archive, delete_trigger, delete_workspace, get_approval, get_open_turn,
+    abandon_pending_approval, arm_trigger, begin_permission_mode_change,
+    cancel_permission_mode_change, claim_approval, compare_and_set_workspace_status,
+    complete_workspace_archive, confirm_permission_mode_change, delete_trigger, delete_workspace,
+    discard_permission_mode_change, fence_permission_mode_change, get_approval, get_open_turn,
     get_repo, get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
-    insert_workspace, list_approvals, list_events, list_fork_events, list_repos, list_sessions,
-    list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo, list_turns,
-    list_workspaces, list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
-    save_repo, save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
-    ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
+    insert_workspace, list_approvals, list_events, list_fork_events,
+    list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
+    list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
+    list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head, save_repo,
+    save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
+    ClaimedApprovalSettlement, PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -49,8 +52,8 @@ use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, Worksp
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, spawn_session_worker, wake_queue, AttachmentStore, TriggerDeliveryClaim,
-    WorkerCommand, WorkerError, WorkerHandle,
+    attach_engine, spawn_session_worker, wake_queue, AttachmentStore, PermissionModeSettlement,
+    TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -135,6 +138,17 @@ pub(crate) enum SubmitTurnOutcome {
     /// The durable trigger delivery behind this submit was already accepted
     /// by an earlier attempt; nothing new was written.
     AlreadyDelivered,
+}
+
+enum LivePermissionModeOutcome {
+    Unavailable,
+    RelaunchRequired,
+    Acknowledged(LivePermissionModeChange),
+}
+
+struct LivePermissionModeChange {
+    settlement: oneshot::Sender<PermissionModeSettlement>,
+    handle: WorkerHandle,
 }
 
 /// Shared code-mode services for the process.
@@ -671,9 +685,32 @@ impl CodeRuntime {
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
         self.ensure_stall_sweep();
-        let actions = recovery::recover_running_sessions(&self.db, &self.bus)
-            .await
-            .map_err(ServerError::from)?;
+        let mut actions = Vec::new();
+        for pending in list_pending_permission_mode_changes(&self.db).await? {
+            let reason = FenceReason::ProbeAmbiguous {
+                detail: format!(
+                    "permission mode change from {} to {} stopped before revision {} committed",
+                    pending.intent.previous_mode,
+                    pending.intent.requested_mode,
+                    pending.intent.revision
+                ),
+            };
+            if let Some(fenced) =
+                fence_permission_mode_change(&self.db, &pending.intent, &reason).await?
+            {
+                super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
+                actions.push(RecoveryAction::Fenced {
+                    session: fenced.id.to_string(),
+                });
+            } else {
+                let _ = discard_permission_mode_change(&self.db, &pending.intent).await?;
+            }
+        }
+        actions.extend(
+            recovery::recover_running_sessions(&self.db, &self.bus)
+                .await
+                .map_err(ServerError::from)?,
+        );
         for workspace in
             list_workspaces_by_status_all_owners(&self.db, CodeWorkspaceStatus::Archiving).await?
         {
@@ -3651,17 +3688,12 @@ impl CodeRuntime {
         self.attach_and_spawn_worker(session).await
     }
 
-    /// Change a live session's permission mode.
+    /// Change a session's permission mode through one durable intent.
     ///
-    /// The mode reaches the engine through `SessionSpec`, which is built once
-    /// when the worker attaches, so a running worker keeps the posture it
-    /// started with no matter what the row says. Restarting it is what makes
-    /// the change take effect — the same stop-then-attach `reap` performs,
-    /// without the fence requirement.
-    ///
-    /// Order matters: the outgoing worker writes its own final state as it
-    /// stops, so the mode is persisted *after* the shutdown or it would be
-    /// clobbered.
+    /// A live worker stays inside the mode-change command after native
+    /// acknowledgement. It cannot accept another turn until the exact owner,
+    /// lifecycle, worker epoch, prior mode, and revision confirm in storage.
+    /// If confirmation fails, the worker stops before this method returns.
     ///
     /// Refused while a turn is running. A turn that began under one posture
     /// must not have it changed underneath it — that is the whole point of
@@ -3699,19 +3731,93 @@ impl CodeRuntime {
         let caps = adapter.capabilities(&probe);
         refuse_unhonored_mode(session.harness_kind, mode, &caps)?;
 
-        // Ask the live engine first. Where it has a channel for this — Claude
-        // Code's `set_permission_mode` control request, Codex's per-turn
-        // policy fields — the child keeps its context and the switch costs
-        // nothing. An engine that fixes its posture at launch says so, and
-        // falls through to the relaunch below.
-        if self.repostured_in_place(id, mode).await? {
-            let mut session = self.get_session(owner, id).await?;
-            let previous = session.permission_mode;
-            session.permission_mode = mode;
-            save_session(&self.db, &session).await?;
-            self.note_permission_mode(owner, &session, previous, mode)
-                .await;
-            return Ok(session);
+        let intent = begin_permission_mode_change(&self.db, &session, mode)
+            .await?
+            .ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "permission_mode_changed",
+                    "the session changed before the permission mode could be reserved",
+                )
+            })?;
+
+        let live = match self
+            .repostured_in_place(id, intent.worker_epoch, mode)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                match cancel_permission_mode_change(&self.db, &intent).await {
+                    Ok(true) => return Err(error),
+                    Ok(false) => {
+                        self.retire_permission_mode_worker(&intent).await;
+                        let _ = discard_permission_mode_change(&self.db, &intent).await;
+                    }
+                    Err(cancel_error) => {
+                        self.retire_permission_mode_worker(&intent).await;
+                        tracing::warn!(
+                            session = %id,
+                            error = %cancel_error,
+                            "could not cancel a failed permission-mode intent"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
+
+        if let LivePermissionModeOutcome::Acknowledged(change) = live {
+            return match confirm_permission_mode_change(&self.db, &intent).await {
+                Ok(true) => {
+                    if change
+                        .settlement
+                        .send(PermissionModeSettlement::Confirmed)
+                        .is_err()
+                    {
+                        self.retire_permission_mode_worker(&intent).await;
+                        let session = self.get_session(owner, id).await?;
+                        return self.attach_and_spawn_worker(session).await;
+                    }
+                    let session = self.get_session(owner, id).await?;
+                    self.note_permission_mode(
+                        owner,
+                        &session,
+                        intent.previous_mode,
+                        mode,
+                        intent.revision,
+                    )
+                    .await;
+                    Ok(session)
+                }
+                Ok(false) => {
+                    let fenced = self
+                        .stop_and_fence_permission_mode_change(&intent, change)
+                        .await?;
+                    if fenced.is_some() {
+                        Err(ServerError::conflict_kind(
+                            "permission_mode_unconfirmed",
+                            "the engine accepted the permission mode, but the durable session changed before confirmation; reap the fenced session before another turn",
+                        ))
+                    } else {
+                        Err(ServerError::conflict_kind(
+                            "permission_mode_changed",
+                            "the engine accepted the permission mode, but a newer session state superseded it",
+                        ))
+                    }
+                }
+                Err(error) => {
+                    if let Err(fence_error) = self
+                        .stop_and_fence_permission_mode_change(&intent, change)
+                        .await
+                    {
+                        tracing::warn!(
+                            session = %id,
+                            error = %fence_error.message(),
+                            "could not persist the permission-mode failure fence"
+                        );
+                    }
+                    Err(ServerError::from(error))
+                }
+            };
         }
 
         // A relaunch is the fallback, and it only works where rebuilding the
@@ -3719,6 +3825,21 @@ impl CodeRuntime {
         // it created the session, and cannot re-apply it on resume, would come
         // back running the old one while the record claimed the new one.
         if !adapter.relaunch_composes_permission_mode() && session.harness_resume_ref.is_some() {
+            let cancelled = matches!(
+                cancel_permission_mode_change(&self.db, &intent).await,
+                Ok(true)
+            );
+            if !cancelled {
+                self.retire_permission_mode_worker(&intent).await;
+                let reason = permission_mode_fence_reason(&intent);
+                if let Some(fenced) =
+                    fence_permission_mode_change(&self.db, &intent, &reason).await?
+                {
+                    super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
+                } else {
+                    let _ = discard_permission_mode_change(&self.db, &intent).await?;
+                }
+            }
             return Err(ServerError::conflict_kind(
                 "permission_mode_fixed",
                 format!(
@@ -3728,7 +3849,7 @@ impl CodeRuntime {
             ));
         }
 
-        let handle = self.workers.lock().expect("code workers").remove(&id);
+        let handle = self.take_worker_for_epoch(id, intent.worker_epoch);
         let decision_gate = handle
             .as_ref()
             .map(|handle| handle.approval_decisions.clone());
@@ -3736,58 +3857,129 @@ impl CodeRuntime {
             Some(gate) => Some(gate.lock_owned().await),
             None => None,
         };
-        if let Some(handle) = handle {
-            Self::shut_down_worker(id, handle).await;
+        if handle.is_some() {
+            self.revoke_worker_channels(id);
         }
-        self.revoke_worker_channels(id);
+        if let Some(handle) = handle {
+            if !Self::shut_down_worker(id, handle).await {
+                let reason = permission_mode_fence_reason(&intent);
+                let fenced = fence_permission_mode_change(&self.db, &intent, &reason).await?;
+                if let Some(fenced) = fenced {
+                    super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
+                } else {
+                    let _ = discard_permission_mode_change(&self.db, &intent).await?;
+                }
+                return Err(ServerError::conflict_kind(
+                    "permission_mode_unconfirmed",
+                    "the session worker did not stop while changing permission mode; reap the fenced session before another turn",
+                ));
+            }
+        }
 
-        let mut session = self.get_session(owner, id).await?;
         super::approval_sweep::abandon_for_restart(
             &self.db,
             &self.bus,
             owner,
-            session.id,
-            session.spawn_epoch,
+            intent.session_id,
+            intent.worker_epoch,
         )
         .await;
-        let previous = session.permission_mode;
-        session.permission_mode = mode;
-        save_session(&self.db, &session).await?;
-        self.note_permission_mode(owner, &session, previous, mode)
+        if !confirm_permission_mode_change(&self.db, &intent).await? {
+            let _ = discard_permission_mode_change(&self.db, &intent).await;
+            return Err(ServerError::conflict_kind(
+                "permission_mode_changed",
+                "the session changed while its worker stopped for the permission mode update",
+            ));
+        }
+        let session = self.get_session(owner, id).await?;
+        self.note_permission_mode(owner, &session, intent.previous_mode, mode, intent.revision)
             .await;
 
         self.attach_and_spawn_worker(session).await
     }
 
-    /// Whether the live engine took the new mode on its own channel.
-    ///
-    /// `Ok(false)` means it cannot, and the caller relaunches. A session with
-    /// no worker is also `false`: there is nothing to re-posture, and the
-    /// relaunch path is what brings one up.
+    /// Ask the live engine to take a mode, then hold its worker for settlement.
     async fn repostured_in_place(
         &self,
         id: CodeSessionId,
+        expected_spawn_epoch: i64,
         mode: PermissionMode,
-    ) -> Result<bool, ServerError> {
+    ) -> Result<LivePermissionModeOutcome, ServerError> {
         let Ok(handle) = self.require_worker(id) else {
-            return Ok(false);
+            return Ok(LivePermissionModeOutcome::Unavailable);
         };
+        if handle.spawn_epoch != expected_spawn_epoch {
+            return Ok(LivePermissionModeOutcome::Unavailable);
+        }
         let (reply, rx) = oneshot::channel();
+        let (settlement, settle) = oneshot::channel();
         if handle
             .commands
-            .send(WorkerCommand::SetPermissionMode { mode, reply })
+            .send(WorkerCommand::SetPermissionMode {
+                mode,
+                settlement: settle,
+                reply,
+            })
             .await
             .is_err()
         {
-            return Ok(false);
+            return Ok(LivePermissionModeOutcome::Unavailable);
         }
         match rx.await {
-            Ok(Ok(())) => Ok(true),
-            Ok(Err(WorkerError::RelaunchRequired(_))) => Ok(false),
+            Ok(Ok(())) => Ok(LivePermissionModeOutcome::Acknowledged(
+                LivePermissionModeChange { settlement, handle },
+            )),
+            Ok(Err(WorkerError::RelaunchRequired(_))) => {
+                Ok(LivePermissionModeOutcome::RelaunchRequired)
+            }
             Ok(Err(err)) => Err(map_worker(err)),
             // The worker went away mid-request. Relaunching is the repair.
-            Err(_) => Ok(false),
+            Err(_) => Ok(LivePermissionModeOutcome::Unavailable),
         }
+    }
+
+    async fn stop_and_fence_permission_mode_change(
+        &self,
+        intent: &PermissionModeChangeIntent,
+        change: LivePermissionModeChange,
+    ) -> Result<Option<CodeSession>, ServerError> {
+        let LivePermissionModeChange { settlement, handle } = change;
+        let _ = settlement.send(PermissionModeSettlement::Abort);
+        let handle = if let Some(registered) =
+            self.take_worker_for_epoch(intent.session_id, intent.worker_epoch)
+        {
+            self.revoke_worker_channels(intent.session_id);
+            drop(handle);
+            registered
+        } else {
+            handle
+        };
+        let _ = Self::shut_down_worker(intent.session_id, handle).await;
+        let reason = permission_mode_fence_reason(intent);
+        let fenced = fence_permission_mode_change(&self.db, intent, &reason).await?;
+        if let Some(fenced) = &fenced {
+            super::attention::emit_digest(&self.db, &self.bus, fenced).await;
+        } else {
+            let _ = discard_permission_mode_change(&self.db, intent).await;
+        }
+        Ok(fenced)
+    }
+
+    async fn retire_permission_mode_worker(&self, intent: &PermissionModeChangeIntent) {
+        let Some(handle) = self.take_worker_for_epoch(intent.session_id, intent.worker_epoch)
+        else {
+            return;
+        };
+        self.revoke_worker_channels(intent.session_id);
+        let _ = Self::shut_down_worker(intent.session_id, handle).await;
+    }
+
+    fn take_worker_for_epoch(&self, id: CodeSessionId, spawn_epoch: i64) -> Option<WorkerHandle> {
+        let mut workers = self.workers.lock().expect("code workers");
+        let exact = workers
+            .get(&id)
+            .is_some_and(|handle| handle.spawn_epoch == spawn_epoch);
+        exact.then(|| workers.remove(&id)).flatten()
     }
 
     /// Journal a mode change so the transcript says when the posture moved.
@@ -3797,6 +3989,7 @@ impl CodeRuntime {
         session: &CodeSession,
         previous: PermissionMode,
         mode: PermissionMode,
+        revision: i64,
     ) {
         let _ = super::session_worker::journal_event(
             &self.db,
@@ -3806,7 +3999,9 @@ impl CodeRuntime {
             session.spawn_epoch,
             CodeEvent::HarnessNotice {
                 level: tidebreak_core::HarnessNoticeLevel::Info,
-                message: format!("permission mode changed from {previous} to {mode}"),
+                message: format!(
+                    "permission mode changed from {previous} to {mode} at revision {revision}"
+                ),
             },
         )
         .await;
@@ -5371,6 +5566,15 @@ fn archive_failure_can_reopen(error: &ServerError) -> bool {
             | "unpushed"
             | "uncommitted_and_unpushed"
     )
+}
+
+fn permission_mode_fence_reason(intent: &PermissionModeChangeIntent) -> FenceReason {
+    FenceReason::ProbeAmbiguous {
+        detail: format!(
+            "permission mode change from {} to {} reached the engine but revision {} did not commit",
+            intent.previous_mode, intent.requested_mode, intent.revision
+        ),
+    }
 }
 
 fn map_worker(err: WorkerError) -> ServerError {

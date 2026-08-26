@@ -2310,6 +2310,131 @@ async fn a_mode_switch_uses_the_engine_channel_before_it_relaunches() {
     );
 }
 
+#[tokio::test]
+async fn a_permission_mode_intent_persistence_failure_never_reaches_the_engine() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_auto_mode(CapLevel::Supported)
+        .with_live_mode_switch();
+    let engine = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    runtime
+        .db
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER fail_permission_mode_intent
+             BEFORE UPDATE OF permission_mode_intent ON code_session
+             WHEN NEW.permission_mode_intent IS NOT NULL
+             BEGIN
+               SELECT RAISE(FAIL, 'permission-mode intent write failed');
+             END",
+        )
+        .await
+        .unwrap();
+
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert!(
+        engine.live_modes().is_empty(),
+        "the engine must remain untouched when the intent does not persist"
+    );
+    let stored = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        session.parse().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.permission_mode, PermissionMode::Plan);
+}
+
+#[tokio::test]
+async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_auto_mode(CapLevel::Supported)
+        .with_live_mode_switch();
+    let engine = adapter.clone();
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
+        .await
+        .remove(0);
+
+    runtime
+        .db
+        .conn
+        .execute_unprepared(
+            "CREATE TRIGGER ignore_permission_mode_confirmation
+             BEFORE UPDATE OF permission_mode ON code_session
+             WHEN NEW.permission_mode <> OLD.permission_mode
+             BEGIN
+               SELECT RAISE(IGNORE);
+             END",
+        )
+        .await
+        .unwrap();
+
+    let response = client
+        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(engine.live_modes(), vec![PermissionMode::Auto]);
+    assert_eq!(
+        engine.shutdown_count(),
+        1,
+        "the acknowledged engine must stop before the failed request returns"
+    );
+    let stored = tidebreak_core::db::code::get_session(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        session.parse().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.permission_mode, PermissionMode::Plan);
+    assert_eq!(stored.lifecycle, CodeSessionLifecycle::Fenced);
+    assert!(matches!(
+        stored.fence_reason,
+        Some(FenceReason::ProbeAmbiguous { .. })
+    ));
+
+    let blocked = client
+        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "must not run" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = blocked.json().await.unwrap();
+    assert_eq!(body["kind"], "session_fenced");
+}
+
 /// Create `count` interactive sessions in one workspace, returning their ids.
 async fn create_sibling_sessions(
     client: &reqwest::Client,
