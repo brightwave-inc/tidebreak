@@ -184,6 +184,15 @@ async fn code_app_with_options(
     (app(state), token, runtime, dir)
 }
 
+async fn execute_code_db_unprepared(dir: &tempfile::TempDir, statement: &str) {
+    let database = dir.path().join("code.db");
+    let connection = sea_orm::Database::connect(format!("sqlite://{}?mode=rw", database.display()))
+        .await
+        .unwrap();
+    connection.execute_unprepared(statement).await.unwrap();
+    connection.close().await.unwrap();
+}
+
 fn browser_token_for_session(runtime: &CodeRuntime, session_id: CodeSessionId) -> String {
     for entry in std::fs::read_dir(runtime.browser_tokens.capfile_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -2325,19 +2334,16 @@ async fn a_permission_mode_intent_persistence_failure_never_reaches_the_engine()
         .await
         .remove(0);
 
-    runtime
-        .db
-        .conn
-        .execute_unprepared(
-            "CREATE TRIGGER fail_permission_mode_intent
-             BEFORE UPDATE OF permission_mode_intent ON code_session
-             WHEN NEW.permission_mode_intent IS NOT NULL
-             BEGIN
-               SELECT RAISE(FAIL, 'permission-mode intent write failed');
-             END",
-        )
-        .await
-        .unwrap();
+    execute_code_db_unprepared(
+        &dir,
+        "CREATE TRIGGER fail_permission_mode_intent
+         BEFORE UPDATE OF permission_mode_intent ON code_session
+         WHEN NEW.permission_mode_intent IS NOT NULL
+         BEGIN
+           SELECT RAISE(FAIL, 'permission-mode intent write failed');
+         END",
+    )
+    .await;
 
     let response = client
         .post(format!("http://{addr}/code/sessions/{session}/mode"))
@@ -2380,19 +2386,16 @@ async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine
         .await
         .remove(0);
 
-    runtime
-        .db
-        .conn
-        .execute_unprepared(
-            "CREATE TRIGGER ignore_permission_mode_confirmation
-             BEFORE UPDATE OF permission_mode ON code_session
-             WHEN NEW.permission_mode <> OLD.permission_mode
-             BEGIN
-               SELECT RAISE(IGNORE);
-             END",
-        )
-        .await
-        .unwrap();
+    execute_code_db_unprepared(
+        &dir,
+        "CREATE TRIGGER ignore_permission_mode_confirmation
+         BEFORE UPDATE OF permission_mode ON code_session
+         WHEN NEW.permission_mode <> OLD.permission_mode
+         BEGIN
+           SELECT RAISE(IGNORE);
+         END",
+    )
+    .await;
 
     let response = client
         .post(format!("http://{addr}/code/sessions/{session}/mode"))
