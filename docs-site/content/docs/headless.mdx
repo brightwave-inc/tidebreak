@@ -412,6 +412,24 @@ folder consent is not in that vocabulary: if a turn parks on
 decision path. Standing consent still comes from `tidebreak folder connect`
 or the desktop.
 
+Profile and settings tools inspect and steer the axes a chat turn depends on:
+
+| Tool | What it does |
+| --- | --- |
+| `profile_snapshot` | One document: settings, providers (`id` / `kind` / `has_credential` only), the model catalog and roles, web-search config, and exec config. |
+| `model_role_set` | Pin the `chat` or `utility` role to a catalog key (`auto` clears it). |
+| `web_search_select` | Select the host web-search provider (`off` / `null` turns it off). |
+| `exec_select` | Select the code-execution backend (`off` / `null` disables it). |
+| `chat_set_model` | Pin a catalog model on one chat. Omit `model` or pass `null` to clear the override. |
+| `chat_set_permission_mode` | Set a chat's permission mode to `plan`, `ask`, `auto`, or `allow`. |
+| `chat_attach_file` | Attach a local file. Image extensions go through the image route; everything else is ingested as a document. Returns `{id}`. |
+| `chat_outputs` | List the conversation's live outputs. |
+| `chat_output_read` | Read one output. Text comes back as text; binary outputs return base64 bytes. |
+| `agent_runs` | List background agent runs for a chat. |
+| `agent_run_cancel` | Ask a background run to stop. |
+
+Credentials do not transit this surface. There is no tool for provider, web-search, or exec keys (`set-key` / `remove-key`), and no tool for MCP server config (`put_mcp_servers`). A human sets those in the desktop or the CLI. `profile_snapshot` strips credential material, key fragments, and secret-bearing fields before it returns.
+
 ### `rehome-secrets`
 
 macOS ties keychain approvals to a binary's code signature, so credentials
