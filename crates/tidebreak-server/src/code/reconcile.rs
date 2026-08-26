@@ -412,7 +412,6 @@ impl StackParentIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::CodePullRequestId;
 
     fn repository(owner: &str, name: &str) -> StackRepositoryIdentity {
         StackRepositoryIdentity::new("github.com", owner, name).unwrap()
@@ -446,32 +445,6 @@ mod tests {
             head_branch,
         )
         .unwrap()
-    }
-
-    fn fact(number: u64, head: &str, state: CodePullRequestState) -> CodePullRequestFact {
-        CodePullRequestFact {
-            id: CodePullRequestId::new(),
-            owner: OwnerId::local(),
-            host: "github.com".into(),
-            repo_owner: "acme".into(),
-            repo_name: "tools".into(),
-            number,
-            url: format!("https://github.com/acme/tools/pull/{number}"),
-            title: format!("PR {number}"),
-            state,
-            draft: false,
-            author: None,
-            head_branch: head.into(),
-            base_branch: "main".into(),
-            head_sha: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            merged_at: None,
-            closed_at: None,
-            first_seen_at: chrono::Utc::now(),
-            last_seen_at: chrono::Utc::now(),
-            live: None,
-        }
     }
 
     #[test]
