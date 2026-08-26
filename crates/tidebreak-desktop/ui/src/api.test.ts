@@ -1778,6 +1778,68 @@ describe("code workspace sessions", () => {
   });
 });
 
+describe("code trigger writes", () => {
+  const trigger = {
+    id: "trigger-1",
+    repo_id: "repo-1",
+    condition: "checks_failed",
+    action: "deliver",
+    enabled: true,
+    created_at: "2026-08-26T12:00:00.000Z",
+    updated_at: "2026-08-26T12:00:00.000Z",
+  };
+
+  it("creates a trigger with a JSON request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(trigger), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(
+      client.createCodeTrigger("repo/1", "checks_failed", "deliver"),
+    ).resolves.toEqual(trigger);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1/code/repos/repo%2F1/triggers");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      condition: "checks_failed",
+      action: "deliver",
+    });
+    expect(new Headers(init.headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+  });
+
+  it("updates a trigger with a JSON request", async () => {
+    const disabledTrigger = { ...trigger, enabled: false };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify(disabledTrigger), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(
+      client.setCodeTriggerEnabled("repo/1", "trigger/1", false),
+    ).resolves.toEqual(disabledTrigger);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://127.0.0.1/code/repos/repo%2F1/triggers/trigger%2F1",
+    );
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({ enabled: false });
+    expect(new Headers(init.headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+  });
+});
+
 describe("code workspace git flow", () => {
   it("commits, pushes, and loads the PR digest", async () => {
     const commit = {
