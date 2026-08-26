@@ -372,7 +372,7 @@ async fn workspace_merge_requires_the_exact_reviewed_target() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
