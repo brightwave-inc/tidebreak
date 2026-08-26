@@ -21,8 +21,9 @@ use chrono::Utc;
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    get_session, insert_watch, latest_watch_for_workspace, list_active_watches_all_owners,
-    list_sessions_for_workspace, save_watch,
+    accept_watch_submission, get_session, insert_watch, latest_watch_for_workspace,
+    list_active_watches_all_owners, list_queued_turns, list_sessions_for_workspace, list_turns,
+    release_watch_submission, reserve_watch_submission, save_watch, WatchSubmissionClaim,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CodeSessionKind, CodeSessionLifecycle, CodeWatch,
@@ -36,6 +37,15 @@ use crate::error::ServerError;
 
 /// How often the watch sweep walks active watches.
 pub(crate) const WATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(47);
+
+/// How long an unaccepted detached submission may hold its reservation.
+/// Admission normally finishes in one database round trip. The longer lease
+/// tolerates a slow worker mailbox while still recovering after a restart.
+const WATCH_SUBMISSION_RESERVATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+const WATCH_SUBMISSION_PREFIX: &str = "submitting ";
+const WATCH_SUBMISSION_HEAD_MARKER: &str = " for head ";
+const WATCH_SUBMISSION_UNKNOWN_HEAD: &str = "unknown";
 
 /// What one PR digest asks of the watch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +86,41 @@ impl WatchReason {
             Self::ChangesRequested => "requested changes",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchSubmissionReservation<'a> {
+    reason: &'a str,
+    head: Option<&'a str>,
+}
+
+fn watch_submission_detail(reason: WatchReason, head: Option<&str>) -> String {
+    format!(
+        "{WATCH_SUBMISSION_PREFIX}{}{WATCH_SUBMISSION_HEAD_MARKER}{}",
+        reason.describe(),
+        head.unwrap_or(WATCH_SUBMISSION_UNKNOWN_HEAD)
+    )
+}
+
+fn watch_submission_reservation(watch: &CodeWatch) -> Option<WatchSubmissionReservation<'_>> {
+    if watch.state != CodeWatchState::Fixing {
+        return None;
+    }
+    let detail = watch
+        .detail
+        .as_deref()?
+        .strip_prefix(WATCH_SUBMISSION_PREFIX)?;
+    let (reason, head) = detail.rsplit_once(WATCH_SUBMISSION_HEAD_MARKER)?;
+    (!reason.is_empty()).then_some(WatchSubmissionReservation {
+        reason,
+        head: (head != WATCH_SUBMISSION_UNKNOWN_HEAD).then_some(head),
+    })
+}
+
+fn watch_submission_reservation_expired(watch: &CodeWatch, now: chrono::DateTime<Utc>) -> bool {
+    now.signed_duration_since(watch.updated_at)
+        .to_std()
+        .is_ok_and(|age| age >= WATCH_SUBMISSION_RESERVATION_TIMEOUT)
 }
 
 /// Classify one digest the way the workflow control does, minus the actions
@@ -402,6 +447,9 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         | CodeSessionLifecycle::Created
         | CodeSessionLifecycle::Idle => {}
     }
+    if reconcile_watch_submission(runtime, watch, &session).await? {
+        return Ok(());
+    }
     let workspace = match runtime.get_workspace(&owner, watch.workspace_id).await {
         Ok(workspace) => workspace,
         Err(_) => {
@@ -545,12 +593,24 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                 )
                 .await;
             }
+            let reservation_detail = watch_submission_detail(reason, pr.head_sha.as_deref());
+            let reserved_at = Utc::now();
+            let Some(claim) = reserve_watch_submission(
+                &runtime.db,
+                &owner,
+                watch,
+                &reservation_detail,
+                reserved_at,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
             let settled_attention = settled_watch_block_attention(watch, &session.attention);
             watch.state = CodeWatchState::Fixing;
-            watch.detail = Some(format!("fixing {}", reason.describe()));
-            watch.last_fix_head = pr.head_sha.clone();
-            watch.cycles = watch.cycles.saturating_add(1);
-            persist_watch(runtime.as_ref(), watch).await?;
+            watch.detail = Some(reservation_detail.clone());
+            watch.updated_at = reserved_at;
+            emit_workspace_digests(&runtime.db, &runtime.bus, &owner, watch.workspace_id).await;
             if let Some(attention) = settled_attention {
                 let _ = apply_attention(
                     &runtime.db,
@@ -564,26 +624,187 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             }
             let instruction = fix_turn_instruction(reason, &pr);
             let session_id = watch.session_id;
+            let watch_id = watch.id;
+            let workspace_id = watch.workspace_id;
+            let head = pr.head_sha.clone();
+            let accepted_detail = format!("fixing {}", reason.describe());
             let task_runtime = Arc::clone(runtime);
             let task_owner = owner.clone();
             // Detached: a fix turn can run for minutes and the sweep must
-            // keep serving other watches. The next sweeps see the session
-            // Running and stand by.
+            // keep serving other watches. The reservation blocks duplicate
+            // sweeps until the worker durably accepts or rejects the turn.
             tokio::spawn(async move {
-                if let Err(err) = task_runtime
+                let result = task_runtime
                     .submit_turn(&task_owner, session_id, instruction, None, None, Vec::new())
+                    .await;
+                let accepted = match &result {
+                    Ok(_) => Some(true),
+                    Err(_) => match watch_submission_was_accepted(
+                        task_runtime.as_ref(),
+                        &task_owner,
+                        session_id,
+                        reserved_at,
+                    )
                     .await
-                {
+                    {
+                        Ok(accepted) => Some(accepted),
+                        Err(err) => {
+                            warn!(
+                                watch = %watch_id,
+                                error = %err.message(),
+                                "code-mode watch could not verify fix-turn acceptance"
+                            );
+                            None
+                        }
+                    },
+                };
+                match accepted {
+                    Some(true) => {
+                        match accept_watch_submission(
+                            &task_runtime.db,
+                            &task_owner,
+                            &claim,
+                            head.as_deref(),
+                            &accepted_detail,
+                            Utc::now(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                emit_workspace_digests(
+                                    &task_runtime.db,
+                                    &task_runtime.bus,
+                                    &task_owner,
+                                    workspace_id,
+                                )
+                                .await;
+                            }
+                            Ok(false) => {}
+                            Err(err) => warn!(
+                                watch = %watch_id,
+                                error = %err,
+                                "code-mode watch could not record an accepted fix turn"
+                            ),
+                        }
+                    }
+                    Some(false) => {
+                        match release_watch_submission(
+                            &task_runtime.db,
+                            &task_owner,
+                            &claim,
+                            Utc::now(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                emit_workspace_digests(
+                                    &task_runtime.db,
+                                    &task_runtime.bus,
+                                    &task_owner,
+                                    workspace_id,
+                                )
+                                .await;
+                            }
+                            Ok(false) => {}
+                            Err(release_err) => warn!(
+                                watch = %watch_id,
+                                error = %release_err,
+                                "code-mode watch could not release a failed submission"
+                            ),
+                        }
+                    }
+                    None => {}
+                }
+                if let Err(err) = result {
                     warn!(
                         session = %session_id,
                         error = %err.message(),
-                        "code-mode watch fix turn failed to submit"
+                        "code-mode watch fix turn failed"
                     );
                 }
             });
             Ok(())
         }
     }
+}
+
+/// Settle the durable reservation before the sweep judges the pull request.
+/// A running, queued, or persisted watch turn proves admission even when the
+/// detached submit task disappeared during a process restart.
+async fn reconcile_watch_submission(
+    runtime: &CodeRuntime,
+    watch: &mut CodeWatch,
+    session: &tidebreak_core::CodeSession,
+) -> Result<bool, ServerError> {
+    let Some(reservation) = watch_submission_reservation(watch) else {
+        return Ok(false);
+    };
+    let accepted = session.lifecycle == CodeSessionLifecycle::Running
+        || watch_submission_was_accepted(runtime, &watch.owner, watch.session_id, watch.updated_at)
+            .await?;
+    let reservation_detail = watch.detail.clone().unwrap_or_default();
+    let claim = WatchSubmissionClaim {
+        watch_id: watch.id,
+        owner: watch.owner.clone(),
+        detail: reservation_detail,
+        reserved_at: watch.updated_at,
+        cycles: watch.cycles,
+    };
+    if accepted {
+        let accepted_at = Utc::now();
+        let detail = format!("fixing {}", reservation.reason);
+        let reservation_head = reservation.head.map(str::to_owned);
+        let changed = accept_watch_submission(
+            &runtime.db,
+            &watch.owner,
+            &claim,
+            reservation_head.as_deref(),
+            &detail,
+            accepted_at,
+        )
+        .await?;
+        if !changed {
+            return Ok(true);
+        }
+        watch.detail = Some(detail);
+        watch.last_fix_head = reservation_head;
+        watch.cycles = watch.cycles.saturating_add(1);
+        watch.updated_at = accepted_at;
+        emit_workspace_digests(&runtime.db, &runtime.bus, &watch.owner, watch.workspace_id).await;
+        return Ok(false);
+    }
+    if !watch_submission_reservation_expired(watch, Utc::now()) {
+        return Ok(true);
+    }
+    let released_at = Utc::now();
+    let changed = release_watch_submission(&runtime.db, &watch.owner, &claim, released_at).await?;
+    if !changed {
+        return Ok(true);
+    }
+    watch.state = CodeWatchState::Watching;
+    watch.detail = None;
+    watch.updated_at = released_at;
+    emit_workspace_digests(&runtime.db, &runtime.bus, &watch.owner, watch.workspace_id).await;
+    Ok(false)
+}
+
+async fn watch_submission_was_accepted(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    session_id: tidebreak_core::CodeSessionId,
+    reserved_at: chrono::DateTime<Utc>,
+) -> Result<bool, ServerError> {
+    if list_queued_turns(&runtime.db, owner, session_id)
+        .await?
+        .iter()
+        .any(|turn| turn.created_at >= reserved_at)
+    {
+        return Ok(true);
+    }
+    Ok(list_turns(&runtime.db, owner, session_id)
+        .await?
+        .iter()
+        .any(|turn| turn.started_at >= reserved_at))
 }
 
 /// The workspace's stored pull-request digest, when the fact row behind it
@@ -930,5 +1151,70 @@ mod tests {
             assert!(text.contains("do not merge"), "{reason:?}");
             assert!(!text.contains("enable auto-merge once"), "{reason:?}");
         }
+    }
+
+    #[test]
+    fn submission_reservation_round_trips_the_reason_and_head() {
+        let now = Utc::now();
+        let watch = CodeWatch {
+            id: CodeWatchId::new(),
+            owner: OwnerId::local(),
+            workspace_id: WorkspaceId::new(),
+            session_id: tidebreak_core::CodeSessionId::new(),
+            pr_number: 12,
+            state: CodeWatchState::Fixing,
+            detail: Some(watch_submission_detail(
+                WatchReason::FailingChecks,
+                Some("abc123"),
+            )),
+            last_fix_head: None,
+            cycles: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(
+            watch_submission_reservation(&watch),
+            Some(WatchSubmissionReservation {
+                reason: "failing checks",
+                head: Some("abc123"),
+            })
+        );
+
+        let mut unknown_head = watch;
+        unknown_head.detail = Some(watch_submission_detail(WatchReason::Conflicts, None));
+        assert_eq!(
+            watch_submission_reservation(&unknown_head),
+            Some(WatchSubmissionReservation {
+                reason: "merge conflicts",
+                head: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_recent_reservation_blocks_duplicate_sweeps_until_it_expires() {
+        let now = Utc::now();
+        let mut watch = CodeWatch {
+            id: CodeWatchId::new(),
+            owner: OwnerId::local(),
+            workspace_id: WorkspaceId::new(),
+            session_id: tidebreak_core::CodeSessionId::new(),
+            pr_number: 12,
+            state: CodeWatchState::Fixing,
+            detail: Some(watch_submission_detail(
+                WatchReason::FailingChecks,
+                Some("abc123"),
+            )),
+            last_fix_head: None,
+            cycles: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        assert!(!watch_submission_reservation_expired(
+            &watch,
+            now + chrono::Duration::seconds(179)
+        ));
+        watch.updated_at = now - chrono::Duration::seconds(180);
+        assert!(watch_submission_reservation_expired(&watch, now));
     }
 }
