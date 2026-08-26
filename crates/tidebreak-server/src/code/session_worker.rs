@@ -27,7 +27,7 @@ use tidebreak_core::db::code::{
     get_open_turn, get_session, get_session_all_owners, get_workspace, insert_approval_for_worker,
     insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
     save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
-    set_session_subagents, CodeJournalError,
+    set_session_subagents, CodeJournalError, CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -51,6 +51,7 @@ pub(crate) enum WorkerCommand {
         message: String,
         model: Option<String>,
         reasoning_effort: Option<ReasoningEffort>,
+        fast_mode: bool,
         attachments: Vec<tidebreak_core::ImageRef>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
@@ -58,6 +59,11 @@ pub(crate) enum WorkerCommand {
     SetPermissionMode {
         mode: PermissionMode,
         settlement: oneshot::Receiver<PermissionModeSettlement>,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
+    },
+    SetExecutionSettings {
+        settings: CodeSessionExecutionSettings,
+        settlement: oneshot::Receiver<ExecutionSettingsSettlement>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Decide {
@@ -78,6 +84,12 @@ pub(crate) enum WorkerCommand {
 
 /// The durable outcome that releases a worker after native mode acceptance.
 pub(crate) enum PermissionModeSettlement {
+    Confirmed,
+    Abort,
+}
+
+/// The durable outcome that releases a worker after a settings reservation.
+pub(crate) enum ExecutionSettingsSettlement {
     Confirmed,
     Abort,
 }
@@ -206,6 +218,7 @@ pub(crate) struct QueuedFollowUp {
     pub message: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub fast_mode: bool,
     pub attachments: Vec<tidebreak_core::ImageRef>,
     pub trigger_delivery: Option<TriggerDeliveryClaim>,
     /// The durable queue row this turn promotes, when the message came from
@@ -736,6 +749,7 @@ async fn run_worker(
                     message,
                     model,
                     reasoning_effort,
+                    fast_mode,
                     attachments,
                     trigger_delivery,
                     reply,
@@ -754,6 +768,7 @@ async fn run_worker(
                             message,
                             model,
                             reasoning_effort,
+                            fast_mode,
                             attachments,
                             trigger_delivery,
                             queued_row: None,
@@ -779,6 +794,22 @@ async fn run_worker(
                         } else {
                             break;
                         }
+                    }
+                }
+                Some(WorkerCommand::SetExecutionSettings {
+                    settings,
+                    settlement,
+                    reply,
+                }) => {
+                    if !reserve_execution_settings(
+                        &mut session,
+                        settings,
+                        settlement,
+                        reply,
+                    )
+                    .await
+                    {
+                        break;
                     }
                 }
                 Some(command) => {
@@ -929,6 +960,7 @@ enum WorktreeWait<'a> {
 }
 
 async fn await_worktree_turn<'a>(
+    session: &mut CodeSession,
     engine: &dyn HarnessSession,
     worktree_turn: &'a tokio::sync::Mutex<()>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
@@ -945,10 +977,19 @@ async fn await_worktree_turn<'a>(
                     return WorktreeWait::Stopped;
                 }
                 Some(WorkerCommand::Shutdown) | None => return WorktreeWait::Shutdown,
+                Some(WorkerCommand::SetExecutionSettings {
+                    settings,
+                    settlement,
+                    reply,
+                }) => {
+                    if !reserve_execution_settings(session, settings, settlement, reply).await {
+                        return WorktreeWait::Shutdown;
+                    }
+                }
                 // There is no turn yet, so steering has nothing to steer, a
-                // second RunTurn is a conflict, and a mode switch belongs to
-                // whichever loop owns the session row. `apply_control` answers
-                // all three that way already.
+                // second RunTurn is a conflict, and a permission-mode switch
+                // belongs to whichever loop owns the session row.
+                // `apply_control` answers all three that way already.
                 Some(command) => {
                     if apply_control(engine, command, None).await == ControlFlow::Shutdown {
                         return WorktreeWait::Shutdown;
@@ -956,6 +997,31 @@ async fn await_worktree_turn<'a>(
                 }
             },
         }
+    }
+}
+
+/// Hold the worker's session copy until the matching targeted write settles.
+///
+/// A queued turn can wait on a sibling's worktree turn while the session is
+/// otherwise idle. The worker must accept settings reservations during that
+/// wait, or the live route cannot use the same reserve-commit-release boundary
+/// that protects ordinary idle updates.
+async fn reserve_execution_settings(
+    session: &mut CodeSession,
+    settings: CodeSessionExecutionSettings,
+    settlement: oneshot::Receiver<ExecutionSettingsSettlement>,
+    reply: oneshot::Sender<Result<(), WorkerError>>,
+) -> bool {
+    let _ = reply.send(Ok(()));
+    match settlement.await {
+        Ok(ExecutionSettingsSettlement::Confirmed) => {
+            session.model = settings.model;
+            session.reasoning_effort = settings.reasoning_effort;
+            session.fast_mode = settings.fast_mode;
+            true
+        }
+        Ok(ExecutionSettingsSettlement::Abort) => true,
+        Err(_) => false,
     }
 }
 
@@ -1052,6 +1118,12 @@ async fn apply_control(
             )));
             ControlFlow::Continue
         }
+        WorkerCommand::SetExecutionSettings { reply, .. } => {
+            let _ = reply.send(Err(WorkerError::Conflict(
+                "finish or interrupt the running turn before changing session settings".into(),
+            )));
+            ControlFlow::Continue
+        }
         WorkerCommand::Shutdown => ControlFlow::Shutdown,
     }
 }
@@ -1081,10 +1153,10 @@ async fn set_permission_mode(
 /// [`promote_queued_turn`] deletes the row and inserts the turn together, so
 /// an edit, reorder, or retraction that lands after the snapshot surfaces as
 /// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings
-/// resolve at promotion: the turn runs under the session's model and effort
-/// as they are now, not as they were at enqueue — same contract as the chat
-/// queue. A pause holds the whole drain; the resume, the next enqueue, or
-/// send-now wakes the worker again.
+/// resolve at promotion: the turn runs under the session's model, effort, and
+/// fast-mode state as they are now, not as they were at enqueue — same
+/// contract as the chat queue. A pause holds the whole drain; the resume, the
+/// next enqueue, or send-now wakes the worker again.
 async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
@@ -1125,6 +1197,7 @@ async fn drain_queued(
             message: head.message.clone(),
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort,
+            fast_mode: session.fast_mode,
             attachments: head.attachments.clone(),
             trigger_delivery: None,
             queued_row: Some(Box::new(head.clone())),
@@ -1279,8 +1352,9 @@ async fn drive_turn_inner(
     worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
         message,
-        model,
-        reasoning_effort,
+        mut model,
+        mut reasoning_effort,
+        mut fast_mode,
         attachments,
         trigger_delivery,
         queued_row,
@@ -1319,15 +1393,17 @@ async fn drive_turn_inner(
         // Already acknowledged, so waiting costs nobody a connection. The wait
         // still listens for control: an interrupt that arrives while a turn is
         // queued has to stop it before it starts, not after.
-        TurnWait::Queued => match await_worktree_turn(engine, worktree.lock, commands).await {
-            WorktreeWait::Acquired(guard) => guard,
-            WorktreeWait::Stopped => return Err(WorkerError::QueuedTurnStopped),
-            WorktreeWait::Shutdown => {
-                return Err(WorkerError::Conflict(
-                    "the session worker is shutting down".into(),
-                ))
+        TurnWait::Queued => {
+            match await_worktree_turn(session, engine, worktree.lock, commands).await {
+                WorktreeWait::Acquired(guard) => guard,
+                WorktreeWait::Stopped => return Err(WorkerError::QueuedTurnStopped),
+                WorktreeWait::Shutdown => {
+                    return Err(WorkerError::Conflict(
+                        "the session worker is shutting down".into(),
+                    ))
+                }
             }
-        },
+        }
     };
     // Ending a session during that wait has to win. The lifecycle checks above
     // read a session that may be minutes stale by now.
@@ -1345,9 +1421,29 @@ async fn drive_turn_inner(
         )));
     }
 
+    // A queued message resolves session settings only after it acquires the
+    // worktree. A live settings update can land while the row waits behind a
+    // sibling turn, so the durable row is the source of truth at promotion.
+    if queued_row.is_some() {
+        let current = get_session(db, &session.owner, session.id)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+            .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
+        if current.spawn_epoch != session.spawn_epoch {
+            return Err(WorkerError::Conflict(
+                "the session worker was superseded before the queued turn started".into(),
+            ));
+        }
+        model = current.model;
+        reasoning_effort = current.reasoning_effort;
+        fast_mode = current.fast_mode;
+    }
+
     if let Some(model) = model.clone() {
         session.model = Some(model);
     }
+    session.reasoning_effort = reasoning_effort;
+    session.fast_mode = fast_mode;
 
     let ordinal = next_turn_ordinal(db, &session.owner, session.id)
         .await
@@ -1455,13 +1551,6 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    // Adopt what the turn was sent with before this worker persists general
-    // session fields. The route already wrote the session's choice, but the
-    // worker's copy predates it and would otherwise restore the old value.
-    if let Some(model) = model {
-        session.model = Some(model);
-    }
-    session.reasoning_effort = reasoning_effort;
     // What the engine is handed is not always what the person wrote: an engine
     // that cannot take images over its own protocol is given paths instead, and
     // `turn.user_input` above keeps the message as typed.

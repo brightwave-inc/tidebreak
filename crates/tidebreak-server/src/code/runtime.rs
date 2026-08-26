@@ -20,8 +20,9 @@ use tidebreak_core::db::code::{
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head, save_repo,
-    save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
-    ClaimedApprovalSettlement, PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
+    replace_session_execution_settings, save_session, save_workspace, settle_approval_claim,
+    update_trigger_enabled, ClaimedApprovalSettlement, CodeSessionExecutionSettings,
+    PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -52,8 +53,8 @@ use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, Worksp
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, spawn_session_worker, wake_queue, AttachmentStore, PermissionModeSettlement,
-    TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
+    attach_engine, spawn_session_worker, wake_queue, AttachmentStore, ExecutionSettingsSettlement,
+    PermissionModeSettlement, TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -368,6 +369,29 @@ pub(crate) struct NewSessionSettings {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Whether the session starts armed for the engine's fast mode.
     pub fast_mode: bool,
+}
+
+struct SelectedModelCapabilities {
+    reasoning_efforts: Vec<ReasoningEffort>,
+    fast_mode: bool,
+}
+
+impl SelectedModelCapabilities {
+    fn supports_reasoning(&self, effort: ReasoningEffort) -> bool {
+        self.reasoning_efforts.contains(&effort)
+    }
+
+    fn deactivate_unsupported(&self, settings: &mut CodeSessionExecutionSettings) {
+        if settings
+            .reasoning_effort
+            .is_some_and(|effort| !self.supports_reasoning(effort))
+        {
+            settings.reasoning_effort = None;
+        }
+        if settings.fast_mode && !self.fast_mode {
+            settings.fast_mode = false;
+        }
+    }
 }
 
 impl CodeRuntime {
@@ -3011,6 +3035,20 @@ impl CodeRuntime {
                 format!("{harness} has no path"),
             ));
         }
+        let execution_settings = CodeSessionExecutionSettings {
+            model: normalize_model(model),
+            reasoning_effort,
+            fast_mode,
+        };
+        if execution_settings.reasoning_effort.is_some() || execution_settings.fast_mode {
+            let selected = Self::selected_model_capabilities(
+                adapter.as_ref(),
+                &probe,
+                execution_settings.model.as_deref(),
+            )
+            .await;
+            Self::validate_execution_settings(harness, &execution_settings, &selected)?;
+        }
         let session = CodeSession {
             id: CodeSessionId::new(),
             owner: owner.clone(),
@@ -3020,9 +3058,9 @@ impl CodeRuntime {
             harness_version: probe.version.clone(),
             harness_resume_ref: None,
             permission_mode,
-            model: normalize_model(model),
-            reasoning_effort,
-            fast_mode,
+            model: execution_settings.model,
+            reasoning_effort: execution_settings.reasoning_effort,
+            fast_mode: execution_settings.fast_mode,
             lifecycle: CodeSessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
@@ -3213,34 +3251,53 @@ impl CodeRuntime {
         // is handed the bytes on its own protocol; every other one is handed a
         // private file and an absolute path in the prompt. The worker picks
         // between the two.
-        let handle = self.require_worker(id)?;
         // Both stick: a composer choice is the session's from here on, exactly
         // as the engines' own pickers behave. The outer `Option` on effort is
         // what lets a turn say "back to the engine default" rather than "no
         // opinion" — the inner `None` is a real choice.
-        let mut changed = false;
-        if let Some(model) = normalize_model(model) {
-            let switched = session.model.as_deref() != Some(model.as_str());
-            session.model = Some(model);
-            changed = true;
-            // A session armed for fast mode on one model must not carry that
-            // arming onto a model that cannot serve the tier: the engines
-            // reject the request rather than quietly running standard, and a
-            // toggle the picker has already hidden must not keep spending.
-            // Checked only on a real switch, which is rare — the model list
-            // costs a process on some engines.
-            if switched && session.fast_mode && !self.model_serves_fast_mode(&session).await? {
-                session.fast_mode = false;
-            }
+        let requested_model = normalize_model(model);
+        let model_changed = requested_model
+            .as_deref()
+            .is_some_and(|model| session.model.as_deref() != Some(model));
+        let requested_effort = reasoning_effort;
+        let mut next = CodeSessionExecutionSettings::from(&session);
+        if let Some(model) = requested_model {
+            next.model = Some(model);
         }
         if let Some(effort) = reasoning_effort {
-            if session.reasoning_effort != effort {
-                session.reasoning_effort = effort;
-                changed = true;
-            }
+            next.reasoning_effort = effort;
         }
-        if changed {
-            let _ = save_session(&self.db, &session).await?;
+        if model_changed
+            || requested_effort.is_some()
+            || next.reasoning_effort.is_some()
+            || next.fast_mode
+        {
+            let adapter = self.adapter(session.harness_kind)?;
+            let probe = self.probe(adapter.as_ref()).await;
+            let selected =
+                Self::selected_model_capabilities(adapter.as_ref(), &probe, next.model.as_deref())
+                    .await;
+            if requested_effort.is_some() {
+                let requested = CodeSessionExecutionSettings {
+                    model: next.model.clone(),
+                    reasoning_effort: next.reasoning_effort,
+                    fast_mode: false,
+                };
+                Self::validate_execution_settings(session.harness_kind, &requested, &selected)?;
+            }
+            selected.deactivate_unsupported(&mut next);
+        }
+        if next != CodeSessionExecutionSettings::from(&session) {
+            session = self
+                .commit_execution_settings(&session, &next, "the turn could reserve them")
+                .await?;
+        }
+        let handle = self.require_worker(id)?;
+        if handle.spawn_epoch != session.spawn_epoch {
+            return Err(ServerError::conflict_kind(
+                "session_worker_changed",
+                "the session worker changed before the turn could start",
+            ));
         }
         // A sibling fenced for an unaccounted engine — an orphan from a
         // previous boot, an ambiguous pid, a lost resume — may still be alive
@@ -3280,6 +3337,7 @@ impl CodeRuntime {
                 message: message.clone(),
                 model: session.model.clone(),
                 reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
                 attachments: attachments.clone(),
                 trigger_delivery,
                 reply,
@@ -3986,6 +4044,87 @@ impl CodeRuntime {
         let _ = Self::shut_down_worker(intent.session_id, handle).await;
     }
 
+    async fn commit_execution_settings(
+        &self,
+        expected: &CodeSession,
+        next: &CodeSessionExecutionSettings,
+        action: &'static str,
+    ) -> Result<CodeSession, ServerError> {
+        let applies_to_future_turn = expected.lifecycle == CodeSessionLifecycle::Running
+            || get_open_turn(&self.db, &expected.owner, expected.id)
+                .await?
+                .is_some();
+        if applies_to_future_turn {
+            return replace_session_execution_settings(&self.db, expected, next)
+                .await?
+                .ok_or_else(|| {
+                    ServerError::conflict_kind(
+                        "session_settings_changed",
+                        format!("the session settings changed before {action}"),
+                    )
+                });
+        }
+
+        let handle = self.require_worker(expected.id)?;
+        if handle.spawn_epoch != expected.spawn_epoch {
+            return Err(ServerError::conflict_kind(
+                "session_worker_changed",
+                "the session worker changed before the settings update",
+            ));
+        }
+        let (reply, response) = oneshot::channel();
+        let (settlement, release) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::SetExecutionSettings {
+                settings: next.clone(),
+                settlement: release,
+                reply,
+            })
+            .await
+            .map_err(|_| {
+                ServerError::conflict_kind(
+                    "session_worker_missing",
+                    "the session worker stopped before the settings update",
+                )
+            })?;
+        response
+            .await
+            .map_err(|_| {
+                ServerError::conflict_kind(
+                    "session_worker_missing",
+                    "the session worker stopped before reserving the settings update",
+                )
+            })?
+            .map_err(map_worker)?;
+
+        let updated = match replace_session_execution_settings(&self.db, expected, next).await {
+            Ok(Some(updated)) => updated,
+            Ok(None) => {
+                let _ = settlement.send(ExecutionSettingsSettlement::Abort);
+                return Err(ServerError::conflict_kind(
+                    "session_settings_changed",
+                    format!("the session settings changed before {action}"),
+                ));
+            }
+            Err(error) => {
+                let _ = settlement.send(ExecutionSettingsSettlement::Abort);
+                return Err(ServerError::from(error));
+            }
+        };
+        if settlement
+            .send(ExecutionSettingsSettlement::Confirmed)
+            .is_err()
+        {
+            if let Some(handle) = self.take_worker_for_epoch(expected.id, expected.spawn_epoch) {
+                self.revoke_worker_channels(expected.id);
+                let _ = Self::shut_down_worker(expected.id, handle).await;
+            }
+            return self.attach_and_spawn_worker(updated).await;
+        }
+        Ok(updated)
+    }
+
     fn take_worker_for_epoch(&self, id: CodeSessionId, spawn_epoch: i64) -> Option<WorkerHandle> {
         let mut workers = self.workers.lock().expect("code workers");
         let exact = workers
@@ -4032,10 +4171,7 @@ impl CodeRuntime {
         id: CodeSessionId,
         effort: Option<ReasoningEffort>,
     ) -> Result<CodeSession, ServerError> {
-        let mut session = self.get_session(owner, id).await?;
-        if session.reasoning_effort == effort {
-            return Ok(session);
-        }
+        let session = self.get_session(owner, id).await?;
         match session.lifecycle {
             CodeSessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(
@@ -4051,43 +4187,41 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        let adapter = self.adapter(session.harness_kind)?;
-        let probe = self.probe(adapter.as_ref()).await;
-        if adapter.capabilities(&probe).reasoning_levels == CapLevel::Unsupported {
-            return Err(ServerError::unprocessable_kind(
-                "reasoning_effort_unsupported",
-                format!(
-                    "{harness} takes no reasoning effort",
-                    harness = session.harness_kind
-                ),
+        if get_open_turn(&self.db, owner, id).await?.is_some() {
+            return Err(ServerError::conflict_kind(
+                "turn_running",
+                "finish or interrupt the running turn before changing the reasoning effort",
             ));
         }
-        session.reasoning_effort = effort;
-        save_session(&self.db, &session).await?;
-        Ok(session)
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let selected =
+            Self::selected_model_capabilities(adapter.as_ref(), &probe, session.model.as_deref())
+                .await;
+        let mut next = CodeSessionExecutionSettings::from(&session);
+        selected.deactivate_unsupported(&mut next);
+        next.reasoning_effort = effort;
+        Self::validate_execution_settings(session.harness_kind, &next, &selected)?;
+        if next == CodeSessionExecutionSettings::from(&session) {
+            return Ok(session);
+        }
+        self.commit_execution_settings(&session, &next, "the reasoning effort could be saved")
+            .await
     }
 
     /// Arm or disarm the engine's fast mode for a session.
     ///
     /// Refused mid-turn and after the session ends, on the rule the effort
-    /// route already applies. Not refused for a model that cannot serve the
-    /// tier, deliberately: the composer's model choice is local until a turn
-    /// carries it, so gating here would reject the arming the picker just
-    /// offered for the model the user can see selected. This stores intent;
-    /// whether a given turn actually runs fast is decided by the adapter
-    /// against the model that turn really sends — see the launch-time check
-    /// in the Claude adapter. That keeps a stale bit inert rather than
-    /// letting it claim a premium the model would not run.
+    /// route already applies. Enabling is also refused unless the selected
+    /// model advertises the tier, so the session snapshot never claims that a
+    /// standard-speed turn is fast.
     pub(crate) async fn set_fast_mode(
         &self,
         owner: &OwnerId,
         id: CodeSessionId,
         fast_mode: bool,
     ) -> Result<CodeSession, ServerError> {
-        let mut session = self.get_session(owner, id).await?;
-        if session.fast_mode == fast_mode {
-            return Ok(session);
-        }
+        let session = self.get_session(owner, id).await?;
         match session.lifecycle {
             CodeSessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(
@@ -4103,33 +4237,26 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        session.fast_mode = fast_mode;
-        save_session(&self.db, &session).await?;
-        Ok(session)
-    }
-
-    /// Whether the session's persisted model advertises fast mode.
-    ///
-    /// Read off the engine's own listing rather than a table here, so a model
-    /// that gains or loses the tier upstream needs no change in this repo. A
-    /// model the engine does not list reads as no fast mode.
-    ///
-    /// Only called when a turn actually switches model, never on the arming
-    /// route: listing costs a process on Codex, and gating the route on the
-    /// persisted id would reject arming for the model the composer is already
-    /// showing as selected.
-    async fn model_serves_fast_mode(&self, session: &CodeSession) -> Result<bool, ServerError> {
+        if get_open_turn(&self.db, owner, id).await?.is_some() {
+            return Err(ServerError::conflict_kind(
+                "turn_running",
+                "finish or interrupt the running turn before changing fast mode",
+            ));
+        }
         let adapter = self.adapter(session.harness_kind)?;
         let probe = self.probe(adapter.as_ref()).await;
-        let listed = adapter.list_models(&probe).await;
-        let selected = session.model.as_deref();
-        Ok(listed
-            .iter()
-            .find(|model| match selected {
-                Some(selected) => model.id == selected,
-                None => model.default,
-            })
-            .is_some_and(|model| model.fast_mode))
+        let selected =
+            Self::selected_model_capabilities(adapter.as_ref(), &probe, session.model.as_deref())
+                .await;
+        let mut next = CodeSessionExecutionSettings::from(&session);
+        selected.deactivate_unsupported(&mut next);
+        next.fast_mode = fast_mode;
+        Self::validate_execution_settings(session.harness_kind, &next, &selected)?;
+        if next == CodeSessionExecutionSettings::from(&session) {
+            return Ok(session);
+        }
+        self.commit_execution_settings(&session, &next, "fast mode could be saved")
+            .await
     }
 
     pub(crate) async fn set_attention(
@@ -4143,6 +4270,68 @@ impl CodeRuntime {
         super::attention::user_set_attention(&self.db, &self.bus, owner, id, clear, note)
             .await
             .map_err(ServerError::from)
+    }
+
+    async fn selected_model_capabilities(
+        adapter: &dyn HarnessAdapter,
+        probe: &HarnessProbe,
+        selected: Option<&str>,
+    ) -> SelectedModelCapabilities {
+        let caps = adapter.capabilities(probe);
+        let listed = adapter.list_models(probe).await;
+        let model = listed.iter().find(|model| match selected {
+            Some(selected) => model.id == selected,
+            None => model.default,
+        });
+        let reasoning_efforts = if caps.reasoning_levels == CapLevel::Supported {
+            model.map_or_else(
+                || {
+                    let mut levels = adapter.reasoning_efforts(probe);
+                    if levels.is_empty() {
+                        levels = listed
+                            .iter()
+                            .flat_map(|model| model.reasoning_efforts.iter().copied())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
+                    }
+                    levels
+                },
+                |model| model.reasoning_efforts.clone(),
+            )
+        } else {
+            Vec::new()
+        };
+        SelectedModelCapabilities {
+            reasoning_efforts,
+            fast_mode: model.is_some_and(|model| model.fast_mode),
+        }
+    }
+
+    fn validate_execution_settings(
+        harness: HarnessKind,
+        settings: &CodeSessionExecutionSettings,
+        selected: &SelectedModelCapabilities,
+    ) -> Result<(), ServerError> {
+        let model = settings.model.as_deref().unwrap_or("the default model");
+        if let Some(effort) = settings.reasoning_effort {
+            if !selected.supports_reasoning(effort) {
+                return Err(ServerError::unprocessable_kind(
+                    "reasoning_effort_unsupported",
+                    format!(
+                        "{harness} model {model} does not support reasoning effort {}",
+                        effort.as_str()
+                    ),
+                ));
+            }
+        }
+        if settings.fast_mode && !selected.fast_mode {
+            return Err(ServerError::unprocessable_kind(
+                "fast_mode_unsupported",
+                format!("{harness} model {model} does not support fast mode"),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn mark_session_viewed(
@@ -4766,6 +4955,7 @@ impl CodeRuntime {
         &self,
         session: CodeSession,
     ) -> Result<CodeSession, ServerError> {
+        let mut session = session;
         let workspace = self
             .get_workspace(&session.owner, session.workspace_id)
             .await?;
@@ -4778,6 +4968,26 @@ impl CodeRuntime {
                 "harness_not_found",
                 format!("{} is not installed", session.harness_kind),
             ));
+        }
+        if session.reasoning_effort.is_some() || session.fast_mode {
+            let selected = Self::selected_model_capabilities(
+                adapter.as_ref(),
+                &probe,
+                session.model.as_deref(),
+            )
+            .await;
+            let mut next = CodeSessionExecutionSettings::from(&session);
+            selected.deactivate_unsupported(&mut next);
+            if next != CodeSessionExecutionSettings::from(&session) {
+                session = replace_session_execution_settings(&self.db, &session, &next)
+                    .await?
+                    .ok_or_else(|| {
+                        ServerError::conflict_kind(
+                            "session_settings_changed",
+                            "the session settings changed before its worker could attach",
+                        )
+                    })?;
+            }
         }
         let binary = probe.binary_path.clone().ok_or_else(|| {
             ServerError::unprocessable_kind(

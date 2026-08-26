@@ -1071,6 +1071,7 @@ mod tests {
                 message: "hello".into(),
                 model: None,
                 reasoning_effort: None,
+                fast_mode: false,
                 attachments: Vec::new(),
                 trigger_delivery: None,
                 reply,
