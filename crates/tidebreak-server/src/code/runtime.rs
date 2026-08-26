@@ -685,7 +685,8 @@ impl CodeRuntime {
                     Ok(workspace) => self.forget_workspace_turn_lock(workspace.id),
                     Err(error) => {
                         tracing::warn!(
-                            "code-mode: archive recovery could not finalize a missing checkout: {error}"
+                            "code-mode: archive recovery could not finalize a missing checkout: {}",
+                            error.message()
                         );
                     }
                 }
@@ -1324,7 +1325,7 @@ impl CodeRuntime {
     async fn archive_workspace_exclusive(
         &self,
         owner: &OwnerId,
-        mut workspace: CodeWorkspace,
+        workspace: CodeWorkspace,
         repo: CodeRepo,
         force: bool,
         terminals: &super::terminal::TerminalHub,
