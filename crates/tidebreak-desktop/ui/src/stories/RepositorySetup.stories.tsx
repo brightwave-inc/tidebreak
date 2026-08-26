@@ -12,10 +12,16 @@ import { expect, userEvent, within } from "storybook/test";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type { HarnessKind } from "@/api/types";
+import { Toaster } from "@/components/ui/sonner";
 import { AddRepoPalette } from "@/code/AddRepoPalette";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
+import { CodeRepoEmptyState } from "@/code/CodeHome";
 import { useCodeUiStore } from "@/code/CodeUiStore";
-import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
+import {
+  activateCodeCloneClient,
+  trackCodeClone,
+  useCodeUpdatesStore,
+} from "@/code/CodeUpdatesStore";
 import { NewWorkspaceDialog } from "@/code/NewWorkspaceDialog";
 import {
   codeRepositories,
@@ -29,6 +35,8 @@ type SetupScenario =
   | "local-only"
   | "clone-failure"
   | "clone-progress"
+  | "clone-background-complete"
+  | "clone-complete"
   | "hosted-picker"
   | "hosted-list-failed"
   | "workspace"
@@ -105,9 +113,6 @@ function setupClient(scenario: SetupScenario): ApiClient {
         scenario === "hosted-picker" || scenario === "hosted-list-failed",
     }),
     startCodeClone: async () => {
-      if (scenario === "clone-failure") {
-        throw new Error("The remote repository could not be reached.");
-      }
       return {
         id: "clone-story",
         phase: "Receiving objects",
@@ -115,6 +120,13 @@ function setupClient(scenario: SetupScenario): ApiClient {
         done: false,
       };
     },
+    getCodeCloneJob: async (jobId: string) =>
+      useCodeUpdatesStore.getState().cloneJobs[jobId] ?? {
+        id: jobId,
+        phase: "Receiving objects",
+        percent: 38,
+        done: false,
+      },
     getCodeRepo: async () => codeRepositories[0]!,
     createCodeRepo: async () => codeRepositories[0]!,
     listCodeHarnessModels: async (kind: HarnessKind) => ({
@@ -204,7 +216,7 @@ function setupRouter() {
   const codeRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/code",
-    component: () => <p>Code</p>,
+    component: () => <CodeRepoEmptyState onAddRepo={() => {}} />,
   });
   const workspaceRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -215,6 +227,64 @@ function setupRouter() {
     routeTree: rootRoute.addChildren([codeRoute, workspaceRoute]),
     history: createMemoryHistory({ initialEntries: ["/code"] }),
   });
+}
+
+const CLONE_REQUEST = {
+  url: "https://github.com/brightwave-inc/tidebreak.git",
+  parent_dir: "/Users/sam/src",
+};
+
+function seedCloneScenario(client: ApiClient, scenario: SetupScenario) {
+  activateCodeCloneClient(client);
+  if (scenario === "clone-progress") {
+    trackCodeClone(
+      client,
+      {
+        id: "clone-story",
+        phase: "Receiving objects",
+        percent: 38,
+        done: false,
+      },
+      CLONE_REQUEST,
+    );
+  }
+  if (scenario === "clone-background-complete") {
+    trackCodeClone(
+      client,
+      {
+        id: "clone-story",
+        phase: "Receiving objects",
+        percent: 82,
+        done: false,
+      },
+      CLONE_REQUEST,
+      true,
+    );
+  }
+  if (scenario === "clone-failure") {
+    trackCodeClone(
+      client,
+      {
+        id: "clone-story",
+        phase: "Clone failed",
+        done: true,
+        error: "fatal: repository not found",
+      },
+      CLONE_REQUEST,
+    );
+  }
+  if (scenario === "clone-complete") {
+    trackCodeClone(
+      client,
+      {
+        id: "clone-story",
+        phase: "Clone complete",
+        done: true,
+        repo_id: codeRepositories[0]!.id,
+      },
+      CLONE_REQUEST,
+    );
+  }
 }
 
 function RepositorySetupStory({ scenario }: { scenario: SetupScenario }) {
@@ -231,18 +301,31 @@ function RepositorySetupStory({ scenario }: { scenario: SetupScenario }) {
           : harnessDoctor,
       loaded: true,
     });
-    return { client: setupClient(scenario), router: setupRouter() };
+    const client = setupClient(scenario);
+    seedCloneScenario(client, scenario);
+    return { client, router: setupRouter() };
   });
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    if (scenario === "clone-background-complete") {
+      useCodeUpdatesStore.getState().apply({
+        type: "clone_progress",
+        job: {
+          id: "clone-story",
+          phase: "Clone complete",
+          done: true,
+          repo_id: codeRepositories[0]!.id,
+        },
+      });
+    }
+    return () => {
       useCodeCatalogStore.getState().reset();
       useCodeUpdatesStore.getState().reset();
-    },
-    [],
-  );
+    };
+  }, [scenario]);
 
   const workspace = scenario.startsWith("workspace");
+  const paletteOpen = scenario !== "clone-background-complete";
   return (
     <AppContextProvider value={appContext(state.client)}>
       <RouterProvider router={state.router as never} />
@@ -253,8 +336,9 @@ function RepositorySetupStory({ scenario }: { scenario: SetupScenario }) {
           repos={codeRepositories}
         />
       ) : (
-        <AddRepoPalette open onOpenChange={() => {}} />
+        <AddRepoPalette open={paletteOpen} onOpenChange={() => {}} />
       )}
+      <Toaster richColors duration={Number.POSITIVE_INFINITY} />
     </AppContextProvider>
   );
 }
@@ -297,14 +381,11 @@ export const CloneFailure: Story = {
   args: { scenario: "clone-failure" },
   play: async ({ canvasElement }) => {
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await body.findByRole("option", { name: /Git URL/ }));
-    await userEvent.type(
-      await body.findByPlaceholderText("https://example.com/acme/app.git"),
-      "https://github.com/brightwave-inc/missing.git",
-    );
-    await userEvent.click(await body.findByRole("button", { name: "Clone" }));
     await expect(
-      await body.findByText("The remote repository could not be reached."),
+      await body.findByText("fatal: repository not found"),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: "Retry" }),
     ).toBeVisible();
   },
 };
@@ -344,13 +425,31 @@ export const CloneProgress: Story = {
   args: { scenario: "clone-progress" },
   play: async ({ canvasElement }) => {
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await body.findByRole("option", { name: /Git URL/ }));
-    await userEvent.type(
-      await body.findByPlaceholderText("https://example.com/acme/app.git"),
-      "https://github.com/brightwave-inc/tidebreak.git",
-    );
-    await userEvent.click(await body.findByRole("button", { name: "Clone" }));
     await expect(await body.findByText("Receiving objects")).toBeVisible();
+  },
+};
+
+export const BackgroundCloneCompleted: Story = {
+  args: { scenario: "clone-background-complete" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await expect(await body.findByText("Repository cloned")).toBeVisible();
+    await expect(
+      await body.findByText("Create a workspace when you are ready."),
+    ).toBeVisible();
+  },
+};
+
+export const CloneCompleted: Story = {
+  args: { scenario: "clone-complete" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await expect(
+      await body.findByText("The repository is ready."),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: "Create workspace" }),
+    ).toBeVisible();
   },
 };
 

@@ -1,15 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 
-import type { Attention, CodeSessionDigest } from "../api/types";
+import type { ApiClient } from "../api/client";
+import type {
+  Attention,
+  CodeCloneJobSnapshot,
+  CodeSessionDigest,
+  CodeUpdateNotice,
+} from "../api/types";
 import {
+  activateCodeCloneClient,
+  codeClientGeneration,
+  connectCodeUpdates,
+  disconnectCodeUpdates,
   noticeToAction,
+  reconcileCodeClone,
   reduceCodeUpdates,
   shouldRequestOsAttention,
+  trackCodeClone,
   useCodeUpdatesStore,
   watchChildren,
   workspaceDigest,
   type CodeUpdatesState,
 } from "./CodeUpdatesStore";
+
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
 
 const working: Attention = { state: { type: "working" }, source: "lifecycle" };
 const need: Attention = {
@@ -38,15 +55,78 @@ const EMPTY_STATE: CodeUpdatesState = {
   conversationsByWorkspace: {},
   childrenByWorkspace: {},
   cloneJobs: {},
+  cloneTracking: {},
+  cloneReadErrors: {},
+  cloneClientGeneration: null,
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
 };
 
 afterEach(() => {
+  disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
+  vi.useRealTimers();
+  vi.clearAllMocks();
   vi.restoreAllMocks();
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+class FakeSocket {
+  onopen: WebSocket["onopen"] = null;
+  onclose: WebSocket["onclose"] = null;
+  onerror: WebSocket["onerror"] = null;
+  closed = false;
+
+  close() {
+    this.closed = true;
+  }
+}
+
+function pendingClone(id: string): CodeCloneJobSnapshot {
+  return { id, phase: "receiving objects", percent: 40, done: false };
+}
+
+function completeClone(id: string): CodeCloneJobSnapshot {
+  return {
+    id,
+    phase: "complete",
+    done: true,
+    repo_id: `repo-${id}`,
+  };
+}
+
+function cloneClient(getCodeCloneJob: ApiClient["getCodeCloneJob"]): {
+  client: Pick<ApiClient, "getCodeCloneJob" | "openCodeUpdates">;
+  sockets: FakeSocket[];
+  send: (notice: CodeUpdateNotice, index?: number) => void;
+} {
+  const sockets: FakeSocket[] = [];
+  const listeners: Array<(notice: CodeUpdateNotice) => void> = [];
+  const client = {
+    getCodeCloneJob: vi.fn(getCodeCloneJob),
+    openCodeUpdates: vi.fn((listener: (notice: CodeUpdateNotice) => void) => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      listeners.push(listener);
+      return socket as unknown as WebSocket;
+    }),
+  };
+  return {
+    client,
+    sockets,
+    send: (notice, index = listeners.length - 1) => listeners[index]?.(notice),
+  };
+}
 
 describe("reduceCodeUpdates", () => {
   it("replaces the map on snapshot and upserts a digest", () => {
@@ -277,6 +357,180 @@ describe("reduceCodeUpdates", () => {
       phase: "ready",
       done: true,
     });
+  });
+
+  it("does not let late clone progress replace a terminal result", () => {
+    const completed = reduceCodeUpdates(EMPTY_STATE, {
+      type: "clone_progress",
+      job: completeClone("job-1"),
+    });
+    const stale = reduceCodeUpdates(completed, {
+      type: "clone_progress",
+      job: pendingClone("job-1"),
+    });
+    expect(stale.cloneJobs["job-1"]).toEqual(completeClone("job-1"));
+  });
+});
+
+describe("clone onboarding reconciliation", () => {
+  it("keeps tracked clone state when live Code updates disconnect", () => {
+    const { client } = cloneClient(async (jobId) => pendingClone(jobId));
+    activateCodeCloneClient(client);
+    trackCodeClone(
+      client,
+      pendingClone("job-persisted"),
+      { url: "https://example.com/acme/app.git" },
+      true,
+    );
+
+    connectCodeUpdates(client);
+    disconnectCodeUpdates();
+
+    expect(useCodeUpdatesStore.getState().cloneJobs["job-persisted"]).toEqual(
+      pendingClone("job-persisted"),
+    );
+    expect(
+      useCodeUpdatesStore.getState().cloneTracking["job-persisted"]?.background,
+    ).toBe(true);
+  });
+
+  it("reconciles every active clone when the updates socket opens", async () => {
+    const { client, sockets } = cloneClient(async (jobId) =>
+      pendingClone(jobId),
+    );
+    activateCodeCloneClient(client);
+    trackCodeClone(client, pendingClone("job-a"), { github: "acme/a" }, true);
+    trackCodeClone(client, pendingClone("job-b"), { github: "acme/b" }, true);
+
+    connectCodeUpdates(client);
+    sockets[0]?.onopen?.call(
+      sockets[0] as unknown as WebSocket,
+      new Event("open"),
+    );
+
+    await vi.waitFor(() =>
+      expect(client.getCodeCloneJob).toHaveBeenCalledTimes(2),
+    );
+    expect(client.getCodeCloneJob).toHaveBeenCalledWith("job-a");
+    expect(client.getCodeCloneJob).toHaveBeenCalledWith("job-b");
+  });
+
+  it("recovers a background completion after Code updates reconnect", async () => {
+    const { client, sockets } = cloneClient(async (jobId) =>
+      completeClone(jobId),
+    );
+    activateCodeCloneClient(client);
+    trackCodeClone(
+      client,
+      pendingClone("job-reconnect"),
+      { github: "acme/app" },
+      true,
+    );
+
+    connectCodeUpdates(client);
+    disconnectCodeUpdates();
+    connectCodeUpdates(client);
+    sockets[1]?.onopen?.call(
+      sockets[1] as unknown as WebSocket,
+      new Event("open"),
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        useCodeUpdatesStore.getState().cloneJobs["job-reconnect"]?.done,
+      ).toBe(true),
+    );
+    expect(toast.success).toHaveBeenCalledWith(
+      "Repository cloned",
+      expect.objectContaining({
+        description: "Create a workspace when you are ready.",
+      }),
+    );
+  });
+
+  it("shows one terminal notice when socket and durable results overlap", async () => {
+    const durable = deferred<CodeCloneJobSnapshot>();
+    const { client, sockets, send } = cloneClient(() => durable.promise);
+    activateCodeCloneClient(client);
+    trackCodeClone(
+      client,
+      pendingClone("job-overlap"),
+      { url: "https://example.com/acme/app.git" },
+      true,
+    );
+    connectCodeUpdates(client);
+    sockets[0]?.onopen?.call(
+      sockets[0] as unknown as WebSocket,
+      new Event("open"),
+    );
+    await vi.waitFor(() =>
+      expect(client.getCodeCloneJob).toHaveBeenCalledWith("job-overlap"),
+    );
+
+    send({
+      type: "clone_progress",
+      job: "job-overlap",
+      phase: "complete",
+      done: true,
+      repo_id: "repo-job-overlap",
+    });
+    durable.resolve(pendingClone("job-overlap"));
+    await durable.promise;
+    await Promise.resolve();
+
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(useCodeUpdatesStore.getState().cloneJobs["job-overlap"]).toEqual(
+      completeClone("job-overlap"),
+    );
+  });
+
+  it("clears tracked clone state for a replacement ApiClient", () => {
+    const first = cloneClient(async (jobId) => pendingClone(jobId)).client;
+    const replacement = cloneClient(async (jobId) =>
+      pendingClone(jobId),
+    ).client;
+    activateCodeCloneClient(first);
+    trackCodeClone(first, pendingClone("job-old"), { github: "acme/old" });
+
+    const replacementGeneration = activateCodeCloneClient(replacement);
+
+    expect(useCodeUpdatesStore.getState().cloneJobs).toEqual({});
+    expect(useCodeUpdatesStore.getState().cloneTracking).toEqual({});
+    expect(useCodeUpdatesStore.getState().cloneClientGeneration).toBe(
+      replacementGeneration,
+    );
+    expect(replacementGeneration).not.toBe(codeClientGeneration(first));
+  });
+
+  it("ignores a durable result from an old ApiClient generation", async () => {
+    const staleRead = deferred<CodeCloneJobSnapshot>();
+    const first = cloneClient(() => staleRead.promise).client;
+    const replacement = cloneClient(async (jobId) =>
+      pendingClone(jobId),
+    ).client;
+    activateCodeCloneClient(first);
+    trackCodeClone(
+      first,
+      pendingClone("job-shared"),
+      { github: "acme/old" },
+      true,
+    );
+    const reconciliation = reconcileCodeClone(first, "job-shared");
+
+    activateCodeCloneClient(replacement);
+    trackCodeClone(
+      replacement,
+      pendingClone("job-shared"),
+      { github: "acme/new" },
+      true,
+    );
+    staleRead.resolve(completeClone("job-shared"));
+    await expect(reconciliation).resolves.toBeNull();
+
+    expect(useCodeUpdatesStore.getState().cloneJobs["job-shared"]).toEqual(
+      pendingClone("job-shared"),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });
 
