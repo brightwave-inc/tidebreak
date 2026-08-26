@@ -1141,11 +1141,12 @@ async fn set_permission_mode(
 /// Each round snapshots the durable FIFO head and drives it as a turn;
 /// [`promote_queued_turn`] deletes the row and inserts the turn together, so
 /// an edit, reorder, or retraction that lands after the snapshot surfaces as
-/// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings
-/// resolve at promotion: the turn runs under the session's model, effort, and
-/// fast-mode state as they are now, not as they were at enqueue — same
-/// contract as the chat queue. A pause holds the whole drain; the resume, the
-/// next enqueue, or send-now wakes the worker again.
+/// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings pin
+/// when this drain takes the head: the turn runs under the session's model,
+/// effort, and fast-mode as they are then, not as they were at enqueue, and
+/// not as a later reservation that lands while the worker waits for the
+/// worktree. Same contract as the chat queue. A pause holds the whole drain;
+/// the resume, the next enqueue, or send-now wakes the worker again.
 async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
@@ -1362,6 +1363,25 @@ async fn drive_turn_inner(
     // never be held against a sibling session waiting for the checkout.
     let hydrated = hydrate_turn_images(store.blobs.as_deref(), &attachments).await?;
 
+    // A queued row is already accepted. Pin the committed settings now, before
+    // the worktree wait can reserve a later send's model, effort, or fast mode.
+    // An idle send still resolves after it owns the checkout: that path can
+    // sit behind a reservation that began after the route read the session.
+    let queued_settings = if matches!(worktree.wait, TurnWait::Queued) {
+        let current = get_session(db, &session.owner, session.id)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+            .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
+        if current.spawn_epoch != session.spawn_epoch {
+            return Err(WorkerError::Conflict(
+                "the session worker was superseded before the turn started".into(),
+            ));
+        }
+        Some(CodeSessionExecutionSettings::from(&current))
+    } else {
+        None
+    };
+
     // The workspace's checkout takes one turn at a time (record 55). Taking
     // the lock *is* the reservation: a pre-flight database read cannot be,
     // because two idle siblings both pass it before either marks itself
@@ -1404,10 +1424,10 @@ async fn drive_turn_inner(
         )));
     }
 
-    // Resolve settings after the worker owns the worktree. Both a queued row
-    // and an idle send can wait behind a transaction-safe settings
-    // reservation that began after the route read the session. The committed
-    // row is the only value that can reach the engine and the turn snapshot.
+    // An idle send resolves settings after it owns the worktree, so a
+    // reservation that committed while this request was in flight reaches the
+    // engine. A queued row already pinned its settings above; do not overwrite
+    // that snapshot from a later reservation or from the session row.
     let current = get_session(db, &session.owner, session.id)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?
@@ -1417,9 +1437,15 @@ async fn drive_turn_inner(
             "the session worker was superseded before the turn started".into(),
         ));
     }
-    session.model = current.model;
-    session.reasoning_effort = current.reasoning_effort;
-    session.fast_mode = current.fast_mode;
+    let turn_settings = match queued_settings {
+        Some(settings) => settings,
+        None => {
+            session.model = current.model;
+            session.reasoning_effort = current.reasoning_effort;
+            session.fast_mode = current.fast_mode;
+            CodeSessionExecutionSettings::from(&*session)
+        }
+    };
 
     let ordinal = next_turn_ordinal(db, &session.owner, session.id)
         .await
@@ -1434,8 +1460,8 @@ async fn drive_turn_inner(
         session_id: session.id,
         ordinal,
         status: CodeTurnStatus::Running,
-        model: session.model.clone(),
-        fast_mode: session.fast_mode,
+        model: turn_settings.model.clone(),
+        fast_mode: turn_settings.fast_mode,
         user_input: message.clone(),
         user_input_blob_id: None,
         attachments,
@@ -1543,9 +1569,9 @@ async fn drive_turn_inner(
     };
     let run = engine.run_turn(TurnInput {
         text: engine_text,
-        model: session.model.clone(),
-        reasoning_effort: session.reasoning_effort,
-        fast_mode: session.fast_mode,
+        model: turn_settings.model.clone(),
+        reasoning_effort: turn_settings.reasoning_effort,
+        fast_mode: turn_settings.fast_mode,
         images,
     });
     tokio::pin!(run);
@@ -2565,8 +2591,8 @@ mod tests {
     use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
     use chrono::Utc;
     use tidebreak_core::db::code::{
-        get_session, insert_repo, insert_session, insert_workspace, list_events,
-        replace_session_execution_settings, MAX_REPLAY_EVENTS,
+        enqueue_queued_turn, get_session, insert_repo, insert_session, insert_workspace,
+        list_events, list_turns, replace_session_execution_settings, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
@@ -2907,6 +2933,130 @@ mod tests {
         let inputs = adapter.turn_inputs();
         assert_eq!(inputs[0].model, updated.model);
         assert_eq!(inputs[0].fast_mode, updated.fast_mode);
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_turn_keeps_the_settings_it_held_before_a_later_reservation() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+        let held = CodeSessionExecutionSettings {
+            model: Some("held".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: true,
+        };
+        session = replace_session_execution_settings(&store, &owner, &session, &held)
+            .await
+            .unwrap()
+            .expect("the held settings commit");
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(plain_text_script());
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                env: Vec::new(),
+                approval: None,
+                binary: std::path::PathBuf::from("/scripted/engine"),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let now = Utc::now();
+        enqueue_queued_turn(
+            &store,
+            &owner,
+            &CodeQueuedTurn {
+                id: CodeTurnId::new(),
+                session_id,
+                message: "use the held settings".into(),
+                attachments: Vec::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+        let worktree_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let checkout = worktree_lock.lock().await;
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            worktree_lock.clone(),
+        );
+
+        let later = CodeSessionExecutionSettings {
+            model: Some("later".into()),
+            reasoning_effort: None,
+            fast_mode: false,
+        };
+        let (reservation_reply, reservation_response) = oneshot::channel();
+        let (settlement, release) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::SetExecutionSettings {
+                settings: later.clone(),
+                settlement: release,
+                reply: reservation_reply,
+            })
+            .await
+            .unwrap();
+        reservation_response.await.unwrap().unwrap();
+        let _updated = replace_session_execution_settings(&store, &owner, &session, &later)
+            .await
+            .unwrap()
+            .expect("the later settings commit");
+        assert!(settlement
+            .send(ExecutionSettingsSettlement::Confirmed)
+            .is_ok());
+
+        drop(checkout);
+        let turn = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turns = list_turns(&store, &owner, session_id).await.unwrap();
+                if let Some(turn) = turns.into_iter().find(|turn| {
+                    turn.status != CodeTurnStatus::Running && !turn.user_input.is_empty()
+                }) {
+                    return turn;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the queued turn completes");
+        assert_eq!(turn.model, held.model);
+        assert_eq!(turn.fast_mode, held.fast_mode);
+        assert_eq!(adapter.turn_efforts(), vec![held.reasoning_effort]);
+        let inputs = adapter.turn_inputs();
+        assert_eq!(inputs[0].model, held.model);
+        assert_eq!(inputs[0].fast_mode, held.fast_mode);
         let _ = handle.commands.send(WorkerCommand::Shutdown).await;
     }
 
