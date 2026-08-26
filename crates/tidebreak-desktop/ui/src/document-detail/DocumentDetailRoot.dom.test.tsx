@@ -2,7 +2,15 @@
 import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import {
   HttpError,
@@ -88,7 +96,11 @@ beforeAll(() => {
   // jsdom implements neither half of the object-URL API the image viewer uses.
   URL.createObjectURL = vi.fn(() => "blob:document");
   URL.revokeObjectURL = vi.fn();
-  // jsdom does not scroll, so the scrolled-to element is recorded instead.
+});
+
+beforeEach(() => {
+  // jsdom does not scroll. Reinstall per case so a reset environment still
+  // records the mark the citation effect asks to bring into view.
   Element.prototype.scrollIntoView = function (this: Element) {
     scrolledTo.push(this);
   };
@@ -475,10 +487,13 @@ describe("DocumentDetailRoot", () => {
       CITED_CONTENT,
     );
 
-    await waitFor(() => expect(document.querySelector("mark")).not.toBeNull());
-    const cited = document.querySelector("mark")!;
-    expect(cited.textContent).toContain(CITED_PASSAGE);
-    expect(scrolledTo).toContain(cited);
+    await waitFor(() => {
+      const cited = document.querySelector("mark");
+      expect(cited).not.toBeNull();
+      expect(cited!.textContent).toContain(CITED_PASSAGE);
+      // The highlight is painted first; the scroll runs in an effect after it.
+      expect(scrolledTo).toContain(cited);
+    });
     // Split around the passage rather than reduced to it: the text of record
     // still reads as one run, which is what the offsets index into.
     expect(document.querySelector("pre")?.textContent).toBe(CITED_CONTENT);
@@ -524,15 +539,14 @@ describe("DocumentDetailRoot", () => {
     // The passage spans an emphasized word, which is three places in the
     // rendered tree rather than one run: the words between them are not
     // adjacent there, so each is marked where it stands.
-    await waitFor(() =>
-      expect(document.querySelectorAll("mark").length).toBeGreaterThan(0),
-    );
-    const marks = Array.from(document.querySelectorAll("mark"));
-    expect(marks.map((mark) => mark.textContent).join("")).toContain(
-      "Revenue rose 12% in the second",
-    );
-    expect(document.querySelector("strong mark")?.textContent).toBe("12%");
-    expect(scrolledTo).toContain(marks[0]);
+    await waitFor(() => {
+      const marks = Array.from(document.querySelectorAll("mark"));
+      expect(marks.map((mark) => mark.textContent).join("")).toContain(
+        "Revenue rose 12% in the second",
+      );
+      expect(document.querySelector("strong mark")?.textContent).toBe("12%");
+      expect(scrolledTo).toContain(marks[0]);
+    });
   });
 
   it("marks the cited line in an original drawn as plain text", async () => {

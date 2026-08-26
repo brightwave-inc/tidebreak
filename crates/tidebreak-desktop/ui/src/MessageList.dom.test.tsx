@@ -71,6 +71,7 @@ const MORE = "More options";
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 describe("approval card interactions", () => {
