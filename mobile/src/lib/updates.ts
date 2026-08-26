@@ -7,9 +7,19 @@ import type {
 export type UpdatesState = {
   byId: Record<string, CodeSessionDigest>;
   order: string[];
+  /**
+   * True only after a snapshot action has landed. An empty list is
+   * trustworthy only then; a live socket with no snapshot still means
+   * "loading".
+   */
+  snapshotReceived: boolean;
 };
 
-export const EMPTY_UPDATES: UpdatesState = { byId: {}, order: [] };
+export const EMPTY_UPDATES: UpdatesState = {
+  byId: {},
+  order: [],
+  snapshotReceived: false,
+};
 
 export type UpdatesAction =
   | { type: "snapshot"; sessions: CodeSessionDigest[] }
@@ -72,7 +82,11 @@ export function reduceUpdates(
         byId[digest.session] = digest;
         order.push(digest.session);
       }
-      return { byId, order: sortSessionIds(byId, order) };
+      return {
+        byId,
+        order: sortSessionIds(byId, order),
+        snapshotReceived: true,
+      };
     }
     case "digest": {
       const digest = action.digest;
@@ -80,7 +94,11 @@ export function reduceUpdates(
       const order = state.order.includes(digest.session)
         ? state.order
         : [digest.session, ...state.order];
-      return { byId, order: sortSessionIds(byId, order) };
+      return {
+        byId,
+        order: sortSessionIds(byId, order),
+        snapshotReceived: state.snapshotReceived,
+      };
     }
   }
 }

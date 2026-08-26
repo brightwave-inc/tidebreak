@@ -73,6 +73,23 @@ describe("reduceUpdates", () => {
     expect(listedSessions(state).map((row) => row.session)).toEqual(["b", "a"]);
   });
 
+  it("marks the list as loaded only after a snapshot", () => {
+    expect(EMPTY_UPDATES.snapshotReceived).toBe(false);
+    const digested = reduceUpdates(EMPTY_UPDATES, {
+      type: "digest",
+      digest: digest(),
+    });
+    expect(digested.snapshotReceived).toBe(false);
+    const snapshotted = reduceUpdates(digested, {
+      type: "snapshot",
+      sessions: [],
+    });
+    expect(snapshotted.snapshotReceived).toBe(true);
+    expect(reduceUpdates(snapshotted, { type: "reset" })).toEqual(
+      EMPTY_UPDATES,
+    );
+  });
+
   it("maps snapshot and digest notices, ignoring delivery", () => {
     expect(
       noticeToAction({ type: "snapshot", sessions: [digest()] })?.type,

@@ -16,7 +16,7 @@ import {
   lifecycleLabel,
 } from "../src/lib/updates";
 import { useMachineClient } from "../src/session/useMachineClient";
-import { useListedSessions } from "../src/session/updatesStore";
+import { useHasSnapshot, useListedSessions } from "../src/session/updatesStore";
 import { useUpdatesFeed } from "../src/session/useUpdatesFeed";
 import { useSessionStore } from "../src/session/store";
 
@@ -26,14 +26,17 @@ export default function SessionsScreen() {
   const client = useMachineClient();
   const { live, refresh } = useUpdatesFeed(client);
   const rows = useListedSessions();
+  const hasSnapshot = useHasSnapshot();
   const [refreshing, setRefreshing] = useState(false);
 
   const signedOut = !session;
   const notAttached = !session?.machine;
 
+  // An empty list is trustworthy only after a snapshot landed; a live socket
+  // with no snapshot yet still means loading.
   const empty = useMemo(
-    () => !signedOut && !notAttached && live && rows.length === 0,
-    [live, notAttached, rows.length, signedOut],
+    () => !signedOut && !notAttached && hasSnapshot && rows.length === 0,
+    [hasSnapshot, notAttached, rows.length, signedOut],
   );
 
   async function onRefresh() {
@@ -86,7 +89,7 @@ export default function SessionsScreen() {
             {live ? "Live" : "Reconnecting…"}
           </Text>
         </View>
-        {!live && rows.length === 0 ? (
+        {!hasSnapshot && rows.length === 0 ? (
           <View className="py-12 items-center gap-2">
             <ActivityIndicator />
             <Text className="text-sm text-muted-foreground">Loading sessions…</Text>

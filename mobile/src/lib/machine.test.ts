@@ -29,7 +29,7 @@ class FakeSocket {
 
   close() {
     this.closed = true;
-    this.onclose?.(new CloseEvent("close"));
+    this.onclose?.(new Event("close") as CloseEvent);
   }
 }
 

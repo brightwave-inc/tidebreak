@@ -22,3 +22,7 @@ export const useUpdatesStore = create<UpdatesStore>((set) => ({
 export function useListedSessions(): CodeSessionDigest[] {
   return useUpdatesStore((state) => listedSessions(state));
 }
+
+export function useHasSnapshot(): boolean {
+  return useUpdatesStore((state) => state.snapshotReceived);
+}
