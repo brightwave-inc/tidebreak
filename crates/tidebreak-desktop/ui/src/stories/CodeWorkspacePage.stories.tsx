@@ -64,6 +64,7 @@ type WorkspaceScenario =
   | "session-create-failure"
   | "first-turn-failure"
   | "fork-first-turn-failure"
+  | "settings-pending"
   | "loading"
   | "failure"
   | SubagentScenario;
@@ -603,12 +604,24 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     listCodeRepos: async () => [repo],
     listCodeWorkspaces: async () => [workspace, ...otherWorkspaces],
     getHarnessDoctor: async () => harnessDoctor,
-    listCodeHarnessModels: async (
-      kind: CodeSessionSnapshot["harness_kind"],
-    ) => ({
-      kind,
-      models: [],
-    }),
+    listCodeHarnessModels: async (kind: CodeSessionSnapshot["harness_kind"]) =>
+      scenario === "settings-pending"
+        ? {
+            kind,
+            models: [
+              {
+                id: "claude-opus-5",
+                label: "Claude Opus 5",
+                reasoning_efforts: ["low", "medium", "high"],
+                fast_mode: true,
+              },
+            ],
+            reasoning_efforts: ["low", "medium", "high"],
+          }
+        : {
+            kind,
+            models: [],
+          },
     openCodeUpdates: (onNotice: (notice: unknown) => void) =>
       socketAfterOpen(() =>
         onNotice({ type: "snapshot", sessions: updateDigests(scenario) }),
@@ -691,6 +704,26 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
     },
     decideCodeApproval: async () => ({}) as never,
     setCodeAttention: async () => session,
+    setCodeSessionPermissionMode: async (
+      _sessionId: string,
+      permissionMode: CodeSessionSnapshot["permission_mode"],
+    ) => ({ ...session, permission_mode: permissionMode }),
+    setCodeSessionReasoningEffort: async (
+      _sessionId: string,
+      reasoningEffort: CodeSessionSnapshot["reasoning_effort"] | null,
+    ) =>
+      scenario === "settings-pending"
+        ? pending<CodeSessionSnapshot>()
+        : {
+            ...session,
+            ...(reasoningEffort === null
+              ? { reasoning_effort: undefined }
+              : { reasoning_effort: reasoningEffort }),
+          },
+    setCodeSessionFastMode: async (_sessionId: string, fastMode: boolean) =>
+      scenario === "settings-pending"
+        ? pending<CodeSessionSnapshot>()
+        : { ...session, fast_mode: fastMode },
     reapCodeSession: async () => session,
     steerCodeSession: async () => undefined,
     interruptCodeSession: async () => undefined,
@@ -965,6 +998,26 @@ type Story = StoryObj<typeof meta>;
 
 /** The default: one stable conversation, with workflow state always in reach. */
 export const ConversationAlone: Story = {};
+
+/** One setting write marks the full related control cluster until it settles. */
+export const SettingsPending: Story = {
+  args: { scenario: "settings-pending", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("switch", { name: "Fast mode off" }),
+    );
+    await expect(
+      await canvas.findByRole("switch", { name: "Fast mode on" }),
+    ).toHaveAttribute("aria-busy", "true");
+    await expect(
+      canvas.getByRole("button", { name: "Reasoning: Default" }),
+    ).toHaveAttribute("aria-busy", "true");
+    await expect(
+      canvas.getByRole("button", { name: "Permissions: Ask" }),
+    ).toBeDisabled();
+  },
+};
 
 /** Review is an optional working pane, not a replacement for the conversation. */
 export const ConversationWithReview: Story = {

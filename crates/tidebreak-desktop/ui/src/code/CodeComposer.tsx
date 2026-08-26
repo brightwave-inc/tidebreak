@@ -11,6 +11,7 @@ import {
   ChevronDown,
   Gauge,
   List,
+  LoaderCircle,
   Search,
   Sparkles,
   Zap,
@@ -106,12 +107,16 @@ function appendRecoveredDraft(current: string, recovered: string): string {
 export function PermissionModePicker({
   value,
   availableModes = MODES,
+  disabled,
+  pending,
   onChange,
   scopeKey = "code-create",
 }: {
   value: PermissionMode;
   availableModes?: readonly PermissionMode[];
   unavailableReason?: string;
+  disabled?: boolean;
+  pending?: boolean;
   onChange?: (mode: PermissionMode) => void;
   scopeKey?: string;
 }) {
@@ -120,7 +125,7 @@ export function PermissionModePicker({
     <PermissionModeMenu
       scopeKey={scopeKey}
       value={value}
-      disabled={locked}
+      disabled={locked || disabled || pending}
       availableModes={availableModes}
       onChange={async (mode: PermissionMode) => {
         if (!availableModes.includes(mode)) {
@@ -130,6 +135,15 @@ export function PermissionModePicker({
       }}
     />
   );
+  if (pending) {
+    return (
+      <WithTooltip label="Saving session settings">
+        <span className="inline-flex" aria-busy="true">
+          {menu}
+        </span>
+      </WithTooltip>
+    );
+  }
   if (!locked) return menu;
   // Disabled buttons drop pointer events, so the tooltip has to sit on a
   // wrapper the reader can still hover and focus.
@@ -512,11 +526,13 @@ export function FastModeToggle({
   available,
   value,
   disabled,
+  pending,
   onChange,
 }: {
   available: boolean;
   value: boolean;
   disabled?: boolean;
+  pending?: boolean;
   onChange: (fastMode: boolean) => void;
 }) {
   if (!available) return null;
@@ -529,16 +545,23 @@ export function FastModeToggle({
       aria-checked={value}
       className={cn("h-8 gap-2 px-2", value && FAST_TRIGGER_CLASS)}
       disabled={disabled}
+      aria-busy={pending}
       aria-label={label}
       title={
-        value
-          ? "Fast mode on: faster output, higher price per token"
-          : "Fast mode off: the engine's usual speed and price"
+        pending
+          ? "Saving session settings"
+          : value
+            ? "Fast mode on: faster output, higher price per token"
+            : "Fast mode off: the engine's usual speed and price"
       }
       data-fast={value ? "on" : undefined}
       onClick={() => onChange(!value)}
     >
-      <Zap className={cn("size-4", !value && "opacity-50")} />
+      {pending ? (
+        <LoaderCircle className="size-4 animate-spin" />
+      ) : (
+        <Zap className={cn("size-4", !value && "opacity-50")} />
+      )}
     </Button>
   );
 }
@@ -547,11 +570,13 @@ export function ReasoningEffortMenu({
   levels,
   value,
   disabled,
+  pending,
   onChange,
 }: {
   levels: readonly ReasoningEffort[];
   value: ReasoningEffort | null;
   disabled?: boolean;
+  pending?: boolean;
   onChange: (effort: ReasoningEffort | null) => void;
 }) {
   const options = reasoningEffortOptions(levels);
@@ -573,11 +598,14 @@ export function ReasoningEffortMenu({
             topSelected && ULTRA_TRIGGER_CLASS,
           )}
           disabled={disabled}
+          aria-busy={pending}
           aria-label={`Reasoning: ${label}`}
-          title={`Reasoning: ${label}`}
+          title={pending ? "Saving session settings" : `Reasoning: ${label}`}
           data-ultra={topSelected ? "on" : undefined}
         >
-          {topSelected ? (
+          {pending ? (
+            <LoaderCircle className="size-4 animate-spin" />
+          ) : topSelected ? (
             <Sparkles className="size-4" />
           ) : (
             <Gauge className="size-4" />
@@ -641,6 +669,7 @@ export function CodeComposer({
   reasoningEffort = null,
   engineEfforts = [],
   fastMode = false,
+  settingsPending = false,
   onModelChange,
   onModeChange,
   onEffortChange,
@@ -677,6 +706,8 @@ export function CodeComposer({
   reasoningEffort?: ReasoningEffort | null;
   /** Whether the session is armed for fast mode. */
   fastMode?: boolean;
+  /** Whether a permission, reasoning, or fast-mode write is active. */
+  settingsPending?: boolean;
   /**
    * The engine's own ladder, used for a model row that states none of its
    * own — a gateway catalog row, or a model the engine no longer lists.
@@ -1080,6 +1111,7 @@ export function CodeComposer({
             <FastModeToggle
               available={fastModeAvailable}
               value={selectedFastMode}
+              pending={settingsPending}
               onChange={(next) => {
                 setSelectedFastMode(next);
                 onFastModeChange(next);
@@ -1092,6 +1124,7 @@ export function CodeComposer({
             <ReasoningEffortMenu
               levels={effortLevels}
               value={selectedEffort}
+              pending={settingsPending}
               onChange={(next) => {
                 setSelectedEffort(next);
                 onEffortChange(next);
@@ -1103,6 +1136,7 @@ export function CodeComposer({
           <PermissionModePicker
             value={permissionMode}
             availableModes={availableModes}
+            pending={settingsPending}
             onChange={onModeChange}
             scopeKey={sessionId ?? "code-create"}
           />
