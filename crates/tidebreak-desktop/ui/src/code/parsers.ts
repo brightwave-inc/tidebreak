@@ -2536,6 +2536,8 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "session_id",
       "ordinal",
       "status",
+      "model",
+      "fast_mode",
       "user_input",
       "attachments",
       "usage",
@@ -2548,8 +2550,13 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     !nonEmpty(value.session_id) ||
     !isFiniteNumber(value.ordinal) ||
     !isMember(value.status, TURN_STATUSES) ||
-    typeof value.user_input !== "string" ||
+    !optionalString(value.model) ||
+    // Serialized unconditionally, but tolerate its absence: a turn row
+    // written before this snapshot existed reads as off, which is what
+    // it was.
+    (value.fast_mode !== undefined && typeof value.fast_mode !== "boolean") ||
     !optionalString(value.checkpoint_ref) ||
+    typeof value.user_input !== "string" ||
     !nonEmpty(value.started_at) ||
     !optionalString(value.ended_at)
   ) {
@@ -2567,6 +2574,8 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     session_id: value.session_id,
     ordinal: value.ordinal,
     status: value.status,
+    fast_mode: value.fast_mode === true,
+    ...(value.model !== undefined ? { model: value.model } : {}),
     user_input: value.user_input,
     started_at: value.started_at,
     attachments,
