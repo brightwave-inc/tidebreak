@@ -1363,11 +1363,11 @@ async fn drive_turn_inner(
     // never be held against a sibling session waiting for the checkout.
     let hydrated = hydrate_turn_images(store.blobs.as_deref(), &attachments).await?;
 
-    // A queued row is already accepted. Pin the committed settings now, before
-    // the worktree wait can reserve a later send's model, effort, or fast mode.
-    // An idle send still resolves after it owns the checkout: that path can
-    // sit behind a reservation that began after the route read the session.
-    let queued_settings = if matches!(worktree.wait, TurnWait::Queued) {
+    // A queued row is already accepted. Bring the worker up to the committed
+    // settings before it waits for the checkout. Reservations accepted during
+    // that wait then update this same session copy, so the turn sees the last
+    // committed settings when the lock becomes available.
+    if matches!(worktree.wait, TurnWait::Queued) {
         let current = get_session(db, &session.owner, session.id)
             .await
             .map_err(|err| WorkerError::Failed(err.to_string()))?
@@ -1377,10 +1377,10 @@ async fn drive_turn_inner(
                 "the session worker was superseded before the turn started".into(),
             ));
         }
-        Some(CodeSessionExecutionSettings::from(&current))
-    } else {
-        None
-    };
+        session.model = current.model;
+        session.reasoning_effort = current.reasoning_effort;
+        session.fast_mode = current.fast_mode;
+    }
 
     // The workspace's checkout takes one turn at a time (record 55). Taking
     // the lock *is* the reservation: a pre-flight database read cannot be,
@@ -1426,20 +1426,20 @@ async fn drive_turn_inner(
 
     // An idle send resolves settings after it owns the worktree, so a
     // reservation that committed while this request was in flight reaches the
-    // engine. A queued row already pinned its settings above; do not overwrite
-    // that snapshot from a later reservation or from the session row.
-    let current = get_session(db, &session.owner, session.id)
-        .await
-        .map_err(|err| WorkerError::Failed(err.to_string()))?
-        .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
-    if current.spawn_epoch != session.spawn_epoch {
-        return Err(WorkerError::Conflict(
-            "the session worker was superseded before the turn started".into(),
-        ));
-    }
-    let turn_settings = match queued_settings {
-        Some(settings) => settings,
-        None => {
+    // engine. A queued row uses the worker copy initialized before the wait and
+    // updated by every confirmed reservation accepted during that wait.
+    let turn_settings = match worktree.wait {
+        TurnWait::Queued => CodeSessionExecutionSettings::from(&*session),
+        TurnWait::Send => {
+            let current = get_session(db, &session.owner, session.id)
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()))?
+                .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
+            if current.spawn_epoch != session.spawn_epoch {
+                return Err(WorkerError::Conflict(
+                    "the session worker was superseded before the turn started".into(),
+                ));
+            }
             session.model = current.model;
             session.reasoning_effort = current.reasoning_effort;
             session.fast_mode = current.fast_mode;
