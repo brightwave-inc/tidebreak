@@ -115,6 +115,33 @@ pub async fn compare_and_set_workspace_status(
     Ok(result.rows_affected == 1)
 }
 
+/// Finish an archive only while the workspace still owns the transient state.
+pub async fn complete_workspace_archive(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: WorkspaceId,
+    archived_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let result = entities::code_workspace::Entity::update_many()
+        .col_expr(
+            entities::code_workspace::Column::Status,
+            sea_orm::sea_query::Expr::value(CodeWorkspaceStatus::Archived.as_str()),
+        )
+        .col_expr(
+            entities::code_workspace::Column::ArchivedAt,
+            sea_orm::sea_query::Expr::value(archived_at),
+        )
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+        .filter(
+            entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Archiving.as_str()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// Persist mutable workspace fields. `id`, `repo_id`, and `created_at` stay as stored.
 pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Result<bool> {
     let result = entities::code_workspace::Entity::update_many()

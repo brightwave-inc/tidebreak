@@ -12,12 +12,12 @@ use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
     abandon_pending_approval, arm_trigger, claim_approval, compare_and_set_workspace_status,
-    delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
-    get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
-    list_events, list_fork_events, list_repos, list_sessions, list_sessions_all_owners,
-    list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
-    list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head, save_repo,
-    save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
+    complete_workspace_archive, delete_trigger, delete_workspace, get_approval, get_open_turn,
+    get_repo, get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
+    insert_workspace, list_approvals, list_events, list_fork_events, list_repos, list_sessions,
+    list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo, list_turns,
+    list_workspaces, list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
+    save_repo, save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
     ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
@@ -665,13 +665,6 @@ impl CodeRuntime {
         for workspace in
             list_workspaces_by_status_all_owners(&self.db, CodeWorkspaceStatus::Archiving).await?
         {
-            if !std::path::Path::new(&workspace.worktree_path).exists() {
-                tracing::warn!(
-                    workspace = %workspace.id,
-                    "code-mode: archive recovery left a missing checkout fenced as archiving"
-                );
-                continue;
-            }
             let sessions =
                 list_sessions_for_workspace(&self.db, &workspace.owner, workspace.id).await?;
             if sessions.iter().any(|session| {
@@ -684,6 +677,18 @@ impl CodeRuntime {
                     workspace = %workspace.id,
                     "code-mode: archive recovery kept lifecycle exclusion because a worker may still exist"
                 );
+                continue;
+            }
+            if !std::path::Path::new(&workspace.worktree_path).exists() {
+                let repo = self.get_repo(&workspace.owner, workspace.repo_id).await?;
+                match self.finalize_removed_workspace(workspace, &repo).await {
+                    Ok(workspace) => self.forget_workspace_turn_lock(workspace.id),
+                    Err(error) => {
+                        tracing::warn!(
+                            "code-mode: archive recovery could not finalize a missing checkout: {error}"
+                        );
+                    }
+                }
                 continue;
             }
             if !compare_and_set_workspace_status(
@@ -1223,6 +1228,25 @@ impl CodeRuntime {
         if workspace.status == CodeWorkspaceStatus::Archived {
             return Ok(workspace);
         }
+        let path = std::path::PathBuf::from(&workspace.worktree_path);
+        if workspace.status == CodeWorkspaceStatus::Archiving && !path.exists() {
+            let sessions = list_sessions_for_workspace(&self.db, owner, id).await?;
+            if sessions.iter().any(|session| {
+                matches!(
+                    session.lifecycle,
+                    CodeSessionLifecycle::Running | CodeSessionLifecycle::Fenced
+                )
+            }) {
+                return Err(ServerError::conflict_kind(
+                    "workspace_lifecycle_busy",
+                    "a workspace worker may still be running",
+                ));
+            }
+            let repo = self.get_repo(owner, workspace.repo_id).await?;
+            let archived = self.finalize_removed_workspace(workspace, &repo).await?;
+            self.forget_workspace_turn_lock(archived.id);
+            return Ok(archived);
+        }
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(
                 "workspace_not_ready",
@@ -1233,7 +1257,6 @@ impl CodeRuntime {
         // Blockers first: a refused archive must leave the workspace exactly as
         // it was, and running the hook script is not "exactly as it was".
         self.refuse_running_sessions(owner, id, force).await?;
-        let path = std::path::PathBuf::from(&workspace.worktree_path);
         if path.exists() {
             if let Some(block) = archive_blockers(&path, &workspace.base_ref)
                 .await
@@ -1363,6 +1386,17 @@ impl CodeRuntime {
         remove_worktree(std::path::Path::new(&repo.root_path), path)
             .await
             .map_err(map_worktree)?;
+        let archived = self.finalize_removed_workspace(workspace, &repo).await?;
+        drop(_turn_guard);
+        self.forget_workspace_turn_lock(archived.id);
+        Ok(archived)
+    }
+
+    async fn finalize_removed_workspace(
+        &self,
+        mut workspace: CodeWorkspace,
+        repo: &CodeRepo,
+    ) -> Result<CodeWorkspace, ServerError> {
         let _ = prune_worktrees(std::path::Path::new(&repo.root_path)).await;
         if let Err(error) =
             delete_workspace_refs(std::path::Path::new(&repo.root_path), workspace.id).await
@@ -1372,20 +1406,36 @@ impl CodeRuntime {
                 "code-mode: could not delete checkpoint refs on archive: {error}"
             );
         }
-        workspace.status = CodeWorkspaceStatus::Archived;
-        workspace.archived_at = Some(Utc::now());
-        if !save_workspace(&self.db, &workspace).await? {
+        let archived_at = workspace.archived_at.unwrap_or_else(Utc::now);
+        if !complete_workspace_archive(&self.db, &workspace.owner, workspace.id, archived_at)
+            .await?
+        {
+            let current = self.get_workspace(&workspace.owner, workspace.id).await?;
+            if current.status == CodeWorkspaceStatus::Archived {
+                return Ok(current);
+            }
             return Err(ServerError::conflict_kind(
                 "workspace_lifecycle_changed",
                 "the workspace row changed before archive completed",
             ));
         }
-        drop(_turn_guard);
+        workspace.status = CodeWorkspaceStatus::Archived;
+        workspace.archived_at = Some(archived_at);
+        super::attention::emit_workspace_digests(
+            &self.db,
+            &self.bus,
+            &workspace.owner,
+            workspace.id,
+        )
+        .await;
+        Ok(workspace)
+    }
+
+    fn forget_workspace_turn_lock(&self, workspace_id: WorkspaceId) {
         self.worktree_turns
             .lock()
             .expect("worktree turn locks")
-            .remove(&workspace.id);
-        Ok(workspace)
+            .remove(&workspace_id);
     }
 
     /// Reactivate an archived workspace at its own path, on its own branch.

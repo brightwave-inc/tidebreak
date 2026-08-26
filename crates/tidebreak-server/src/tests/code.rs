@@ -3772,6 +3772,49 @@ async fn archive_shutdown_timeout_preserves_the_checkout() {
 }
 
 #[tokio::test]
+async fn archive_recovery_finishes_after_checkout_removal() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let owner = tidebreak_core::OwnerId::local();
+    let (_registered, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id: tidebreak_core::WorkspaceId = json_id(&workspace).parse().unwrap();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    assert!(tidebreak_core::db::code::compare_and_set_workspace_status(
+        &runtime.db,
+        &owner,
+        workspace_id,
+        CodeWorkspaceStatus::Active,
+        CodeWorkspaceStatus::Archiving,
+    )
+    .await
+    .unwrap());
+    let removed = std::process::Command::new("git")
+        .current_dir(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(removed.success());
+    assert!(!path.exists());
+
+    let restarted = CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        scripted_registry(),
+    );
+    restarted.recover().await.unwrap();
+
+    let stored = tidebreak_core::db::code::get_workspace(&runtime.db, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, CodeWorkspaceStatus::Archived);
+    assert!(stored.archived_at.is_some());
+}
+
+#[tokio::test]
 async fn archive_refuses_ignored_only_content_without_force() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;
