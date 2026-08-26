@@ -1609,18 +1609,17 @@ pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerC
     if merge_state == "behind" {
         return Some(CodeTriggerCondition::Behind);
     }
-    // A host review decision is explicit. Keep it separate from the generic
-    // merge-state summary, which can report blocked while checks still run.
-    if review == "review_required" {
-        return Some(CodeTriggerCondition::ReviewRequired);
-    }
     // Pending checks are the "not yet" the watch waits through. Reporting
-    // ready here would fire before the checks that decide it have reported.
+    // ready or review-required here would fire before the checks that decide
+    // the pull request have reported.
     if checks
         .iter()
         .any(|check| check.bucket == PullRequestCheckBucket::Pending)
     {
         return None;
+    }
+    if review == "review_required" {
+        return Some(CodeTriggerCondition::ReviewRequired);
     }
     if merge_state == "blocked" || merge_state == "unstable" {
         return Some(CodeTriggerCondition::ReviewRequired);
@@ -1747,9 +1746,10 @@ mod tests {
     /// A blocked or unstable merge-state summary can reflect checks that have
     /// not finished. Wait for those checks before asking for review.
     #[test]
-    fn pending_checks_outrank_generic_blocked_merge_states() {
+    fn pending_checks_outrank_blocked_merge_and_review_required() {
         for merge_state in ["blocked", "unstable"] {
             let pr = PullRequestDigest {
+                review_decision: Some("review_required".to_owned()),
                 merge_state_status: Some(merge_state.to_owned()),
                 checks: Some(vec![check(PullRequestCheckBucket::Pending)]),
                 ..digest()
@@ -1762,21 +1762,19 @@ mod tests {
         }
     }
 
-    /// Explicit host review decisions remain actionable while checks run.
+    /// A requested change remains actionable while checks run.
     #[test]
-    fn explicit_review_decisions_outrank_pending_checks() {
-        for (review, condition) in [
-            ("changes_requested", CodeTriggerCondition::ChangesRequested),
-            ("review_required", CodeTriggerCondition::ReviewRequired),
-        ] {
-            let pr = PullRequestDigest {
-                review_decision: Some(review.to_owned()),
-                merge_state_status: Some("blocked".to_owned()),
-                checks: Some(vec![check(PullRequestCheckBucket::Pending)]),
-                ..digest()
-            };
-            assert_eq!(classify_trigger_condition(&pr), Some(condition));
-        }
+    fn changes_requested_outranks_pending_checks() {
+        let pr = PullRequestDigest {
+            review_decision: Some("changes_requested".to_owned()),
+            merge_state_status: Some("blocked".to_owned()),
+            checks: Some(vec![check(PullRequestCheckBucket::Pending)]),
+            ..digest()
+        };
+        assert_eq!(
+            classify_trigger_condition(&pr),
+            Some(CodeTriggerCondition::ChangesRequested)
+        );
     }
 
     /// A merged pull request classifies as merged even while the host still
