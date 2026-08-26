@@ -84,6 +84,7 @@ function HostedGatewayProbe() {
 
 afterEach(() => {
   cleanup();
+  pairingNudge.fire = null;
   vi.clearAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -542,6 +543,12 @@ describe("ManagedGate", () => {
     mount(client);
     expect(await screen.findByText("the open product")).toBeInTheDocument();
     await waitFor(() => expect(pairingNudge.fire).not.toBeNull());
+
+    // The pairing listener is attached in an effect after the first
+    // resolved-policy render. Wait for it so the nudge is not a no-op.
+    await waitFor(() => {
+      expect(pairingNudge.fire).toEqual(expect.any(Function));
+    });
 
     // No timer advance: the nudge alone must refetch and lower the gate.
     await act(async () => {
