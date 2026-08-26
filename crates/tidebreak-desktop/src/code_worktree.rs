@@ -161,8 +161,11 @@ fn validate_directory(path: &Path) -> Result<(), CodeWorktreeOpenError> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DesktopPlatform {
+    #[cfg(any(target_os = "macos", test))]
     Macos,
+    #[cfg(any(target_os = "windows", test))]
     Windows,
+    #[cfg(any(target_os = "linux", test))]
     Linux,
     Unsupported,
 }
@@ -174,8 +177,11 @@ struct LauncherPlan {
 
 fn launcher_plan(platform: DesktopPlatform, path: &Path) -> Option<LauncherPlan> {
     let (program, args) = match platform {
+        #[cfg(any(target_os = "macos", test))]
         DesktopPlatform::Macos => ("/usr/bin/open", vec![path.as_os_str().to_owned()]),
+        #[cfg(any(target_os = "windows", test))]
         DesktopPlatform::Windows => ("explorer.exe", vec![path.as_os_str().to_owned()]),
+        #[cfg(any(target_os = "linux", test))]
         DesktopPlatform::Linux => ("xdg-open", vec![path.as_os_str().to_owned()]),
         DesktopPlatform::Unsupported => return None,
     };
