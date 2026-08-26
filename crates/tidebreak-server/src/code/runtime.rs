@@ -504,6 +504,7 @@ impl CodeRuntime {
             host: HostEnv::from_process(),
             host_tool_broker: None,
             git_credentials: None,
+            harness_llm: None,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
