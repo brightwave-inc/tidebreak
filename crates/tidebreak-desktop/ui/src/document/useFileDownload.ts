@@ -275,7 +275,7 @@ function decode<F extends FileDownloadFormat>(
       return new TextDecoder().decode(bytes) as Decoded<F>;
     case "blob":
       return new Blob(
-        [bytes as Uint8Array<ArrayBuffer>],
+        [bytes],
         contentType ? { type: contentType } : undefined,
       ) as Decoded<F>;
     default:
