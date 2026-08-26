@@ -99,6 +99,126 @@ impl DeliveryAccess {
             retry_at: None,
         }
     }
+
+    /// The reader, or the same refusal the list reads surface as a source
+    /// error — `gh_absent`/`gh_signed_out`/`gh_unavailable` on a local
+    /// machine, `git_forge_not_offered` with the connect path on a hosted
+    /// one.
+    fn require_reader(&self) -> Result<DeliveryReader, ServerError> {
+        self.reader.clone().ok_or_else(|| {
+            ServerError::conflict_kind(self.unavailable_kind, self.capability.remediation.clone())
+        })
+    }
+}
+
+/// One authenticated GET runner for the detail drawers: the same
+/// repository-scoped endpoint strings, answered by `gh api` or by the forge
+/// REST API depending on the reader.
+enum DeliveryEndpointApi {
+    Gh {
+        binary: PathBuf,
+        host: String,
+    },
+    Rest {
+        api_base: String,
+        credential: GitCredential,
+    },
+}
+
+impl DeliveryEndpointApi {
+    async fn get(&self, endpoint: &str) -> Result<Value, String> {
+        match self {
+            Self::Gh { binary, host } => run_api_json(binary, host, endpoint).await,
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::forge_rest::api_get(api_base, credential, endpoint).await,
+        }
+    }
+
+    async fn pull_request(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        repository: &CodeGitHubRepositoryRef,
+        number: u64,
+    ) -> Result<Value, String> {
+        match self {
+            Self::Gh { binary, .. } => {
+                let cli_repository =
+                    gh::cli_repository(&repository.host, &repository.owner, &repository.name);
+                let number = number.to_string();
+                let raw = gh::run_gh(
+                    Path::new("."),
+                    binary,
+                    &[
+                        "pr",
+                        "view",
+                        &number,
+                        "--repo",
+                        &cli_repository,
+                        "--json",
+                        PR_LIST_FIELDS_WITH_CHECKS,
+                    ],
+                    GH_READ_TIMEOUT,
+                )
+                .await?;
+                serde_json::from_str(&raw)
+                    .map_err(|error| format!("could not parse pull request: {error}"))
+            }
+            Self::Rest {
+                api_base,
+                credential,
+            } => {
+                super::forge_rest::delivery_pull_request(api_base, target, credential, number).await
+            }
+        }
+    }
+}
+
+async fn delivery_endpoint_api(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    reader: &DeliveryReader,
+    target: &CodeGitHubRepositoryTarget,
+) -> Result<DeliveryEndpointApi, String> {
+    match reader {
+        DeliveryReader::Gh(binary) => Ok(DeliveryEndpointApi::Gh {
+            binary: binary.clone(),
+            host: target.host.clone(),
+        }),
+        DeliveryReader::Forge => {
+            let credential = borrow_delivery_credential(runtime, owner, target).await?;
+            Ok(DeliveryEndpointApi::Rest {
+                api_base: runtime.forge_api_base_for(&target.host),
+                credential,
+            })
+        }
+    }
+}
+
+async fn resolve_repository_for_api(
+    runtime: &CodeRuntime,
+    api: &DeliveryEndpointApi,
+    target: &CodeGitHubRepositoryTarget,
+    tidebreak_repo_id: Option<tidebreak_core::RepoId>,
+    force_refresh: bool,
+) -> Result<CodeGitHubRepositoryRef, String> {
+    match api {
+        DeliveryEndpointApi::Gh { binary, .. } => {
+            resolve_repository_cached(runtime, binary, target, tidebreak_repo_id, force_refresh)
+                .await
+        }
+        DeliveryEndpointApi::Rest { credential, .. } => {
+            resolve_repository_rest_cached(
+                runtime,
+                target,
+                tidebreak_repo_id,
+                force_refresh,
+                credential,
+            )
+            .await
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,10 +596,10 @@ pub(crate) async fn query_pull_requests_by_number(
     owner: &OwnerId,
     repositories: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>,
 ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
-    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
-    let capability = github_capability(&observation);
+    let access = delivery_access(runtime, owner, false).await;
+    let capability = access.capability.clone();
     let repositories = dedupe_numbered_targets(repositories)?;
-    if observation.authenticated != Some(true) {
+    let Some(reader) = access.reader.clone() else {
         return Ok(CodeDeliveryPullRequestsPage {
             capability,
             items: Vec::new(),
@@ -487,21 +607,20 @@ pub(crate) async fn query_pull_requests_by_number(
             errors: Vec::new(),
             fetched_at: Utc::now(),
         });
-    }
+    };
 
-    let binary = observation
-        .binary
-        .clone()
-        .expect("authenticated gh has a binary");
     let workspaces = Arc::new(workspace_index(runtime, owner, false).await?);
     let resolved = stream::iter(repositories)
         .map(|(target, numbers)| {
-            let binary = binary.clone();
+            let reader = reader.clone();
             async move {
-                let repository = resolve_repository(&binary, &target, None)
+                let api = delivery_endpoint_api(runtime, owner, &reader, &target)
                     .await
                     .map_err(|message| (target.clone(), message))?;
-                Ok((target, repository, numbers))
+                let repository = resolve_repository_for_api(runtime, &api, &target, None, false)
+                    .await
+                    .map_err(|message| (target.clone(), message))?;
+                Ok((target, Arc::new(api), repository, numbers))
             }
         })
         .buffer_unordered(DELIVERY_CONCURRENCY)
@@ -512,11 +631,11 @@ pub(crate) async fn query_pull_requests_by_number(
     let mut errors = Vec::new();
     for result in resolved {
         match result {
-            Ok((target, repository, numbers)) => {
+            Ok((target, api, repository, numbers)) => {
                 reads.extend(
-                    numbers
-                        .into_iter()
-                        .map(|number| (target.clone(), repository.clone(), number)),
+                    numbers.into_iter().map(|number| {
+                        (target.clone(), Arc::clone(&api), repository.clone(), number)
+                    }),
                 );
             }
             Err((target, message)) => errors.push(source_error(Some(target), message)),
@@ -524,12 +643,11 @@ pub(crate) async fn query_pull_requests_by_number(
     }
 
     let results = stream::iter(reads)
-        .map(|(target, repository, number)| {
-            let binary = binary.clone();
+        .map(|(target, api, repository, number)| {
             let workspaces = Arc::clone(&workspaces);
             async move {
                 with_transient_retry(|| {
-                    fetch_pull_request(&binary, &repository, number, &workspaces)
+                    fetch_pull_request(&api, &target, &repository, number, &workspaces)
                 })
                 .await
                 .map_err(|message| (target, format!("pull request #{number}: {message}")))
@@ -852,18 +970,24 @@ pub(crate) async fn pull_request_detail(
         std::slice::from_ref(&target.repository),
     )
     .await?;
-    let observation = require_authenticated(runtime).await?;
-    let binary = observation
-        .binary
-        .as_ref()
-        .expect("authenticated gh has binary");
-    let repository = resolve_repository_cached(runtime, binary, &target.repository, None, false)
+    let access = delivery_access(runtime, owner, false).await;
+    let reader = access.require_reader()?;
+    let api = delivery_endpoint_api(runtime, owner, &reader, &target.repository)
+        .await
+        .map_err(|message| ServerError::bad_request_kind("github", message))?;
+    let repository = resolve_repository_for_api(runtime, &api, &target.repository, None, false)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let workspace_index = workspace_index(runtime, owner, false).await?;
-    let mut observation = fetch_pull_request(binary, &repository, target.number, &workspace_index)
-        .await
-        .map_err(|message| ServerError::bad_request_kind("github", message))?;
+    let mut observation = fetch_pull_request(
+        &api,
+        &target.repository,
+        &repository,
+        target.number,
+        &workspace_index,
+    )
+    .await
+    .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let minted = persist_and_augment_pull_request_facts(
         runtime,
         owner,
@@ -895,11 +1019,11 @@ pub(crate) async fn pull_request_detail(
         &format!("pulls/{}/files?per_page=100", target.number),
     );
     let (pull, issue_comments, reviews, inline_comments, changed) = tokio::join!(
-        run_api_json(binary, &target.repository.host, &pull_endpoint),
-        run_api_json(binary, &target.repository.host, &issue_comments_endpoint),
-        run_api_json(binary, &target.repository.host, &reviews_endpoint),
-        run_api_json(binary, &target.repository.host, &inline_endpoint),
-        run_api_json(binary, &target.repository.host, &files_endpoint),
+        api.get(&pull_endpoint),
+        api.get(&issue_comments_endpoint),
+        api.get(&reviews_endpoint),
+        api.get(&inline_endpoint),
+        api.get(&files_endpoint),
     );
     let pull = pull.map_err(|message| ServerError::bad_request_kind("github", message))?;
     let mut comments = Vec::new();
@@ -1391,12 +1515,12 @@ pub(crate) async fn run_detail(
         std::slice::from_ref(&target.repository),
     )
     .await?;
-    let observation = require_authenticated(runtime).await?;
-    let binary = observation
-        .binary
-        .as_ref()
-        .expect("authenticated gh has binary");
-    let repository = resolve_repository_cached(runtime, binary, &target.repository, None, false)
+    let access = delivery_access(runtime, owner, false).await;
+    let reader = access.require_reader()?;
+    let api = delivery_endpoint_api(runtime, owner, &reader, &target.repository)
+        .await
+        .map_err(|message| ServerError::bad_request_kind("github", message))?;
+    let repository = resolve_repository_for_api(runtime, &api, &target.repository, None, false)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let workspace_index = workspace_index(runtime, owner, false).await?;
@@ -1409,10 +1533,7 @@ pub(crate) async fn run_detail(
                 &target.repository,
                 &format!("actions/runs/{}/jobs?per_page=100", target.id),
             );
-            let (run, jobs) = tokio::join!(
-                run_api_json(binary, &target.repository.host, &run_endpoint),
-                run_api_json(binary, &target.repository.host, &jobs_endpoint),
-            );
+            let (run, jobs) = tokio::join!(api.get(&run_endpoint), api.get(&jobs_endpoint),);
             let run = run.map_err(|message| ServerError::bad_request_kind("github", message))?;
             let summary = parse_workflow_run(&repository, &run, &workspace_index)
                 .ok_or_else(|| ServerError::not_found("workflow run not found"))?;
@@ -1458,10 +1579,8 @@ pub(crate) async fn run_detail(
                 &target.repository,
                 &format!("deployments/{}/statuses?per_page=100", target.id),
             );
-            let (deployment, statuses) = tokio::join!(
-                run_api_json(binary, &target.repository.host, &deployment_endpoint),
-                run_api_json(binary, &target.repository.host, &statuses_endpoint),
-            );
+            let (deployment, statuses) =
+                tokio::join!(api.get(&deployment_endpoint), api.get(&statuses_endpoint),);
             let deployment =
                 deployment.map_err(|message| ServerError::bad_request_kind("github", message))?;
             let mut errors = Vec::new();
@@ -2241,30 +2360,13 @@ fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequest
 }
 
 async fn fetch_pull_request(
-    binary: &Path,
+    api: &DeliveryEndpointApi,
+    target: &CodeGitHubRepositoryTarget,
     repository: &CodeGitHubRepositoryRef,
     number: u64,
     workspaces: &[WorkspaceIndexEntry],
 ) -> Result<PullRequestObservation, String> {
-    let cli_repository = gh::cli_repository(&repository.host, &repository.owner, &repository.name);
-    let number = number.to_string();
-    let raw = gh::run_gh(
-        Path::new("."),
-        binary,
-        &[
-            "pr",
-            "view",
-            &number,
-            "--repo",
-            &cli_repository,
-            "--json",
-            PR_LIST_FIELDS_WITH_CHECKS,
-        ],
-        GH_READ_TIMEOUT,
-    )
-    .await?;
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("could not parse pull request: {error}"))?;
+    let value = api.pull_request(target, repository, number).await?;
     parse_pull_request(repository, &value, workspaces)
         .ok_or_else(|| "GitHub returned an incomplete pull request".into())
 }
