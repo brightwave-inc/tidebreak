@@ -1141,12 +1141,12 @@ async fn set_permission_mode(
 /// Each round snapshots the durable FIFO head and drives it as a turn;
 /// [`promote_queued_turn`] deletes the row and inserts the turn together, so
 /// an edit, reorder, or retraction that lands after the snapshot surfaces as
-/// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings pin
-/// when this drain takes the head: the turn runs under the session's model,
-/// effort, and fast-mode as they are then, not as they were at enqueue, and
-/// not as a later reservation that lands while the worker waits for the
-/// worktree. Same contract as the chat queue. A pause holds the whole drain;
-/// the resume, the next enqueue, or send-now wakes the worker again.
+/// [`WorkerError::QueuedTurnStale`] and the loop simply re-reads. Settings
+/// resolve when the worker promotes the row after acquiring the worktree: the
+/// turn runs under the session's model, effort, and fast mode then, including
+/// confirmed reservations accepted during the wait. Same contract as the chat
+/// queue. A pause holds the whole drain; the resume, the next enqueue, or
+/// send-now wakes the worker again.
 async fn drain_queued(
     session: &mut CodeSession,
     engine: &dyn HarnessSession,
@@ -2937,7 +2937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_queued_turn_keeps_the_settings_it_held_before_a_later_reservation() {
+    async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
         let (directory, store, sink, session_id) = seeded_sink().await;
         let owner = OwnerId::local();
         let mut session = get_session(&store, &owner, session_id)
@@ -3051,12 +3051,12 @@ mod tests {
         })
         .await
         .expect("the queued turn completes");
-        assert_eq!(turn.model, held.model);
-        assert_eq!(turn.fast_mode, held.fast_mode);
-        assert_eq!(adapter.turn_efforts(), vec![held.reasoning_effort]);
+        assert_eq!(turn.model, later.model);
+        assert_eq!(turn.fast_mode, later.fast_mode);
+        assert_eq!(adapter.turn_efforts(), vec![later.reasoning_effort]);
         let inputs = adapter.turn_inputs();
-        assert_eq!(inputs[0].model, held.model);
-        assert_eq!(inputs[0].fast_mode, held.fast_mode);
+        assert_eq!(inputs[0].model, later.model);
+        assert_eq!(inputs[0].fast_mode, later.fast_mode);
         let _ = handle.commands.send(WorkerCommand::Shutdown).await;
     }
 
