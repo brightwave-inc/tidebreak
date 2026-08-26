@@ -4052,7 +4052,7 @@ impl CodeRuntime {
                 .await?
                 .is_some();
         if applies_to_future_turn {
-            return replace_session_execution_settings(&self.db, expected, next)
+            return replace_session_execution_settings(&self.db, &expected.owner, expected, next)
                 .await?
                 .ok_or_else(|| {
                     ServerError::conflict_kind(
@@ -4095,20 +4095,23 @@ impl CodeRuntime {
             })?
             .map_err(map_worker)?;
 
-        let updated = match replace_session_execution_settings(&self.db, expected, next).await {
-            Ok(Some(updated)) => updated,
-            Ok(None) => {
-                let _ = settlement.send(ExecutionSettingsSettlement::Abort);
-                return Err(ServerError::conflict_kind(
-                    "session_settings_changed",
-                    format!("the session settings changed before {action}"),
-                ));
-            }
-            Err(error) => {
-                let _ = settlement.send(ExecutionSettingsSettlement::Abort);
-                return Err(ServerError::from(error));
-            }
-        };
+        let updated =
+            match replace_session_execution_settings(&self.db, &expected.owner, expected, next)
+                .await
+            {
+                Ok(Some(updated)) => updated,
+                Ok(None) => {
+                    let _ = settlement.send(ExecutionSettingsSettlement::Abort);
+                    return Err(ServerError::conflict_kind(
+                        "session_settings_changed",
+                        format!("the session settings changed before {action}"),
+                    ));
+                }
+                Err(error) => {
+                    let _ = settlement.send(ExecutionSettingsSettlement::Abort);
+                    return Err(ServerError::from(error));
+                }
+            };
         if settlement
             .send(ExecutionSettingsSettlement::Confirmed)
             .is_err()
@@ -4977,14 +4980,15 @@ impl CodeRuntime {
             let mut next = CodeSessionExecutionSettings::from(&session);
             selected.deactivate_unsupported(&mut next);
             if next != CodeSessionExecutionSettings::from(&session) {
-                session = replace_session_execution_settings(&self.db, &session, &next)
-                    .await?
-                    .ok_or_else(|| {
-                        ServerError::conflict_kind(
-                            "session_settings_changed",
-                            "the session settings changed before its worker could attach",
-                        )
-                    })?;
+                session =
+                    replace_session_execution_settings(&self.db, &session.owner, &session, &next)
+                        .await?
+                        .ok_or_else(|| {
+                            ServerError::conflict_kind(
+                                "session_settings_changed",
+                                "the session settings changed before its worker could attach",
+                            )
+                        })?;
             }
         }
         let binary = probe.binary_path.clone().ok_or_else(|| {

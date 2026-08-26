@@ -2815,7 +2815,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             fast_mode: true,
         };
-        session = replace_session_execution_settings(&store, &session, &stale)
+        session = replace_session_execution_settings(&store, &owner, &session, &stale)
             .await
             .unwrap()
             .expect("the initial settings commit");
@@ -2888,7 +2888,7 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = replace_session_execution_settings(&store, &session, &committed)
+        let updated = replace_session_execution_settings(&store, &owner, &session, &committed)
             .await
             .unwrap()
             .expect("the reserved settings commit");

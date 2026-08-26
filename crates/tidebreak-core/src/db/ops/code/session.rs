@@ -149,16 +149,20 @@ pub async fn get_session_all_owners(
 /// change won, so the caller must release the worker without applying `next`.
 pub async fn replace_session_execution_settings(
     store: &DbStore,
+    owner: &OwnerId,
     expected: &CodeSession,
     next: &CodeSessionExecutionSettings,
 ) -> Result<Option<CodeSession>> {
+    if &expected.owner != owner {
+        return Ok(None);
+    }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, expected.id).await? {
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
     let Some(row) = entities::code_session::Entity::find_by_id(expected.id.0)
-        .filter(entities::code_session::Column::Owner.eq(expected.owner.as_str()))
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?

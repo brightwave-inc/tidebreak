@@ -339,7 +339,7 @@ async fn execution_settings_replace_atomically_and_survive_stale_worker_saves() 
         reasoning_effort: Some(ReasoningEffort::High),
         fast_mode: true,
     };
-    let changed = replace_session_execution_settings(&store, &stale, &next)
+    let changed = replace_session_execution_settings(&store, &owner, &stale, &next)
         .await
         .unwrap()
         .unwrap();
@@ -351,7 +351,7 @@ async fn execution_settings_replace_atomically_and_survive_stale_worker_saves() 
         fast_mode: false,
     };
     assert!(
-        replace_session_execution_settings(&store, &stale, &conflicting)
+        replace_session_execution_settings(&store, &owner, &stale, &conflicting)
             .await
             .unwrap()
             .is_none()
