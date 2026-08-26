@@ -979,12 +979,12 @@ export type CodeDeliveryPrAttentionReason = "changes_requested" | "checks_failed
  * User-initiated global PR action. Code-changing actions deliberately do not
  * exist here; they remain workspace-scoped agent prompts.
  */
-export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | 
+export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | { "type": "create_stack", 
 /**
  * The chain to register, bottom to top. Every pull request's base
  * ref must match the previous one's head ref.
  */
-{ "type": "create_stack", numbers: Array<number>, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
+numbers: Array<number>, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
 
 export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullRequestTarget, action: CodeDeliveryPullRequestAction, };
 
