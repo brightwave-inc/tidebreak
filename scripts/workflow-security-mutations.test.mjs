@@ -26,6 +26,8 @@ const fixturePaths = [
   ".github/vercel-cli/package.json",
   ".github/vercel-cli/pnpm-lock.yaml",
   "docs-site/package.json",
+  "crates/tidebreak-cli/build.rs",
+  "crates/tidebreak-core/build.rs",
   "crates/tidebreak-desktop/tauri.conf.json",
   "crates/tidebreak-desktop/tauri.staging.conf.json",
   "crates/tidebreak-desktop/Cargo.toml",
@@ -33,6 +35,7 @@ const fixturePaths = [
   "crates/tidebreak-desktop/src/updater.rs",
   "crates/tidebreak-desktop/src/broker.rs",
   "crates/tidebreak-desktop/scripts/prepare-sidecar.mjs",
+  "crates/tidebreak-server/build.rs",
   "deploy/self-host/Dockerfile",
   "deploy/self-host/Dockerfile.dockerignore",
   "crates/tidebreak-sandbox-agent/Dockerfile.dockerignore",
@@ -535,8 +538,14 @@ const mutations = [
     file: ".github/workflows/release.yml",
     expected: "restored product binaries are discarded before the packaging build",
     mutate: (source) =>
-      editWorkflowJob(source, "build_linux", (job) =>
-        job.replace(
+      editWorkflowJob(source, "build_linux", (job) => {
+        if (/      - name: Discard restored product binaries\n/.test(job)) {
+          return job.replace(
+            /\n\s+target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak \\\n/,
+            "\n",
+          );
+        }
+        return job.replace(
           "      - name: Install Linux packaging dependencies\n",
           `      - name: Restore unsigned Rust build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -554,8 +563,8 @@ const mutations = [
 
       - name: Install Linux packaging dependencies
 `,
-        ),
-      ),
+        );
+      }),
   },
   {
     name: "README macOS download matches an uploaded asset",

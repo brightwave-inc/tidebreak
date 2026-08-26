@@ -323,16 +323,6 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare App Store Connect key
-        env:
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: |
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
-          chmod 600 "$key_path"
-          echo "APPLE_API_KEY=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
-
       - name: Import Developer ID certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -401,7 +391,11 @@ jobs:
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify(overlay));
           '
 
-      - name: Build, sign, and notarize the staging app
+      # The App Store Connect key is deliberately not in the environment yet:
+      # without notary credentials, Tauri signs the app and DMG but skips its
+      # own notarization submission. One submission of the DMG below covers
+      # the nested app too, halving the Apple round trips.
+      - name: Build and sign the staging app
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
@@ -411,7 +405,19 @@ jobs:
             --config ${{ runner.temp }}/tidebreak-staging.json
             --bundles app,dmg
 
-      - name: Notarize and staple the DMG
+      - name: Prepare App Store Connect key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      # Notarizing the DMG registers tickets for the DMG and the identically
+      # signed app inside it, so both staples come from this one submission.
+      - name: Notarize the DMG, then staple the DMG and app
         env:
           RELEASE_TARGET: universal-apple-darwin
         run: |
@@ -422,6 +428,12 @@ jobs:
             exit 1
           }
           dmg_path="${dmg_paths[0]}"
+          app_paths=("$target_dir/$RELEASE_TARGET/release/bundle/macos/"*.app)
+          (( ${#app_paths[@]} == 1 )) && [[ -d "${app_paths[0]}" ]] || {
+            echo "Expected exactly one app bundle to staple for $RELEASE_TARGET" >&2
+            exit 1
+          }
+          app_path="${app_paths[0]}"
 
           submission_output="$(xcrun notarytool submit "$dmg_path" \
             --key "$APPLE_API_KEY_PATH" \
@@ -445,6 +457,8 @@ jobs:
 
           xcrun stapler staple "$dmg_path"
           xcrun stapler validate "$dmg_path"
+          xcrun stapler staple "$app_path"
+          xcrun stapler validate "$app_path"
 
       - name: Verify and collect signed artifacts
         env:
@@ -750,6 +764,9 @@ jobs:
             --cache-control 'no-cache, max-age=0'
           echo "advance=true" >> "$GITHUB_OUTPUT"
 
+      # Do not wait for the invalidation to complete: propagation takes 5-15
+      # minutes, the smoke test below cache-busts its own reads, and staging
+      # clients only ever race a short no-cache TTL on these two objects.
       - name: Invalidate staging metadata
         if: ${{ steps.advance.outputs.advance == 'true' }}
         id: invalidate
@@ -760,9 +777,6 @@ jobs:
             --query Invalidation.Id \
             --output text)"
           echo "id=$invalidation_id" >> "$GITHUB_OUTPUT"
-          aws cloudfront wait invalidation-completed \
-            --distribution-id "$DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID" \
-            --id "$invalidation_id"
 
       - name: Smoke test hosted staging
         if: ${{ steps.advance.outputs.advance == 'true' }}

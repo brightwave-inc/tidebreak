@@ -1591,12 +1591,14 @@ test("prepared binaries are checksum-verified before signing material loads", ()
 
 test("restored product binaries are discarded before the packaging build", () => {
   const release = workflows["release.yml"];
-  for (const name of ["build_macos", "build_windows", "build_linux"]) {
+  for (const name of ["build_macos", "prepare_windows", "build_windows", "build_linux"]) {
     const job = workflowJob(release, name);
     const names = stepNames(job);
     const restoreIdx = names.findIndex((n) => /Restore.*cache/i.test(n));
     const discardIdx = names.findIndex((n) => /Discard.*product/i.test(n));
-    const buildIdx = names.findIndex((n) => /Build.*Tauri|Bundle.*Tauri/i.test(n));
+    const buildIdx = names.findIndex((n) =>
+      /Build.*Tauri|Bundle.*Tauri|Compile.*production credentials/i.test(n),
+    );
     if (restoreIdx === -1) {
       assert.equal(discardIdx, -1, `${name}: discard without a cache restore is stale`);
       continue;
@@ -1625,6 +1627,16 @@ test("restored product binaries are discarded before the packaging build", () =>
     for (const product of products) {
       assert.match(discardStep, product, `${name}: discard must remove ${product}`);
     }
+  }
+});
+
+test("release version changes invalidate restored Rust artifacts", () => {
+  for (const crateName of ["tidebreak-cli", "tidebreak-core", "tidebreak-server"]) {
+    const buildScript = readFileSync(
+      repositoryFile("crates", crateName, "build.rs"),
+      "utf8",
+    );
+    assert.match(buildScript, /cargo::rerun-if-env-changed=TIDEBREAK_VERSION/);
   }
 });
 
