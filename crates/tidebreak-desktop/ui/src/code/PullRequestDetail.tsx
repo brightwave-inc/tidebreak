@@ -70,6 +70,7 @@ import {
   prAgentQuickActions,
   prDirectMergeAction,
   prFreshAgentPrompt,
+  prMergeControls,
   prWorkflowPrompt,
   type PrPromptAction,
 } from "./prActions";
@@ -88,6 +89,7 @@ import {
   STATUS_TONE_BADGE_VARIANT,
   checkCounts,
   mergeBlockedReasons,
+  prStatus,
   pullRequestLifecycle,
   pullRequestSettledAt,
   type PullRequestLifecycle,
@@ -307,14 +309,55 @@ export function PullRequestDetailSheet({
     try {
       for (const member of members) {
         // Merging a lower layer rebases the ones above, so every hop reads a
-        // fresh head rather than trusting the SHA this sheet loaded — the
-        // expected-head guard would refuse a stale one.
+        // fresh pull request rather than trusting the head this sheet loaded
+        // — the expected-head guard would refuse a stale SHA.
         const fresh = await client.getCodeDeliveryPullRequestDetail({
           repository: codeDeliveryRepositoryTarget(summary.repository),
           number: member.number,
         });
+        if (fresh.summary.state !== "open" || !fresh.summary.head_sha) {
+          continue;
+        }
         const head = fresh.summary.head_sha;
-        if (fresh.summary.state !== "open" || !head) continue;
+        // One gate per hop, the same one every other merge surface uses:
+        // the layer must actually be mergeable now, not just open.
+        const action = prDirectMergeAction(
+          deliveryPullRequestDigest(fresh.summary),
+          { hasMergeQueue },
+        );
+        if (!action) {
+          toast.warning(
+            `Stack merge stopped at #${member.number}: ${
+              prMergeControls(prStatus(fresh.summary).gate).explanation ??
+              "it is not mergeable right now."
+            }`,
+          );
+          return;
+        }
+        if (action.kind !== "merge") {
+          // A queue entry hands the layer to the host without landing it, so
+          // the layers above cannot merge yet. Stop here and say so — a run
+          // that armed the queue has not merged the stack.
+          const result = await client.runCodeDeliveryPullRequestAction({
+            target: {
+              repository: codeDeliveryRepositoryTarget(summary.repository),
+              number: member.number,
+            },
+            action: {
+              type: "merge",
+              method: mergeMethod,
+              auto: true,
+              admin: false,
+              expected_head_sha: head,
+            },
+          });
+          toast[result.success ? "success" : "warning"](
+            result.success
+              ? `#${member.number} was added to the merge queue. The layers above follow once it lands.`
+              : `Stack merge stopped at #${member.number}: ${result.message}`,
+          );
+          return;
+        }
         const result = await client.runCodeDeliveryPullRequestAction({
           target: {
             repository: codeDeliveryRepositoryTarget(summary.repository),
@@ -323,7 +366,7 @@ export function PullRequestDetailSheet({
           action: {
             type: "merge",
             method: mergeMethod,
-            auto: hasMergeQueue,
+            auto: false,
             admin: false,
             expected_head_sha: head,
           },
@@ -863,22 +906,30 @@ function PrActions({
       : null;
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;
   const canAdminMerge = detail.can_merge && Boolean(summary.head_sha);
-  // The stack offer is GitHub's own: merging lands the bottom run of
-  // non-draft layers, in order. Merged layers below the run are skipped, a
-  // draft layer stops it — GitHub lands everything below the latest ready
-  // pull request and leaves the drafts above open. Two layers is the
-  // smallest stack worth confirming, and while the offer is on the table it
-  // replaces the single-layer merge: merging one layer of a live stack alone
-  // is the half-measure the stack exists to avoid.
+  // The stack offer lands this pull request and every unmerged layer below
+  // it, in order — GitHub's own "merge the latest ready pull request" move.
+  // Merged layers below are skipped (already landed), a draft layer blocks
+  // everything above it, and the run stops at this pull request: layers
+  // above it are not the reader's to land from here. The offer itself is
+  // gated by the same decision every merge surface uses, and while it is on
+  // the table it replaces the single-layer merge — merging one layer of a
+  // live stack alone is the half-measure the stack exists to avoid.
   const mergeableStackLayers: CodeDeliveryStackMember[] = [];
+  let stackRunReachesThis = false;
   for (const member of detail.stack ?? []) {
     if (member.state !== "open") continue;
     if (member.draft) break;
     mergeableStackLayers.push(member);
+    if (member.number === summary.number) {
+      stackRunReachesThis = true;
+      break;
+    }
   }
   const canMergeStack =
     detail.can_merge &&
     Boolean(summary.head_sha) &&
+    mergeAction !== null &&
+    stackRunReachesThis &&
     mergeableStackLayers.length >= 2;
   const showSingleMerge = !canMergeStack && mergeAction !== null;
   const anyAction =
@@ -978,14 +1029,18 @@ function PrActions({
             {confirmingStackMerge && (
               <div className="mt-2.5 flex w-full flex-col gap-2 rounded-md border border-border-subtle bg-background p-2.5">
                 <p className="text-muted-foreground text-xs">
-                  Lands {mergeableStackLayers.length} layers bottom to top:
-                  {mergeableStackLayers.map((member) => ` #${member.number}`)}.
-                  Each layer merges with{" "}
+                  Lands #{summary.number} and the{" "}
+                  {mergeableStackLayers.length - 1} unmerged layer
+                  {mergeableStackLayers.length - 1 === 1 ? "" : "s"} below it (
+                  {mergeableStackLayers
+                    .map((member) => `#${member.number}`)
+                    .join(", ")}
+                  ), bottom to top, each with{" "}
                   {hasMergeQueue
-                    ? "the merge queue"
+                    ? "the merge queue — the first layer joins the queue and the rest follow once it lands"
                     : `a direct ${mergeMethod} merge`}
-                  . The chain stops at the first layer that cannot merge, and
-                  draft layers above it stay open.
+                  . The chain stops at the first layer that cannot merge; draft
+                  layers stay open.
                 </p>
                 <div className="flex gap-2">
                   <Button

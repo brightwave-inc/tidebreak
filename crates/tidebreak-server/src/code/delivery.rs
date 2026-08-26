@@ -864,10 +864,12 @@ pub(crate) async fn query_pull_requests_by_number(
         .await;
 
     let mut reads = Vec::new();
+    let mut apis: HashMap<String, Arc<DeliveryApi>> = HashMap::new();
     let mut errors = Vec::new();
     for result in resolved {
         match result {
             Ok((target, api, repository, numbers)) => {
+                apis.insert(repository_key(&target), Arc::clone(&api));
                 reads.extend(
                     numbers.into_iter().map(|number| {
                         (target.clone(), Arc::clone(&api), repository.clone(), number)
@@ -911,7 +913,7 @@ pub(crate) async fn query_pull_requests_by_number(
     // keys on `stack_parent_number` (decision 62) — so this path persists and
     // annotates the same way the list read does. Host stacks join first so
     // the shared pass sees the same host edges a list read would.
-    attach_host_stacks(runtime, owner, &reader, &mut items).await;
+    attach_host_stacks(&apis, &mut items).await;
     let workspaces_gaining_links =
         persist_and_augment_pull_request_facts(runtime, owner, &workspaces, &mut items).await;
     for workspace_id in workspaces_gaining_links {
@@ -2530,38 +2532,33 @@ async fn fetch_stacks(api: &DeliveryApi, target: &CodeGitHubRepositoryTarget) ->
 }
 
 /// Attach host stack membership to exact-number reads: one stacks read per
-/// distinct repository, then per-pull-request membership.
+/// distinct repository, through the transports that path already borrowed —
+/// no new credential borrows.
 ///
 /// Best-effort like the list read — a repository whose stacks cannot be read
 /// keeps its items as they came, and branch inference stays the fallback.
 async fn attach_host_stacks(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
-    reader: &DeliveryReader,
+    apis: &HashMap<String, Arc<DeliveryApi>>,
     items: &mut [PullRequestObservation],
 ) {
-    let mut groups: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        let repository = &item.summary.repository;
         groups
-            .entry((
-                repository.host.clone(),
-                repository.owner.clone(),
-                repository.name.clone(),
-            ))
+            .entry(repository_key_ref(&item.summary.repository))
             .or_default()
             .push(index);
     }
-    for ((host, repo_owner, name), indices) in groups {
-        let target = CodeGitHubRepositoryTarget {
-            host,
-            owner: repo_owner,
-            name,
-        };
-        let Ok(api) = delivery_api(runtime, owner, reader, &target).await else {
+    for (key, indices) in groups {
+        let Some(api) = apis.get(&key) else {
             continue;
         };
-        let Some(payload) = fetch_stacks(&api, &target).await else {
+        let repository = &items[indices[0]].summary.repository;
+        let target = CodeGitHubRepositoryTarget {
+            host: repository.host.clone(),
+            owner: repository.owner.clone(),
+            name: repository.name.clone(),
+        };
+        let Some(payload) = fetch_stacks(api, &target).await else {
             continue;
         };
         let memberships = parse_stack_memberships(&payload);
@@ -2581,12 +2578,12 @@ async fn fetch_pull_requests(
     plan: &PullRequestRemotePlan,
     force_refresh: bool,
 ) -> Result<Vec<PullRequestObservation>, String> {
-    // One transport for the stacks read, whichever arm lists the pull
-    // requests: both readers expose the same GET, and the enrichment is
-    // arm-independent.
-    let stacks_api = delivery_api(runtime, owner, reader, target).await?;
-    let (repository, values, stacks) = match reader {
-        DeliveryReader::Gh(observation) => {
+    // One borrowed transport per repository, shared by the pull-request list
+    // and the stacks enrichment — the credential lender counts one borrow per
+    // repository operation, and a second one here would double it.
+    let api = delivery_api(runtime, owner, reader, target).await?;
+    let (repository, values, stacks) = match &api {
+        DeliveryApi::Gh { observation, .. } => {
             let binary = observation
                 .binary
                 .as_deref()
@@ -2615,7 +2612,7 @@ async fn fetch_pull_requests(
                 with_transient_retry(|| {
                     gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)
                 }),
-                fetch_stacks(&stacks_api, target),
+                fetch_stacks(&api, target),
             );
             let raw = raw?;
             let value: Value = serde_json::from_str(&raw)
@@ -2626,23 +2623,24 @@ async fn fetch_pull_requests(
                 stacks,
             )
         }
-        DeliveryReader::Forge => {
-            let credential = borrow_delivery_credential(runtime, owner, target).await?;
+        DeliveryApi::Rest {
+            api_base,
+            credential,
+        } => {
             let repository =
-                resolve_repository_rest_cached(runtime, target, None, force_refresh, &credential)
+                resolve_repository_rest_cached(runtime, target, None, force_refresh, credential)
                     .await?;
-            let api_base = runtime.forge_api_base_for(&target.host);
             let (values, stacks) = tokio::join!(
                 with_transient_retry(|| {
                     super::forge_rest::delivery_pull_requests(
-                        &api_base,
+                        api_base,
                         target,
-                        &credential,
+                        credential,
                         plan.state,
                         plan.checks_loaded,
                     )
                 }),
-                fetch_stacks(&stacks_api, target),
+                fetch_stacks(&api, target),
             );
             let values = values?;
             (repository, values, stacks)

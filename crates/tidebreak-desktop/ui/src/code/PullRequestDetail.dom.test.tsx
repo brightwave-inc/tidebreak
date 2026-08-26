@@ -18,6 +18,7 @@ import type {
 import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
+  stackedDeliveryPullRequests,
 } from "../stories/fixtures";
 import { PullRequestDetailSheet } from "./PullRequestDetail";
 
@@ -428,5 +429,151 @@ describe("PullRequestDetailSheet", () => {
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("button", { name: "Admin merge" })).toBeNull();
     expect(runAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("merge stack", () => {
+  function stackedSummary(number: number) {
+    const summary = stackedDeliveryPullRequests.find(
+      (item) => item.number === number,
+    );
+    if (!summary) throw new Error(`no stacked fixture for #${number}`);
+    return summary;
+  }
+
+  async function renderStackPanel(
+    number: number,
+    api = client(),
+    hasMergeQueue = false,
+  ) {
+    render(
+      <PullRequestDetailSheet
+        client={api}
+        summary={stackedSummary(number)}
+        hasMergeQueue={hasMergeQueue}
+        onClose={vi.fn()}
+        onChanged={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    await screen.findByRole("tab", { name: /Conversation/ });
+  }
+
+  async function confirmStackMerge() {
+    await userEvent.click(
+      screen.getByRole("button", { name: /Merge stack \(\d layers\)/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Merge stack" }));
+  }
+
+  it("merges the opened pull request and the layers below it, in order", async () => {
+    vi.mocked(toast.success).mockClear();
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: true,
+        message: "Merged.",
+      }),
+    );
+    await renderStackPanel(
+      2302,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+    );
+
+    await confirmStackMerge();
+
+    // Bottom layer first, then the opened layer, each a direct merge against
+    // that layer's own head.
+    expect(runAction).toHaveBeenCalledTimes(2);
+    const calls = runAction.mock.calls.map((call) => call[0]);
+    expect(calls.map((call) => call.target.number)).toEqual([2301, 2302]);
+    for (const call of calls) {
+      expect(call.action).toMatchObject({ type: "merge", auto: false });
+    }
+    expect(toast.success).toHaveBeenCalledWith("Stack merged.");
+  });
+
+  it("replaces the single-layer merge while the stack offer stands", async () => {
+    await renderStackPanel(2302);
+    expect(
+      screen.getByRole("button", { name: /Merge stack \(2 layers\)/ }),
+    ).toBeInTheDocument();
+    // A single-layer squash merge would land #2302 into #2301's branch — the
+    // half-measure the stack exists to avoid.
+    expect(
+      screen.queryByRole("button", { name: "Squash and merge" }),
+    ).toBeNull();
+  });
+
+  it("keeps the single-layer merge for a bottom layer with nothing below it", async () => {
+    await renderStackPanel(2301);
+    expect(screen.queryByRole("button", { name: /Merge stack/ })).toBeNull();
+    // The single-layer merge stays: nothing below this layer to land with it.
+    expect(screen.getByRole("button", { name: "Merge" })).toBeInTheDocument();
+  });
+
+  it("stops at a layer the merge gate refuses, merging nothing", async () => {
+    vi.mocked(toast.warning).mockClear();
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: true,
+        message: "Merged.",
+      }),
+    );
+    const blockedDetail = {
+      ...deliveryPullRequestDetails[2301]!,
+      summary: {
+        ...stackedDeliveryPullRequests[0]!,
+        mergeable: "conflicting",
+        merge_state_status: "dirty",
+      },
+    };
+    const getDetail = vi.fn(
+      async ({ number }: CodeDeliveryPullRequestTarget) =>
+        number === 2301 ? blockedDetail : deliveryPullRequestDetails[number]!,
+    );
+    await renderStackPanel(
+      2302,
+      client({
+        getCodeDeliveryPullRequestDetail: getDetail,
+        runCodeDeliveryPullRequestAction: runAction,
+      }),
+    );
+
+    await confirmStackMerge();
+
+    expect(runAction).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith(
+      expect.stringMatching(/stopped at #2301.*conflicts/),
+    );
+    expect(toast.success).not.toHaveBeenCalledWith("Stack merged.");
+  });
+
+  it("enqueues the first layer on a merge-queue repository and stops there", async () => {
+    vi.mocked(toast.success).mockClear();
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: true,
+        message: "Added to the merge queue.",
+      }),
+    );
+    await renderStackPanel(
+      2302,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+      true,
+    );
+
+    await confirmStackMerge();
+
+    // The queue entry hands the layer to the host without landing it, so the
+    // chain stops and never claims the stack merged.
+    expect(runAction).toHaveBeenCalledTimes(1);
+    expect(runAction.mock.calls[0]![0]).toMatchObject({
+      target: { number: 2301 },
+      action: { type: "merge", auto: true },
+    });
+    expect(toast.success).toHaveBeenCalledWith(
+      expect.stringMatching(/#2301 was added to the merge queue/),
+    );
+    expect(toast.success).not.toHaveBeenCalledWith("Stack merged.");
   });
 });
