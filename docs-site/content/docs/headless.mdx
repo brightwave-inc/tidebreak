@@ -412,6 +412,53 @@ folder consent is not in that vocabulary: if a turn parks on
 decision path. Standing consent still comes from `tidebreak folder connect`
 or the desktop.
 
+#### Code mode
+
+The same `agent-mcp` process also drives **code mode** on that server: repos,
+workspaces, sessions, turns, approvals, diffs, and git/PR actions. Reads are
+read-only; mutations are sensitive. Possession of the bearer authorizes
+calling them. Harness approvals the engine raises inside a session are never
+auto-approved.
+
+Session lifecycle:
+
+| Tool | What it does |
+| --- | --- |
+| `code_harnesses` | Harness doctor report. |
+| `code_repo_add` | Register a local git checkout (`source`, optional `name`). |
+| `code_repos` | Registered repos. |
+| `code_workspace_create` | Create a worktree + branch (`repo_id`, optional `name`, `base`). |
+| `code_workspaces` | Workspaces, optionally filtered by `repo_id`. |
+| `code_workspace_archive` | Archive a workspace. |
+| `code_session_create` | Start a session (`workspace_id`, optional `harness`, `model`, `permission_mode`). |
+| `code_sessions` | Sessions in a workspace. |
+| `code_session_set_permission_mode` | Change the session's permission mode. |
+| `code_turns` | Turn history plus the durable session queue. |
+| `code_interrupt` | Interrupt the in-flight turn. |
+| `code_diff` / `code_files` | Workspace diff and changed-file list. |
+| `code_git_status` / `code_git_commit` / `code_git_push` / `code_git_pr` | Git and pull-request actions. These are Sensitive tools, not a second approval gate: the bearer already authorizes the workspace. |
+
+The run-turn → decide loop is the chat loop with a code-shaped decision:
+
+```json
+{"approval_id":"…","decision":"approve"}
+{"approval_id":"…","decision":"deny","feedback":"use the fixtures directory"}
+```
+
+`code_run_turn` subscribes the session event socket, then submits. Follow until
+the turn settles, parks on an approval, or `timeout_seconds` (default 300)
+elapses. `code_wait` re-follows an in-flight or queued turn. `code_decide`
+applies the decision and follows to the next settle point. `code_approvals`
+lists what is parked.
+
+`status` is the chat set plus **`queued`**. `POST /code/sessions/{id}/turns`
+waits for the worker to finish or to park the message on the durable session
+queue. A queued receipt returns immediately with the queue position and the
+turn id the promoted turn will run under — it is not a failure. Re-check with
+`code_wait`; one wait drains the running turn and then the queued follow-up.
+
+`run_action` and `reap_session` are not mounted.
+
 ### `rehome-secrets`
 
 macOS ties keychain approvals to a binary's code signature, so credentials

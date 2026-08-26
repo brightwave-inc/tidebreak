@@ -465,7 +465,7 @@ impl CodeRuntime {
         })
     }
 
-    #[cfg(any(test, feature = "scripted-harness"))]
+    #[cfg(test)]
     pub(crate) fn with_registry(
         db: Arc<DbStore>,
         data_dir: PathBuf,
@@ -474,7 +474,7 @@ impl CodeRuntime {
         Self::with_registry_and_browser_runtime(db, data_dir, adapters, None, None)
     }
 
-    #[cfg(any(test, feature = "scripted-harness"))]
+    #[cfg(test)]
     pub(crate) fn with_registry_and_browser_runtime(
         db: Arc<DbStore>,
         data_dir: PathBuf,
@@ -539,7 +539,7 @@ impl CodeRuntime {
 
     /// Lend gateway git credentials from tests, in place of the on-behalf-of
     /// handle a hosted deployment wires in.
-    #[cfg(any(test, feature = "scripted-harness"))]
+    #[cfg(test)]
     pub(crate) fn with_git_credentials(
         mut self,
         lender: Arc<dyn crate::obo_gateway::GitCredentialLender>,
@@ -2463,17 +2463,31 @@ impl CodeRuntime {
             // which case this is a marker read. It stays on the create path
             // regardless: correctness must not depend on the warm path having
             // run, and a pin installed here is serialized against that one.
-            match self.ensure_pinned_harness(harness, false).await {
-                Ok(binary) => {
-                    self.record_pin_install(harness, Ok(()));
-                    self.invalidate_moved_probe(harness, &binary);
+            // Skip when a CLI e2e has replaced this kind with the scripted
+            // engine: that binary has no pin and must not try to download one.
+            let skip_pin = {
+                #[cfg(feature = "scripted-harness")]
+                {
+                    crate::scripted_harness::env_is_set()
                 }
-                Err(err) => {
-                    self.record_pin_install(harness, Err(err.clone()));
-                    return Err(ServerError::unprocessable_kind(
-                        "harness_not_found",
-                        format!("{harness} could not be installed: {err}"),
-                    ));
+                #[cfg(not(feature = "scripted-harness"))]
+                {
+                    false
+                }
+            };
+            if !skip_pin {
+                match self.ensure_pinned_harness(harness, false).await {
+                    Ok(binary) => {
+                        self.record_pin_install(harness, Ok(()));
+                        self.invalidate_moved_probe(harness, &binary);
+                    }
+                    Err(err) => {
+                        self.record_pin_install(harness, Err(err.clone()));
+                        return Err(ServerError::unprocessable_kind(
+                            "harness_not_found",
+                            format!("{harness} could not be installed: {err}"),
+                        ));
+                    }
                 }
             }
         }

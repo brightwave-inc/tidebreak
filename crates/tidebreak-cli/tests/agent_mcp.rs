@@ -100,6 +100,9 @@ impl Mcp {
             "chat_events",
             "chat_steer",
             "chat_cancel",
+            "code_run_turn",
+            "code_wait",
+            "code_decide",
         ] {
             assert!(
                 names.contains(&expected),
