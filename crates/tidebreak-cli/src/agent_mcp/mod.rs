@@ -25,6 +25,7 @@ use crate::connect;
 
 mod chat;
 pub(crate) mod follow;
+mod profile;
 
 /// Per-chat follow cursor so `chat_wait` / `chat_decide` resume the same turn.
 #[derive(Debug, Clone)]
@@ -67,7 +68,8 @@ pub(crate) async fn run(server: connect::Server) -> Result<()> {
 /// grow the surface (settings, code mode) without touching the entry point.
 fn assemble_registry(state: Arc<AgentMcp>) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
-    chat::register(&mut tools, state);
+    chat::register(&mut tools, Arc::clone(&state));
+    profile::register(&mut tools, state);
     tools
 }
 
@@ -125,15 +127,26 @@ mod tests {
         assert_eq!(
             names,
             [
+                "agent_run_cancel",
+                "agent_runs",
+                "chat_attach_file",
                 "chat_cancel",
                 "chat_create",
                 "chat_decide",
                 "chat_events",
                 "chat_list",
+                "chat_output_read",
+                "chat_outputs",
                 "chat_run_turn",
+                "chat_set_model",
+                "chat_set_permission_mode",
                 "chat_status",
                 "chat_steer",
                 "chat_wait",
+                "exec_select",
+                "model_role_set",
+                "profile_snapshot",
+                "web_search_select",
             ],
             "an invalid schema is dropped from advertisement; names must stay complete"
         );

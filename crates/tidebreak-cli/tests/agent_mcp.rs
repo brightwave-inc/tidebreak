@@ -100,6 +100,17 @@ impl Mcp {
             "chat_events",
             "chat_steer",
             "chat_cancel",
+            "profile_snapshot",
+            "model_role_set",
+            "web_search_select",
+            "exec_select",
+            "chat_set_model",
+            "chat_set_permission_mode",
+            "chat_attach_file",
+            "chat_outputs",
+            "chat_output_read",
+            "agent_runs",
+            "agent_run_cancel",
         ] {
             assert!(
                 names.contains(&expected),
@@ -351,4 +362,151 @@ fn short_timeout_then_wait() {
     );
     assert_eq!(finished["status"], "completed", "{finished}");
     assert_eq!(finished["assistant_text"], "later", "{finished}");
+}
+
+/// (a) profile_snapshot returns the profile axes and contains no key material.
+#[test]
+fn profile_snapshot_returns_axes_without_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = json!([{"text": "unused"}]).to_string();
+    let (_server, url, token) =
+        spawn_serve(dir.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let mut mcp = Mcp::connect(&url, &token, dir.path());
+
+    let snapshot = mcp.call("profile_snapshot", json!({}));
+    assert!(snapshot.get("settings").is_some(), "{snapshot}");
+    assert!(snapshot["providers"].is_array(), "{snapshot}");
+    assert!(snapshot["models"].is_array(), "{snapshot}");
+    assert!(snapshot["roles"].is_array(), "{snapshot}");
+    assert!(snapshot.get("web_search").is_some(), "{snapshot}");
+    assert!(snapshot.get("exec").is_some(), "{snapshot}");
+
+    let roles = snapshot["roles"].as_array().expect("roles");
+    assert!(
+        roles.iter().any(|role| role["role"] == "chat"),
+        "{snapshot}"
+    );
+    for provider in snapshot["providers"].as_array().expect("providers") {
+        assert!(provider.get("id").is_some(), "{provider}");
+        assert!(provider.get("kind").is_some(), "{provider}");
+        assert!(provider.get("has_credential").is_some(), "{provider}");
+        assert!(provider.get("credential").is_none(), "{provider}");
+        assert!(provider.get("api_key").is_none(), "{provider}");
+        assert!(provider.get("base_url").is_none(), "{provider}");
+    }
+
+    let dumped = snapshot.to_string();
+    for needle in [
+        "\"api_key\"",
+        "\"credential\"",
+        "\"token\"",
+        "\"secret\"",
+        "\"password\"",
+        "sk-",
+    ] {
+        assert!(
+            !dumped.contains(needle),
+            "snapshot leaked {needle}: {snapshot}"
+        );
+    }
+}
+
+/// (b) chat_set_permission_mode then a scripted approval-requiring turn parks.
+#[test]
+fn set_permission_mode_then_approval_parks() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = json!([
+        {
+            "tool": "exec",
+            "input": {"summary": "Run a command", "command": "true"}
+        },
+        {"text": "ran it"}
+    ])
+    .to_string();
+    let (_server, url, token) =
+        spawn_serve(dir.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let mut mcp = Mcp::connect(&url, &token, dir.path());
+
+    let created = mcp.call("chat_create", json!({ "permission_mode": "allow" }));
+    let chat_id = created["chat_id"].as_str().expect("chat_id").to_owned();
+    let set = mcp.call(
+        "chat_set_permission_mode",
+        json!({
+            "chat_id": chat_id,
+            "permission_mode": "ask",
+        }),
+    );
+    assert_eq!(set["permission_mode"], "ask", "{set}");
+
+    let parked = mcp.call(
+        "chat_run_turn",
+        json!({
+            "chat_id": chat_id,
+            "prompt": "run the command",
+        }),
+    );
+    assert_eq!(parked["status"], "needs_approval", "{parked}");
+    assert!(parked["pending"]["call_id"].as_str().is_some(), "{parked}");
+}
+
+/// (c) chat_attach_file then a turn that reads the attached document.
+#[test]
+fn attach_file_then_turn_reads_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("notes.md");
+    std::fs::write(&source, "alpha-marker-42 in the attached notes\n").unwrap();
+    let script = json!([
+        {"tool": "list_documents", "input": {}},
+        {"text": "I read the attached notes"}
+    ])
+    .to_string();
+    let (_server, url, token) =
+        spawn_serve(dir.path(), &[("TIDEBREAK_SCRIPTED_PROVIDER", &script)]);
+    let mut mcp = Mcp::connect(&url, &token, dir.path());
+
+    let created = mcp.call("chat_create", json!({}));
+    let chat_id = created["chat_id"].as_str().expect("chat_id").to_owned();
+    let attached = mcp.call(
+        "chat_attach_file",
+        json!({
+            "chat_id": chat_id,
+            "path": source.to_string_lossy(),
+        }),
+    );
+    let document_id = attached["id"].as_str().expect("attach id").to_owned();
+    assert_eq!(attached["kind"], "document", "{attached}");
+
+    let turn = mcp.call(
+        "chat_run_turn",
+        json!({
+            "chat_id": chat_id,
+            "prompt": "read the attached notes",
+        }),
+    );
+    assert_eq!(turn["status"], "completed", "{turn}");
+    assert_eq!(
+        turn["assistant_text"], "I read the attached notes",
+        "{turn}"
+    );
+
+    let events = mcp.call(
+        "chat_events",
+        json!({
+            "chat_id": chat_id,
+            "after_seq": 0,
+        }),
+    );
+    let frames = events["events"].as_array().expect("events");
+    let listed = frames.iter().any(|frame| {
+        let event = frame.get("event").unwrap_or(frame);
+        event.get("type").and_then(Value::as_str) == Some("tool_call_completed")
+            && event
+                .pointer("/result")
+                .map(|result| result.to_string())
+                .is_some_and(|dump| dump.contains("notes.md") || dump.contains(&document_id))
+    });
+    assert!(
+        listed,
+        "list_documents did not surface the attached file {document_id}: {events}"
+    );
 }
