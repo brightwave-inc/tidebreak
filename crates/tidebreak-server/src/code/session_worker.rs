@@ -2809,10 +2809,16 @@ mod tests {
             .unwrap()
             .unwrap();
         session.lifecycle = CodeSessionLifecycle::Idle;
-        session.model = Some("stale".into());
-        session.reasoning_effort = Some(ReasoningEffort::High);
-        session.fast_mode = true;
         assert!(save_session(&store, &session).await.unwrap());
+        let stale = CodeSessionExecutionSettings {
+            model: Some("stale".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: true,
+        };
+        session = replace_session_execution_settings(&store, &session, &stale)
+            .await
+            .unwrap()
+            .expect("the initial settings commit");
 
         let worktree = directory.path().join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
