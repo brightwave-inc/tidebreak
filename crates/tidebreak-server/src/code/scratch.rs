@@ -526,7 +526,9 @@ mod tests {
         let data_dir = worktree.path().join("data");
         std::fs::create_dir(&data_dir).unwrap();
 
-        let error = workspace_root(&data_dir, WorkspaceId::new()).unwrap_err();
+        let error = workspace_root(&data_dir, WorkspaceId::new())
+            .err()
+            .expect("symlinked Git marker should be rejected");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
@@ -591,7 +593,9 @@ mod tests {
         let data_dir = worktree.path().join(".tidebreak");
         std::fs::create_dir(&data_dir).unwrap();
 
-        let error = workspace_root(&data_dir, WorkspaceId::new()).unwrap_err();
+        let error = workspace_root(&data_dir, WorkspaceId::new())
+            .err()
+            .expect("repository-local data directory should be rejected");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_git_success(worktree.path(), &["add", "-A"]);
