@@ -190,11 +190,11 @@ pub async fn list_workspace_files(
         files: files
             .into_iter()
             .map(|file| CodeFileChange {
-                path: file.path,
+                path: file.path.to_wire(),
                 kind: file.kind,
                 insertions: file.insertions,
                 deletions: file.deletions,
-                previous_path: file.previous_path,
+                previous_path: file.previous_path.map(|path| path.to_wire()),
             })
             .collect(),
         truncated,
@@ -208,12 +208,7 @@ pub async fn get_workspace_diff(
     Path(id): Path<WorkspaceId>,
     Query(query): Query<WorkspaceDiffQuery>,
 ) -> Result<Json<CodeWorkspaceDiff>, ServerError> {
-    let file = query
-        .file
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let file = exact_diff_file(query.file);
     let (diff, truncated, stat, turn_id) =
         code.workspace_diff(id, query.turn, file.as_deref()).await?;
     Ok(Json(CodeWorkspaceDiff {
@@ -223,4 +218,22 @@ pub async fn get_workspace_diff(
         turn_id,
         file,
     }))
+}
+
+fn exact_diff_file(file: Option<String>) -> Option<String> {
+    file.filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exact_diff_file;
+
+    #[test]
+    fn diff_file_keeps_path_whitespace_exact() {
+        assert_eq!(
+            exact_diff_file(Some(" leading and trailing ".to_owned())).as_deref(),
+            Some(" leading and trailing ")
+        );
+        assert_eq!(exact_diff_file(Some(String::new())), None);
+    }
 }

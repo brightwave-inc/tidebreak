@@ -25,11 +25,14 @@
 //! Diffs are produced here, bounded in bytes and file count, with truncation
 //! marked on the payload. The renderer never runs git.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::warn;
@@ -53,6 +56,7 @@ pub(crate) const MAX_DIFF_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_DIFF_FILES: usize = 64;
 
 const REF_PREFIX: &str = "refs/tidebreak/checkpoints";
+const GIT_PATH_WIRE_PREFIX: &str = "tidebreak-path:v1:";
 
 /// Ordinal of a session's start baseline, one below its first turn.
 ///
@@ -78,14 +82,65 @@ impl Default for DiffBounds {
     }
 }
 
+/// One Git path, kept as bytes until the route serializes it.
+///
+/// UTF-8 paths keep their existing wire value unless they start with the
+/// reserved prefix. Every other path uses a canonical URL-safe base64 value,
+/// which the file-diff query must return unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GitPath(Vec<u8>);
+
+impl GitPath {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+
+    fn from_wire(value: &str) -> Result<Self, CheckpointError> {
+        let Some(encoded) = value.strip_prefix(GIT_PATH_WIRE_PREFIX) else {
+            return Ok(Self(value.as_bytes().to_vec()));
+        };
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| CheckpointError::user("file path identifier is invalid"))?;
+        let path = Self(bytes);
+        if path.to_wire() != value {
+            return Err(CheckpointError::user(
+                "file path identifier is not canonical",
+            ));
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn to_wire(&self) -> String {
+        match std::str::from_utf8(&self.0) {
+            Ok(path) if !path.starts_with(GIT_PATH_WIRE_PREFIX) => path.to_owned(),
+            _ => format!("{GIT_PATH_WIRE_PREFIX}{}", URL_SAFE_NO_PAD.encode(&self.0)),
+        }
+    }
+
+    fn to_os_string(&self) -> Result<OsString, String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            Ok(OsString::from_vec(self.0.clone()))
+        }
+        #[cfg(not(unix))]
+        {
+            String::from_utf8(self.0.clone())
+                .map(OsString::from)
+                .map_err(|_| "Git returned a path that this platform cannot represent".to_owned())
+        }
+    }
+}
+
 /// One file in a bounded workspace or turn file list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChangedFile {
-    pub path: String,
+    pub path: GitPath,
     pub kind: FileChangeKind,
     pub insertions: u32,
     pub deletions: u32,
-    pub previous_path: Option<String>,
+    pub previous_path: Option<GitPath>,
 }
 
 /// Bounded file list for `GET /code/workspaces/{id}/files`.
@@ -346,24 +401,23 @@ pub(crate) async fn produce_diff(
     file: Option<&str>,
     bounds: DiffBounds,
 ) -> Result<BoundedDiff, CheckpointError> {
-    let listed = collect_changes(worktree, from, to, bounds).await?;
     if let Some(path) = file {
-        let raw = git_bytes(
+        let path = GitPath::from_wire(path)?;
+        let paths = std::slice::from_ref(&path);
+        let raw = git_bytes_with_literal_paths(
             worktree,
-            &["diff", "--find-renames", from, to, "--", path],
+            &["diff", "--find-renames", from, to, "--"],
+            paths,
             GIT_SNAPSHOT_TIMEOUT,
         )
         .await
         .map_err(CheckpointError::internal)?;
         let (diff, body_truncated) = truncate_bytes(&raw, bounds.max_bytes);
-        let file_stat = listed
-            .files
-            .iter()
-            .find(|entry| entry.path == path || entry.previous_path.as_deref() == Some(path));
+        let selected = collect_changes_for_paths(worktree, from, to, paths).await?;
         let stat = Diffstat {
-            files: u32::from(file_stat.is_some() || !diff.is_empty()),
-            insertions: file_stat.map(|entry| entry.insertions).unwrap_or(0),
-            deletions: file_stat.map(|entry| entry.deletions).unwrap_or(0),
+            files: selected.stat.files.max(u32::from(!diff.is_empty())),
+            insertions: selected.stat.insertions,
+            deletions: selected.stat.deletions,
             truncated: body_truncated,
         };
         return Ok(BoundedDiff {
@@ -373,6 +427,7 @@ pub(crate) async fn produce_diff(
         });
     }
 
+    let listed = collect_changes(worktree, from, to, bounds).await?;
     // One `git diff` for every included path rather than one spawn per file.
     // `collect_changes` has already capped `listed.files` at `max_files` and
     // set `listed.truncated` when it did, so passing those paths as a single
@@ -389,11 +444,19 @@ pub(crate) async fn produce_diff(
             },
         });
     }
-    let mut args: Vec<&str> = vec!["diff", "--find-renames", from, to, "--"];
-    args.extend(listed.files.iter().map(|entry| entry.path.as_str()));
-    let raw = git_bytes(worktree, &args, GIT_SNAPSHOT_TIMEOUT)
-        .await
-        .map_err(CheckpointError::internal)?;
+    let paths: Vec<_> = listed
+        .files
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    let raw = git_bytes_with_literal_paths(
+        worktree,
+        &["diff", "--find-renames", from, to, "--"],
+        &paths,
+        GIT_SNAPSHOT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
     let (body, body_truncated) = truncate_bytes(&raw, bounds.max_bytes);
     truncated |= body_truncated;
     Ok(BoundedDiff {
@@ -726,19 +789,72 @@ async fn collect_changes(
     to: &str,
     bounds: DiffBounds,
 ) -> Result<BoundedFiles, CheckpointError> {
-    let name_status = git_bytes(
+    collect_changes_inner(worktree, from, to, bounds, None).await
+}
+
+async fn collect_changes_for_paths(
+    worktree: &Path,
+    from: &str,
+    to: &str,
+    paths: &[GitPath],
+) -> Result<BoundedFiles, CheckpointError> {
+    collect_changes_inner(
         worktree,
-        &["diff", "--name-status", "-z", "--find-renames", from, to],
-        GIT_TIMEOUT,
+        from,
+        to,
+        DiffBounds {
+            max_bytes: usize::MAX,
+            max_files: usize::MAX,
+        },
+        Some(paths),
     )
     .await
+}
+
+async fn collect_changes_inner(
+    worktree: &Path,
+    from: &str,
+    to: &str,
+    bounds: DiffBounds,
+    paths: Option<&[GitPath]>,
+) -> Result<BoundedFiles, CheckpointError> {
+    let name_status_args = [
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        from,
+        to,
+        "--",
+    ];
+    let numstat_args = ["diff", "--numstat", "-z", "--find-renames", from, to, "--"];
+    let name_status = match paths {
+        Some(paths) => {
+            git_bytes_with_literal_paths(worktree, &name_status_args, paths, GIT_TIMEOUT).await
+        }
+        None => {
+            git_bytes(
+                worktree,
+                &name_status_args[..name_status_args.len() - 1],
+                GIT_TIMEOUT,
+            )
+            .await
+        }
+    }
     .map_err(CheckpointError::internal)?;
-    let numstat = git_bytes(
-        worktree,
-        &["diff", "--numstat", "-z", "--find-renames", from, to],
-        GIT_TIMEOUT,
-    )
-    .await
+    let numstat = match paths {
+        Some(paths) => {
+            git_bytes_with_literal_paths(worktree, &numstat_args, paths, GIT_TIMEOUT).await
+        }
+        None => {
+            git_bytes(
+                worktree,
+                &numstat_args[..numstat_args.len() - 1],
+                GIT_TIMEOUT,
+            )
+            .await
+        }
+    }
     .map_err(CheckpointError::internal)?;
     let stats = parse_numstat(&numstat);
     let mut files = parse_name_status(&name_status);
@@ -777,42 +893,41 @@ async fn collect_changes(
 }
 
 fn parse_name_status(raw: &[u8]) -> Vec<ChangedFile> {
-    let text = String::from_utf8_lossy(raw);
-    let mut parts = text.split('\0').filter(|part| !part.is_empty());
+    let mut parts = raw.split(|byte| *byte == 0).filter(|part| !part.is_empty());
     let mut files = Vec::new();
     while let Some(status) = parts.next() {
-        let code = status.chars().next().unwrap_or('M');
+        let code = status.first().copied().unwrap_or(b'M');
         match code {
-            'R' | 'C' => {
-                let previous = parts.next().unwrap_or("").to_owned();
-                let path = parts.next().unwrap_or("").to_owned();
+            b'R' | b'C' => {
+                let previous = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default();
                 if path.is_empty() {
                     continue;
                 }
                 files.push(ChangedFile {
-                    path,
-                    kind: if code == 'R' {
+                    path: GitPath::from_bytes(path),
+                    kind: if code == b'R' {
                         FileChangeKind::Renamed
                     } else {
                         FileChangeKind::Modified
                     },
                     insertions: 0,
                     deletions: 0,
-                    previous_path: Some(previous).filter(|value| !value.is_empty()),
+                    previous_path: (!previous.is_empty()).then(|| GitPath::from_bytes(previous)),
                 });
             }
             other => {
-                let path = parts.next().unwrap_or("").to_owned();
+                let path = parts.next().unwrap_or_default();
                 if path.is_empty() {
                     continue;
                 }
                 let kind = match other {
-                    'A' => FileChangeKind::Added,
-                    'D' => FileChangeKind::Deleted,
+                    b'A' => FileChangeKind::Added,
+                    b'D' => FileChangeKind::Deleted,
                     _ => FileChangeKind::Modified,
                 };
                 files.push(ChangedFile {
-                    path,
+                    path: GitPath::from_bytes(path),
                     kind,
                     insertions: 0,
                     deletions: 0,
@@ -834,33 +949,35 @@ fn parse_name_status(raw: &[u8]) -> Vec<ChangedFile> {
 /// The NUL-delimited record is `<added>\t<deleted>\t<path>\0`, except for a
 /// rename or copy, where the path column is empty and the pre-image and
 /// post-image paths follow as two further NUL-terminated fields.
-fn parse_numstat(raw: &[u8]) -> std::collections::HashMap<String, (u32, u32)> {
-    let text = String::from_utf8_lossy(raw);
+fn parse_numstat(raw: &[u8]) -> std::collections::HashMap<GitPath, (u32, u32)> {
     let mut out = std::collections::HashMap::new();
-    let mut parts = text.split('\0').filter(|part| !part.is_empty());
+    let mut parts = raw.split(|byte| *byte == 0).filter(|part| !part.is_empty());
     while let Some(record) = parts.next() {
         // A path may itself contain a tab, so only split off the two counts.
-        let mut cols = record.splitn(3, '\t');
-        let insertions = parse_stat_count(cols.next().unwrap_or("0"));
-        let deletions = parse_stat_count(cols.next().unwrap_or("0"));
-        let path = cols.next().unwrap_or("");
+        let mut cols = record.splitn(3, |byte| *byte == b'\t');
+        let insertions = parse_stat_count(cols.next().unwrap_or(b"0"));
+        let deletions = parse_stat_count(cols.next().unwrap_or(b"0"));
+        let path = cols.next().unwrap_or_default();
         if path.is_empty() {
             let (Some(_previous), Some(current)) = (parts.next(), parts.next()) else {
                 break;
             };
-            out.insert(current.to_owned(), (insertions, deletions));
+            out.insert(GitPath::from_bytes(current), (insertions, deletions));
         } else {
-            out.insert(path.to_owned(), (insertions, deletions));
+            out.insert(GitPath::from_bytes(path), (insertions, deletions));
         }
     }
     out
 }
 
-fn parse_stat_count(value: &str) -> u32 {
-    if value == "-" {
+fn parse_stat_count(value: &[u8]) -> u32 {
+    if value == b"-" {
         0
     } else {
-        value.parse().unwrap_or(0)
+        std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
     }
 }
 
@@ -926,9 +1043,40 @@ async fn git_bytes_env(
     env: &[(&str, &str)],
     limit: Duration,
 ) -> Result<Vec<u8>, String> {
+    let mut command = git_command(cwd);
+    command.args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    run_git_command(command, args.join(" "), limit).await
+}
+
+async fn git_bytes_with_literal_paths(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[GitPath],
+    limit: Duration,
+) -> Result<Vec<u8>, String> {
+    let mut command = git_command(cwd);
+    command.arg("--literal-pathspecs").args(args);
+    for path in paths {
+        command.arg(path.to_os_string()?);
+    }
+    run_git_command(
+        command,
+        format!(
+            "--literal-pathspecs {} <{} paths>",
+            args.join(" "),
+            paths.len()
+        ),
+        limit,
+    )
+    .await
+}
+
+fn git_command(cwd: &Path) -> Command {
     let mut command = Command::new("git");
     command
-        .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -939,16 +1087,21 @@ async fn git_bytes_env(
         .env("GIT_AUTHOR_EMAIL", "tidebreak@localhost")
         .env("GIT_COMMITTER_NAME", "Tidebreak")
         .env("GIT_COMMITTER_EMAIL", "tidebreak@localhost");
-    for (key, value) in env {
-        command.env(key, value);
-    }
+    command
+}
+
+async fn run_git_command(
+    mut command: Command,
+    description: String,
+    limit: Duration,
+) -> Result<Vec<u8>, String> {
     let child = command
         .spawn()
         .map_err(|err| format!("failed to spawn git: {err}"))?;
     let output = timeout(limit, child.wait_with_output())
         .await
-        .map_err(|_| format!("git {} timed out", args.join(" ")))?
-        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
+        .map_err(|_| format!("git {description} timed out"))?
+        .map_err(|err| format!("git {description} failed: {err}"))?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -978,6 +1131,8 @@ pub(crate) async fn user_git_fingerprint(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
@@ -1089,15 +1244,18 @@ mod tests {
         )
         .await
         .unwrap();
-        let paths: Vec<_> = files.files.iter().map(|file| file.path.as_str()).collect();
-        assert!(paths.contains(&"new.txt"), "{paths:?}");
+        let paths: Vec<_> = files.files.iter().map(|file| file.path.to_wire()).collect();
+        assert!(paths.iter().any(|path| path == "new.txt"), "{paths:?}");
         assert!(
             files
                 .files
                 .iter()
                 .any(|file| file.kind == FileChangeKind::Renamed
-                    && (file.path == "kept.txt"
-                        || file.previous_path.as_deref() == Some("keep.txt"))),
+                    && (file.path.to_wire() == "kept.txt"
+                        || file
+                            .previous_path
+                            .as_ref()
+                            .is_some_and(|path| path.to_wire() == "keep.txt"))),
             "{:#?}",
             files.files
         );
@@ -1105,7 +1263,8 @@ mod tests {
             files
                 .files
                 .iter()
-                .any(|file| file.path == "README.md" && file.kind == FileChangeKind::Modified),
+                .any(|file| file.path.to_wire() == "README.md"
+                    && file.kind == FileChangeKind::Modified),
             "{:#?}",
             files.files
         );
@@ -1168,10 +1327,17 @@ mod tests {
         let renamed = files
             .files
             .iter()
-            .find(|file| file.path == "src/beta.rs")
+            .find(|file| file.path.to_wire() == "src/beta.rs")
             .unwrap_or_else(|| panic!("{:#?}", files.files));
         assert_eq!(renamed.kind, FileChangeKind::Renamed);
-        assert_eq!(renamed.previous_path.as_deref(), Some("src/alpha.rs"));
+        assert_eq!(
+            renamed
+                .previous_path
+                .as_ref()
+                .map(GitPath::to_wire)
+                .as_deref(),
+            Some("src/alpha.rs")
+        );
         assert_eq!((renamed.insertions, renamed.deletions), (1, 0));
 
         // Matched by kind rather than by name: macOS and Linux disagree on the
@@ -1181,16 +1347,243 @@ mod tests {
             .iter()
             .find(|file| file.kind == FileChangeKind::Added)
             .unwrap_or_else(|| panic!("{:#?}", files.files));
-        assert!(accented.path.contains("caf"), "{}", accented.path);
+        let accented_path = accented.path.to_wire();
+        assert!(accented_path.contains("caf"), "{accented_path}");
         assert!(
-            !accented.path.starts_with('"'),
-            "path must not be quoted: {}",
-            accented.path
+            !accented_path.starts_with('"'),
+            "path must not be quoted: {accented_path}"
         );
         assert_eq!((accented.insertions, accented.deletions), (2, 0));
 
         assert_eq!(files.stat.insertions, 3);
         assert_eq!(files.stat.deletions, 0);
+    }
+
+    #[test]
+    fn non_utf8_paths_do_not_collide_in_parsers_or_wire_values() {
+        let first_name = b"collision-\x80.txt";
+        let second_name = b"collision-\x81.txt";
+        assert_eq!(
+            String::from_utf8_lossy(first_name),
+            String::from_utf8_lossy(second_name),
+            "the old lossy representation collapsed these paths"
+        );
+        let name_status = b"A\0collision-\x80.txt\0A\0collision-\x81.txt\0";
+        let numstat = b"1\t0\tcollision-\x80.txt\01\t0\tcollision-\x81.txt\0";
+        let stats = parse_numstat(numstat);
+        let mut files = parse_name_status(name_status);
+        for file in &mut files {
+            let (insertions, deletions) = stats.get(&file.path).copied().unwrap();
+            file.insertions = insertions;
+            file.deletions = deletions;
+        }
+
+        assert_eq!(files.len(), 2);
+        assert_ne!(files[0].path, files[1].path);
+        let first = files[0].path.to_wire();
+        let second = files[1].path.to_wire();
+        assert_ne!(first, second);
+        assert_eq!(GitPath::from_wire(&first).unwrap(), files[0].path);
+        assert_eq!(GitPath::from_wire(&second).unwrap(), files[1].path);
+        assert_eq!((files[0].insertions, files[0].deletions), (1, 0));
+        assert_eq!((files[1].insertions, files[1].deletions), (1, 0));
+    }
+
+    #[test]
+    fn reserved_wire_prefix_is_encoded_without_colliding() {
+        let literal = GitPath::from_bytes(b"tidebreak-path:v1:YQ");
+        let literal_wire = literal.to_wire();
+
+        assert_ne!(literal_wire, "tidebreak-path:v1:YQ");
+        assert_eq!(GitPath::from_wire(&literal_wire).unwrap(), literal);
+        assert!(GitPath::from_wire("tidebreak-path:v1:YQ").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn non_utf8_wire_identity_addresses_exact_file_diff() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "non-utf8");
+        let first_name = b"collision-\x80.txt";
+        let second_name = b"collision-\x81.txt";
+        std::fs::write(
+            tree.join(OsString::from_vec(first_name.to_vec())),
+            "first\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.join(OsString::from_vec(second_name.to_vec())),
+            "second\n",
+        )
+        .unwrap();
+
+        let recorded = record_checkpoint(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+        let from = merge_base(&tree, "main").await.unwrap();
+        let files = list_changed_files(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+
+        let first = files
+            .files
+            .iter()
+            .find(|file| file.path.0.as_slice() == first_name)
+            .map(|file| file.path.to_wire())
+            .expect("first byte path is listed");
+        let second = files
+            .files
+            .iter()
+            .find(|file| file.path.0.as_slice() == second_name)
+            .map(|file| file.path.to_wire())
+            .expect("second byte path is listed");
+        assert_ne!(first, second);
+        assert_eq!(GitPath::from_wire(&first).unwrap().0.as_slice(), first_name);
+        assert_eq!(
+            GitPath::from_wire(&second).unwrap().0.as_slice(),
+            second_name
+        );
+
+        let first_diff = produce_diff(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            Some(&first),
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert!(first_diff.diff.contains("+first"), "{}", first_diff.diff);
+        assert!(!first_diff.diff.contains("+second"), "{}", first_diff.diff);
+        assert_eq!(
+            (
+                first_diff.stat.files,
+                first_diff.stat.insertions,
+                first_diff.stat.deletions
+            ),
+            (1, 1, 0)
+        );
+
+        let second_diff = produce_diff(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            Some(&second),
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert!(second_diff.diff.contains("+second"), "{}", second_diff.diff);
+        assert!(!second_diff.diff.contains("+first"), "{}", second_diff.diff);
+        assert_eq!(
+            (
+                second_diff.stat.files,
+                second_diff.stat.insertions,
+                second_diff.stat.deletions
+            ),
+            (1, 1, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn file_diff_treats_pathspec_magic_as_a_literal_path() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "literal-pathspec");
+        let literal = ":(glob)*.txt";
+        std::fs::write(tree.join(literal), "literal magic\n").unwrap();
+        std::fs::write(tree.join("victim.txt"), "must stay out\n").unwrap();
+
+        let recorded = record_checkpoint(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+        let from = merge_base(&tree, "main").await.unwrap();
+        let diff = produce_diff(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            Some(literal),
+            DiffBounds::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(diff.diff.contains("+literal magic"), "{}", diff.diff);
+        assert!(!diff.diff.contains("must stay out"), "{}", diff.diff);
+        assert_eq!(
+            (diff.stat.files, diff.stat.insertions, diff.stat.deletions),
+            (1, 1, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_file_stats_do_not_depend_on_the_file_list_cap() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "selected-stat");
+        std::fs::write(tree.join("a-first.txt"), "first\n").unwrap();
+        std::fs::write(tree.join("b-second.txt"), "second\n").unwrap();
+        std::fs::write(tree.join("z-selected.txt"), "one\ntwo\n").unwrap();
+
+        let recorded = record_checkpoint(
+            &tree,
+            ws(),
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+        let from = merge_base(&tree, "main").await.unwrap();
+        let bounds = DiffBounds {
+            max_bytes: MAX_DIFF_BYTES,
+            max_files: 1,
+        };
+        let listed = list_changed_files(&tree, &from, &recorded.checkpoint_ref, bounds)
+            .await
+            .unwrap();
+        assert!(listed.truncated);
+        assert!(listed
+            .files
+            .iter()
+            .all(|file| file.path.to_wire() != "z-selected.txt"));
+
+        let diff = produce_diff(
+            &tree,
+            &from,
+            &recorded.checkpoint_ref,
+            Some("z-selected.txt"),
+            bounds,
+        )
+        .await
+        .unwrap();
+        assert!(diff.diff.contains("+two"), "{}", diff.diff);
+        assert_eq!(
+            (diff.stat.files, diff.stat.insertions, diff.stat.deletions),
+            (1, 2, 0)
+        );
+        assert!(!diff.stat.truncated);
     }
 
     #[tokio::test]
@@ -1330,9 +1723,9 @@ mod tests {
         let files = list_changed_files(&tree, &from, &to, DiffBounds::default())
             .await
             .unwrap();
-        let paths: Vec<_> = files.files.iter().map(|file| file.path.as_str()).collect();
+        let paths: Vec<_> = files.files.iter().map(|file| file.path.to_wire()).collect();
 
-        assert_eq!(paths, vec!["workspace-change.txt"]);
+        assert_eq!(paths, vec!["workspace-change.txt".to_owned()]);
         assert_eq!(files.stat.files, 1);
     }
 
