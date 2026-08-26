@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use tidebreak_harness::{spawn_process_tree, BoundedProcessOutput, OutputBudget};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::warn;
@@ -49,6 +50,11 @@ use super::bus::CodeEventBus;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const GIT_OUTPUT_LINES: usize = 200_000;
+const GIT_ERROR_BYTES: usize = 64 * 1024;
+const GIT_ERROR_LINES: usize = 2_048;
+const MAX_DIFF_LINES: usize = 32_768;
 
 /// Default bound on a unified-diff body.
 pub(crate) const MAX_DIFF_BYTES: usize = 256 * 1024;
@@ -404,15 +410,17 @@ pub(crate) async fn produce_diff(
     if let Some(path) = file {
         let path = GitPath::from_wire(path)?;
         let paths = std::slice::from_ref(&path);
-        let raw = git_bytes_with_literal_paths(
+        let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
             worktree,
             &["diff", "--find-renames", from, to, "--"],
             paths,
             GIT_SNAPSHOT_TIMEOUT,
+            OutputBudget::head(bounds.max_bytes, MAX_DIFF_LINES),
         )
         .await
         .map_err(CheckpointError::internal)?;
-        let (diff, body_truncated) = truncate_bytes(&raw, bounds.max_bytes);
+        let (diff, decode_truncated) = truncate_bytes(&raw, bounds.max_bytes);
+        let body_truncated = read_truncated || decode_truncated;
         let selected = collect_changes_for_paths(worktree, from, to, paths).await?;
         let stat = Diffstat {
             files: selected.stat.files.max(u32::from(!diff.is_empty())),
@@ -449,15 +457,17 @@ pub(crate) async fn produce_diff(
         .iter()
         .map(|entry| entry.path.clone())
         .collect();
-    let raw = git_bytes_with_literal_paths(
+    let (raw, read_truncated) = git_bytes_with_literal_paths_bounded(
         worktree,
         &["diff", "--find-renames", from, to, "--"],
         &paths,
         GIT_SNAPSHOT_TIMEOUT,
+        OutputBudget::head(bounds.max_bytes, MAX_DIFF_LINES),
     )
     .await
     .map_err(CheckpointError::internal)?;
-    let (body, body_truncated) = truncate_bytes(&raw, bounds.max_bytes);
+    let (body, decode_truncated) = truncate_bytes(&raw, bounds.max_bytes);
+    let body_truncated = read_truncated || decode_truncated;
     truncated |= body_truncated;
     Ok(BoundedDiff {
         diff: body,
@@ -1074,6 +1084,32 @@ async fn git_bytes_with_literal_paths(
     .await
 }
 
+async fn git_bytes_with_literal_paths_bounded(
+    cwd: &Path,
+    args: &[&str],
+    paths: &[GitPath],
+    limit: Duration,
+    stdout_budget: OutputBudget,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut command = git_command(cwd);
+    command.arg("--literal-pathspecs").args(args);
+    for path in paths {
+        command.arg(path.to_os_string()?);
+    }
+    run_git_command_bounded(
+        command,
+        format!(
+            "--literal-pathspecs {} <{} paths>",
+            args.join(" "),
+            paths.len()
+        ),
+        limit,
+        stdout_budget,
+        true,
+    )
+    .await
+}
+
 fn git_command(cwd: &Path) -> Command {
     let mut command = Command::new("git");
     command
@@ -1091,24 +1127,83 @@ fn git_command(cwd: &Path) -> Command {
 }
 
 async fn run_git_command(
-    mut command: Command,
+    command: Command,
     description: String,
     limit: Duration,
 ) -> Result<Vec<u8>, String> {
-    let child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn git: {err}"))?;
-    let output = timeout(limit, child.wait_with_output())
-        .await
-        .map_err(|_| format!("git {description} timed out"))?
-        .map_err(|err| format!("git {description} failed: {err}"))?;
-    if output.status.success() {
-        Ok(output.stdout)
+    let (stdout, truncated) = run_git_command_bounded(
+        command,
+        description.clone(),
+        limit,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+        false,
+    )
+    .await?;
+    if truncated {
+        Err(format!("git {description} output exceeded its limit"))
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        Err(if stderr.is_empty() { stdout } else { stderr })
+        Ok(stdout)
     }
+}
+
+async fn run_git_command_bounded(
+    mut command: Command,
+    description: String,
+    limit: Duration,
+    stdout_budget: OutputBudget,
+    accept_truncated_stdout: bool,
+) -> Result<(Vec<u8>, bool), String> {
+    let child =
+        spawn_process_tree(&mut command).map_err(|err| format!("failed to spawn git: {err}"))?;
+    let output = timeout(
+        limit,
+        child.wait_with_bounded_output(
+            stdout_budget,
+            OutputBudget::tail(GIT_ERROR_BYTES, GIT_ERROR_LINES),
+            true,
+        ),
+    )
+    .await
+    .map_err(|_| format!("git {description} timed out"))?
+    .map_err(|err| format!("git {description} failed: {err}"))?;
+    finish_git_output(output, &description, accept_truncated_stdout)
+}
+
+fn finish_git_output(
+    output: BoundedProcessOutput,
+    description: &str,
+    accept_truncated_stdout: bool,
+) -> Result<(Vec<u8>, bool), String> {
+    let stdout_truncated = output.stdout.truncated;
+    let stderr_truncated = output.stderr.truncated;
+    let stderr_empty = output.stderr.bytes.is_empty();
+    if output.status.success() && !output.terminated_for_output {
+        return if stdout_truncated && !accept_truncated_stdout {
+            Err(format!("git {description} output exceeded its limit"))
+        } else {
+            Ok((output.stdout.bytes, stdout_truncated))
+        };
+    }
+    if output.terminated_for_output
+        && stdout_truncated
+        && !stderr_truncated
+        && stderr_empty
+        && accept_truncated_stdout
+    {
+        return Ok((output.stdout.bytes, true));
+    }
+
+    let stdout = output.stdout.into_marked_text().trim().to_owned();
+    let stderr = output.stderr.into_marked_text().trim().to_owned();
+    if output.terminated_for_output {
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(if detail.is_empty() {
+            format!("git {description} output exceeded its limit")
+        } else {
+            format!("git {description} output exceeded its limit: {detail}")
+        });
+    }
+    Err(if stderr.is_empty() { stdout } else { stderr })
 }
 
 /// Fingerprint of the user's `HEAD` and index, used to prove a checkpoint
@@ -1688,7 +1783,7 @@ mod tests {
             .await
             .unwrap();
         assert!(diff.truncated);
-        assert!(diff.diff.len() <= 80, "{}", diff.diff.len());
+        assert!(diff.diff.len() <= tight.max_bytes, "{}", diff.diff.len());
     }
 
     #[tokio::test]

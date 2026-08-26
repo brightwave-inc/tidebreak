@@ -11,7 +11,7 @@ use std::process::{ExitStatus, Output};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 #[cfg(unix)]
@@ -29,6 +29,101 @@ pub enum RecordedProcessReap {
     Exited,
     /// The recorded process still had the same identity when the wait expired.
     TimedOut,
+}
+
+/// Which end of one subprocess stream survives an output limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputRetention {
+    /// Keep the first bytes and lines that the process wrote.
+    Head,
+    /// Keep the newest bytes and lines that the process wrote.
+    Tail,
+}
+
+/// Memory limits for one piped subprocess stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputBudget {
+    /// Maximum retained bytes.
+    pub max_bytes: usize,
+    /// Maximum retained newline-delimited records.
+    pub max_lines: usize,
+    /// Which end survives when either limit is exceeded.
+    pub retention: OutputRetention,
+}
+
+impl OutputBudget {
+    /// Create a budget that keeps the stream's leading bytes and lines.
+    #[must_use]
+    pub const fn head(max_bytes: usize, max_lines: usize) -> Self {
+        Self {
+            max_bytes,
+            max_lines,
+            retention: OutputRetention::Head,
+        }
+    }
+
+    /// Create a budget that keeps the stream's trailing bytes and lines.
+    #[must_use]
+    pub const fn tail(max_bytes: usize, max_lines: usize) -> Self {
+        Self {
+            max_bytes,
+            max_lines,
+            retention: OutputRetention::Tail,
+        }
+    }
+}
+
+/// One subprocess stream captured within its byte and line limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedOutput {
+    /// Retained bytes from the selected end of the stream.
+    pub bytes: Vec<u8>,
+    /// Whether bytes or lines were discarded.
+    pub truncated: bool,
+    /// Which end of the stream was retained.
+    pub retention: OutputRetention,
+}
+
+impl BoundedOutput {
+    /// Decode the retained bytes and insert an explicit truncation marker at
+    /// the discarded end.
+    #[must_use]
+    pub fn into_marked_text(self) -> String {
+        let text = String::from_utf8_lossy(&self.bytes).into_owned();
+        if !self.truncated {
+            return text;
+        }
+        match self.retention {
+            OutputRetention::Head => {
+                if text.ends_with('\n') {
+                    format!("{text}[output truncated]\n")
+                } else {
+                    format!("{text}\n[output truncated]")
+                }
+            }
+            OutputRetention::Tail => {
+                if text.starts_with('\n') {
+                    format!("[output truncated]{text}")
+                } else {
+                    format!("[output truncated]\n{text}")
+                }
+            }
+        }
+    }
+}
+
+/// Exit status and bounded stdout and stderr from one process tree.
+#[derive(Debug)]
+pub struct BoundedProcessOutput {
+    /// Root process exit status.
+    pub status: ExitStatus,
+    /// Bounded stdout.
+    pub stdout: BoundedOutput,
+    /// Bounded stderr.
+    pub stderr: BoundedOutput,
+    /// Whether the process tree was terminated after either stream exceeded
+    /// its budget.
+    pub terminated_for_output: bool,
 }
 
 /// Return the creation identity captured when this process spawned `pid`.
@@ -362,6 +457,52 @@ impl ProcessTreeChild {
         })
     }
 
+    /// Capture stdout and stderr concurrently without exceeding either
+    /// stream's byte or line budget.
+    ///
+    /// If `terminate_on_limit` is true, the first discarded byte terminates
+    /// the owned process tree. The returned buffers still contain the bounded
+    /// head or tail selected by each budget. Cancelling this future keeps the
+    /// ordinary drop behavior and terminates the tree.
+    pub async fn wait_with_bounded_output(
+        mut self,
+        stdout_budget: OutputBudget,
+        stderr_budget: OutputBudget,
+        terminate_on_limit: bool,
+    ) -> io::Result<BoundedProcessOutput> {
+        drop(self.take_stdin());
+        let stdout = self.take_stdout();
+        let stderr = self.take_stderr();
+        let (limit_tx, mut limit_rx) = watch::channel(false);
+        let read_stdout = capture_bounded(stdout, stdout_budget, limit_tx.clone());
+        let read_stderr = capture_bounded(stderr, stderr_budget, limit_tx);
+        let readers = async move { tokio::try_join!(read_stdout, read_stderr) };
+        tokio::pin!(readers);
+
+        let mut terminated_for_output = false;
+        let mut limit_open = true;
+        let (stdout, stderr) = loop {
+            tokio::select! {
+                result = &mut readers => break result?,
+                changed = limit_rx.changed(), if terminate_on_limit && !terminated_for_output && limit_open => {
+                    if changed.is_ok() && *limit_rx.borrow_and_update() {
+                        self.terminate_tree()?;
+                        terminated_for_output = true;
+                    } else if changed.is_err() {
+                        limit_open = false;
+                    }
+                }
+            }
+        };
+        let status = self.wait().await?;
+        Ok(BoundedProcessOutput {
+            status,
+            stdout,
+            stderr,
+            terminated_for_output,
+        })
+    }
+
     /// Ask the process to stop, escalating to tree termination after `grace`.
     ///
     /// Windows has no reliable console-control channel for GUI-spawned batch
@@ -434,6 +575,163 @@ impl ProcessTreeChild {
             self.child_mut().start_kill()
         }
     }
+}
+
+const BOUNDED_OUTPUT_CHUNK_BYTES: usize = 8 * 1_024;
+
+async fn capture_bounded<R>(
+    reader: Option<R>,
+    budget: OutputBudget,
+    limit_tx: watch::Sender<bool>,
+) -> io::Result<BoundedOutput>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(mut reader) = reader else {
+        return Ok(BoundedOutput {
+            bytes: Vec::new(),
+            truncated: false,
+            retention: budget.retention,
+        });
+    };
+    let mut capture = OutputCapture::new(budget);
+    // Keep the read buffer off the async future's stack. Callers can nest this
+    // future through several git helpers, and two inline 8 KiB buffers per
+    // process can overflow the small stack used by Rust's test threads.
+    let mut chunk = vec![0_u8; BOUNDED_OUTPUT_CHUNK_BYTES];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        if capture.push(&chunk[..read]) {
+            limit_tx.send_replace(true);
+        }
+    }
+    Ok(capture.finish())
+}
+
+#[derive(Debug)]
+struct OutputCapture {
+    budget: OutputBudget,
+    bytes: Vec<u8>,
+    newline_count: usize,
+    truncated: bool,
+}
+
+impl OutputCapture {
+    fn new(budget: OutputBudget) -> Self {
+        Self {
+            budget,
+            bytes: Vec::with_capacity(budget.max_bytes.min(BOUNDED_OUTPUT_CHUNK_BYTES)),
+            newline_count: 0,
+            truncated: false,
+        }
+    }
+
+    /// Returns true only when this push crosses a limit for the first time.
+    fn push(&mut self, chunk: &[u8]) -> bool {
+        let was_truncated = self.truncated;
+        match self.budget.retention {
+            OutputRetention::Head => self.push_head(chunk),
+            OutputRetention::Tail => self.push_tail(chunk),
+        }
+        !was_truncated && self.truncated
+    }
+
+    fn push_head(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let byte_room = self.budget.max_bytes.saturating_sub(self.bytes.len());
+        let mut take = chunk.len().min(byte_room);
+        if self.newline_count >= self.budget.max_lines {
+            take = 0;
+        } else if self.budget.max_lines != usize::MAX {
+            let remaining_lines = self.budget.max_lines - self.newline_count;
+            if let Some(index) = nth_newline(chunk, remaining_lines) {
+                take = take.min(index.saturating_add(1));
+            }
+        }
+        let kept = &chunk[..take];
+        self.newline_count = self
+            .newline_count
+            .saturating_add(kept.iter().filter(|byte| **byte == b'\n').count());
+        self.bytes.extend_from_slice(kept);
+        self.truncated |= take < chunk.len();
+    }
+
+    fn push_tail(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        if self.budget.max_bytes == 0 || self.budget.max_lines == 0 {
+            self.truncated = true;
+            return;
+        }
+        if chunk.len() >= self.budget.max_bytes {
+            let dropped = !self.bytes.is_empty() || chunk.len() > self.budget.max_bytes;
+            self.bytes.clear();
+            self.bytes
+                .extend_from_slice(&chunk[chunk.len() - self.budget.max_bytes..]);
+            self.truncated |= dropped;
+        } else {
+            let overflow = self
+                .bytes
+                .len()
+                .saturating_add(chunk.len())
+                .saturating_sub(self.budget.max_bytes);
+            if overflow > 0 {
+                self.bytes.drain(..overflow);
+                self.truncated = true;
+            }
+            self.bytes.extend_from_slice(chunk);
+        }
+        self.newline_count = self.bytes.iter().filter(|byte| **byte == b'\n').count();
+        if self.budget.max_lines != usize::MAX {
+            while retained_line_count(&self.bytes, self.newline_count) > self.budget.max_lines {
+                let Some(end) = self.bytes.iter().position(|byte| *byte == b'\n') else {
+                    self.bytes.clear();
+                    self.newline_count = 0;
+                    self.truncated = true;
+                    break;
+                };
+                self.bytes.drain(..=end);
+                self.newline_count -= 1;
+                self.truncated = true;
+            }
+        }
+    }
+
+    fn finish(self) -> BoundedOutput {
+        BoundedOutput {
+            bytes: self.bytes,
+            truncated: self.truncated,
+            retention: self.budget.retention,
+        }
+    }
+}
+
+fn retained_line_count(bytes: &[u8], newline_count: usize) -> usize {
+    newline_count.saturating_add(usize::from(
+        !bytes.is_empty() && bytes.last() != Some(&b'\n'),
+    ))
+}
+
+fn nth_newline(bytes: &[u8], count: usize) -> Option<usize> {
+    if count == 0 {
+        return Some(0);
+    }
+    let mut seen = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            seen += 1;
+            if seen == count {
+                return Some(index);
+            }
+        }
+    }
+    None
 }
 
 impl Drop for ProcessTreeChild {
@@ -1003,6 +1301,35 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+
+    #[test]
+    fn bounded_capture_discards_bytes_beyond_the_cap() {
+        let mut capture = OutputCapture::new(OutputBudget::head(8, usize::MAX));
+        assert!(capture.push(b"0123456789"));
+        let output = capture.finish();
+        assert_eq!(output.bytes, b"01234567");
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn bounded_capture_does_not_retain_a_very_long_line() {
+        let mut capture = OutputCapture::new(OutputBudget::head(32, 4));
+        assert!(!capture.push(&[b'x'; 16]));
+        assert!(capture.push(&vec![b'x'; 64 * 1_024]));
+        let output = capture.finish();
+        assert_eq!(output.bytes.len(), 32);
+        assert!(output.bytes.iter().all(|byte| *byte == b'x'));
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn bounded_capture_stops_at_the_line_cap() {
+        let mut capture = OutputCapture::new(OutputBudget::head(128, 2));
+        assert!(capture.push(b"one\ntwo\nthree\n"));
+        let output = capture.finish();
+        assert_eq!(output.bytes, b"one\ntwo\n");
+        assert!(output.truncated);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1160,6 +1487,69 @@ exit 0
             "output collection unexpectedly ignored the inherited pipe"
         );
         assert_process_exits(descendant).await;
+    }
+
+    #[tokio::test]
+    async fn bounded_output_drains_stdout_and_stderr_concurrently() {
+        let script = r#"
+i=0
+while [ $i -lt 300 ]; do
+  printf 'stdout-%04d\n' "$i"
+  printf 'stderr-%04d\n' "$i" >&2
+  i=$((i+1))
+done
+"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = spawn_process_tree(&mut command).unwrap();
+        let output = timeout(
+            ASSERTION_TIMEOUT,
+            child.wait_with_bounded_output(
+                super::OutputBudget::head(1_024, 64),
+                super::OutputBudget::head(1_024, 64),
+                false,
+            ),
+        )
+        .await
+        .expect("bounded output completed")
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.truncated);
+        assert!(output.stderr.truncated);
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).starts_with("stdout-0000"));
+        assert!(String::from_utf8_lossy(&output.stderr.bytes).starts_with("stderr-0000"));
+    }
+
+    #[tokio::test]
+    async fn bounded_output_terminates_a_producer_that_continues_after_the_cap() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "while :; do printf '0123456789abcdef'; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = spawn_process_tree(&mut command).unwrap();
+        let output = timeout(
+            ASSERTION_TIMEOUT,
+            child.wait_with_bounded_output(
+                super::OutputBudget::head(128, 8),
+                super::OutputBudget::tail(128, 8),
+                true,
+            ),
+        )
+        .await
+        .expect("output limit terminated the producer")
+        .unwrap();
+
+        assert!(output.terminated_for_output);
+        assert!(output.stdout.truncated);
+        assert_eq!(output.stdout.bytes.len(), 128);
+        assert!(!output.status.success());
     }
 
     async fn spawn_shell_tree() -> (ProcessTreeChild, BufReader<ChildStdout>) {
