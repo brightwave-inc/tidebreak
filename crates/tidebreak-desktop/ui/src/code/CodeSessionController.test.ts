@@ -228,7 +228,16 @@ describe("CodeSessionController", () => {
         pending = false;
       },
       getPendingTurnRefreshes: () =>
-        pending ? [{ turnId: "t1", eventSeq: 1, observedSeq: 1 }] : [],
+        pending
+          ? [
+              {
+                turnId: "t1",
+                eventSeq: 1,
+                observedSeq: 1,
+                observedTurnActivityRevision: 0,
+              },
+            ]
+          : [],
     });
     controller.start();
     pending = true;

@@ -121,6 +121,7 @@ function createController(
           turnId: pending.turnId,
           eventSeq: pending.eventSeq,
           observedSeq: state.lastSeq,
+          observedTurnActivityRevision: state.turnActivityRevision,
         }),
       );
     },

@@ -12,6 +12,8 @@ export type CodeTurnRefreshRequest = {
   eventSeq: number;
   /** Journal cursor captured when this refresh generation started. */
   observedSeq: number;
+  /** Live activity revision captured with the journal cursor. */
+  observedTurnActivityRevision: number;
 };
 
 /** A brief quiet window means the initial journal burst has reached its tail. */

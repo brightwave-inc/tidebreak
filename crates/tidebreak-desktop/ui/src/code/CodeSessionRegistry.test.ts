@@ -623,7 +623,7 @@ describe("CodeSessionRegistry", () => {
     });
   });
 
-  it("restores a capped failure after initial hydration already saw it end", async () => {
+  it("keeps a capped failure unassigned after initial hydration already saw it end", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];
     const openSocket = (
@@ -667,17 +667,17 @@ describe("CodeSessionRegistry", () => {
     await flushMicrotasks();
 
     expect(hydrateTurns).toHaveBeenCalledTimes(2);
-    expect(store.getState().pendingTerminalReconciliations.size).toBe(0);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
     expect(store.getState().items.at(-1)).toMatchObject({
       kind: "turn_boundary",
       turnId: "t2",
       status: "failed",
       durationMs: 2_500,
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
   });
 
-  it("restores a capped failure after initial hydration was unavailable", async () => {
+  it("keeps a capped failure unassigned after initial hydration was unavailable", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];
     const openSocket = (
@@ -720,7 +720,7 @@ describe("CodeSessionRegistry", () => {
     await flushMicrotasks();
 
     expect(hydrateTurns).toHaveBeenCalledTimes(2);
-    expect(store.getState().pendingTerminalReconciliations.size).toBe(0);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
     expect(store.getState()).toMatchObject({
       busy: false,
       activeTurnId: null,
@@ -731,11 +731,11 @@ describe("CodeSessionRegistry", () => {
       turnId: "t2",
       status: "failed",
       durationMs: 2_500,
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
   });
 
-  it("retries a failed terminal refresh with bounded backoff", async () => {
+  it("retries an unresolved terminal refresh with bounded backoff", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];
     const openSocket = (
@@ -794,7 +794,7 @@ describe("CodeSessionRegistry", () => {
     await flushMicrotasks();
 
     expect(hydrateTurns).toHaveBeenCalledTimes(3);
-    expect(store.getState().pendingTerminalReconciliations.size).toBe(0);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
     expect(store.getState()).toMatchObject({
       busy: false,
       activeTurnId: null,
@@ -805,11 +805,11 @@ describe("CodeSessionRegistry", () => {
       turnId: "t2",
       status: "failed",
       durationMs: 2_500,
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
   });
 
-  it("reconciles a failed capped terminal before a retained store reconnects", async () => {
+  it("keeps an unattributed capped terminal pending across a retained reconnect", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];
     const openSocket = (
@@ -867,7 +867,7 @@ describe("CodeSessionRegistry", () => {
     expect(reopened).toBe(first);
     expect(hydrateTurns).toHaveBeenCalledTimes(3);
     expect(sockets.map((socket) => socket.after)).toEqual([0, 2_001]);
-    expect(reopened.getState().pendingTerminalReconciliations.size).toBe(0);
+    expect(reopened.getState().pendingTerminalReconciliations.size).toBe(1);
     expect(reopened.getState()).toMatchObject({
       busy: false,
       activeTurnId: null,
@@ -878,7 +878,7 @@ describe("CodeSessionRegistry", () => {
       turnId: "t2",
       status: "failed",
       durationMs: 2_500,
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
   });
 

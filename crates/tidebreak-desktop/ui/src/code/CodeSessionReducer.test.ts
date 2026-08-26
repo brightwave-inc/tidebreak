@@ -772,6 +772,113 @@ describe("hydrate then replay", () => {
     });
   });
 
+  it("keeps a newly accepted turn active while buffered replay finishes an older turn", () => {
+    const accepted = applyAcceptedTurn(initialCodeSessionState(), {
+      ...SNAPSHOT_TURN,
+      id: "t2",
+      ordinal: 2,
+      status: "running",
+      user_input: "run the tests",
+      ended_at: undefined,
+    });
+
+    expect(accepted).toMatchObject({
+      lastSeq: 0,
+      activeTurnId: "t2",
+      journalTurnId: null,
+      acceptedTurnFence: { turnId: "t2", afterSeq: 0 },
+      turnActivityRevision: 1,
+    });
+
+    const replayedStart = reduceCodeSessionEvent(
+      accepted,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const replayedTerminal = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+
+    expect(replayedStart.state).toMatchObject({
+      lastSeq: 1,
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t1",
+      acceptedTurnFence: { turnId: "t2", afterSeq: 0 },
+      turnActivityRevision: 1,
+    });
+    expect(replayedTerminal.state).toMatchObject({
+      lastSeq: 2,
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: null,
+      acceptedTurnFence: { turnId: "t2", afterSeq: 0 },
+      turnActivityRevision: 1,
+      lifecycle: "running",
+    });
+    expect(
+      replayedTerminal.state.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t1",
+      ),
+    ).toMatchObject({ status: "completed", usage: NO_USAGE });
+  });
+
+  it("rejects a snapshot activity update captured before an accepted turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const replayedStart = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const terminal = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+    const observedTurnActivityRevision = terminal.state.turnActivityRevision;
+    const accepted = applyAcceptedTurn(terminal.state, {
+      ...SNAPSHOT_TURN,
+      id: "t2",
+      ordinal: 2,
+      status: "running",
+      user_input: "run the tests",
+      ended_at: undefined,
+    });
+
+    expect(accepted.lastSeq).toBe(terminal.state.lastSeq);
+    const reconciled = reconcilePendingCodeTurns(
+      accepted,
+      [SNAPSHOT_TURN],
+      [
+        {
+          turnId: "t1",
+          eventSeq: 2,
+          observedSeq: 2,
+          observedTurnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled).toMatchObject({
+      lastSeq: 2,
+      busy: true,
+      activeTurnId: "t2",
+      acceptedTurnFence: { turnId: "t2", afterSeq: 2 },
+      lifecycle: "running",
+    });
+    expect(
+      reconciled.items.find((item) => item.id === "boundary:t1"),
+    ).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+  });
+
   it("reconciles a capped terminal against the hydrated active turn", () => {
     const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
       {
@@ -818,7 +925,14 @@ describe("hydrate then replay", () => {
           ended_at: LATER,
         },
       ],
-      [{ turnId: null, eventSeq: 2_001, observedSeq: 2_001 }],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
     );
     expect(reconciled).toMatchObject({
       busy: false,
@@ -832,10 +946,10 @@ describe("hydrate then replay", () => {
       turnId: "t2",
       durationMs: 2_500,
     });
-    expect(reconciled.pendingTerminalReconciliations.size).toBe(0);
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
   });
 
-  it("keeps a capped failure error until the candidate snapshot confirms it", () => {
+  it("keeps a capped failure unassigned when only its snapshot candidate completes", () => {
     const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
       {
         ...SNAPSHOT_TURN,
@@ -899,12 +1013,12 @@ describe("hydrate then replay", () => {
       turnId: "t2",
       status: "failed",
       durationMs: 2_500,
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
-    expect(reconciled.pendingTerminalReconciliations.size).toBe(0);
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
   });
 
-  it("restores a capped failure after hydration already returned the terminal turn", () => {
+  it("does not attach a capped failure after hydration already returned the terminal turn", () => {
     const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
       {
         ...SNAPSHOT_TURN,
@@ -939,10 +1053,17 @@ describe("hydrate then replay", () => {
           user_input: "run the tests",
         },
       ],
-      [{ turnId: null, eventSeq: 2_001, observedSeq: 2_001 }],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
     );
 
-    expect(reconciled.pendingTerminalReconciliations.size).toBe(0);
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
     expect(
       reconciled.items.find(
         (item) => item.kind === "turn_boundary" && item.turnId === "t2",
@@ -950,11 +1071,11 @@ describe("hydrate then replay", () => {
     ).toMatchObject({
       status: "failed",
       durationMs: 2_500,
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
   });
 
-  it("restores a capped failure when no initial turn snapshot was available", () => {
+  it("does not attach a capped failure when no initial turn snapshot was available", () => {
     const terminal = reduceCodeSessionEvent(
       initialCodeSessionState(),
       {
@@ -981,16 +1102,70 @@ describe("hydrate then replay", () => {
           user_input: "run the tests",
         },
       ],
-      [{ turnId: null, eventSeq: 2_001, observedSeq: 2_001 }],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
     );
 
-    expect(reconciled.pendingTerminalReconciliations.size).toBe(0);
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
     expect(reconciled.items.at(-1)).toMatchObject({
       kind: "turn_boundary",
       turnId: "t2",
       status: "failed",
-      error: "compiler crashed: missing libssl",
+      error: null,
     });
+  });
+
+  it("does not give a later completed turn an earlier unattributed terminal's usage", () => {
+    const replayUsage = {
+      ...NO_USAGE,
+      input_tokens: 91,
+      output_tokens: 37,
+    };
+    const terminal = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: { type: "turn_completed", usage: replayUsage },
+      },
+      deps(),
+    );
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          user_input: "later completed work",
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "completed",
+      usage: null,
+      error: null,
+    });
+    expect(reconciled.lastUsage).toBeNull();
   });
 
   it("keeps a capped failure pending while its stale candidate still runs", () => {
@@ -1113,7 +1288,14 @@ describe("hydrate then replay", () => {
           user_input: "new work",
         },
       ],
-      [{ turnId: null, eventSeq: 2_001, observedSeq: 2_001 }],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
     );
 
     expect(
@@ -1127,8 +1309,9 @@ describe("hydrate then replay", () => {
     expect(reconciled.items.at(-1)).toMatchObject({
       kind: "turn_boundary",
       turnId: "t2",
-      error: "new turn failed",
+      error: null,
     });
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
   });
 
   it("inserts a recovered boundary before the following turn", () => {
@@ -1166,7 +1349,14 @@ describe("hydrate then replay", () => {
           ended_at: undefined,
         },
       ],
-      [{ turnId: null, eventSeq: 100, observedSeq: 102 }],
+      [
+        {
+          turnId: null,
+          eventSeq: 100,
+          observedSeq: 102,
+          observedTurnActivityRevision: output.state.turnActivityRevision,
+        },
+      ],
     );
 
     expect(reconciled.items.map((item) => item.id)).toEqual([
@@ -1203,7 +1393,14 @@ describe("hydrate then replay", () => {
     const reconciled = reconcilePendingCodeTurns(
       terminal.state,
       [SNAPSHOT_TURN],
-      [{ turnId: "t1", eventSeq: 2, observedSeq: 2 }],
+      [
+        {
+          turnId: "t1",
+          eventSeq: 2,
+          observedSeq: 2,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
     );
 
     expect(reconciled.lastUsage).toEqual(usage);
@@ -1251,7 +1448,14 @@ describe("hydrate then replay", () => {
           ended_at: undefined,
         },
       ],
-      [{ turnId: "t1", eventSeq: 2, observedSeq: 2 }],
+      [
+        {
+          turnId: "t1",
+          eventSeq: 2,
+          observedSeq: 2,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
     );
 
     expect(reconciled).toMatchObject({

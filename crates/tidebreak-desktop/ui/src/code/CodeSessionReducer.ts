@@ -136,6 +136,13 @@ export type CodeSessionState = {
   activeTurnId: string | null;
   /** Turn established by a journal `turn_started` frame. */
   journalTurnId: string | null;
+  /**
+   * A submit accepted after this journal cursor still owns live activity until
+   * the journal names that turn or a newer live frame supersedes it.
+   */
+  acceptedTurnFence: { turnId: string; afterSeq: number } | null;
+  /** Changes when live activity changes without necessarily moving `lastSeq`. */
+  turnActivityRevision: number;
   turnStartedAt: string | null;
   /** Whether this store observed the active turn start as a live frame. */
   turnStartObservedLive: boolean;
@@ -215,6 +222,8 @@ export function initialCodeSessionState(): CodeSessionState {
     busy: false,
     activeTurnId: null,
     journalTurnId: null,
+    acceptedTurnFence: null,
+    turnActivityRevision: 0,
     turnStartedAt: null,
     turnStartObservedLive: false,
     durableBoundaryTurnIds: new Set(),
@@ -292,6 +301,8 @@ export function applyAcceptedTurn(
     ...next,
     busy: true,
     activeTurnId: turn.id,
+    acceptedTurnFence: { turnId: turn.id, afterSeq: state.lastSeq },
+    turnActivityRevision: state.turnActivityRevision + 1,
     turnStartedAt: turn.started_at,
     turnStartObservedLive: continuesObservedTurn,
     lifecycle: "running",
@@ -388,6 +399,11 @@ function reconcileCodeTurnSnapshotWithPending(
     busy: false,
     activeTurnId: null,
     journalTurnId: null,
+    acceptedTurnFence:
+      state.acceptedTurnFence?.turnId === turn.id
+        ? null
+        : state.acceptedTurnFence,
+    turnActivityRevision: state.turnActivityRevision + 1,
     turnStartedAt: null,
     turnStartObservedLive: false,
     assistantBuffer: "",
@@ -413,7 +429,8 @@ export function reconcilePendingCodeTurns(
   requested?: readonly {
     turnId: string | null;
     eventSeq: number;
-    observedSeq?: number;
+    observedSeq: number;
+    observedTurnActivityRevision: number;
   }[],
 ): CodeSessionState {
   const orderedTurns = [...turns].sort(
@@ -425,6 +442,8 @@ export function reconcilePendingCodeTurns(
     [...state.pendingTerminalReconciliations.values()].map((pending) => ({
       turnId: pending.turnId,
       eventSeq: pending.eventSeq,
+      observedSeq: state.lastSeq,
+      observedTurnActivityRevision: state.turnActivityRevision,
     }));
   const currentPending = requests.flatMap((request) => {
     const pending = next.pendingTerminalReconciliations.get(request.eventSeq);
@@ -459,15 +478,22 @@ export function reconcilePendingCodeTurns(
       : applyCodeTurnSnapshot(next, turn);
   }
 
-  const observedSeqs = requested
-    ?.map((request) => request.observedSeq)
-    .filter((seq): seq is number => seq !== undefined);
   const responseMatchesCurrentJournal =
     requested === undefined ||
-    (observedSeqs !== undefined &&
-      observedSeqs.length > 0 &&
-      observedSeqs.every((seq) => seq === next.lastSeq));
-  if (orderedTurns.length > 0 && responseMatchesCurrentJournal) {
+    (requested.length > 0 &&
+      requested.every((request) => request.observedSeq === state.lastSeq));
+  const responseMatchesCurrentActivity =
+    requested === undefined ||
+    (requested.length > 0 &&
+      requested.every(
+        (request) =>
+          request.observedTurnActivityRevision === state.turnActivityRevision,
+      ));
+  if (
+    orderedTurns.length > 0 &&
+    responseMatchesCurrentJournal &&
+    responseMatchesCurrentActivity
+  ) {
     next = applyAuthoritativeTurnActivity(next, orderedTurns);
   }
   return next;
@@ -562,22 +588,13 @@ function assignUnattributedTerminals(
   }
 
   for (const [nextTurnId, group] of groups) {
+    // Without either an exact `turn_started` identity or a following start as
+    // an ordinal anchor, a capped terminal could belong to any earlier turn.
+    // Do not bind it to whichever snapshot happens to be last.
+    if (nextTurnId === null) continue;
     group.sort((left, right) => left.eventSeq - right.eventSeq);
-    let anchor: number;
-    if (nextTurnId !== null) {
-      anchor = turns.findIndex((turn) => turn.id === nextTurnId);
-      if (anchor === -1) continue;
-    } else {
-      if (turns.some((turn) => turn.status === "running")) continue;
-      const candidateTurnId = group.at(-1)?.candidateTurnId;
-      if (
-        candidateTurnId &&
-        !turns.some((turn) => turn.id === candidateTurnId)
-      ) {
-        continue;
-      }
-      anchor = turns.length;
-    }
+    const anchor = turns.findIndex((turn) => turn.id === nextTurnId);
+    if (anchor === -1) continue;
     if (anchor < group.length) continue;
 
     const proposed: Array<[PendingTerminalReconciliation, CodeTurnSnapshot]> =
@@ -611,6 +628,22 @@ function applyAuthoritativeTurnActivity(
   state: CodeSessionState,
   turns: readonly CodeTurnSnapshot[],
 ): CodeSessionState {
+  const acceptedTurn = state.acceptedTurnFence
+    ? turns.find((turn) => turn.id === state.acceptedTurnFence?.turnId)
+    : undefined;
+  if (
+    state.acceptedTurnFence &&
+    (!acceptedTurn || acceptedTurn.status === "running")
+  ) {
+    return {
+      ...state,
+      lastUsage: latestTurnUsage(state, turns),
+      busy: true,
+      activeTurnId: state.acceptedTurnFence.turnId,
+      turnStartedAt: acceptedTurn?.started_at ?? state.turnStartedAt,
+      lifecycle: "running",
+    };
+  }
   const open = [...turns]
     .reverse()
     .find(
@@ -619,6 +652,7 @@ function applyAuthoritativeTurnActivity(
     );
   const lastUsage = latestTurnUsage(state, turns);
   if (open) {
+    const activityChanged = state.activeTurnId !== open.id;
     return {
       ...state,
       lastUsage,
@@ -629,15 +663,22 @@ function applyAuthoritativeTurnActivity(
       turnStartedAt: open.started_at,
       turnStartObservedLive:
         state.activeTurnId === open.id && state.turnStartObservedLive,
+      acceptedTurnFence: null,
+      turnActivityRevision:
+        state.turnActivityRevision + (activityChanged ? 1 : 0),
       lifecycle: "running",
     };
   }
+  const activityChanged = state.activeTurnId !== null || state.busy;
   return {
     ...state,
     lastUsage,
     busy: false,
     activeTurnId: null,
     journalTurnId: null,
+    acceptedTurnFence: null,
+    turnActivityRevision:
+      state.turnActivityRevision + (activityChanged ? 1 : 0),
     turnStartedAt: null,
     turnStartObservedLive: false,
     assistantBuffer: "",
@@ -763,21 +804,35 @@ export function reduceCodeSessionEvent(
         state.activeTurnId === event.turn_id ? state.turnStartedAt : null;
       const continuesObservedTurn =
         state.journalTurnId === event.turn_id && state.turnStartObservedLive;
+      const preservesAcceptedTurn =
+        replayFollowsAcceptedTurn(state, framed) &&
+        state.acceptedTurnFence.turnId !== event.turn_id;
+      const activityChanged =
+        !preservesAcceptedTurn && state.activeTurnId !== event.turn_id;
       return {
         state: {
           ...state,
           busy: true,
-          activeTurnId: event.turn_id,
+          activeTurnId: preservesAcceptedTurn
+            ? state.activeTurnId
+            : event.turn_id,
           journalTurnId: event.turn_id,
+          acceptedTurnFence: preservesAcceptedTurn
+            ? state.acceptedTurnFence
+            : null,
+          turnActivityRevision:
+            state.turnActivityRevision + (activityChanged ? 1 : 0),
           // Hydration carries the server's accepted timestamp. Keep it when
           // replay walks the same turn, and never invent a start for history
           // that the client did not observe live.
-          turnStartedAt:
-            durableStartedAt ??
-            observedStartedAt ??
-            (framed.replayed === true ? null : deps.now()),
-          turnStartObservedLive:
-            framed.replayed !== true || continuesObservedTurn,
+          turnStartedAt: preservesAcceptedTurn
+            ? state.turnStartedAt
+            : (durableStartedAt ??
+              observedStartedAt ??
+              (framed.replayed === true ? null : deps.now())),
+          turnStartObservedLive: preservesAcceptedTurn
+            ? state.turnStartObservedLive
+            : framed.replayed !== true || continuesObservedTurn,
           assistantBuffer: "",
           reasoningBuffer: "",
           lifecycle: "running",
@@ -1105,6 +1160,12 @@ export function reduceCodeSessionEvent(
         canMeasureTurn && !hasDurableBoundary
           ? durationMs(state.turnStartedAt, deps.now())
           : null;
+      const resolvesActiveTurn =
+        state.activeTurnId === turnId &&
+        !(
+          replayFollowsAcceptedTurn(state, framed) &&
+          state.acceptedTurnFence.turnId !== turnId
+        );
       const finalized = finalizeStreaming(
         finalizeStreaming(state.items, "assistant"),
         "reasoning",
@@ -1112,7 +1173,7 @@ export function reduceCodeSessionEvent(
       return {
         state: {
           ...state,
-          busy: false,
+          busy: resolvesActiveTurn ? false : state.busy,
           lastUsage: needsSnapshot
             ? state.lastUsage
             : (usage ?? state.lastUsage),
@@ -1135,11 +1196,19 @@ export function reduceCodeSessionEvent(
                 state.turnOrdinals,
               )
             : finalized,
-          activeTurnId: null,
-          journalTurnId: null,
-          turnStartedAt: null,
-          turnStartObservedLive: false,
-          lifecycle: "idle",
+          activeTurnId: resolvesActiveTurn ? null : state.activeTurnId,
+          journalTurnId:
+            state.journalTurnId === turnId ? null : state.journalTurnId,
+          acceptedTurnFence: resolvesActiveTurn
+            ? null
+            : state.acceptedTurnFence,
+          turnActivityRevision:
+            state.turnActivityRevision + (resolvesActiveTurn ? 1 : 0),
+          turnStartedAt: resolvesActiveTurn ? null : state.turnStartedAt,
+          turnStartObservedLive: resolvesActiveTurn
+            ? false
+            : state.turnStartObservedLive,
+          lifecycle: resolvesActiveTurn ? "idle" : state.lifecycle,
           // A failed or interrupted turn still leaves whatever the engine
           // wrote before it stopped, so every resolution is a content change.
           contentRevision: state.contentRevision + 1,
@@ -1151,6 +1220,19 @@ export function reduceCodeSessionEvent(
     default:
       return { state, effects };
   }
+}
+
+function replayFollowsAcceptedTurn(
+  state: CodeSessionState,
+  framed: SequencedCodeEventFrame,
+): state is CodeSessionState & {
+  acceptedTurnFence: { turnId: string; afterSeq: number };
+} {
+  return (
+    framed.replayed === true &&
+    state.acceptedTurnFence !== null &&
+    framed.seq > state.acceptedTurnFence.afterSeq
+  );
 }
 
 /**
