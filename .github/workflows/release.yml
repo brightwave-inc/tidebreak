@@ -1357,6 +1357,11 @@ jobs:
           RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
+          # GNU tar treats C:\path as a remote host and \ as escapes. Stay on
+          # POSIX paths for every tar argument.
+          PREPARED_ROOT="$(cygpath -u "$PREPARED_ROOT")"
+          RELEASE_CONFIG="$(cygpath -u "$RELEASE_CONFIG")"
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
           app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop.exe"
           broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
           cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
@@ -1385,9 +1390,8 @@ jobs:
               "$cli_sidecar" \
               > SHA256SUMS
           )
-          # GNU tar treats C:\path as host C. Keep the archive name relative.
           (
-            cd "$GITHUB_WORKSPACE"
+            cd "$workspace"
             tar -cf prepared-windows.tar -C "$PREPARED_ROOT" \
               SHA256SUMS \
               release-config.json \
@@ -1458,12 +1462,14 @@ jobs:
           RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
+          PREPARED_ROOT="$(cygpath -u "$PREPARED_ROOT")"
+          PREPARED_DOWNLOAD="$(cygpath -u "$PREPARED_DOWNLOAD")"
+          RELEASE_CONFIG="$(cygpath -u "$RELEASE_CONFIG")"
           rm -rf "$PREPARED_ROOT"
           mkdir -p "$PREPARED_ROOT"
           (
             cd "$PREPARED_DOWNLOAD"
             sha256sum --check --strict prepared-windows.tar.sha256
-            # GNU tar treats C:\path as host C. Keep the archive name relative.
             tar -xf prepared-windows.tar -C "$PREPARED_ROOT"
           )
           (

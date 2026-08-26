@@ -1944,6 +1944,7 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   assert.match(prepareJob, /compression-level: 0/);
   assert.match(prepareJob, /overwrite: true/);
   assert.match(prepareJob, /sha256sum[\s\S]*> SHA256SUMS/);
+  assert.match(prepareJob, /PREPARED_ROOT="\$\(cygpath -u "\$PREPARED_ROOT"\)"/);
   assert.match(prepareJob, /tar -cf prepared-windows\.tar -C "\$PREPARED_ROOT"/);
   assert.match(prepareJob, /sha256sum prepared-windows\.tar/);
   assert.doesNotMatch(prepareJob, /tar -[cx]f "\$/);
@@ -1963,6 +1964,11 @@ test("Windows release jobs mirror the credential-free prepare/build split", () =
   assert.match(
     verifyStep,
     /sha256sum --check --strict prepared-windows\.tar\.sha256/,
+  );
+  assert.match(verifyStep, /PREPARED_ROOT="\$\(cygpath -u "\$PREPARED_ROOT"\)"/);
+  assert.match(
+    verifyStep,
+    /PREPARED_DOWNLOAD="\$\(cygpath -u "\$PREPARED_DOWNLOAD"\)"/,
   );
   assert.match(verifyStep, /tar -xf prepared-windows\.tar -C "\$PREPARED_ROOT"/);
   assert.doesNotMatch(verifyStep, /tar -[cx]f "\$/);
