@@ -595,7 +595,10 @@ where
         });
     };
     let mut capture = OutputCapture::new(budget);
-    let mut chunk = [0_u8; BOUNDED_OUTPUT_CHUNK_BYTES];
+    // Keep the read buffer off the async future's stack. Callers can nest this
+    // future through several git helpers, and two inline 8 KiB buffers per
+    // process can overflow the small stack used by Rust's test threads.
+    let mut chunk = vec![0_u8; BOUNDED_OUTPUT_CHUNK_BYTES];
     loop {
         let read = reader.read(&mut chunk).await?;
         if read == 0 {
@@ -1311,7 +1314,7 @@ mod tests {
     #[test]
     fn bounded_capture_does_not_retain_a_very_long_line() {
         let mut capture = OutputCapture::new(OutputBudget::head(32, 4));
-        assert!(!capture.push(&vec![b'x'; 16]));
+        assert!(!capture.push(&[b'x'; 16]));
         assert!(capture.push(&vec![b'x'; 64 * 1_024]));
         let output = capture.finish();
         assert_eq!(output.bytes.len(), 32);
