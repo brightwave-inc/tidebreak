@@ -2,7 +2,8 @@
 
 Supervision-first Expo client for hosted Tidebreak. This slice pairs the phone
 with a Model Gateway deployment, attaches to the advertised Tidebreak machine,
-and shows a proof-of-attach home screen.
+attaches to the advertised Tidebreak machine, and shows a live read-only
+sessions list plus a session event timeline.
 
 The app lives here, outside the Cargo workspace. It does not share the desktop
 UI package.

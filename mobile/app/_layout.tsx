@@ -42,6 +42,8 @@ export default function RootLayout() {
           <Stack.Screen name="pair" options={{ title: "Gateway" }} />
           <Stack.Screen name="attach" options={{ title: "Machine" }} />
           <Stack.Screen name="home" options={{ title: "Attached" }} />
+          <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
+          <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
           <Stack.Screen name="settings" options={{ title: "Settings" }} />
         </Stack>
       </QueryClientProvider>

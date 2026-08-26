@@ -8,7 +8,7 @@ export default function WelcomeScreen() {
   const session = useSessionStore((state) => state.session);
 
   if (session?.machine) {
-    return <Redirect href="/home" />;
+    return <Redirect href="/sessions" />;
   }
   if (session) {
     return <Redirect href="/attach" />;

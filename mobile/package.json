@@ -9,7 +9,8 @@
     "ios": "expo start --ios",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "sync-wire": "node scripts/sync-wire.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.90.21",
