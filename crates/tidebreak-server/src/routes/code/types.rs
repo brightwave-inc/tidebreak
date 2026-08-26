@@ -921,7 +921,10 @@ fn default_github_host() -> String {
     "github.com".to_owned()
 }
 
-/// Whether the local GitHub CLI can serve delivery requests.
+/// Whether this caller's GitHub path can serve Delivery requests.
+///
+/// Desktops and self-host machines report the local GitHub CLI. A
+/// gateway-authenticated hosted machine reports the caller's connected forge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeGitHubCapability {
     pub found: bool,

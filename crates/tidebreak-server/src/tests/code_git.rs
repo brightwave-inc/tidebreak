@@ -1663,3 +1663,317 @@ exit 3
     let live = fact.live.expect("the digest read writes the live tier");
     assert_eq!(live.merge_state_status.as_deref(), Some("blocked"));
 }
+
+fn assert_borrowed_forge_credential(headers: &axum::http::HeaderMap) {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(bearer, "Bearer ghs_fake_borrowed");
+}
+
+async fn register_delivery_repository(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    root: &std::path::Path,
+) {
+    let response = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "path": root }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+}
+
+/// Issue #2673: a gateway-authenticated hosted caller reads every Delivery
+/// list through one borrowed credential per repository operation. No `gh`
+/// observation participates, and check runs keep the attention bucket useful.
+#[tokio::test]
+async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
+    let repository = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "name": "demo",
+            "full_name": "acme/demo",
+            "html_url": "https://github.com/acme/demo",
+            "default_branch": "main",
+            "owner": { "login": "acme" },
+        }))
+    };
+    let pulls = |headers: axum::http::HeaderMap,
+                 axum::extract::Query(query): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >| async move {
+        assert_borrowed_forge_credential(&headers);
+        assert_eq!(query.get("state").map(String::as_str), Some("open"));
+        axum::Json(serde_json::json!([{
+            "number": 17,
+            "html_url": "https://github.com/acme/demo/pull/17",
+            "title": "Repair hosted delivery",
+            "state": "open",
+            "draft": false,
+            "user": {
+                "login": "mira-chen",
+                "avatar_url": "https://avatars.example/mira"
+            },
+            "head": {
+                "ref": "hosted-delivery",
+                "sha": "feedfeedfeedfeedfeed",
+                "repo": {
+                    "name": "demo",
+                    "full_name": "acme/demo",
+                    "owner": { "login": "acme" }
+                }
+            },
+            "base": { "ref": "main" },
+            "labels": [{ "name": "code" }],
+            "comments": 2,
+            "created_at": "2026-08-25T10:00:00Z",
+            "updated_at": "2026-08-25T11:00:00Z",
+            "merged_at": null,
+            "closed_at": null
+        }]))
+    };
+    let checks = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "check_runs": [{
+                "name": "desktop test",
+                "status": "completed",
+                "conclusion": "failure",
+                "details_url": "https://github.com/acme/demo/actions/runs/44"
+            }, {
+                "name": "clippy",
+                "status": "in_progress",
+                "conclusion": null,
+                "html_url": "https://github.com/acme/demo/actions/runs/45"
+            }]
+        }))
+    };
+    let workflow_runs = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "workflow_runs": [{
+                "id": 44,
+                "run_attempt": 2,
+                "status": "completed",
+                "conclusion": "failure",
+                "display_title": "Desktop CI",
+                "name": "CI",
+                "html_url": "https://github.com/acme/demo/actions/runs/44",
+                "head_branch": "hosted-delivery",
+                "head_sha": "feedfeedfeedfeedfeed",
+                "event": "pull_request",
+                "actor": { "login": "mira-chen" },
+                "created_at": "2026-08-25T10:00:00Z",
+                "updated_at": "2026-08-25T11:00:00Z"
+            }]
+        }))
+    };
+    let deployments = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([{
+            "id": 91,
+            "environment": "production",
+            "ref": "hosted-delivery",
+            "sha": "feedfeedfeedfeedfeed",
+            "creator": { "login": "mira-chen" },
+            "created_at": "2026-08-25T10:30:00Z",
+            "updated_at": "2026-08-25T10:30:00Z"
+        }]))
+    };
+    let forge = axum::Router::new()
+        .route("/repos/acme/demo", axum::routing::get(repository))
+        .route("/repos/acme/demo/pulls", axum::routing::get(pulls))
+        .route(
+            "/repos/acme/demo/commits/{sha}/check-runs",
+            axum::routing::get(checks),
+        )
+        .route(
+            "/repos/acme/demo/actions/runs",
+            axum::routing::get(workflow_runs),
+        )
+        .route(
+            "/repos/acme/demo/deployments",
+            axum::routing::get(deployments),
+        );
+    let forge_addr = serve(forge).await;
+
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_gh_search_path(Some("/path/with/no/gh".into()));
+    runtime.set_forge_api_base(Some(format!("http://{forge_addr}")));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let root = init_paired_repo(dir.path());
+    run(
+        &root,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    register_delivery_repository(&client, addr, &token, &root).await;
+
+    let repositories: serde_json::Value = client
+        .get(format!("http://{addr}/code/delivery/repositories"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repositories["capability"]["authenticated"], true);
+    assert_eq!(repositories["capability"]["viewer_login"], "mira-chen");
+    assert_eq!(
+        repositories["repositories"][0]["name_with_owner"],
+        "acme/demo"
+    );
+    assert_eq!(repositories["repositories"][0]["default_branch"], "main");
+
+    let target = serde_json::json!({
+        "host": "github.com",
+        "owner": "acme",
+        "name": "demo"
+    });
+    let pull_requests: serde_json::Value = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/query"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repositories": [target.clone()],
+            "states": ["open"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pull_requests["items"][0]["number"], 17);
+    assert_eq!(pull_requests["items"][0]["comment_count"], 2);
+    assert_eq!(
+        pull_requests["items"][0]["checks"][0]["name"],
+        "desktop test"
+    );
+    assert_eq!(pull_requests["items"][0]["checks"][0]["bucket"], "fail");
+    assert_eq!(
+        pull_requests["items"][0]["checks"][0]["workflow_run_id"],
+        44
+    );
+    assert_eq!(pull_requests["items"][0]["checks"][1]["bucket"], "pending");
+    assert_eq!(
+        pull_requests["items"][0]["checks"][1]["workflow_run_id"],
+        45
+    );
+    assert_eq!(
+        pull_requests["items"][0]["attention_reasons"][0],
+        "checks_failed"
+    );
+
+    let runs: serde_json::Value = client
+        .post(format!("http://{addr}/code/delivery/runs/query"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "repositories": [target] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runs["items"].as_array().unwrap().len(), 2, "{runs}");
+    assert!(runs["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["kind"] == "workflow_run"));
+    assert!(runs["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["kind"] == "deployment"));
+    assert_eq!(
+        lender.minted(),
+        vec![
+            "acme/demo".to_owned(),
+            "acme/demo".to_owned(),
+            "acme/demo".to_owned()
+        ],
+        "each repository read borrows once"
+    );
+}
+
+/// Issue #2673: a hosted caller who has not connected their forge gets the
+/// gateway's connect path. The response never points at a terminal on a
+/// machine where the caller cannot run `gh auth login`.
+#[tokio::test]
+async fn an_unconnected_hosted_delivery_page_never_recommends_gh_login() {
+    let connect_url = "https://gateway.example/account/apps";
+    let lender = Arc::new(FakeLender::refusing(GitForgeError::NotConnected {
+        connect_url: Some(connect_url.to_owned()),
+    }));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_gh_search_path(Some("/path/with/no/gh".into()));
+    runtime.set_forge_api_base(Some("http://127.0.0.1:9".into()));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let root = init_paired_repo(dir.path());
+    run(
+        &root,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+    register_delivery_repository(&client, addr, &token, &root).await;
+
+    let repositories: serde_json::Value = client
+        .get(format!("http://{addr}/code/delivery/repositories"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let remediation = repositories["capability"]["remediation"].as_str().unwrap();
+    assert_eq!(repositories["capability"]["authenticated"], false);
+    assert!(remediation.contains(connect_url), "{remediation}");
+    assert!(!remediation.contains("gh auth login"), "{remediation}");
+
+    let pull_requests: serde_json::Value = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/query"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repositories": [{
+                "host": "github.com",
+                "owner": "acme",
+                "name": "demo"
+            }],
+            "states": ["open"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pull_requests["items"].as_array().unwrap().len(), 0);
+    assert_eq!(pull_requests["errors"][0]["kind"], "git_forge_not_offered");
+    assert!(pull_requests["errors"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains(connect_url));
+    assert!(lender.minted().is_empty());
+}
