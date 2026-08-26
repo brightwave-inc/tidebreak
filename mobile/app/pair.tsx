@@ -1,5 +1,4 @@
 import Constants from "expo-constants";
-import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 import { useRouter } from "expo-router";
 import { useState } from "react";
@@ -103,9 +102,6 @@ export default function PairScreen() {
           {busy ? "Opening browser…" : "Continue"}
         </Text>
       </Pressable>
-      <Text className="text-xs text-muted-foreground">
-        Redirect: {Linking.createURL("callback")} / {redirectUri()}
-      </Text>
     </Screen>
   );
 }

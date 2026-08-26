@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { memoryStorage } from "./storage";
+import { memoryStorage, SESSION_STORAGE_KEY } from "./storage";
 import { SignedOutError, TokenStore, type TokenHttp } from "./tokenStore";
 import type { PersistedSession, TokenResponse } from "./types";
 
@@ -75,5 +75,39 @@ describe("TokenStore", () => {
       SignedOutError,
     );
     expect(store.snapshot()).toBeNull();
+  });
+
+  it("keeps access tokens out of persistent storage", async () => {
+    const http: TokenHttp = {
+      postForm: vi.fn(async () => ({ status: 200, json: tokens(1) })),
+    };
+    const storage = memoryStorage();
+    const store = new TokenStore(storage, http);
+    await store.replace(session());
+    expect(await store.getAccessToken("control")).toBe("mg_at_1");
+
+    const raw = await storage.getItem(SESSION_STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    const persisted = JSON.parse(raw!) as PersistedSession;
+    expect(persisted.accessTokens).toEqual([]);
+    expect(persisted.refreshToken).toBe("mg_rt_1");
+
+    // A stale token written by an older build is dropped on hydrate.
+    await storage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        ...persisted,
+        accessTokens: [
+          {
+            resource: "control",
+            accessToken: "mg_at_stale",
+            expiresAtMs: Date.now() + 600_000,
+          },
+        ],
+      }),
+    );
+    const rehydrated = new TokenStore(storage, http);
+    const hydrated = await rehydrated.hydrate();
+    expect(hydrated?.accessTokens).toEqual([]);
   });
 });

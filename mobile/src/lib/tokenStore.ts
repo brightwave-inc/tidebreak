@@ -47,7 +47,10 @@ export class TokenStore {
       return null;
     }
     try {
-      this.session = JSON.parse(raw) as PersistedSession;
+      const parsed = JSON.parse(raw) as PersistedSession;
+      // Access tokens are a memory-only cache; drop any a previous build
+      // wrote so a stale token is never trusted across launches.
+      this.session = { ...parsed, accessTokens: [] };
     } catch {
       await this.clear();
       return null;
@@ -174,9 +177,11 @@ export class TokenStore {
       await this.storage.deleteItem(SESSION_STORAGE_KEY);
       return;
     }
+    // Short-lived access tokens stay in memory only: they expire in minutes,
+    // and expo-secure-store caps values near 2KB on Android.
     await this.storage.setItem(
       SESSION_STORAGE_KEY,
-      JSON.stringify(this.session),
+      JSON.stringify({ ...this.session, accessTokens: [] }),
     );
   }
 }
