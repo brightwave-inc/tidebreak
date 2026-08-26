@@ -46,6 +46,11 @@ export type CodeCloneTracking = {
   startedOrder: number;
 };
 
+export type SelectedCodeClone = {
+  jobId: string;
+  clientGeneration: number;
+};
+
 export type CodeUpdatesState = {
   /**
    * Conversation digests, keyed workspace → session. Never a watch.
@@ -72,6 +77,8 @@ export type CodeUpdatesState = {
   cloneReadErrors: Record<string, string>;
   /** The ApiClient generation that owns every clone entry in this store. */
   cloneClientGeneration: number | null;
+  /** The exact clone requested by a notification action, consumed on open. */
+  selectedClone: SelectedCodeClone | null;
   /**
    * Warm harness installs, keyed by engine. The New Workspace dialog starts
    * them and reads their phase from here; nothing else depends on them, and a
@@ -104,6 +111,7 @@ const EMPTY: CodeUpdatesState = {
   cloneTracking: {},
   cloneReadErrors: {},
   cloneClientGeneration: null,
+  selectedClone: null,
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
@@ -419,7 +427,12 @@ type CodeUpdatesStore = CodeUpdatesState & {
 export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
   ...EMPTY,
   apply: (action) => {
-    let backgroundClone: CodeCloneJobSnapshot | null = null;
+    const backgroundClone: {
+      current: {
+        job: CodeCloneJobSnapshot;
+        clientGeneration: number;
+      } | null;
+    } = { current: null };
     set((previous) => {
       let next = reduceCodeUpdates(previous, action);
       // OS attention stays keyed to the conversation: a watch child's state
@@ -434,7 +447,10 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
         const tracking = next.cloneTracking[action.job.id];
         const updatedJob = next.cloneJobs[action.job.id];
         if (tracking?.background && updatedJob?.done && !tracking.notified) {
-          backgroundClone = updatedJob;
+          backgroundClone.current = {
+            job: updatedJob,
+            clientGeneration: tracking.clientGeneration,
+          };
           next = {
             ...next,
             cloneTracking: {
@@ -446,7 +462,10 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
       }
       return next;
     });
-    if (backgroundClone) notifyBackgroundClone(backgroundClone);
+    const notification = backgroundClone.current;
+    if (notification) {
+      notifyBackgroundClone(notification.job, notification.clientGeneration);
+    }
   },
   setViewedWorkspace: (workspaceId) => {
     set(reduceCodeUpdates(get(), { type: "view", workspaceId }));
@@ -458,6 +477,7 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
       cloneTracking: state.cloneTracking,
       cloneReadErrors: state.cloneReadErrors,
       cloneClientGeneration: state.cloneClientGeneration,
+      selectedClone: state.selectedClone,
       viewedWorkspaceId: state.viewedWorkspaceId,
     })),
   reset: () => set({ ...EMPTY }),
@@ -503,13 +523,17 @@ export function trackCodeClone(
 ): boolean {
   const clientGeneration = codeClientGeneration(client);
   let tracked = false;
+  let terminal: CodeCloneJobSnapshot | null = null;
   useCodeUpdatesStore.setState((state) => {
     if (state.cloneClientGeneration !== clientGeneration) return state;
     tracked = true;
     const cloneReadErrors = { ...state.cloneReadErrors };
     delete cloneReadErrors[job.id];
-    nextCloneOrder += 1;
+    const existing = state.cloneTracking[job.id];
+    const startedOrder = existing?.startedOrder ?? ++nextCloneOrder;
     const trackedJob = mergeCloneJob(state.cloneJobs[job.id], job);
+    const notify = background && trackedJob.done && !existing?.notified;
+    if (notify) terminal = trackedJob;
     return {
       cloneJobs: { ...state.cloneJobs, [job.id]: trackedJob },
       cloneTracking: {
@@ -518,16 +542,14 @@ export function trackCodeClone(
           request,
           clientGeneration,
           background,
-          notified: false,
-          startedOrder: nextCloneOrder,
+          notified: existing?.notified === true || notify,
+          startedOrder,
         },
       },
       cloneReadErrors,
     };
   });
-  if (tracked && background && job.done) {
-    setCodeCloneBackground(client, job.id, true);
-  }
+  if (terminal) notifyBackgroundClone(terminal, clientGeneration);
   return tracked;
 }
 
@@ -561,7 +583,7 @@ export function setCodeCloneBackground(
       },
     };
   });
-  if (terminal) notifyBackgroundClone(terminal);
+  if (terminal) notifyBackgroundClone(terminal, clientGeneration);
 }
 
 export type ResumableCodeClone = {
@@ -569,6 +591,56 @@ export type ResumableCodeClone = {
   tracking: CodeCloneTracking;
   readError: string | null;
 };
+
+function resumableCodeClone(
+  state: CodeUpdatesState,
+  clientGeneration: number,
+  jobId: string,
+): ResumableCodeClone | null {
+  const tracking = state.cloneTracking[jobId];
+  const job = state.cloneJobs[jobId];
+  if (tracking?.clientGeneration !== clientGeneration || !job) return null;
+  return {
+    job,
+    tracking,
+    readError: state.cloneReadErrors[jobId] ?? null,
+  };
+}
+
+/** Select the exact tracked clone that a notification action represents. */
+export function selectCodeClone(selection: SelectedCodeClone): boolean {
+  let selected = false;
+  useCodeUpdatesStore.setState((state) => {
+    if (
+      state.cloneClientGeneration !== selection.clientGeneration ||
+      !resumableCodeClone(state, selection.clientGeneration, selection.jobId)
+    ) {
+      return state;
+    }
+    selected = true;
+    return { selectedClone: selection };
+  });
+  return selected;
+}
+
+/** Consume the clone selected by a notification action. */
+export function takeSelectedCodeClone(
+  client: object,
+): ResumableCodeClone | null | undefined {
+  const clientGeneration = codeClientGeneration(client);
+  let selected: ResumableCodeClone | null | undefined;
+  useCodeUpdatesStore.setState((state) => {
+    const request = state.selectedClone;
+    if (!request) return state;
+    selected =
+      state.cloneClientGeneration === clientGeneration &&
+      request.clientGeneration === clientGeneration
+        ? resumableCodeClone(state, clientGeneration, request.jobId)
+        : null;
+    return { selectedClone: null };
+  });
+  return selected;
+}
 
 /** The most recently started clone that this client can resume. */
 export function latestCodeClone(client: object): ResumableCodeClone | null {
@@ -579,14 +651,8 @@ export function latestCodeClone(client: object): ResumableCodeClone | null {
     .filter(([, entry]) => entry.clientGeneration === clientGeneration)
     .sort(([, left], [, right]) => right.startedOrder - left.startedOrder)[0];
   if (!tracking) return null;
-  const [jobId, entry] = tracking;
-  const job = state.cloneJobs[jobId];
-  if (!job) return null;
-  return {
-    job,
-    tracking: entry,
-    readError: state.cloneReadErrors[jobId] ?? null,
-  };
+  const [jobId] = tracking;
+  return resumableCodeClone(state, clientGeneration, jobId);
 }
 
 /** Remove a clone once onboarding has handed its repository off. */
@@ -685,10 +751,16 @@ export function reconcileCodeClone(
   return request;
 }
 
-function notifyBackgroundClone(job: CodeCloneJobSnapshot): void {
+function notifyBackgroundClone(
+  job: CodeCloneJobSnapshot,
+  clientGeneration: number,
+): void {
   const action = {
     label: job.error ? "Retry" : "Open",
-    onClick: () => useCodeUiStore.getState().setAddRepoOpen(true),
+    onClick: () => {
+      if (!selectCodeClone({ jobId: job.id, clientGeneration })) return;
+      useCodeUiStore.getState().setAddRepoOpen(true);
+    },
   };
   if (job.error) {
     toast.error("Repository clone failed", {

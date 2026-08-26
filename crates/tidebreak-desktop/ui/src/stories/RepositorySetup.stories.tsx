@@ -39,6 +39,11 @@ type SetupScenario =
   | "clone-complete"
   | "hosted-picker"
   | "hosted-list-failed"
+  | "source-probe-failure"
+  | "defaults-probe-failure"
+  | "progress-read-failure"
+  | "repository-handoff-failure"
+  | "registration-background-complete"
   | "workspace"
   | "workspace-needs-harness";
 
@@ -50,14 +55,19 @@ function setupClient(scenario: SetupScenario): ApiClient {
   const localOnly = scenario === "local-only";
   const githubHint = scenario === "github-hint";
   return {
-    getCodeCloneDefaults: async () => ({
-      parent_dir: "/Users/sam/src",
-      gh_found: !githubHint,
-      gh_authenticated: !githubHint,
-      gh_remediation: githubHint
-        ? "GitHub CLI is not signed in on this machine."
-        : "",
-    }),
+    getCodeCloneDefaults: async () => {
+      if (scenario === "defaults-probe-failure") {
+        throw new Error("The saved destination is unavailable.");
+      }
+      return {
+        parent_dir: "/Users/sam/src",
+        gh_found: !githubHint,
+        gh_authenticated: !githubHint,
+        gh_remediation: githubHint
+          ? "GitHub CLI is not signed in on this machine."
+          : "",
+      };
+    },
     listCodeGithubRepositories: async () => {
       if (scenario === "hosted-list-failed") {
         throw new Error("502: bad gateway");
@@ -79,39 +89,44 @@ function setupClient(scenario: SetupScenario): ApiClient {
           }
         : { repositories: [] };
     },
-    getCodeRepoSources: async () => ({
-      sources: localOnly
-        ? [
-            { kind: "local", available: true },
-            {
-              kind: "git_url",
-              available: false,
-              remediation: "Install git on this machine to clone a remote.",
-            },
-            {
-              kind: "github",
-              available: false,
-              remediation: "Install git on this machine to clone a remote.",
-            },
-          ]
-        : [
-            { kind: "local", available: true },
-            { kind: "git_url", available: true },
-            {
-              kind: "github",
-              available: true,
-              remediation:
-                scenario === "hosted-picker" ||
-                scenario === "hosted-list-failed"
-                  ? "Clones and pushes use your own GitHub account: work lands as mira-chen."
-                  : githubHint
-                    ? "GitHub CLI is not signed in on this machine."
-                    : undefined,
-            },
-          ],
-      chooses_destination:
-        scenario === "hosted-picker" || scenario === "hosted-list-failed",
-    }),
+    getCodeRepoSources: async () => {
+      if (scenario === "source-probe-failure") {
+        throw new Error("The machine did not answer.");
+      }
+      return {
+        sources: localOnly
+          ? [
+              { kind: "local", available: true },
+              {
+                kind: "git_url",
+                available: false,
+                remediation: "Install git on this machine to clone a remote.",
+              },
+              {
+                kind: "github",
+                available: false,
+                remediation: "Install git on this machine to clone a remote.",
+              },
+            ]
+          : [
+              { kind: "local", available: true },
+              { kind: "git_url", available: true },
+              {
+                kind: "github",
+                available: true,
+                remediation:
+                  scenario === "hosted-picker" ||
+                  scenario === "hosted-list-failed"
+                    ? "Clones and pushes use your own GitHub account: work lands as mira-chen."
+                    : githubHint
+                      ? "GitHub CLI is not signed in on this machine."
+                      : undefined,
+              },
+            ],
+        chooses_destination:
+          scenario === "hosted-picker" || scenario === "hosted-list-failed",
+      };
+    },
     startCodeClone: async () => {
       return {
         id: "clone-story",
@@ -120,15 +135,31 @@ function setupClient(scenario: SetupScenario): ApiClient {
         done: false,
       };
     },
-    getCodeCloneJob: async (jobId: string) =>
-      useCodeUpdatesStore.getState().cloneJobs[jobId] ?? {
-        id: jobId,
-        phase: "Receiving objects",
-        percent: 38,
-        done: false,
-      },
-    getCodeRepo: async () => codeRepositories[0]!,
-    createCodeRepo: async () => codeRepositories[0]!,
+    getCodeCloneJob: async (jobId: string) => {
+      if (scenario === "progress-read-failure") {
+        throw new Error("The progress service is unavailable.");
+      }
+      return (
+        useCodeUpdatesStore.getState().cloneJobs[jobId] ?? {
+          id: jobId,
+          phase: "Receiving objects",
+          percent: 38,
+          done: false,
+        }
+      );
+    },
+    getCodeRepo: async () => {
+      if (scenario === "repository-handoff-failure") {
+        throw new Error("The repository catalog is unavailable.");
+      }
+      return codeRepositories[0]!;
+    },
+    createCodeRepo: async () => {
+      if (scenario === "registration-background-complete") {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 250));
+      }
+      return codeRepositories[0]!;
+    },
     listCodeHarnessModels: async (kind: HarnessKind) => ({
       kind,
       models: [
@@ -236,7 +267,7 @@ const CLONE_REQUEST = {
 
 function seedCloneScenario(client: ApiClient, scenario: SetupScenario) {
   activateCodeCloneClient(client);
-  if (scenario === "clone-progress") {
+  if (scenario === "clone-progress" || scenario === "progress-read-failure") {
     trackCodeClone(
       client,
       {
@@ -273,7 +304,10 @@ function seedCloneScenario(client: ApiClient, scenario: SetupScenario) {
       CLONE_REQUEST,
     );
   }
-  if (scenario === "clone-complete") {
+  if (
+    scenario === "clone-complete" ||
+    scenario === "repository-handoff-failure"
+  ) {
     trackCodeClone(
       client,
       {
@@ -288,10 +322,19 @@ function seedCloneScenario(client: ApiClient, scenario: SetupScenario) {
 }
 
 function RepositorySetupStory({ scenario }: { scenario: SetupScenario }) {
+  const [paletteOpen, setPaletteOpen] = useState(
+    scenario !== "clone-background-complete",
+  );
   const [state] = useState(() => {
     useCodeCatalogStore.getState().reset();
     useCodeUpdatesStore.getState().reset();
-    useCodeUiStore.setState({ lastCreate: null, pendingComposerPrompt: null });
+    useCodeUiStore.setState({
+      addRepoOpen: false,
+      lastCreate: null,
+      newWorkspaceOpen: false,
+      newWorkspaceRepoId: undefined,
+      pendingComposerPrompt: null,
+    });
     useCodeCatalogStore.setState({
       repos: codeRepositories,
       workspaces: [],
@@ -325,7 +368,6 @@ function RepositorySetupStory({ scenario }: { scenario: SetupScenario }) {
   }, [scenario]);
 
   const workspace = scenario.startsWith("workspace");
-  const paletteOpen = scenario !== "clone-background-complete";
   return (
     <AppContextProvider value={appContext(state.client)}>
       <RouterProvider router={state.router as never} />
@@ -336,7 +378,7 @@ function RepositorySetupStory({ scenario }: { scenario: SetupScenario }) {
           repos={codeRepositories}
         />
       ) : (
-        <AddRepoPalette open={paletteOpen} onOpenChange={() => {}} />
+        <AddRepoPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       )}
       <Toaster richColors duration={Number.POSITIVE_INFINITY} />
     </AppContextProvider>
@@ -421,11 +463,64 @@ export const HostedGitHubListFailed: Story = {
   },
 };
 
+export const SourceProbeFailure: Story = {
+  args: { scenario: "source-probe-failure" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await expect(
+      await body.findByText(
+        "Could not check which sources this machine supports.",
+      ),
+    ).toBeVisible();
+    await userEvent.click(await body.findByRole("button", { name: "Retry" }));
+    await expect(
+      await body.findByText(
+        "Could not check which sources this machine supports.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const DefaultsProbeFailure: Story = {
+  args: { scenario: "defaults-probe-failure" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await body.findByRole("option", { name: /Git URL/ }));
+    await expect(
+      await body.findByText(
+        "The saved destination did not load. Choose one or retry.",
+      ),
+    ).toBeVisible();
+    await userEvent.click(await body.findByRole("button", { name: "Retry" }));
+    await expect(
+      await body.findByText(
+        "The saved destination did not load. Choose one or retry.",
+      ),
+    ).toBeVisible();
+  },
+};
+
 export const CloneProgress: Story = {
   args: { scenario: "clone-progress" },
   play: async ({ canvasElement }) => {
     const body = within(canvasElement.ownerDocument.body);
     await expect(await body.findByText("Receiving objects")).toBeVisible();
+  },
+};
+
+export const DurableProgressReadFailure: Story = {
+  args: { scenario: "progress-read-failure" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await expect(
+      await body.findByText("The progress service is unavailable."),
+    ).toBeVisible();
+    await userEvent.click(
+      await body.findByRole("button", { name: "Retry check" }),
+    );
+    await expect(
+      await body.findByText("The progress service is unavailable."),
+    ).toBeVisible();
   },
 };
 
@@ -449,6 +544,42 @@ export const CloneCompleted: Story = {
     ).toBeVisible();
     await expect(
       await body.findByRole("button", { name: "Create workspace" }),
+    ).toBeVisible();
+  },
+};
+
+export const RepositoryHandoffFailure: Story = {
+  args: { scenario: "repository-handoff-failure" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await body.findByRole("button", { name: "Create workspace" }),
+    );
+    await expect(
+      await body.findByText("The repository catalog is unavailable."),
+    ).toBeVisible();
+    await userEvent.click(await body.findByRole("button", { name: "Retry" }));
+    await expect(
+      await body.findByText("The repository catalog is unavailable."),
+    ).toBeVisible();
+  },
+};
+
+export const RegistrationCompletedInBackground: Story = {
+  args: { scenario: "registration-background-complete" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await body.findByRole("option", { name: /Local folder/ }),
+    );
+    await userEvent.type(await body.findByLabelText("Path"), "/Users/sam/src");
+    await userEvent.click(
+      await body.findByRole("button", { name: "Register" }),
+    );
+    await userEvent.click(await body.findByRole("button", { name: "Close" }));
+    await expect(await body.findByText("Repository registered")).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: "Open" }),
     ).toBeVisible();
   },
 };

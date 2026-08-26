@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { useState } from "react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
@@ -17,7 +18,12 @@ import { setAttachedRemotely } from "@/host";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
-import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import {
+  activateCodeCloneClient,
+  selectCodeClone,
+  trackCodeClone,
+  useCodeUpdatesStore,
+} from "./CodeUpdatesStore";
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
@@ -32,7 +38,9 @@ afterEach(() => {
     newWorkspaceRepoId: undefined,
     addRepoOpen: false,
   });
+  setAttachedRemotely(false);
   vi.useRealTimers();
+  vi.clearAllMocks();
 });
 
 const REPO = {
@@ -198,6 +206,33 @@ describe("AddRepoPalette", () => {
     );
   });
 
+  it("keeps a destination typed before clone defaults resolve", async () => {
+    const defaults =
+      deferred<
+        Awaited<ReturnType<AppContextValue["client"]["getCodeCloneDefaults"]>>
+      >();
+    await renderPalette(
+      app({
+        getCodeCloneDefaults: vi.fn(() => defaults.promise),
+      }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: /Git URL/ }));
+    const destination = await screen.findByLabelText("Destination folder");
+    fireEvent.change(destination, { target: { value: "/tmp/chosen" } });
+
+    await act(async () => {
+      defaults.resolve({
+        parent_dir: "/tmp/stale-default",
+        gh_found: true,
+        gh_authenticated: true,
+        gh_remediation: "",
+      });
+      await defaults.promise;
+    });
+
+    expect(destination).toHaveValue("/tmp/chosen");
+  });
+
   it("drives clone progress to done and shows an error tail with retry", async () => {
     const started = vi.fn(async () => ({
       id: "job-1",
@@ -298,6 +333,138 @@ describe("AddRepoPalette", () => {
 
     await waitFor(() => expect(getCodeRepo).not.toHaveBeenCalled());
     expect(useCodeUiStore.getState().newWorkspaceOpen).toBe(false);
+  });
+
+  it("opens the exact clone selected by a background notification", async () => {
+    const value = app();
+    const clientGeneration = activateCodeCloneClient(value.client);
+    trackCodeClone(
+      value.client,
+      { id: "job-a", phase: "Clone A", done: false },
+      { github: "acme/a", parent_dir: "/tmp/src" },
+      true,
+    );
+    trackCodeClone(
+      value.client,
+      { id: "job-b", phase: "Clone B", done: false },
+      { github: "acme/b", parent_dir: "/tmp/src" },
+      true,
+    );
+    expect(selectCodeClone({ jobId: "job-a", clientGeneration })).toBe(true);
+
+    render(<PaletteHarness value={value} />);
+
+    expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
+      "Clone A",
+    );
+    expect(screen.queryByText("Clone B")).not.toBeInTheDocument();
+  });
+
+  it("keeps the selected clone destination when pending defaults resolve", async () => {
+    const defaults =
+      deferred<
+        Awaited<ReturnType<AppContextValue["client"]["getCodeCloneDefaults"]>>
+      >();
+    const value = app({
+      getCodeCloneDefaults: vi.fn(() => defaults.promise),
+    });
+    const clientGeneration = activateCodeCloneClient(value.client);
+    render(<PaletteHarness value={value} />);
+    expect(
+      await screen.findByRole("option", { name: /Local folder/ }),
+    ).toBeVisible();
+
+    act(() => {
+      trackCodeClone(
+        value.client,
+        { id: "job-a", phase: "Clone A", done: false },
+        { github: "acme/a", parent_dir: "/tmp/selected" },
+        true,
+      );
+      selectCodeClone({ jobId: "job-a", clientGeneration });
+    });
+    expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
+      "Clone A",
+    );
+
+    await act(async () => {
+      defaults.resolve({
+        parent_dir: "/tmp/stale-default",
+        gh_found: true,
+        gh_authenticated: true,
+        gh_remediation: "",
+      });
+      await defaults.promise;
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Backspace" });
+
+    expect(await screen.findByLabelText("Destination folder")).toHaveValue(
+      "/tmp/selected",
+    );
+  });
+
+  it("aborts every setup probe when the palette closes", async () => {
+    const sources = vi.fn((_signal?: AbortSignal) => new Promise(() => {}));
+    const github = vi.fn((_signal?: AbortSignal) => new Promise(() => {}));
+    const defaults = vi.fn((_signal?: AbortSignal) => new Promise(() => {}));
+    render(
+      <PaletteHarness
+        value={app({
+          getCodeRepoSources: sources as never,
+          listCodeGithubRepositories: github as never,
+          getCodeCloneDefaults: defaults as never,
+        })}
+      />,
+    );
+    await waitFor(() => {
+      expect(sources).toHaveBeenCalledTimes(1);
+      expect(github).toHaveBeenCalledTimes(1);
+      expect(defaults).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    for (const probe of [sources, github, defaults]) {
+      const signal = probe.mock.calls[0]?.[0];
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal?.aborted).toBe(true);
+    }
+  });
+
+  it("keeps a successful local registration after dismissal", async () => {
+    const registration = deferred<typeof REPO>();
+    const value = app({
+      createCodeRepo: vi.fn(() => registration.promise),
+    });
+    render(<PaletteHarness value={value} />);
+    fireEvent.click(
+      await screen.findByRole("option", { name: /Local folder/ }),
+    );
+    fireEvent.change(await screen.findByLabelText("Path"), {
+      target: { value: REPO.root_path },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Register" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    await act(async () => {
+      registration.resolve(REPO);
+      await registration.promise;
+    });
+
+    expect(useCodeCatalogStore.getState().repos).toContainEqual(REPO);
+    expect(toast.success).toHaveBeenCalledWith(
+      "Repository registered",
+      expect.objectContaining({
+        description: "Create a workspace when you are ready.",
+      }),
+    );
+    expect(useCodeUiStore.getState().newWorkspaceOpen).toBe(false);
+    expect(useCodeUiStore.getState().newWorkspaceRepoId).toBeUndefined();
+    const options = vi.mocked(toast.success).mock.calls[0]?.[1] as
+      | { action?: { onClick: () => void } }
+      | undefined;
+    options?.action?.onClick();
+    expect(useCodeUiStore.getState().newWorkspaceRepoId).toBe(REPO.id);
   });
 
   it("ignores slow setup probes from a dismissed opening after reopen", async () => {
@@ -507,6 +674,88 @@ describe("AddRepoPalette", () => {
     expect(
       screen.queryByRole("option", { name: /stale\/repository/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("clears the previous client's defaults while replacement probes wait", async () => {
+    const replacementDefaults =
+      deferred<
+        Awaited<ReturnType<AppContextValue["client"]["getCodeCloneDefaults"]>>
+      >();
+    const first = app({
+      getCodeCloneDefaults: vi.fn(async () => ({
+        parent_dir: "/first/src",
+        gh_found: false,
+        gh_authenticated: false,
+        gh_remediation: "Client A needs a GitHub credential.",
+      })),
+    });
+    const replacement = app({
+      getCodeCloneDefaults: vi.fn(() => replacementDefaults.promise),
+    });
+    const view = render(<PaletteHarness value={first} />);
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+    expect(await screen.findByTestId("gh-absent-hint")).toHaveTextContent(
+      "Client A needs a GitHub credential.",
+    );
+
+    view.rerender(<PaletteHarness value={replacement} />);
+    fireEvent.click(
+      await screen.findByRole("option", { name: /GitHub repository/ }),
+    );
+
+    expect(
+      screen.queryByText(/Client A needs a GitHub credential/),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      name: "completed",
+      job: {
+        id: "job-terminal",
+        phase: "Clone complete",
+        done: true,
+        repo_id: REPO.id,
+      },
+    },
+    {
+      name: "failed",
+      job: {
+        id: "job-terminal",
+        phase: "Clone failed",
+        done: true,
+        error: "fatal: repository not found",
+      },
+    },
+  ])("forgets a $name clone when Back leaves progress", async ({ job }) => {
+    const value = app();
+    activateCodeCloneClient(value.client);
+    trackCodeClone(value.client, job, {
+      url: "https://example.com/acme/app.git",
+      parent_dir: "/tmp/src",
+    });
+    render(<PaletteHarness value={value} />);
+    expect(await screen.findByTestId("clone-phase")).toHaveTextContent(
+      job.phase,
+    );
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Backspace" });
+    expect(
+      await screen.findByPlaceholderText("https://example.com/acme/app.git"),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open add repository" }),
+    );
+
+    expect(
+      await screen.findByRole("option", { name: /Local folder/ }),
+    ).toBeVisible();
+    expect(
+      useCodeUpdatesStore.getState().cloneJobs["job-terminal"],
+    ).toBeUndefined();
   });
 
   it("recovers a clone that completes while Code UI is unmounted", async () => {

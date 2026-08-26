@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { ChevronDown, Folder, GitBranch, Link2 } from "lucide-react";
+import { toast } from "sonner";
 
 import type {
   CodeCloneDefaults,
@@ -57,9 +58,11 @@ import {
   latestCodeClone,
   reconcileCodeClone,
   setCodeCloneBackground,
+  takeSelectedCodeClone,
   trackCodeClone,
   useCodeUpdatesStore,
   type CodeCloneRequest,
+  type ResumableCodeClone,
 } from "./CodeUpdatesStore";
 
 type Stage = "sources" | "local" | "git_url" | "github" | "progress";
@@ -69,6 +72,7 @@ type PaletteOpening = {
   id: number;
   clientGeneration: number;
   active: boolean;
+  controller: AbortController;
 };
 
 type CloneHandoff = {
@@ -91,6 +95,17 @@ function isAuthorizationFailure(error: unknown): boolean {
     return true;
   }
   return error instanceof Error && /\b(?:401|403)\b/.test(error.message);
+}
+
+function isAbortFailure(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : Boolean(
+        error &&
+          typeof error === "object" &&
+          "name" in error &&
+          (error as { name?: unknown }).name === "AbortError",
+      );
 }
 
 const SOURCES: OptionRow[] = [
@@ -131,6 +146,7 @@ export function AddRepoPalette({
   const upsertRepo = useCodeCatalogStore((state) => state.upsertRepo);
   const cloneJobs = useCodeUpdatesStore((state) => state.cloneJobs);
   const cloneReadErrors = useCodeUpdatesStore((state) => state.cloneReadErrors);
+  const selectedClone = useCodeUpdatesStore((state) => state.selectedClone);
   const [stage, setStage] = useState<Stage>("sources");
   const [query, setQuery] = useState("");
   const [path, setPath] = useState("");
@@ -139,7 +155,10 @@ export function AddRepoPalette({
   const [github, setGithub] = useState("");
   const [parentDir, setParentDir] = useState("");
   const [cloneName, setCloneName] = useState("");
-  const [defaults, setDefaults] = useState<CodeCloneDefaults | null>(null);
+  const [loadedDefaults, setLoadedDefaults] = useState<{
+    clientGeneration: number;
+    value: CodeCloneDefaults;
+  } | null>(null);
   const [defaultsProbeFailed, setDefaultsProbeFailed] = useState(false);
   const [sources, setSources] = useState<CodeRepoSources | null>(null);
   const [sourcesProbeFailed, setSourcesProbeFailed] = useState(false);
@@ -160,9 +179,14 @@ export function AddRepoPalette({
   const handoffRef = useRef<CloneHandoff | null>(null);
   const activeJobIdRef = useRef<string | null>(null);
   const autoAttemptedJobs = useRef(new Set<string>());
+  const destinationEditVersion = useRef(0);
 
   const job = jobId ? cloneJobs[jobId] : undefined;
   const readError = jobId ? cloneReadErrors[jobId] : undefined;
+  const defaults =
+    loadedDefaults?.clientGeneration === codeClientGeneration(client)
+      ? loadedDefaults.value
+      : null;
   // Whether this window can name a path the machine would resolve. Browsing
   // is the host's, resolving is the machine's, and they are the same computer
   // only when the window is not attached elsewhere.
@@ -225,16 +249,30 @@ export function AddRepoPalette({
     setJobId(nextJobId);
   }, []);
 
-  const isCurrentOpening = useCallback(
+  const editParentDir = useCallback((value: string) => {
+    destinationEditVersion.current += 1;
+    setParentDir(value);
+  }, []);
+
+  const isCurrentClient = useCallback(
     (opening: PaletteOpening | null): opening is PaletteOpening =>
       Boolean(
-        opening?.active &&
-          openingRef.current === opening &&
+        opening &&
           opening.clientGeneration === codeClientGeneration(client) &&
           opening.clientGeneration ===
             useCodeUpdatesStore.getState().cloneClientGeneration,
       ),
     [client],
+  );
+
+  const isCurrentOpening = useCallback(
+    (opening: PaletteOpening | null): opening is PaletteOpening =>
+      Boolean(
+        opening?.active &&
+          openingRef.current === opening &&
+          isCurrentClient(opening),
+      ),
+    [isCurrentClient],
   );
 
   const backgroundCurrentClone = useCallback(() => {
@@ -248,7 +286,10 @@ export function AddRepoPalette({
     (nextOpen: boolean) => {
       if (!nextOpen) {
         const opening = openingRef.current;
-        if (opening) opening.active = false;
+        if (opening) {
+          opening.active = false;
+          opening.controller.abort();
+        }
         backgroundCurrentClone();
       }
       onOpenChange(nextOpen);
@@ -260,11 +301,12 @@ export function AddRepoPalette({
     async (opening: PaletteOpening, showBusy = false) => {
       if (showBusy) setProbeBusy("sources");
       try {
-        const next = await client.getCodeRepoSources();
+        const next = await client.getCodeRepoSources(opening.controller.signal);
         if (!isCurrentOpening(opening)) return;
         setSources(next);
         setSourcesProbeFailed(false);
-      } catch {
+      } catch (caught) {
+        if (opening.controller.signal.aborted || isAbortFailure(caught)) return;
         if (!isCurrentOpening(opening)) return;
         setSources(null);
         setSourcesProbeFailed(true);
@@ -279,11 +321,14 @@ export function AddRepoPalette({
     async (opening: PaletteOpening, showBusy = false) => {
       if (showBusy) setProbeBusy("github");
       try {
-        const next = await client.listCodeGithubRepositories();
+        const next = await client.listCodeGithubRepositories(
+          opening.controller.signal,
+        );
         if (!isCurrentOpening(opening)) return;
         setGithubRepos(next.repositories);
         setGithubListFailed(false);
-      } catch {
+      } catch (caught) {
+        if (opening.controller.signal.aborted || isAbortFailure(caught)) return;
         if (!isCurrentOpening(opening)) return;
         setGithubRepos([]);
         setGithubListFailed(true);
@@ -297,25 +342,76 @@ export function AddRepoPalette({
   const loadCloneDefaults = useCallback(
     async (
       opening: PaletteOpening,
-      preserveDestination: boolean,
-      showBusy = false,
+      options: {
+        seedDestination: boolean;
+        replaceDestination?: boolean;
+        showBusy?: boolean;
+      },
     ) => {
+      const {
+        seedDestination,
+        replaceDestination = false,
+        showBusy = false,
+      } = options;
+      const editVersion = destinationEditVersion.current;
+      const maySeedDestination =
+        seedDestination &&
+        (replaceDestination || destinationEditVersion.current === 0);
       if (showBusy) setProbeBusy("defaults");
       try {
-        const next = await client.getCodeCloneDefaults();
+        const next = await client.getCodeCloneDefaults(
+          opening.controller.signal,
+        );
         if (!isCurrentOpening(opening)) return;
-        setDefaults(next);
+        setLoadedDefaults({
+          clientGeneration: opening.clientGeneration,
+          value: next,
+        });
         setDefaultsProbeFailed(false);
-        if (!preserveDestination) setParentDir(next.parent_dir ?? "");
+        if (
+          maySeedDestination &&
+          destinationEditVersion.current === editVersion
+        ) {
+          setParentDir(next.parent_dir ?? "");
+        }
       } catch (caught) {
+        if (opening.controller.signal.aborted || isAbortFailure(caught)) return;
         if (!isCurrentOpening(opening)) return;
-        setDefaults(null);
+        setLoadedDefaults(null);
         setDefaultsProbeFailed(!isAuthorizationFailure(caught));
       } finally {
         if (showBusy && isCurrentOpening(opening)) setProbeBusy(null);
       }
     },
     [client, isCurrentOpening],
+  );
+
+  const showClone = useCallback(
+    (
+      opening: PaletteOpening,
+      resumable: ResumableCodeClone,
+      allowAutomaticHandoff: boolean,
+    ) => {
+      const { request } = resumable.tracking;
+      setUrl(request.url ?? "");
+      setGithub(request.github ?? "");
+      destinationEditVersion.current += 1;
+      setParentDir(request.parent_dir ?? "");
+      setCloneName(request.name ?? "");
+      setCurrentJob(resumable.job.id);
+      setStage("progress");
+      setCodeCloneBackground(client, resumable.job.id, false);
+      handoffRef.current = {
+        openingId: opening.id,
+        clientGeneration: opening.clientGeneration,
+        jobId: resumable.job.id,
+        armed:
+          allowAutomaticHandoff &&
+          !resumable.tracking.background &&
+          !resumable.job.done,
+      };
+    },
+    [client, setCurrentJob],
   );
 
   useEffect(() => {
@@ -329,6 +425,7 @@ export function AddRepoPalette({
       id: openingSequence.current,
       clientGeneration,
       active: true,
+      controller: new AbortController(),
     };
     openingRef.current = opening;
     handoffRef.current = null;
@@ -341,12 +438,14 @@ export function AddRepoPalette({
     setUrl("");
     setGithub("");
     setParentDir("");
+    destinationEditVersion.current = 0;
     setCloneName("");
     setCurrentJob(null);
     setBusy(false);
     setError(null);
     setHandoffBusy(false);
     setHandoffError(null);
+    setLoadedDefaults(null);
     setSources(null);
     setSourcesProbeFailed(false);
     setDefaultsProbeFailed(false);
@@ -354,25 +453,11 @@ export function AddRepoPalette({
     setGithubListFailed(false);
     setProbeBusy(null);
 
-    const resumable = latestCodeClone(client);
+    const selected = takeSelectedCodeClone(client);
+    const resumable =
+      selected === undefined ? latestCodeClone(client) : selected;
     if (resumable) {
-      const { request } = resumable.tracking;
-      const handoffWasCancelled = resumable.tracking.background;
-      setUrl(request.url ?? "");
-      setGithub(request.github ?? "");
-      setParentDir(request.parent_dir ?? "");
-      setCloneName(request.name ?? "");
-      setCurrentJob(resumable.job.id);
-      setStage("progress");
-      setCodeCloneBackground(client, resumable.job.id, false);
-      handoffRef.current = {
-        openingId: opening.id,
-        clientGeneration,
-        jobId: resumable.job.id,
-        // Closing the progress surface cancels its automatic handoff. Reopening
-        // restores progress, but only an explicit action creates the workspace.
-        armed: !handoffWasCancelled && !resumable.job.done,
-      };
+      showClone(opening, resumable, selected === undefined);
     }
 
     void loadSources(opening);
@@ -380,10 +465,13 @@ export function AddRepoPalette({
     // Administrator-only, and the person adding a repo on a shared machine
     // usually is not one. A refusal leaves the remembered destination unknown,
     // which the machine fills in for itself.
-    void loadCloneDefaults(opening, Boolean(resumable));
+    void loadCloneDefaults(opening, {
+      seedDestination: !resumable,
+    });
 
     return () => {
       opening.active = false;
+      opening.controller.abort();
       if (openingRef.current === opening) openingRef.current = null;
       const handoff = handoffRef.current;
       if (
@@ -401,6 +489,25 @@ export function AddRepoPalette({
     loadSources,
     open,
     setCurrentJob,
+    showClone,
+  ]);
+
+  useEffect(() => {
+    if (!open || !selectedClone) return;
+    const opening = openingRef.current;
+    if (!isCurrentOpening(opening)) return;
+    const resumable = takeSelectedCodeClone(client);
+    if (!resumable) return;
+    if (activeJobIdRef.current !== resumable.job.id) backgroundCurrentClone();
+    handoffRef.current = null;
+    showClone(opening, resumable, false);
+  }, [
+    backgroundCurrentClone,
+    client,
+    isCurrentOpening,
+    open,
+    selectedClone,
+    showClone,
   ]);
 
   useEffect(() => {
@@ -499,7 +606,11 @@ export function AddRepoPalette({
       return;
     }
     if (stage === "progress") {
-      backgroundCurrentClone();
+      const currentJob = activeJobIdRef.current
+        ? useCodeUpdatesStore.getState().cloneJobs[activeJobIdRef.current]
+        : undefined;
+      if (currentJob?.done) forgetCodeClone(client, currentJob.id);
+      else backgroundCurrentClone();
       handoffRef.current = null;
       setStage(github.trim() ? "github" : url.trim() ? "git_url" : "sources");
       setCurrentJob(null);
@@ -516,7 +627,7 @@ export function AddRepoPalette({
     const picked = await pickCodeDirectory();
     if (!picked || !isCurrentOpening(opening)) return;
     if (into === "path") setPath(picked);
-    else setParentDir(picked);
+    else editParentDir(picked);
   }
 
   async function registerLocal() {
@@ -530,11 +641,21 @@ export function AddRepoPalette({
         path: path.trim(),
         display_name: displayName.trim() || undefined,
       });
-      if (!isCurrentOpening(opening)) return;
+      if (!isCurrentClient(opening)) return;
       upsertRepo(repo);
-      opening.active = false;
-      onOpenChange(false);
-      useCodeUiStore.getState().startNewWorkspace(repo.id);
+      if (isCurrentOpening(opening)) {
+        opening.active = false;
+        onOpenChange(false);
+        useCodeUiStore.getState().startNewWorkspace(repo.id);
+      } else {
+        toast.success("Repository registered", {
+          description: "Create a workspace when you are ready.",
+          action: {
+            label: "Open",
+            onClick: () => useCodeUiStore.getState().startNewWorkspace(repo.id),
+          },
+        });
+      }
     } catch (caught) {
       if (isCurrentOpening(opening)) {
         setError(
@@ -792,7 +913,7 @@ export function AddRepoPalette({
             busy={busy}
             error={error}
             onUrl={setUrl}
-            onParentDir={setParentDir}
+            onParentDir={editParentDir}
             onName={setCloneName}
             canBrowse={canBrowse}
             attached={attached}
@@ -803,7 +924,11 @@ export function AddRepoPalette({
             onRetryDefaults={() => {
               const opening = openingRef.current;
               if (isCurrentOpening(opening)) {
-                void loadCloneDefaults(opening, false, true);
+                void loadCloneDefaults(opening, {
+                  seedDestination: true,
+                  replaceDestination: true,
+                  showBusy: true,
+                });
               }
             }}
             onSubmit={() =>
@@ -830,7 +955,7 @@ export function AddRepoPalette({
             busy={busy}
             error={error}
             onGithub={setGithub}
-            onParentDir={setParentDir}
+            onParentDir={editParentDir}
             onName={setCloneName}
             canBrowse={canBrowse}
             attached={attached}
@@ -847,7 +972,11 @@ export function AddRepoPalette({
             onRetryDefaults={() => {
               const opening = openingRef.current;
               if (isCurrentOpening(opening)) {
-                void loadCloneDefaults(opening, false, true);
+                void loadCloneDefaults(opening, {
+                  seedDestination: true,
+                  replaceDestination: true,
+                  showBusy: true,
+                });
               }
             }}
             onSubmit={() =>

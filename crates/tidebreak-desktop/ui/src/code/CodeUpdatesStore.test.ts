@@ -16,13 +16,16 @@ import {
   noticeToAction,
   reconcileCodeClone,
   reduceCodeUpdates,
+  selectCodeClone,
   shouldRequestOsAttention,
+  takeSelectedCodeClone,
   trackCodeClone,
   useCodeUpdatesStore,
   watchChildren,
   workspaceDigest,
   type CodeUpdatesState,
 } from "./CodeUpdatesStore";
+import { useCodeUiStore } from "./CodeUiStore";
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
@@ -58,6 +61,7 @@ const EMPTY_STATE: CodeUpdatesState = {
   cloneTracking: {},
   cloneReadErrors: {},
   cloneClientGeneration: null,
+  selectedClone: null,
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
@@ -66,6 +70,7 @@ const EMPTY_STATE: CodeUpdatesState = {
 afterEach(() => {
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
+  useCodeUiStore.setState({ addRepoOpen: false });
   vi.useRealTimers();
   vi.clearAllMocks();
   vi.restoreAllMocks();
@@ -373,6 +378,106 @@ describe("reduceCodeUpdates", () => {
 });
 
 describe("clone onboarding reconciliation", () => {
+  it("notifies once when terminal socket progress beats the start response", () => {
+    const { client } = cloneClient(async (jobId) => completeClone(jobId));
+    activateCodeCloneClient(client);
+    useCodeUpdatesStore.getState().apply({
+      type: "clone_progress",
+      job: completeClone("job-fast"),
+    });
+
+    trackCodeClone(
+      client,
+      pendingClone("job-fast"),
+      { github: "acme/fast" },
+      true,
+    );
+
+    expect(useCodeUpdatesStore.getState().cloneJobs["job-fast"]).toEqual(
+      completeClone("job-fast"),
+    );
+    expect(
+      useCodeUpdatesStore.getState().cloneTracking["job-fast"]?.notified,
+    ).toBe(true);
+    expect(toast.success).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds each background notification action to its clone", () => {
+    const { client } = cloneClient(async (jobId) => pendingClone(jobId));
+    activateCodeCloneClient(client);
+    trackCodeClone(client, pendingClone("job-a"), { github: "acme/a" }, true);
+    trackCodeClone(client, pendingClone("job-b"), { github: "acme/b" }, true);
+
+    useCodeUpdatesStore.getState().apply({
+      type: "clone_progress",
+      job: completeClone("job-a"),
+    });
+    const options = vi.mocked(toast.success).mock.calls[0]?.[1] as
+      | { action?: { onClick: () => void } }
+      | undefined;
+    options?.action?.onClick();
+
+    expect(useCodeUiStore.getState().addRepoOpen).toBe(true);
+    expect(takeSelectedCodeClone(client)?.job.id).toBe("job-a");
+    expect(useCodeUpdatesStore.getState().selectedClone).toBeNull();
+  });
+
+  it("ignores a notification from a replaced client generation", () => {
+    const first = cloneClient(async (jobId) => pendingClone(jobId)).client;
+    activateCodeCloneClient(first);
+    trackCodeClone(
+      first,
+      pendingClone("job-shared"),
+      { github: "acme/old" },
+      true,
+    );
+    useCodeUpdatesStore.getState().apply({
+      type: "clone_progress",
+      job: completeClone("job-shared"),
+    });
+    const options = vi.mocked(toast.success).mock.calls[0]?.[1] as
+      | { action?: { onClick: () => void } }
+      | undefined;
+
+    const replacement = cloneClient(async (jobId) =>
+      pendingClone(jobId),
+    ).client;
+    activateCodeCloneClient(replacement);
+    trackCodeClone(
+      replacement,
+      pendingClone("job-shared"),
+      { github: "acme/new" },
+      true,
+    );
+    options?.action?.onClick();
+
+    expect(useCodeUiStore.getState().addRepoOpen).toBe(false);
+    expect(useCodeUpdatesStore.getState().selectedClone).toBeNull();
+  });
+
+  it("does not fall back when a selected clone belongs to the old client", () => {
+    const first = cloneClient(async (jobId) => pendingClone(jobId)).client;
+    const firstGeneration = activateCodeCloneClient(first);
+    trackCodeClone(first, pendingClone("job-old"), { github: "acme/old" });
+    expect(
+      selectCodeClone({
+        jobId: "job-old",
+        clientGeneration: firstGeneration,
+      }),
+    ).toBe(true);
+
+    const replacement = cloneClient(async (jobId) =>
+      pendingClone(jobId),
+    ).client;
+    activateCodeCloneClient(replacement);
+    trackCodeClone(replacement, pendingClone("job-new"), {
+      github: "acme/new",
+    });
+
+    expect(takeSelectedCodeClone(replacement)).toBeNull();
+    expect(useCodeUpdatesStore.getState().selectedClone).toBeNull();
+  });
+
   it("keeps tracked clone state when live Code updates disconnect", () => {
     const { client } = cloneClient(async (jobId) => pendingClone(jobId));
     activateCodeCloneClient(client);
