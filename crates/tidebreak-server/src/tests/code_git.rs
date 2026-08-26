@@ -1688,31 +1688,17 @@ async fn register_delivery_repository(
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 }
 
-/// Issue #2673: a gateway-authenticated hosted caller reads every Delivery
-/// list through one borrowed credential per repository operation. No `gh`
-/// observation participates, and check runs keep the attention bucket useful.
+/// Issue #2673: a gateway-authenticated hosted caller reads Delivery lists
+/// and details through one borrowed credential per repository operation. No
+/// `gh` observation participates, and check runs keep attention useful.
 #[tokio::test]
-async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
-    let repository = |headers: axum::http::HeaderMap| async move {
-        assert_borrowed_forge_credential(&headers);
-        axum::Json(serde_json::json!({
-            "name": "demo",
-            "full_name": "acme/demo",
-            "html_url": "https://github.com/acme/demo",
-            "default_branch": "main",
-            "owner": { "login": "acme" },
-        }))
-    };
-    let pulls = |headers: axum::http::HeaderMap,
-                 axum::extract::Query(query): axum::extract::Query<
-        std::collections::HashMap<String, String>,
-    >| async move {
-        assert_borrowed_forge_credential(&headers);
-        assert_eq!(query.get("state").map(String::as_str), Some("open"));
-        axum::Json(serde_json::json!([{
+async fn a_hosted_delivery_page_reads_lists_and_details_over_forge_rest() {
+    fn pull_request() -> serde_json::Value {
+        serde_json::json!({
             "number": 17,
             "html_url": "https://github.com/acme/demo/pull/17",
             "title": "Repair hosted delivery",
+            "body": "Read the delivery detail over REST.",
             "state": "open",
             "draft": false,
             "user": {
@@ -1730,11 +1716,67 @@ async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
             },
             "base": { "ref": "main" },
             "labels": [{ "name": "code" }],
+            "assignees": [{ "login": "mira-chen" }],
+            "requested_reviewers": [{ "login": "reviewer" }],
             "comments": 2,
+            "changed_files": 1,
+            "additions": 12,
+            "deletions": 3,
+            "commits": 2,
             "created_at": "2026-08-25T10:00:00Z",
             "updated_at": "2026-08-25T11:00:00Z",
             "merged_at": null,
             "closed_at": null
+        })
+    }
+
+    let repository = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "name": "demo",
+            "full_name": "acme/demo",
+            "html_url": "https://github.com/acme/demo",
+            "default_branch": "main",
+            "owner": { "login": "acme" },
+        }))
+    };
+    let pulls = |headers: axum::http::HeaderMap,
+                 axum::extract::Query(query): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >| async move {
+        assert_borrowed_forge_credential(&headers);
+        assert_eq!(query.get("state").map(String::as_str), Some("open"));
+        axum::Json(serde_json::json!([pull_request()]))
+    };
+    let pull = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(pull_request())
+    };
+    let issue_comments = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([{
+            "id": 100,
+            "body": "Please keep the hosted path scoped.",
+            "user": { "login": "reviewer" },
+            "created_at": "2026-08-25T11:05:00Z"
+        }]))
+    };
+    let reviews = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([]))
+    };
+    let inline_comments = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([]))
+    };
+    let files = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([{
+            "filename": "crates/tidebreak-server/src/code/delivery.rs",
+            "status": "modified",
+            "additions": 12,
+            "deletions": 3,
+            "patch": "@@ -1 +1 @@"
         }]))
     };
     let checks = |headers: axum::http::HeaderMap| async move {
@@ -1773,6 +1815,37 @@ async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
             }]
         }))
     };
+    let workflow_run = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "id": 44,
+            "run_attempt": 2,
+            "status": "completed",
+            "conclusion": "failure",
+            "display_title": "Desktop CI",
+            "name": "CI",
+            "html_url": "https://github.com/acme/demo/actions/runs/44",
+            "head_branch": "hosted-delivery",
+            "head_sha": "feedfeedfeedfeedfeed",
+            "event": "pull_request",
+            "actor": { "login": "mira-chen" },
+            "created_at": "2026-08-25T10:00:00Z",
+            "updated_at": "2026-08-25T11:00:00Z"
+        }))
+    };
+    let jobs = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "jobs": [{
+                "id": 501,
+                "name": "test",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/acme/demo/actions/runs/44/job/501",
+                "steps": [{ "name": "Run tests", "conclusion": "failure" }]
+            }]
+        }))
+    };
     let deployments = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
         axum::Json(serde_json::json!([{
@@ -1785,9 +1858,46 @@ async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
             "updated_at": "2026-08-25T10:30:00Z"
         }]))
     };
+    let deployment = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!({
+            "id": 91,
+            "environment": "production",
+            "ref": "hosted-delivery",
+            "sha": "feedfeedfeedfeedfeed",
+            "creator": { "login": "mira-chen" },
+            "created_at": "2026-08-25T10:30:00Z",
+            "updated_at": "2026-08-25T10:30:00Z"
+        }))
+    };
+    let deployment_statuses = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([{
+            "id": 92,
+            "state": "success",
+            "description": "Deployed",
+            "environment_url": "https://demo.example",
+            "log_url": "https://github.com/acme/demo/deployments/91",
+            "created_at": "2026-08-25T10:35:00Z"
+        }]))
+    };
     let forge = axum::Router::new()
         .route("/repos/acme/demo", axum::routing::get(repository))
         .route("/repos/acme/demo/pulls", axum::routing::get(pulls))
+        .route("/repos/acme/demo/pulls/17", axum::routing::get(pull))
+        .route(
+            "/repos/acme/demo/issues/17/comments",
+            axum::routing::get(issue_comments),
+        )
+        .route(
+            "/repos/acme/demo/pulls/17/reviews",
+            axum::routing::get(reviews),
+        )
+        .route(
+            "/repos/acme/demo/pulls/17/comments",
+            axum::routing::get(inline_comments),
+        )
+        .route("/repos/acme/demo/pulls/17/files", axum::routing::get(files))
         .route(
             "/repos/acme/demo/commits/{sha}/check-runs",
             axum::routing::get(checks),
@@ -1797,8 +1907,24 @@ async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
             axum::routing::get(workflow_runs),
         )
         .route(
+            "/repos/acme/demo/actions/runs/44",
+            axum::routing::get(workflow_run),
+        )
+        .route(
+            "/repos/acme/demo/actions/runs/44/jobs",
+            axum::routing::get(jobs),
+        )
+        .route(
             "/repos/acme/demo/deployments",
             axum::routing::get(deployments),
+        )
+        .route(
+            "/repos/acme/demo/deployments/91",
+            axum::routing::get(deployment),
+        )
+        .route(
+            "/repos/acme/demo/deployments/91/statuses",
+            axum::routing::get(deployment_statuses),
         );
     let forge_addr = serve(forge).await;
 
@@ -1878,10 +2004,34 @@ async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
         "checks_failed"
     );
 
+    let pull_request_detail: serde_json::Value = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/detail"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repository": target.clone(),
+            "number": 17
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pull_request_detail["summary"]["number"], 17);
+    assert_eq!(
+        pull_request_detail["body"],
+        "Read the delivery detail over REST."
+    );
+    assert_eq!(pull_request_detail["comments"][0]["author"], "reviewer");
+    assert_eq!(
+        pull_request_detail["files"][0]["path"],
+        "crates/tidebreak-server/src/code/delivery.rs"
+    );
+
     let runs: serde_json::Value = client
         .post(format!("http://{addr}/code/delivery/runs/query"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "repositories": [target] }))
+        .json(&serde_json::json!({ "repositories": [target.clone()] }))
         .send()
         .await
         .unwrap()
@@ -1899,9 +2049,50 @@ async fn a_hosted_delivery_page_reads_repository_lists_over_forge_rest() {
         .unwrap()
         .iter()
         .any(|item| item["kind"] == "deployment"));
+
+    let workflow_detail: serde_json::Value = client
+        .post(format!("http://{addr}/code/delivery/runs/detail"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repository": target.clone(),
+            "kind": "workflow_run",
+            "id": 44
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(workflow_detail["summary"]["github_id"], 44);
+    assert_eq!(workflow_detail["jobs"][0]["name"], "test");
+    assert_eq!(workflow_detail["jobs"][0]["failed_steps"][0], "Run tests");
+
+    let deployment_detail: serde_json::Value = client
+        .post(format!("http://{addr}/code/delivery/runs/detail"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repository": target,
+            "kind": "deployment",
+            "id": 91
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deployment_detail["summary"]["github_id"], 91);
+    assert_eq!(
+        deployment_detail["deployment_statuses"][0]["state"],
+        "success"
+    );
     assert_eq!(
         lender.minted(),
         vec![
+            "acme/demo".to_owned(),
+            "acme/demo".to_owned(),
+            "acme/demo".to_owned(),
             "acme/demo".to_owned(),
             "acme/demo".to_owned(),
             "acme/demo".to_owned()
