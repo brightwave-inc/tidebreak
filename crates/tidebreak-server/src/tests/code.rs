@@ -7440,11 +7440,10 @@ fn code_routes_go_through_the_owner_scoped_view() {
         // `types.rs` declare and shape, and serve nothing.
         let serves_data = text.contains("pub async fn") && name != "mod.rs";
         if serves_data && !text.contains("ScopedCode") {
-            // The browser channel is the sole capability-bearer route: it
-            // authenticates with a session-private browser capability token
-            // (resolved into a `BrowserSubject` owner/workspace/session scope)
-            // rather than the app-token `ScopedCode` extractor. Require its
-            // own authorization path instead of the scoped extractor.
+            // Browser and harness inference are capability-bearer routes.
+            // Each resolves a session-private token to the owning session
+            // instead of accepting the app-token `ScopedCode` extractor.
+            // Require each route's own authorization path here.
             if name == "browser.rs" {
                 if !text.contains("fn authorize(")
                     || !text.contains("BrowserSubject")
@@ -7453,7 +7452,18 @@ fn code_routes_go_through_the_owner_scoped_view() {
                     findings.push(format!(
                         "{name} is the capability-bearer browser route but is \
                          missing its `authorize` / `BrowserSubject` / \
-                         `bearer_token` authorization path"
+                        `bearer_token` authorization path"
+                    ));
+                }
+            } else if name == "llm.rs" {
+                if !text.contains("HarnessLlmRelay")
+                    || !text.contains("HeaderMap")
+                    || !text.contains("relay.forward(")
+                {
+                    findings.push(format!(
+                        "{name} is the capability-bearer harness inference \
+                         route but is missing its `HarnessLlmRelay` / \
+                         `HeaderMap` / `relay.forward` authorization path"
                     ));
                 }
             } else {

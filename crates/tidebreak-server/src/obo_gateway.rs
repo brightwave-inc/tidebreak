@@ -427,7 +427,7 @@ impl OboGateway {
     /// # Errors
     /// Fails when this process holds no subject token for `owner`, or when
     /// the gateway refuses the exchange.
-    async fn bearer_for(&self, owner: &OwnerId) -> Result<String> {
+    pub(crate) async fn bearer_for(&self, owner: &OwnerId) -> Result<String> {
         let slot = {
             let users = self.users.lock().map_err(|_| {
                 AgentError::msg("on-behalf-of inference state is unavailable in this process")
