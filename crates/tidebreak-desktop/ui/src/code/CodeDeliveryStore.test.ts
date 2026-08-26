@@ -9,6 +9,7 @@ import type {
 import {
   codeDeliveryRepositoryKey,
   mergeKnownAuthors,
+  resetCodeDeliveryHostState,
   trackedCodeDeliveryRepositories,
   unreadCodeDeliveryNotifications,
   useCodeDeliveryStore,
@@ -93,6 +94,36 @@ afterEach(() => {
 });
 
 describe("trackedCodeDeliveryRepositories", () => {
+  it("clears host data without deleting Delivery preferences", () => {
+    const manual = repository("other-org", "manual");
+    useCodeDeliveryStore.getState().rememberManualRepositories([manual]);
+    useCodeDeliveryStore.setState({
+      polling: true,
+      monitorError: "old host failed",
+      repositorySnapshot: {
+        capability: { found: true, authenticated: true, remediation: "" },
+        repositories: [repository("brightwave-inc", "old", "repo-old")],
+        errors: [],
+        fetched_at: NOW,
+      },
+      repositoryLoading: true,
+      repositoryError: "stale",
+      repositoryFetchedAt: Date.now(),
+    });
+
+    resetCodeDeliveryHostState();
+
+    expect(useCodeDeliveryStore.getState()).toMatchObject({
+      manualRepositories: [manual],
+      polling: false,
+      monitorError: null,
+      repositorySnapshot: null,
+      repositoryLoading: false,
+      repositoryError: null,
+      repositoryFetchedAt: null,
+    });
+  });
+
   it("combines registered and manual repositories, excludes opted-out rows, and pins first", () => {
     const alpha = repository("brightwave-inc", "alpha", "repo-alpha");
     const zeta = repository("brightwave-inc", "zeta", "repo-zeta");

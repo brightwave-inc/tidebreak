@@ -1,12 +1,34 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CodeWorkspaceSnapshot } from "../api/types";
+import type { CodeRepoSnapshot, CodeWorkspaceSnapshot } from "../api/types";
 import {
   OPTIMISTIC_WORKSPACE_ID_PREFIX,
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
+import { resetCodeClientGenerationForTests } from "./CodeClientGeneration";
+import { activateCodeClient } from "./CodeClientScope";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function repo(id: string): CodeRepoSnapshot {
+  return {
+    id,
+    root_path: `/tmp/${id}`,
+    display_name: id,
+    default_base_ref: "main",
+    branch_prefix: "tidebreak",
+    quick_actions: [],
+    created_at: "2026-08-26T00:00:00.000Z",
+  };
+}
 
 function workspace(
   id: string,
@@ -27,6 +49,7 @@ function workspace(
 
 afterEach(() => {
   useCodeCatalogStore.getState().reset();
+  resetCodeClientGenerationForTests();
 });
 
 describe("CodeCatalogStore.upsertWorkspace", () => {
@@ -61,6 +84,61 @@ describe("CodeCatalogStore.upsertWorkspace", () => {
 });
 
 describe("CodeCatalogStore.ensureHarnessModels", () => {
+  it("ignores a model result from a replaced client generation", async () => {
+    const staleModels = deferred<{
+      kind: "codex";
+      models: ParsedHarnessModel[];
+      reasoning_efforts: ReasoningEffort[];
+    }>();
+    const first = {
+      listCodeHarnessModels: vi.fn(() => staleModels.promise),
+    };
+    activateCodeClient(first);
+    const stale = useCodeCatalogStore
+      .getState()
+      .ensureHarnessModels(first, "codex");
+
+    const replacement = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "codex" as const,
+        models: [
+          {
+            id: "gpt-new",
+            label: "New model",
+            default: true,
+            reasoning_efforts: [],
+            fast_mode: false,
+          },
+        ],
+        reasoning_efforts: [],
+      })),
+    };
+    activateCodeClient(replacement);
+    await useCodeCatalogStore
+      .getState()
+      .ensureHarnessModels(replacement, "codex");
+
+    staleModels.resolve({
+      kind: "codex",
+      models: [
+        {
+          id: "gpt-old",
+          label: "Old model",
+          default: true,
+          reasoning_efforts: [],
+          fast_mode: false,
+        },
+      ],
+      reasoning_efforts: [],
+    });
+    await stale;
+
+    expect(replacement.listCodeHarnessModels).toHaveBeenCalledOnce();
+    expect(useCodeCatalogStore.getState().modelsByHarness.codex).toEqual([
+      expect.objectContaining({ id: "gpt-new" }),
+    ]);
+  });
+
   it("caches an empty native model catalog", async () => {
     const client = {
       listCodeHarnessModels: vi.fn(async () => ({
@@ -182,6 +260,42 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
 });
 
 describe("CodeCatalogStore.refresh", () => {
+  it("does not let an old catalog populate or block a replacement", async () => {
+    const staleRepos = deferred<CodeRepoSnapshot[]>();
+    const first = {
+      listCodeRepos: vi.fn(() => staleRepos.promise),
+      listCodeWorkspaces: vi.fn(async () => []),
+      getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+      listCodeHarnessModels: vi.fn(async (kind: string) => ({
+        kind,
+        models: [],
+      })),
+    };
+    activateCodeClient(first);
+    const stale = useCodeCatalogStore.getState().refresh(first as never);
+
+    const replacement = {
+      listCodeRepos: vi.fn(async () => [repo("repo-new")]),
+      listCodeWorkspaces: vi.fn(async () => []),
+      getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+      listCodeHarnessModels: vi.fn(async (kind: string) => ({
+        kind,
+        models: [],
+      })),
+    };
+    activateCodeClient(replacement);
+    const fresh = useCodeCatalogStore.getState().refresh(replacement as never);
+    await fresh;
+
+    expect(replacement.listCodeRepos).toHaveBeenCalledOnce();
+    expect(useCodeCatalogStore.getState().repos).toEqual([repo("repo-new")]);
+
+    staleRepos.resolve([repo("repo-old")]);
+    await stale;
+
+    expect(useCodeCatalogStore.getState().repos).toEqual([repo("repo-new")]);
+  });
+
   it("shares one catalog request across the sidebar and route body", async () => {
     const client = {
       listCodeRepos: vi.fn(async () => []),

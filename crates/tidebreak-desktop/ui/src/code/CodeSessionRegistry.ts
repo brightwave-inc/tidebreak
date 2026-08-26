@@ -1,5 +1,6 @@
 import type { ApiClient } from "../api/client";
 import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
+import { codeClientGeneration } from "./CodeClientGeneration";
 import { CodeSessionController } from "./CodeSessionController";
 import {
   createCodeSessionStore,
@@ -31,6 +32,7 @@ export type CodeSessionEntry = {
   controller: CodeSessionController | null;
   refCount: number;
   turnsHydrated: boolean;
+  clientGeneration: number | null;
 };
 
 const registry = new Map<string, CodeSessionEntry>();
@@ -146,8 +148,15 @@ export function acquireCodeSession(
   openSocket: CodeSessionOpenSocket,
   deps: CodeSessionDeps = defaultDeps,
   hydrateTurns?: () => Promise<CodeTurnSnapshot[]>,
+  clientGeneration: number | null = null,
 ): ReturnType<typeof createCodeSessionStore> {
-  const existing = registry.get(sessionId);
+  let existing = registry.get(sessionId);
+  if (existing && existing.clientGeneration !== clientGeneration) {
+    existing.controller?.dispose();
+    retainedSessionIds.delete(sessionId);
+    registry.delete(sessionId);
+    existing = undefined;
+  }
   if (existing) {
     if (existing.refCount === 0) {
       retainedSessionIds.delete(sessionId);
@@ -176,6 +185,7 @@ export function acquireCodeSession(
     controller: null,
     refCount: 1,
     turnsHydrated: hydrateTurns === undefined,
+    clientGeneration,
   };
   registry.set(sessionId, entry);
   entry.controller = createController(
@@ -202,6 +212,7 @@ export function acquireCodeSessionFromClient(
     (after, onFrame) => client.openCodeEvents(sessionId, after, onFrame),
     deps,
     () => client.listCodeSessionTurns(sessionId),
+    codeClientGeneration(client),
   );
 }
 

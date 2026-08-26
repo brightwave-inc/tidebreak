@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
 import {
   acquireCodeSession,
+  acquireCodeSessionFromClient,
   MAX_RETAINED_CODE_SESSIONS,
   peekCodeSession,
   releaseCodeSession,
   resetCodeSessionRegistry,
 } from "./CodeSessionRegistry";
+import { resetCodeClientGenerationForTests } from "./CodeClientGeneration";
+import { activateCodeClient } from "./CodeClientScope";
 import { userItemId } from "./CodeSessionReducer";
 
 class FakeSocket {
@@ -66,9 +69,78 @@ function turnSnapshot(
 afterEach(() => {
   vi.useRealTimers();
   resetCodeSessionRegistry();
+  resetCodeClientGenerationForTests();
 });
 
 describe("CodeSessionRegistry", () => {
+  it("does not let old session hydration populate a replacement client", async () => {
+    const staleTurns = deferred<CodeTurnSnapshot[]>();
+    const oldSockets: FakeSocket[] = [];
+    const first = {
+      listCodeSessionTurns: vi.fn(() => staleTurns.promise),
+      openCodeEvents: vi.fn(
+        (
+          _sessionId: string,
+          after: number,
+          onFrame: (frame: SequencedCodeEventFrame) => void,
+        ) => {
+          const socket = new FakeSocket(after, onFrame);
+          oldSockets.push(socket);
+          return socket as unknown as WebSocket;
+        },
+      ),
+    };
+    activateCodeClient(first);
+    const oldStore = acquireCodeSessionFromClient("s1", first as never);
+
+    const newSockets: FakeSocket[] = [];
+    const replacement = {
+      listCodeSessionTurns: vi.fn(async () => [
+        turnSnapshot(
+          "t2",
+          "completed",
+          "2026-08-26T12:00:00.000Z",
+          "2026-08-26T12:00:01.000Z",
+        ),
+      ]),
+      openCodeEvents: vi.fn(
+        (
+          _sessionId: string,
+          after: number,
+          onFrame: (frame: SequencedCodeEventFrame) => void,
+        ) => {
+          const socket = new FakeSocket(after, onFrame);
+          newSockets.push(socket);
+          return socket as unknown as WebSocket;
+        },
+      ),
+    };
+    activateCodeClient(replacement);
+    const newStore = acquireCodeSessionFromClient("s1", replacement as never);
+    await flushMicrotasks();
+
+    staleTurns.resolve([
+      turnSnapshot(
+        "t1",
+        "completed",
+        "2026-08-25T12:00:00.000Z",
+        "2026-08-25T12:00:01.000Z",
+      ),
+    ]);
+    await flushMicrotasks();
+
+    expect(oldSockets).toHaveLength(0);
+    expect(newSockets).toHaveLength(1);
+    expect(peekCodeSession("s1")?.store).toBe(newStore);
+    expect(oldStore.getState().items).toEqual([]);
+    expect(newStore.getState().items).toContainEqual(
+      expect.objectContaining({ kind: "user", turnId: "t2" }),
+    );
+    expect(newStore.getState().items).not.toContainEqual(
+      expect.objectContaining({ kind: "user", turnId: "t1" }),
+    );
+  });
+
   it("marks the session hydrated even when the snapshot cannot be read", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

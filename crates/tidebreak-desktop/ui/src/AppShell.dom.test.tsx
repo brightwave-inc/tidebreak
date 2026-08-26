@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_MODE_STORAGE_KEY, restoreStoredAppMode } from "./appMode";
 import { useChatListStore } from "./ChatListStore";
 import { useCodeCatalogStore } from "./code/CodeCatalogStore";
+import { resetCodeClientGenerationForTests } from "./code/CodeClientGeneration";
 import { useCodeUiStore } from "./code/CodeUiStore";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useProjectListStore } from "./ProjectListStore";
@@ -201,6 +202,11 @@ vi.mock("./api", () => ({
     getHarnessDoctor = getHarnessDoctor;
     getCodeWorktreeRoot = getCodeWorktreeRoot;
     listCodeHarnessModels = listCodeHarnessModels;
+    getCodeSubscriptionUsage = vi.fn(async () => ({
+      source: "unavailable" as const,
+      providers: [],
+      diagnostics: [],
+    }));
     getCodeDeliveryRepositories = vi.fn(async () => ({
       capability: {
         found: false,
@@ -417,6 +423,7 @@ beforeEach(() => {
   listCodeRepos.mockClear();
   listCodeWorkspaces.mockClear();
   listCodeHarnessModels.mockClear();
+  resetCodeClientGenerationForTests();
   useCodeCatalogStore.getState().reset();
   useCodeUiStore.setState({
     newWorkspaceOpen: false,
@@ -493,6 +500,69 @@ describe("app shell", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(await screen.findByRole("radio", { name: "Code" })).toBeChecked();
+  });
+
+  it("resets Code host state before mounting routes for a client", async () => {
+    let resolveRepos!: (
+      value: Awaited<ReturnType<typeof listCodeRepos>>,
+    ) => void;
+    listCodeRepos.mockImplementationOnce(
+      () =>
+        new Promise<Awaited<ReturnType<typeof listCodeRepos>>>((resolve) => {
+          resolveRepos = resolve;
+        }),
+    );
+    useCodeCatalogStore.setState({
+      repos: [
+        {
+          id: "repo-old",
+          root_path: "/tmp/old",
+          display_name: "Old authority",
+          default_base_ref: "main",
+          branch_prefix: "tidebreak",
+          quick_actions: [],
+          created_at: "2026-08-25T00:00:00.000Z",
+        },
+      ],
+      workspaces: [
+        {
+          id: "ws-old",
+          repo_id: "repo-old",
+          title: "Old authority workspace",
+          worktree_path: "/tmp/old/ws-old",
+          branch_name: "tidebreak/old",
+          base_ref: "main",
+          status: "active",
+          created_at: "2026-08-25T00:00:00.000Z",
+        },
+      ],
+      loaded: true,
+    });
+    useCodeUiStore.setState({
+      addRepoOpen: true,
+      workflowShortcutPending: {
+        workspaceId: "ws-old",
+        shortcut: "merge",
+      },
+    });
+
+    await mountApp({ at: "/code" });
+    expect(await screen.findByRole("radio", { name: "Code" })).toBeChecked();
+    expect(useCodeCatalogStore.getState()).toMatchObject({
+      repos: [],
+      workspaces: [],
+      loaded: false,
+    });
+    expect(useCodeUiStore.getState()).toMatchObject({
+      addRepoOpen: false,
+      workflowShortcutPending: null,
+    });
+    expect(screen.queryByText("Old authority workspace")).toBeNull();
+
+    resolveRepos([]);
+    await waitFor(() =>
+      expect(useCodeCatalogStore.getState().loaded).toBe(true),
+    );
   });
 
   it("remembers each app mode selection", async () => {
