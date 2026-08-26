@@ -1922,11 +1922,13 @@ async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {
     }
 }
 
-/// Bump the spawn epoch, record pid/version, and journal SessionStarted.
+/// Bump the spawn epoch and record the process metadata.
 ///
 /// Call this once, before the engine is launched, so the event sink and the
 /// session row share the same epoch. Pass `child_pid` after launch via
-/// [`save_session`] if the adapter only exposes a pid later.
+/// [`save_session`] if the adapter only exposes a pid later. Codex reports
+/// `SessionStarted` after its thread exists, so its parser journals that event
+/// with the resume ref. Other adapters keep the eager event at attachment.
 pub(crate) async fn attach_engine(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -1954,23 +1956,25 @@ pub(crate) async fn attach_engine(
     super::attention::persist_session(db, bus, &session)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
-    persist_and_publish(
-        db,
-        bus,
-        &session.owner,
-        session_id,
-        epoch,
-        CodeEvent::SessionStarted {
-            harness_kind: kind,
-            harness_version: session
-                .harness_version
-                .clone()
-                .unwrap_or_else(|| "unknown".into()),
-            resume_ref: session.harness_resume_ref.clone(),
-        },
-    )
-    .await
-    .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    if kind != tidebreak_core::HarnessKind::Codex {
+        persist_and_publish(
+            db,
+            bus,
+            &session.owner,
+            session_id,
+            epoch,
+            CodeEvent::SessionStarted {
+                harness_kind: kind,
+                harness_version: session
+                    .harness_version
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into()),
+                resume_ref: session.harness_resume_ref.clone(),
+            },
+        )
+        .await
+        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    }
     Ok(session)
 }
 
@@ -2415,7 +2419,9 @@ impl From<HarnessError> for WorkerError {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use tidebreak_core::db::code::{get_session, insert_repo, insert_session, insert_workspace};
+    use tidebreak_core::db::code::{
+        get_session, insert_repo, insert_session, insert_workspace, list_events, MAX_REPLAY_EVENTS,
+    };
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
         ImageMediaType, ImageRef, PermissionMode, RepoId, ToolDetail, WorkspaceId,
@@ -2497,10 +2503,13 @@ mod tests {
         .is_none());
     }
 
-    async fn seeded_sink() -> (
+    async fn seeded_session(
+        harness_kind: HarnessKind,
+        harness_version: Option<&str>,
+    ) -> (
         tempfile::TempDir,
         Arc<DbStore>,
-        Arc<LiveSink>,
+        Arc<CodeEventBus>,
         CodeSessionId,
     ) {
         let directory = tempfile::tempdir().unwrap();
@@ -2566,8 +2575,8 @@ mod tests {
                 owner: owner.clone(),
                 workspace_id,
                 kind: CodeSessionKind::Interactive,
-                harness_kind: HarnessKind::ClaudeCode,
-                harness_version: Some("2.1.237".into()),
+                harness_kind,
+                harness_version: harness_version.map(str::to_owned),
                 harness_resume_ref: None,
                 permission_mode: PermissionMode::Plan,
                 model: None,
@@ -2585,10 +2594,26 @@ mod tests {
         )
         .await
         .unwrap();
+        (
+            directory,
+            store,
+            Arc::new(CodeEventBus::default()),
+            session_id,
+        )
+    }
+
+    async fn seeded_sink() -> (
+        tempfile::TempDir,
+        Arc<DbStore>,
+        Arc<LiveSink>,
+        CodeSessionId,
+    ) {
+        let (directory, store, bus, session_id) =
+            seeded_session(HarnessKind::ClaudeCode, Some("2.1.237")).await;
         let sink = sink_for(
             store.clone(),
-            Arc::new(CodeEventBus::default()),
-            owner,
+            bus,
+            OwnerId::local(),
             session_id,
             1,
             None,
@@ -2597,6 +2622,103 @@ mod tests {
             None,
         );
         (directory, store, sink, session_id)
+    }
+
+    #[tokio::test]
+    async fn codex_attachment_journals_one_start_after_the_thread_is_known() {
+        let (_directory, store, bus, session_id) =
+            seeded_session(HarnessKind::Codex, Some("codex-cli 0.147.0")).await;
+        let attached = attach_engine(
+            &store,
+            &bus,
+            session_id,
+            HarnessKind::Codex,
+            Some("0.147.0".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        let owner = OwnerId::local();
+        assert_eq!(attached.harness_version.as_deref(), Some("0.147.0"));
+
+        assert!(
+            list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+                .await
+                .unwrap()
+                .events
+                .iter()
+                .all(|event| !matches!(&event.event, CodeEvent::SessionStarted { .. }))
+        );
+
+        let sink = sink_for(
+            store.clone(),
+            bus,
+            owner.clone(),
+            session_id,
+            attached.spawn_epoch,
+            None,
+            attached.subagents,
+            None,
+            None,
+        );
+        sink.emit(HarnessEvent::SessionStarted {
+            harness_kind: HarnessKind::Codex,
+            harness_version: "0.147.0".into(),
+            resume_ref: Some("thread-1".into()),
+        })
+        .await;
+
+        let started = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events
+            .into_iter()
+            .filter_map(|event| match event.event {
+                CodeEvent::SessionStarted {
+                    harness_kind,
+                    harness_version,
+                    resume_ref,
+                } => Some((harness_kind, harness_version, resume_ref)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            started,
+            vec![(
+                HarnessKind::Codex,
+                "0.147.0".into(),
+                Some("thread-1".into())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_codex_attachment_keeps_the_eager_session_start() {
+        let (_directory, store, bus, session_id) =
+            seeded_session(HarnessKind::ClaudeCode, Some("2.1.237")).await;
+
+        attach_engine(
+            &store,
+            &bus,
+            session_id,
+            HarnessKind::ClaudeCode,
+            Some("2.1.237".into()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events = list_events(&store, &OwnerId::local(), session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(&event.event, CodeEvent::SessionStarted { .. }))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

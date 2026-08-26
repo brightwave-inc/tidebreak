@@ -52,7 +52,10 @@ impl HarnessAdapter for CodexAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "codex").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let version = observe_version(&capture.binary, &capture.env)
+                    .await
+                    .ok()
+                    .map(|version| normalize_codex_version(&version));
                 let authenticated = observe_login(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,
@@ -118,6 +121,20 @@ impl HarnessAdapter for CodexAdapter {
         // 0064), so attaching a session costs no engine runtime.
         Ok(Box::new(CodexSession::new(spec)))
     }
+}
+
+fn normalize_codex_version(version: &str) -> String {
+    version
+        .split_whitespace()
+        .find_map(|candidate| {
+            let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+            candidate
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_digit())
+                .then(|| candidate.to_owned())
+        })
+        .unwrap_or_else(|| version.trim().to_owned())
 }
 
 fn supports_native_steering(version: Option<&str>) -> bool {
@@ -756,6 +773,13 @@ mod tests {
     #[test]
     fn adapter_has_a_fixtures_directory_with_a_manifest() {
         assert!(fixture_dir().join("manifest.toml").is_file());
+    }
+
+    #[test]
+    fn codex_versions_use_the_bare_engine_version() {
+        assert_eq!(normalize_codex_version("codex-cli 0.147.0"), "0.147.0");
+        assert_eq!(normalize_codex_version("codex-cli v0.147.0"), "0.147.0");
+        assert_eq!(normalize_codex_version("0.147.0"), "0.147.0");
     }
 
     #[test]
