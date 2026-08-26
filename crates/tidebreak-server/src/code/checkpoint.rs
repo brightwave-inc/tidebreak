@@ -1369,7 +1369,7 @@ mod tests {
             "the old lossy representation collapsed these paths"
         );
         let name_status = b"A\0collision-\x80.txt\0A\0collision-\x81.txt\0";
-        let numstat = b"1\t0\tcollision-\x80.txt\01\t0\tcollision-\x81.txt\0";
+        let numstat = b"1\t0\tcollision-\x80.txt\x001\t0\tcollision-\x81.txt\0";
         let stats = parse_numstat(numstat);
         let mut files = parse_name_status(name_status);
         for file in &mut files {
