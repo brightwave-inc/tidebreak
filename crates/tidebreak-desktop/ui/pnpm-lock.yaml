@@ -173,8 +173,8 @@ importers:
         specifier: 36.1.0
         version: 36.1.0
       ag-grid-react:
-        specifier: 35.0.1
-        version: 35.0.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        specifier: 36.1.0
+        version: 36.1.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       class-variance-authority:
         specifier: 0.7.1
         version: 0.7.1
@@ -3020,20 +3020,14 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  ag-charts-types@13.0.1:
-    resolution: {integrity: sha512-qg9adyiAaeUaDtWZEEPF45dv55kdJTe6Ghi0EQXCS79h/7KvOd6dxhqGZjPL1zeFl/L9qEXuYgb+LkGStq4mgQ==}
-
   ag-charts-types@14.1.0:
     resolution: {integrity: sha512-mmzkng88c0l+Z9PvCMowMilhVeNgDU/iMuMemcOQD4BG/qO4vbkxWvyQO0iqju8Dx7YOY81PNzC/RmElQNiVkA==}
-
-  ag-grid-community@35.0.1:
-    resolution: {integrity: sha512-fYYZdymWKsN9/tZv+R6uZRnuiWYEQr+GHl85ZrB0ixbFcE8opYK4NJI29NnMc9ShYiCBnAO9hj54IFa+FI4aDA==}
 
   ag-grid-community@36.1.0:
     resolution: {integrity: sha512-WnvSQ4csRs8gv/b1B0lPHykQXvUJVgi2u5mpY0Aa6dv3pvhDVVqCT8dwUyOeCog4JNPptaXGrOrZ8qP2XoJzVA==}
 
-  ag-grid-react@35.0.1:
-    resolution: {integrity: sha512-NvrrgWUm+DsnsZVFho16srlyBNKSl9nqeSadk63HpHYerq4S4vN/2JCxdNtfqns7SpbYx7GbasbMFCXKYj7Qaw==}
+  ag-grid-react@36.1.0:
+    resolution: {integrity: sha512-FNsmrOmr+taZY11sCA+6Ow0mKs2JqnmrjBrMjkKC2rVTXPARtks+tv+Ne4ZkLGGtvIMDlBFCDbSzFXVP0CdwXQ==}
     peerDependencies:
       react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
       react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
@@ -8173,22 +8167,16 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  ag-charts-types@13.0.1: {}
-
   ag-charts-types@14.1.0: {}
-
-  ag-grid-community@35.0.1:
-    dependencies:
-      ag-charts-types: 13.0.1
 
   ag-grid-community@36.1.0:
     dependencies:
       ag-charts-types: 14.1.0
       ag-stack: 36.1.0
 
-  ag-grid-react@35.0.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
+  ag-grid-react@36.1.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
     dependencies:
-      ag-grid-community: 35.0.1
+      ag-grid-community: 36.1.0
       prop-types: 15.8.1
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)

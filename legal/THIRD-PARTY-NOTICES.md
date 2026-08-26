@@ -26,7 +26,7 @@ a stale one.
 ## Summary
 
 - Rust crates: 829
-- Desktop UI production packages: 514
+- Desktop UI production packages: 515
 - Distinct license texts: 576
 - Packages with no declared license: 0
 - Packages with a curated license: 28
@@ -6559,23 +6559,29 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/acornjs/acorn.git
 - License text: `LICENSE` ([L-cdf8603d8d39](#l-cdf8603d8d39))
 
-### ag-charts-types 13.0.1
+### ag-charts-types 14.1.0
 
 - License: `MIT`
 - Repository: https://github.com/ag-grid/ag-charts.git
-- License text: `LICENSE.txt` ([L-dbb87c28e56b](#l-dbb87c28e56b))
+- License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
 
-### ag-grid-community 35.0.1
-
-- License: `MIT`
-- Repository: https://github.com/ag-grid/ag-grid.git
-- License text: `LICENSE.txt` ([L-dbb87c28e56b](#l-dbb87c28e56b))
-
-### ag-grid-react 35.0.1
+### ag-grid-community 36.1.0
 
 - License: `MIT`
 - Repository: https://github.com/ag-grid/ag-grid.git
-- License text: `LICENSE.txt` ([L-dbb87c28e56b](#l-dbb87c28e56b))
+- License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
+
+### ag-grid-react 36.1.0
+
+- License: `MIT`
+- Repository: https://github.com/ag-grid/ag-grid.git
+- License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
+
+### ag-stack 36.1.0
+
+- License: `MIT`
+- Repository: https://github.com/ag-grid/ag-grid.git
+- License text: `LICENSE.txt` ([L-ee9d26385e34](#l-ee9d26385e34))
 
 ### ansi-regex 5.0.1
 
@@ -35197,32 +35203,6 @@ DEALINGS IN THE SOFTWARE.
 MIT OR Apache-2.0
 ```
 
-### L-dbb87c28e56b
-
-```
-The MIT License
-
-Copyright (c) 2015-2025 AG GRID LTD
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ### L-dd0815108f8e
 
 ```
@@ -36591,6 +36571,32 @@ airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circl
 The MIT License (MIT) (for the icons listed above)
 
 Copyright (c) 2013-present Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### L-ee9d26385e34
+
+```
+The MIT License
+
+Copyright (c) 2015-2026 AG GRID LTD
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
