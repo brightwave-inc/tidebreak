@@ -100,6 +100,8 @@ pub struct CodeTurnSnapshot {
 /// A follow-up parked while the session is already running a turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedCodeTurn {
+    /// Row id, and the turn id the promoted turn is inserted under.
+    pub id: CodeTurnId,
     pub session_id: CodeSessionId,
     pub message: String,
     pub position: i64,
@@ -111,6 +113,14 @@ pub struct QueuedCodeTurn {
 pub enum SubmitTurnResponse {
     Ran(CodeTurnSnapshot),
     Queued(QueuedCodeTurn),
+}
+
+/// Result of `GET /code/sessions/{id}/queued`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedCodeTurnsSnapshot {
+    pub queued: Vec<QueuedCodeTurn>,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// One event on the per-session WebSocket.
@@ -400,12 +410,27 @@ impl Client {
         harness: HarnessKind,
         permission_mode: PermissionMode,
     ) -> Result<CodeSessionSnapshot> {
+        self.create_session_with(workspace, harness, permission_mode, None)
+            .await
+    }
+
+    pub async fn create_session_with(
+        &self,
+        workspace: WorkspaceId,
+        harness: HarnessKind,
+        permission_mode: PermissionMode,
+        model: Option<&str>,
+    ) -> Result<CodeSessionSnapshot> {
+        let mut body = serde_json::json!({
+            "harness": harness,
+            "permission_mode": permission_mode,
+        });
+        if let Some(model) = model {
+            body["model"] = model.into();
+        }
         self.post_json(
             format!("{}/code/workspaces/{workspace}/sessions", self.base_url()),
-            &serde_json::json!({
-                "harness": harness,
-                "permission_mode": permission_mode,
-            }),
+            &body,
         )
         .await
     }
@@ -428,6 +453,17 @@ impl Client {
     ) -> Result<Vec<CodeTurnSnapshot>> {
         self.get_json(format!("{}/code/sessions/{session}/turns", self.base_url()))
             .await
+    }
+
+    pub async fn list_queued_code_turns(
+        &self,
+        session: CodeSessionId,
+    ) -> Result<QueuedCodeTurnsSnapshot> {
+        self.get_json(format!(
+            "{}/code/sessions/{session}/queued",
+            self.base_url()
+        ))
+        .await
     }
 
     pub async fn interrupt_session(&self, session: CodeSessionId) -> Result<()> {

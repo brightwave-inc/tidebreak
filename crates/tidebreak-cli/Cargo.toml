@@ -52,9 +52,9 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-# The scripted model provider the end-to-end print-mode test drives the turn
-# with. Enabling it here compiles it into the `tidebreak` binary the test spawns,
-# and only when the tests are built.
-tidebreak-server = { path = "../tidebreak-server", features = ["scripted-provider"] }
+# The scripted model provider and scripted code-mode engine the end-to-end
+# tests drive. Enabling them here compiles them into the `tidebreak` binary
+# the tests spawn, and only when the tests are built.
+tidebreak-server = { path = "../tidebreak-server", features = ["scripted-provider", "scripted-harness"] }
 tempfile = { workspace = true }
 jsonschema = { workspace = true }
