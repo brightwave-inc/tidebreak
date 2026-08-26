@@ -18,6 +18,8 @@
 //! application.
 
 use std::future::Future;
+#[cfg(any(test, target_os = "macos"))]
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -510,14 +512,88 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
                 .store(false, Ordering::Release);
             Err(UPDATE_INSTALL_ERROR.to_owned())
         }
-        Ok(Ok(())) => {
-            app.restart();
+        Ok(Ok(())) => relaunch_after_update(&app),
+    }
+}
+
+/// Relaunch into the just-installed bundle.
+///
+/// Tauri's [`AppHandle::restart`] spawns `Contents/MacOS/<exe>` directly. On
+/// macOS that skips Launch Services, so the new process can draw a window
+/// without appearing in the Command-Tab switcher or becoming the front app.
+/// Packaged macOS builds therefore ask `open` to launch the `.app` after this
+/// process has exited. Unpackaged binaries and other platforms keep Tauri's
+/// restart.
+fn relaunch_after_update(app: &AppHandle) -> ! {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(app_bundle_from_binary)
+    {
+        if schedule_bundle_relaunch(&bundle).is_ok() {
+            app.exit(0);
+            loop {
+                std::thread::sleep(Duration::MAX);
+            }
         }
     }
+    app.restart();
+}
+
+/// Walk `…/Name.app/Contents/MacOS/<exe>` up to `Name.app`.
+#[cfg(any(test, target_os = "macos"))]
+fn app_bundle_from_binary(binary: &Path) -> Option<PathBuf> {
+    let macos = binary.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    bundle
+        .file_name()?
+        .to_str()?
+        .ends_with(".app")
+        .then(|| bundle.to_path_buf())
+}
+
+/// Start a detached `open` of the bundle after this process exits.
+///
+/// Launch Services only registers the app if `open` runs against the `.app`,
+/// and the single-instance plugin refuses a second Tidebreak until this
+/// process is gone. The helper therefore waits on the captured parent pid,
+/// then asks `open` to launch the bundle. Its own process group keeps a
+/// SIGHUP from this exit from cancelling it.
+#[cfg(target_os = "macos")]
+fn schedule_bundle_relaunch(bundle: &Path) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"parent=$PPID
+while /bin/kill -0 "$parent" 2>/dev/null; do
+  /bin/sleep 0.1
+done
+exec /usr/bin/open "$1""#,
+            "relaunch",
+        ])
+        .arg(bundle)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
     use super::*;
@@ -539,6 +615,31 @@ mod tests {
                 "error": null,
                 "enabled": true,
             })
+        );
+    }
+
+    #[test]
+    fn app_bundle_is_the_enclosing_dot_app() {
+        let binary = Path::new("/Applications/Tidebreak.app/Contents/MacOS/tidebreak-desktop");
+        assert_eq!(
+            app_bundle_from_binary(binary).as_deref(),
+            Some(Path::new("/Applications/Tidebreak.app"))
+        );
+        assert_eq!(
+            app_bundle_from_binary(Path::new(
+                "/Applications/Tidebreak Staging.app/Contents/MacOS/tidebreak-desktop"
+            ))
+            .as_deref(),
+            Some(Path::new("/Applications/Tidebreak Staging.app"))
+        );
+    }
+
+    #[test]
+    fn unpackaged_binaries_have_no_app_bundle() {
+        assert!(app_bundle_from_binary(Path::new("/tmp/tidebreak-desktop")).is_none());
+        assert!(
+            app_bundle_from_binary(Path::new("/Applications/Tidebreak.app/Contents/MacOS"))
+                .is_none()
         );
     }
 
