@@ -57,3 +57,4 @@ uuid = { workspace = true }
 # and only when the tests are built.
 tidebreak-server = { path = "../tidebreak-server", features = ["scripted-provider"] }
 tempfile = { workspace = true }
+jsonschema = { workspace = true }

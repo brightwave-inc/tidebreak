@@ -48,6 +48,7 @@ tidebreak mcp-server add <name> (--command <cmd> [--arg <a>]… | --url <url>)
 tidebreak mcp-server remove <name>
 tidebreak chat list
 tidebreak chat create
+tidebreak agent-mcp
 
 tidebreak code doctor [--refresh]
 tidebreak code repo add <path> [--name <name>] [--base-ref <ref>] [--branch-prefix <p>]
@@ -78,7 +79,7 @@ tidebreak code watch [--once] [--timeout <secs>]
 
 A bare `tidebreak` with no arguments runs `serve`.
 
-`-p`, `output`, `attach`, the setup commands, and the code family additionally take
+`-p`, `output`, `attach`, `agent-mcp`, the setup commands, and the code family additionally take
 `--server <url>` / `--server-token-env <var>`, or `--attach` — see
 [Attaching to a running server](#attaching-to-a-running-server).
 Every `tidebreak code` command also accepts `--json` (one object, or NDJSON
@@ -348,6 +349,69 @@ It exposes `read_file` and `list_dir`, and only after a proper MCP initialize
 handshake. This is Tidebreak acting as an MCP *server* for some other client —
 it is unrelated to [connecting MCP servers to Tidebreak](/mcp-servers).
 
+### Agent MCP
+
+`tidebreak agent-mcp` is the other direction: an MCP *server* that lets an
+external agent drive **chat** on a Tidebreak that is already running. It is an
+attach client, the same way `-p` is — pass `--server` / `--attach` (and
+`TIDEBREAK_SERVER_TOKEN` or `TIDEBREAK_DATA_DIR` for `--attach`). `mcp` and
+`browser-mcp` refuse those flags; this command requires them in practice,
+because the tools talk to the attach contract, not to a workspace directory.
+
+```sh
+export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
+cargo run -p tidebreak-cli -- agent-mcp --server http://127.0.0.1:53421
+```
+
+stdout is JSON-RPC only. Diagnostics go to stderr.
+
+The tools are schema-discoverable (`tools/list`). Reads are read-only;
+mutations are sensitive. Possession of the bearer is what authorizes calling
+them — the driven chat's own approvals are never auto-approved.
+
+| Tool | What it does |
+| --- | --- |
+| `chat_create` | Create a chat. Optional `model` and `permission_mode` (`plan`, `ask`, `auto`, `allow`). Returns `{chat_id}`. |
+| `chat_list` | Chat summaries. |
+| `chat_status` | Run state, a tail of recent messages, pending approvals / plans / questions. |
+| `chat_run_turn` | Post a prompt with a fresh turn id and follow until the turn settles, parks, or `timeout_seconds` (default 300) elapses. |
+| `chat_wait` | Re-follow an in-flight turn. Same return shape as `chat_run_turn`. |
+| `chat_decide` | Apply a print-protocol decision, then follow to the next settle point. |
+| `chat_events` | Raw journal frames after `after_seq`, at most `max_events` (capped at 200). |
+| `chat_steer` | Inject more user text into the in-flight turn. |
+| `chat_cancel` | Cancel the in-flight turn. |
+
+`chat_run_turn`, `chat_wait`, and `chat_decide` return the same object:
+
+```json
+{
+  "status": "completed",
+  "assistant_text": "…",
+  "pending": null,
+  "events_cursor": 42
+}
+```
+
+`status` is one of `completed`, `needs_approval`, `needs_plan_decision`,
+`needs_answer`, `needs_host_consent`, `running`, `cancelled`, `failed`.
+`running` means the timeout elapsed while the turn continues on the server —
+turns are durable — so you re-check with `chat_wait` or `chat_status`.
+
+The loop is run-turn, then decide, until `completed` (or `failed` /
+`cancelled`):
+
+```json
+{"type":"approval","call_id":"…","decision":"approve"}
+{"type":"plan","call_id":"…","decision":"accept","permission_mode":"auto"}
+{"type":"questions","call_id":"…","answers":[{"question_id":"target","selected_option_ids":["staging"]}]}
+```
+
+Those objects are the same ones `-p --output-format json` reads on stdin. Host
+folder consent is not in that vocabulary: if a turn parks on
+`request_folder_access`, status is `needs_host_consent` and there is no
+decision path. Standing consent still comes from `tidebreak folder connect`
+or the desktop.
+
 ### `rehome-secrets`
 
 macOS ties keychain approvals to a binary's code signature, so credentials
@@ -398,7 +462,7 @@ export TIDEBREAK_SERVER_TOKEN=<the token that server printed>
 cargo run -p tidebreak-cli -- --server http://127.0.0.1:53421 provider list
 ```
 
-`--server` / `--attach` work on `-p` and every setup command.
+`--server` / `--attach` work on `-p`, `agent-mcp`, and every setup command.
 `TIDEBREAK_SERVER_URL` sets the same thing as `--server` for a whole shell, and
 the flag wins over it. After the endpoint is resolved, an attached command
 writes no log file and touches no keychain — it is only an HTTP+WebSocket

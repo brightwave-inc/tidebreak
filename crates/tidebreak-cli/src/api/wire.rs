@@ -293,7 +293,6 @@ pub struct AgentActivityItem {
 pub struct PendingPlan {
     pub call_id: CallId,
     /// The turn that proposed it; part of the wire contract, not rendered.
-    #[allow(dead_code)]
     pub turn_id: TurnId,
     pub title: String,
     pub plan: String,
@@ -305,7 +304,6 @@ pub struct PendingPlan {
 pub struct PendingQuestions {
     pub call_id: CallId,
     /// The turn that asked; part of the wire contract, not rendered.
-    #[allow(dead_code)]
     pub turn_id: TurnId,
     #[serde(default)]
     pub questions: Vec<UserQuestion>,

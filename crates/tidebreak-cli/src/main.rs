@@ -70,6 +70,11 @@
 //! stdio so any MCP-speaking host can observe and navigate browser sessions.
 //! See [`browser`].
 //!
+//! `tidebreak agent-mcp` serves chat-mode tools over MCP stdio so an external
+//! agent can drive a running Tidebreak over the attach contract. Unlike `mcp`
+//! and `browser-mcp` it accepts `--server` / `--attach`: it is a client, the
+//! same way `-p` is. See [`agent_mcp`].
+//!
 //! Every client command above embeds its own server by default. `--server
 //! <url>` (or `TIDEBREAK_SERVER_URL`) makes it a pure client of one that is
 //! already running instead, with the bearer token coming from
@@ -94,11 +99,13 @@ use tidebreak_core::{
     AgentError, ChatId, Config, ListDir, Profile, ReadFile, Result, ToolCtx, ToolRegistry, TurnId,
 };
 
+mod agent_mcp;
 mod api;
 mod browser;
 mod code;
 mod connect;
 mod diagnostics;
+mod event_stream;
 mod folder;
 mod folder_executor;
 mod outputs;
@@ -175,6 +182,7 @@ usage: tidebreak serve
        tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
               --document-epoch <n> [--max-width <px>] [--max-height <px>] --json
        tidebreak browser-mcp
+       tidebreak agent-mcp
 
        tidebreak folder connect <path> --chat <id> [--output-format text|json]
        tidebreak folder list [--chat <id>] [--output-format text|json]
@@ -213,11 +221,11 @@ A key is read from stdin, or from the environment variable named by
 --from-env — never from an argument, which every process on the machine
 can read.
 
--p, output, attach, diagnostics, the setup commands, and the code family also take
---server <url> [--server-token-env <var>] or --attach, which talks to a
-server that is already running instead of embedding one. --attach reads
-{TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop). With
---server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
+-p, output, attach, diagnostics, agent-mcp, the setup commands, and the code
+family also take --server <url> [--server-token-env <var>] or --attach, which
+talks to a server that is already running instead of embedding one. --attach
+reads {TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop).
+With --server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
 variable; it is never an argument either. The folder commands do not take
 --server/--attach: they provision local host consent in this machine's own
 broker and product store, and they can run while serve or the desktop
@@ -453,6 +461,14 @@ async fn run() -> Result<i32> {
                 usage_error("browser-mcp accepts no arguments");
             }
             crate::browser::run_browser_mcp().await.map(|()| 0)
+        }
+        Some(command) if command == OsStr::new("agent-mcp") => {
+            if args.next().is_some() {
+                usage_error("agent-mcp accepts no arguments beyond --server/--attach");
+            }
+            crate::agent_mcp::run(server_flags.resolve()?)
+                .await
+                .map(|()| 0)
         }
         Some(command) if command == OsStr::new("code") => {
             match crate::code::parse(text_args(args)) {
