@@ -3320,17 +3320,20 @@ function parseCodeWorkspaceMergeResult(
       }
     | undefined;
   const repository = target?.repository;
+  const host = repository?.host;
+  const owner = repository?.owner;
+  const name = repository?.name;
   const acceptedHead = record.accepted_head_sha;
   const status = parseCodeWorkspacePr(record.status);
   if (
     !repository ||
-    typeof repository.host !== "string" ||
-    typeof repository.owner !== "string" ||
-    typeof repository.name !== "string" ||
+    typeof host !== "string" ||
+    typeof owner !== "string" ||
+    typeof name !== "string" ||
     typeof target.number !== "number" ||
     typeof acceptedHead !== "string" ||
     !status ||
-    !sameRepository(repository, expected.target.repository) ||
+    !sameRepository({ host, owner, name }, expected.target.repository) ||
     target.number !== expected.target.number ||
     acceptedHead !== expected.expected_head_sha
   ) {
@@ -3339,9 +3342,9 @@ function parseCodeWorkspaceMergeResult(
   return {
     target: {
       repository: {
-        host: repository.host,
-        owner: repository.owner,
-        name: repository.name,
+        host,
+        owner,
+        name,
       },
       number: target.number,
     },
