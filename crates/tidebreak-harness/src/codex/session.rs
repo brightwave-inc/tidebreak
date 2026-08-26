@@ -25,7 +25,14 @@ use crate::{
 use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(test))]
+const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
 const CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CONTROL_RPC_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 
 /// The service-tier id Codex serves fast mode under.
@@ -43,11 +50,8 @@ pub struct CodexSession {
     /// thread for "this turn and subsequent turns", so a switch lands here and
     /// rides out on the next turn rather than relaunching the child.
     permission_mode: Mutex<PermissionMode>,
-    /// Whether the mode has moved since the last turn told the engine about
-    /// it. [`Self::handshake`] settles it per child: a started thread was
-    /// just told its posture, while a resumed thread carries whatever it was
-    /// last told and gets a restatement on the next turn.
-    posture_unsent: AtomicBool,
+    /// Posture generations that still need correlated engine admission.
+    posture: Mutex<PostureState>,
     resume_ref: Mutex<Option<String>>,
     /// Whether a turn has actually run on this thread. Codex only writes the
     /// thread's rollout once a turn starts, so a thread id from
@@ -62,6 +66,7 @@ pub struct CodexSession {
     stdout: Mutex<Option<Arc<AsyncMutex<StdoutReader>>>>,
     parser: Arc<Mutex<CodexStreamParser>>,
     next_id: AtomicI64,
+    interrupts_this_turn: AtomicU32,
     control_state: Arc<Mutex<ControlState>>,
     control_state_changed: Arc<Notify>,
     pending_approvals: Mutex<HashMap<String, Value>>,
@@ -75,6 +80,27 @@ struct StdoutReader {
 struct ControlState {
     turn: ControlTurn,
     pending: HashMap<i64, PendingSteer>,
+    interrupt: Option<PendingInterrupt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PostureGeneration {
+    id: u64,
+    mode: PermissionMode,
+}
+
+struct PostureState {
+    next_generation: u64,
+    pending: Option<PostureGeneration>,
+    admission: Option<TurnAdmission>,
+}
+
+struct TurnAdmission {
+    rpc_id: i64,
+    thread_id: String,
+    posture_generation: Option<u64>,
+    turn_id: Option<String>,
+    deadline: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +125,11 @@ struct PendingSteer {
     deadline: Option<Instant>,
     write_state: PendingWriteState,
     accept_response: bool,
+}
+
+struct PendingInterrupt {
+    rpc_id: i64,
+    reply: Option<oneshot::Sender<Result<(), HarnessError>>>,
 }
 
 struct ControlRegistration<'a> {
@@ -149,12 +180,18 @@ impl CodexSession {
     pub(super) fn new(spec: SessionSpec) -> Self {
         let resume_ref = spec.resume_ref.clone();
         let permission_mode = spec.permission_mode;
+        let pending_posture = resume_ref.as_ref().map(|_| PostureGeneration {
+            id: 1,
+            mode: permission_mode,
+        });
         Self {
             spec,
             permission_mode: Mutex::new(permission_mode),
-            // Settled per child by `handshake`; until one runs there is no
-            // engine to disagree with.
-            posture_unsent: AtomicBool::new(resume_ref.is_some()),
+            posture: Mutex::new(PostureState {
+                next_generation: u64::from(pending_posture.is_some()),
+                pending: pending_posture,
+                admission: None,
+            }),
             resume_ref: Mutex::new(resume_ref),
             thread_ran_a_turn: AtomicBool::new(false),
             resume_lost: Mutex::new(None),
@@ -164,9 +201,11 @@ impl CodexSession {
             stdout: Mutex::new(None),
             parser: Arc::new(Mutex::new(CodexStreamParser::new())),
             next_id: AtomicI64::new(1),
+            interrupts_this_turn: AtomicU32::new(0),
             control_state: Arc::new(Mutex::new(ControlState {
                 turn: ControlTurn::Idle,
                 pending: HashMap::new(),
+                interrupt: None,
             })),
             control_state_changed: Arc::new(Notify::new()),
             pending_approvals: Mutex::new(HashMap::new()),
@@ -198,6 +237,125 @@ impl CodexSession {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    fn arm_posture(&self, mode: PermissionMode) -> PostureGeneration {
+        let mut state = self.posture.lock().expect("codex posture");
+        state.next_generation = state.next_generation.saturating_add(1);
+        let generation = PostureGeneration {
+            id: state.next_generation,
+            mode,
+        };
+        state.pending = Some(generation);
+        generation
+    }
+
+    fn ensure_posture_pending(&self) -> PostureGeneration {
+        let mode = self.permission_mode();
+        let mut state = self.posture.lock().expect("codex posture");
+        if let Some(generation) = state.pending {
+            return generation;
+        }
+        state.next_generation = state.next_generation.saturating_add(1);
+        let generation = PostureGeneration {
+            id: state.next_generation,
+            mode,
+        };
+        state.pending = Some(generation);
+        generation
+    }
+
+    fn pending_posture(&self) -> Option<PostureGeneration> {
+        self.posture.lock().expect("codex posture").pending
+    }
+
+    fn register_turn_admission(
+        &self,
+        rpc_id: i64,
+        thread_id: String,
+        posture_generation: Option<u64>,
+    ) {
+        self.posture.lock().expect("codex posture").admission = Some(TurnAdmission {
+            rpc_id,
+            thread_id,
+            posture_generation,
+            turn_id: None,
+            deadline: Instant::now() + HANDSHAKE_TIMEOUT,
+        });
+    }
+
+    fn turn_admission_deadline(&self) -> Option<Instant> {
+        self.posture
+            .lock()
+            .expect("codex posture")
+            .admission
+            .as_ref()
+            .map(|admission| admission.deadline)
+    }
+
+    fn expire_turn_admission(&self) -> bool {
+        let mut state = self.posture.lock().expect("codex posture");
+        if state
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission.deadline <= Instant::now())
+        {
+            state.admission = None;
+            return true;
+        }
+        false
+    }
+
+    fn clear_turn_admission(&self) {
+        self.posture.lock().expect("codex posture").admission = None;
+    }
+
+    /// Admit only the posture generation that rode on this exact turn.
+    /// A newer mode switch leaves a newer generation pending.
+    fn observe_turn_admission(&self, value: &Value) -> Option<String> {
+        let mut state = self.posture.lock().expect("codex posture");
+        let admission = state.admission.as_mut()?;
+
+        let turn_id = if is_rpc_response(value) {
+            if value_rpc_id(value) != Some(admission.rpc_id) {
+                return None;
+            }
+            if value.get("error").is_some() {
+                state.admission = None;
+                return None;
+            }
+            let turn_id = value.pointer("/result/turn/id").and_then(Value::as_str)?;
+            admission.turn_id = Some(turn_id.to_owned());
+            turn_id.to_owned()
+        } else if value.get("method").and_then(Value::as_str) == Some("turn/started") {
+            if value.pointer("/params/threadId").and_then(Value::as_str)
+                != Some(admission.thread_id.as_str())
+            {
+                return None;
+            }
+            let turn_id = value.pointer("/params/turn/id").and_then(Value::as_str)?;
+            if admission
+                .turn_id
+                .as_deref()
+                .is_some_and(|expected| expected != turn_id)
+            {
+                return None;
+            }
+            turn_id.to_owned()
+        } else {
+            return None;
+        };
+
+        let generation = admission.posture_generation;
+        state.admission = None;
+        if generation.is_some_and(|generation| {
+            state
+                .pending
+                .is_some_and(|pending| pending.id == generation)
+        }) {
+            state.pending = None;
+        }
+        Some(turn_id)
+    }
+
     async fn write_message(&self, message: &Value) -> Result<(), HarnessError> {
         let Some(stdin) = self.stdin.lock().expect("codex stdin").clone() else {
             return Err(HarnessError::Other("engine child has no stdin".into()));
@@ -217,8 +375,16 @@ impl CodexSession {
             .lock()
             .expect("codex parser")
             .note_outbound(&json!(id), method);
-        self.write_message(&json!({ "id": id, "method": method, "params": params }))
-            .await?;
+        if let Err(err) = self
+            .write_message(&json!({ "id": id, "method": method, "params": params }))
+            .await
+        {
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(id));
+            return Err(err);
+        }
         Ok(id)
     }
 
@@ -313,10 +479,11 @@ impl CodexSession {
     }
 
     fn begin_control_turn(&self) {
-        let pending = {
+        self.interrupts_this_turn.store(0, Ordering::SeqCst);
+        let (pending, interrupt) = {
             let mut state = self.control_state.lock().expect("codex control state");
             state.turn = ControlTurn::Starting;
-            std::mem::take(&mut state.pending)
+            (std::mem::take(&mut state.pending), state.interrupt.take())
         };
         for (id, mut pending) in pending {
             if let Some(reply) = pending.reply.take() {
@@ -328,6 +495,17 @@ impl CodexSession {
                 .lock()
                 .expect("codex parser")
                 .forget_outbound(&json!(id));
+        }
+        if let Some(mut interrupt) = interrupt {
+            if let Some(reply) = interrupt.reply.take() {
+                let _ = reply.send(Err(HarnessError::Other(
+                    "the prior turn ended before the interrupt was acknowledged".into(),
+                )));
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(interrupt.rpc_id));
         }
         self.control_state_changed.notify_waiters();
     }
@@ -353,8 +531,8 @@ impl CodexSession {
     /// not started writing are removed immediately. An in-flight write becomes
     /// a bounded tombstone: its caller is rejected now, and the sole stream
     /// reader still consumes its eventual response without emitting a steer.
-    fn close_control_turn_for_terminal(&self, detail: &str) {
-        let removed = {
+    fn close_control_turn_for_terminal(&self, detail: &str, interrupted: bool) {
+        let (removed, interrupt) = {
             let mut state = self.control_state.lock().expect("codex control state");
             state.turn = ControlTurn::Closed;
             let queued_ids = state
@@ -374,7 +552,7 @@ impl CodexSession {
                     let _ = reply.send(Err(HarnessError::SteeringRejected(detail.into())));
                 }
             }
-            removed
+            (removed, state.interrupt.take())
         };
         for (id, mut pending) in removed {
             if let Some(reply) = pending.reply.take() {
@@ -385,14 +563,28 @@ impl CodexSession {
                 .expect("codex parser")
                 .forget_outbound(&json!(id));
         }
+        if let Some(mut pending) = interrupt {
+            if let Some(reply) = pending.reply.take() {
+                let result = if interrupted {
+                    Ok(())
+                } else {
+                    Err(HarnessError::Other(detail.into()))
+                };
+                let _ = reply.send(result);
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(pending.rpc_id));
+        }
         self.control_state_changed.notify_waiters();
     }
 
     fn abort_control_turn(&self, detail: &str) {
-        let pending = {
+        let (pending, interrupt) = {
             let mut state = self.control_state.lock().expect("codex control state");
             state.turn = ControlTurn::Closed;
-            std::mem::take(&mut state.pending)
+            (std::mem::take(&mut state.pending), state.interrupt.take())
         };
         for (id, mut pending) in pending {
             if let Some(reply) = pending.reply.take() {
@@ -402,6 +594,15 @@ impl CodexSession {
                 .lock()
                 .expect("codex parser")
                 .forget_outbound(&json!(id));
+        }
+        if let Some(mut pending) = interrupt {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::Other(detail.into())));
+            }
+            self.parser
+                .lock()
+                .expect("codex parser")
+                .forget_outbound(&json!(pending.rpc_id));
         }
         self.control_state_changed.notify_waiters();
     }
@@ -449,12 +650,8 @@ impl CodexSession {
     }
 
     fn controls_pending(&self) -> bool {
-        !self
-            .control_state
-            .lock()
-            .expect("codex control state")
-            .pending
-            .is_empty()
+        let state = self.control_state.lock().expect("codex control state");
+        !state.pending.is_empty() || state.interrupt.is_some()
     }
 
     fn active_control_turn_id(&self) -> Option<String> {
@@ -463,6 +660,104 @@ impl CodexSession {
             ControlTurn::Active(turn_id) => Some(turn_id.clone()),
             ControlTurn::Idle | ControlTurn::Starting | ControlTurn::Closed => None,
         }
+    }
+
+    fn register_interrupt(&self, rpc_id: i64) -> oneshot::Receiver<Result<(), HarnessError>> {
+        let (reply, receiver) = oneshot::channel();
+        self.parser
+            .lock()
+            .expect("codex parser")
+            .note_outbound(&json!(rpc_id), "turn/interrupt");
+        self.control_state
+            .lock()
+            .expect("codex control state")
+            .interrupt = Some(PendingInterrupt {
+            rpc_id,
+            reply: Some(reply),
+        });
+        receiver
+    }
+
+    fn resolve_interrupt_response(&self, rpc_id: i64, value: &Value) -> bool {
+        let pending = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            if state
+                .interrupt
+                .as_ref()
+                .is_none_or(|pending| pending.rpc_id != rpc_id)
+            {
+                return false;
+            }
+            state.interrupt.take()
+        };
+        let Some(mut pending) = pending else {
+            return false;
+        };
+        let result = if let Some(detail) = rpc_error_detail(value) {
+            Err(HarnessError::Other(format!(
+                "the engine rejected the interrupt: {detail}"
+            )))
+        } else if value.get("result").is_some() {
+            Ok(())
+        } else {
+            Err(HarnessError::Other(
+                "the engine returned a malformed interrupt response".into(),
+            ))
+        };
+        if let Some(reply) = pending.reply.take() {
+            let _ = reply.send(result);
+        }
+        true
+    }
+
+    fn cancel_interrupt(&self, rpc_id: i64, detail: &str) {
+        let pending = {
+            let mut state = self.control_state.lock().expect("codex control state");
+            if state
+                .interrupt
+                .as_ref()
+                .is_none_or(|pending| pending.rpc_id != rpc_id)
+            {
+                return;
+            }
+            state.interrupt.take()
+        };
+        if let Some(mut pending) = pending {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::Other(detail.into())));
+            }
+        }
+        self.parser
+            .lock()
+            .expect("codex parser")
+            .forget_outbound(&json!(rpc_id));
+        self.control_state_changed.notify_waiters();
+    }
+
+    fn fail_pending_interrupt(&self, detail: &str) {
+        let rpc_id = self
+            .control_state
+            .lock()
+            .expect("codex control state")
+            .interrupt
+            .as_ref()
+            .map(|pending| pending.rpc_id);
+        if let Some(rpc_id) = rpc_id {
+            self.cancel_interrupt(rpc_id, detail);
+        }
+    }
+
+    async fn interrupt_process_tree(&self) -> Result<(), HarnessError> {
+        self.clear_turn_admission();
+        self.fail_pending_interrupt("the native interrupt did not complete");
+        let mut slot = self.child.lock().await;
+        *self.stdin.lock().expect("codex stdin") = None;
+        *self.stdout.lock().expect("codex stdout") = None;
+        self.child_pid.store(0, Ordering::SeqCst);
+        if let Some(mut child) = slot.take() {
+            child.interrupt(PROCESS_INTERRUPT_GRACE).await?;
+        }
+        Ok(())
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), HarnessError> {
@@ -668,8 +963,10 @@ impl CodexSession {
         }
         // A resumed thread carries whatever posture it was last told, so the
         // next turn restates the mode rather than assume it holds. A started
-        // thread was just told its posture.
-        self.posture_unsent.store(resumed, Ordering::SeqCst);
+        // thread was just created with this mode.
+        if resumed {
+            self.ensure_posture_pending();
+        }
         Ok(())
     }
 
@@ -709,7 +1006,13 @@ impl CodexSession {
         let mut terminal = false;
         loop {
             let changed = self.control_state_changed.notified();
-            let deadline = self.next_control_deadline();
+            let control_deadline = self.next_control_deadline();
+            let admission_deadline = self.turn_admission_deadline();
+            let deadline = match (control_deadline, admission_deadline) {
+                (Some(control), Some(admission)) => Some(control.min(admission)),
+                (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            };
             if terminal && !self.controls_pending() {
                 return Ok(());
             }
@@ -721,6 +1024,11 @@ impl CodexSession {
                         lines = self.read_lines() => lines?,
                         () = changed => continue,
                         () = tokio::time::sleep_until(deadline) => {
+                            if self.expire_turn_admission() {
+                                return Err(HarnessError::Other(
+                                    "timed out waiting for the engine to admit the turn".into(),
+                                ));
+                            }
                             self.expire_control_requests();
                             continue;
                         }
@@ -735,6 +1043,10 @@ impl CodexSession {
                 }
             };
             if lines.is_empty() {
+                self.clear_turn_admission();
+                self.fail_pending_interrupt(
+                    "engine stdout closed before the interrupt was acknowledged",
+                );
                 let message = if terminal {
                     "engine stdout closed before a control response arrived"
                 } else {
@@ -785,9 +1097,13 @@ impl CodexSession {
 
     async fn emit_parsed(&self, line: &str) -> Vec<HarnessEvent> {
         let value = serde_json::from_str::<Value>(line).ok();
+        let mut admitted_turn_id = None;
         if let Some(value) = value.as_ref() {
             if is_rpc_response(value) {
                 if let Some(rpc_id) = value_rpc_id(value) {
+                    if self.resolve_interrupt_response(rpc_id, value) {
+                        self.control_state_changed.notify_waiters();
+                    }
                     let pending = self
                         .control_state
                         .lock()
@@ -809,6 +1125,7 @@ impl CodexSession {
                     }
                 }
             }
+            admitted_turn_id = self.observe_turn_admission(value);
             if let Some(detail) = lost_resume_detail(value) {
                 *self.resume_lost.lock().expect("codex resume lost") = Some(detail);
             }
@@ -823,10 +1140,15 @@ impl CodexSession {
             )
         });
         if terminal {
+            self.clear_turn_admission();
+            let interrupted = events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnInterrupted));
             self.close_control_turn_for_terminal(
                 "the active turn finished before steering was accepted",
+                interrupted,
             );
-        } else if let Some(turn_id) = value.as_ref().and_then(observed_turn_id) {
+        } else if let Some(turn_id) = admitted_turn_id.as_deref() {
             self.activate_control_turn(turn_id);
             // The engine acknowledged a turn on this thread, so it has
             // written the thread's rollout: the id is resumable now.
@@ -896,9 +1218,9 @@ impl HarnessSession for CodexSession {
         if input.fast_mode {
             params["serviceTier"] = json!(FAST_SERVICE_TIER);
         }
-        let posture_unsent = self.posture_unsent.load(Ordering::SeqCst);
-        if posture_unsent {
-            let (sandbox, approval) = turn_start_policy(self.permission_mode());
+        let posture = self.pending_posture();
+        if let Some(posture) = posture {
+            let (sandbox, approval) = turn_start_policy(posture.mode);
             params["sandboxPolicy"] = sandbox;
             params["approvalPolicy"] = json!(approval);
         }
@@ -912,10 +1234,7 @@ impl HarnessSession for CodexSession {
                 return Err(err);
             }
         };
-        if posture_unsent {
-            self.posture_unsent.store(false, Ordering::SeqCst);
-        }
-        let _ = id;
+        self.register_turn_admission(id, thread_id, posture.map(|generation| generation.id));
         // Long-lived child: its exit is a session-level failure, not a turn
         // outcome, and `read_until_terminal_turn` already errors on a stream
         // that ends without one.
@@ -948,7 +1267,7 @@ impl HarnessSession for CodexSession {
             return Ok(());
         }
         *self.permission_mode.lock().expect("codex permission mode") = mode;
-        self.posture_unsent.store(true, Ordering::SeqCst);
+        self.arm_posture(mode);
         Ok(())
     }
 
@@ -1006,27 +1325,44 @@ impl HarnessSession for CodexSession {
             // session must not cost it anything (decision 0064).
             return Ok(());
         }
+        let asked = self.interrupts_this_turn.fetch_add(1, Ordering::SeqCst);
+        if asked > 0 {
+            return self.interrupt_process_tree().await;
+        }
         let thread_id = self.resume_ref.lock().expect("codex resume").clone();
         let turn_id = self.active_control_turn_id();
-        if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-            let id = self
-                .request(
-                    "turn/interrupt",
-                    json!({ "threadId": thread_id, "turnId": turn_id }),
-                )
-                .await;
-            if id.is_ok() {
-                return Ok(());
+        let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) else {
+            return self.interrupt_process_tree().await;
+        };
+
+        let rpc_id = self.next_rpc_id();
+        let receiver = self.register_interrupt(rpc_id);
+        let message = json!({
+            "id": rpc_id,
+            "method": "turn/interrupt",
+            "params": { "threadId": thread_id, "turnId": turn_id },
+        });
+        if let Err(err) = self.write_message(&message).await {
+            self.cancel_interrupt(rpc_id, "the engine refused the interrupt request");
+            warn!(%err, "engine child refused a stop request; stopping the process");
+            return self.interrupt_process_tree().await;
+        }
+
+        match timeout(CONTROL_RPC_TIMEOUT, receiver).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(err))) => {
+                warn!(%err, "engine rejected a stop request; stopping the process");
+                self.interrupt_process_tree().await
+            }
+            Ok(Err(_)) => self.interrupt_process_tree().await,
+            Err(_) => {
+                self.cancel_interrupt(
+                    rpc_id,
+                    "timed out waiting for the engine to acknowledge the interrupt",
+                );
+                self.interrupt_process_tree().await
             }
         }
-        let mut slot = self.child.lock().await;
-        let Some(child) = slot.as_mut() else {
-            return Ok(());
-        };
-        child.interrupt(Duration::from_secs(2)).await?;
-        *slot = None;
-        self.child_pid.store(0, Ordering::SeqCst);
-        Ok(())
     }
 
     fn resume_ref(&self) -> Option<String> {
@@ -1113,17 +1449,6 @@ fn is_rpc_response(value: &Value) -> bool {
     object.contains_key("id")
         && !object.contains_key("method")
         && (object.contains_key("result") || object.contains_key("error"))
-}
-
-fn observed_turn_id(value: &Value) -> Option<&str> {
-    let method = value.get("method").and_then(Value::as_str);
-    if method == Some("turn/started") {
-        return value.pointer("/params/turn/id").and_then(Value::as_str);
-    }
-    if is_rpc_response(value) {
-        return value.pointer("/result/turn/id").and_then(Value::as_str);
-    }
-    None
 }
 
 fn value_rpc_id(value: &Value) -> Option<i64> {
@@ -1442,6 +1767,71 @@ done
 "#;
 
     #[cfg(unix)]
+    const FAKE_POSTURE_APP_SERVER: &str = r#"#!/bin/sh
+turns=0
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"userAgent":"fake/0.147.0"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      turns=$((turns+1))
+      printf '%s\n' "$line" >>"$FAKE_CODEX_TURNS"
+      if [ "$turns" -eq 1 ]; then
+        printf '{"id":%s,"error":{"code":-32602,"message":"invalid turn options"}}\n' "$id"
+      else
+        printf '{"id":%s,"result":{"turn":{"id":"TURN-%s","status":"inProgress"}}}\n' "$id" "$turns"
+        printf '{"method":"turn/completed","params":{"threadId":"THREAD-1","turn":{"id":"TURN-%s","status":"completed"}}}\n' "$turns"
+      fi
+      ;;
+  esac
+done
+"#;
+
+    #[cfg(unix)]
+    const FAKE_INTERRUPT_APP_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=${line#*\"id\":}
+  id=${id%%,*}
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"userAgent":"fake/0.147.0"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"THREAD-1","cliVersion":"0.147.0","turns":[]}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"TURN-1","status":"inProgress"}}}\n' "$id"
+      printf '{"method":"turn/started","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"inProgress"}}}\n'
+      ;;
+    *'"method":"turn/interrupt"'*)
+      printf '%s\n' "$line" >>"$FAKE_CODEX_INTERRUPTS"
+      case "$FAKE_CODEX_INTERRUPT_MODE" in
+        success)
+          printf '{"id":%s,"result":{}}\n' "$id"
+          printf '{"method":"turn/completed","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"interrupted"}}}\n'
+          ;;
+        error)
+          printf '{"id":%s,"error":{"code":-32000,"message":"turn is no longer active"}}\n' "$id"
+          ;;
+        eof)
+          exit 0
+          ;;
+        timeout)
+          :
+          ;;
+      esac
+      ;;
+  esac
+done
+"#;
+
+    #[cfg(unix)]
     fn write_fake_app_server(path: &std::path::Path) {
         write_app_server(path, FAKE_APP_SERVER);
     }
@@ -1585,6 +1975,53 @@ done
         }
     }
 
+    #[cfg(unix)]
+    async fn run_interrupt_case(
+        mode: &str,
+    ) -> (
+        Result<TurnOutcome, HarnessError>,
+        Result<(), HarnessError>,
+        bool,
+        bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_app_server(&binary, FAKE_INTERRUPT_APP_SERVER);
+        let mut spec = spec_for(dir.path(), &binary, None);
+        spec.extra_env
+            .push(("FAKE_CODEX_INTERRUPT_MODE".into(), mode.to_owned()));
+        spec.extra_env.push((
+            "FAKE_CODEX_INTERRUPTS".into(),
+            dir.path()
+                .join("interrupts.ndjson")
+                .to_string_lossy()
+                .into_owned(),
+        ));
+        let session = Arc::new(CodexSession::new(spec));
+        let running = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.run_turn(turn("keep working")).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.active_control_turn_id().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fake turn was never admitted");
+
+        let stopped = session.interrupt().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("fake turn did not finish")
+            .expect("turn task panicked");
+        let child_alive = session.child_pid().is_some();
+        let request_written = std::fs::read_to_string(dir.path().join("interrupts.ndjson"))
+            .is_ok_and(|input| input.lines().count() == 1);
+        session.park().await.unwrap();
+        (outcome, stopped, child_alive, request_written)
+    }
+
     /// The wedge from the app-server dying before its first turn: codex
     /// never persisted the thread, so a thread id that has run no turn must
     /// not be reported as a resume ref. The next spawn then starts a clean
@@ -1710,6 +2147,180 @@ done
         let session = unit_session(Arc::new(RecordingSink::default()));
         session.interrupt().await.unwrap();
         assert_eq!(session.child_pid(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_turn_start_keeps_posture_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        write_app_server(&binary, FAKE_POSTURE_APP_SERVER);
+        let mut spec = spec_for(dir.path(), &binary, None);
+        spec.extra_env.push((
+            "FAKE_CODEX_TURNS".into(),
+            dir.path()
+                .join("turns.ndjson")
+                .to_string_lossy()
+                .into_owned(),
+        ));
+        let session = CodexSession::new(spec);
+        session
+            .set_permission_mode(PermissionMode::Plan)
+            .await
+            .unwrap();
+
+        session.run_turn(turn("first")).await.unwrap();
+        assert!(
+            session.pending_posture().is_some(),
+            "a rejected turn must leave its posture armed"
+        );
+        session.run_turn(turn("second")).await.unwrap();
+        assert!(
+            session.pending_posture().is_none(),
+            "the matching accepted retry settles the posture"
+        );
+
+        let requests = std::fs::read_to_string(dir.path().join("turns.ndjson")).unwrap();
+        let requests = requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
+            assert_eq!(request["params"]["approvalPolicy"], "untrusted");
+        }
+    }
+
+    #[tokio::test]
+    async fn late_success_cannot_clear_newer_posture_generation() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let first = session.pending_posture().expect("resume posture is armed");
+        session.register_turn_admission(41, "THREAD-1".into(), Some(first.id));
+        let newer = session.arm_posture(PermissionMode::Plan);
+
+        session
+            .emit_parsed(r#"{"id":41,"result":{"turn":{"id":"TURN-OLD"}}}"#)
+            .await;
+
+        assert_eq!(session.pending_posture(), Some(newer));
+    }
+
+    #[test]
+    fn admission_timeout_keeps_posture_pending() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let generation = session.pending_posture().expect("resume posture is armed");
+        session.register_turn_admission(41, "THREAD-1".into(), Some(generation.id));
+        session
+            .posture
+            .lock()
+            .expect("codex posture")
+            .admission
+            .as_mut()
+            .expect("turn admission")
+            .deadline = Instant::now();
+
+        assert!(session.expire_turn_admission());
+        assert_eq!(session.pending_posture(), Some(generation));
+    }
+
+    #[tokio::test]
+    async fn malformed_turn_start_result_keeps_posture_pending() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let generation = session.pending_posture().expect("resume posture is armed");
+        session
+            .parser
+            .lock()
+            .expect("codex parser")
+            .note_outbound(&json!(41), "turn/start");
+        session.register_turn_admission(41, "THREAD-1".into(), Some(generation.id));
+
+        let events = session.emit_parsed(r#"{"id":41,"result":{}}"#).await;
+
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnFailed { .. })
+        ));
+        assert_eq!(session.pending_posture(), Some(generation));
+    }
+
+    #[tokio::test]
+    async fn terminal_before_admission_keeps_posture_pending() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let generation = session.pending_posture().expect("resume posture is armed");
+        session.register_turn_admission(41, "THREAD-1".into(), Some(generation.id));
+
+        session
+            .emit_parsed(
+                r#"{"method":"turn/completed","params":{"threadId":"THREAD-1","turn":{"id":"TURN-1","status":"failed"}}}"#,
+            )
+            .await;
+
+        assert_eq!(session.pending_posture(), Some(generation));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_interrupt_waits_for_correlated_success() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("success").await;
+        stopped.unwrap();
+        assert!(matches!(outcome.unwrap(), TurnOutcome::Clean));
+        assert!(child_alive, "a native interrupt keeps the session child");
+        assert!(request_written);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_interrupt_error_falls_back_to_the_process_tree() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("error").await;
+        stopped.unwrap();
+        assert!(outcome.is_err());
+        assert!(!child_alive);
+        assert!(request_written);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_interrupt_timeout_falls_back_to_the_process_tree() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("timeout").await;
+        stopped.unwrap();
+        assert!(outcome.is_err());
+        assert!(!child_alive);
+        assert!(request_written);
+    }
+
+    #[tokio::test]
+    async fn a_late_codex_interrupt_response_cannot_resolve_a_new_waiter() {
+        let session = unit_session(Arc::new(RecordingSink::default()));
+        let old = session.register_interrupt(52);
+        session.cancel_interrupt(52, "timed out");
+        assert!(old.await.unwrap().is_err());
+        let current = session.register_interrupt(53);
+
+        session.emit_parsed(r#"{"id":52,"result":{}}"#).await;
+        assert_eq!(
+            session
+                .control_state
+                .lock()
+                .expect("codex control state")
+                .interrupt
+                .as_ref()
+                .map(|pending| pending.rpc_id),
+            Some(53)
+        );
+
+        session.emit_parsed(r#"{"id":53,"result":{}}"#).await;
+        current.await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_interrupt_eof_falls_back_to_the_process_tree() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("eof").await;
+        stopped.unwrap();
+        assert!(outcome.is_err());
+        assert!(!child_alive);
+        assert!(request_written);
     }
 
     #[test]

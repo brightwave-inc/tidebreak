@@ -407,9 +407,8 @@ impl CodexStreamParser {
                 }]
             }
             // The manifest records the observed set as
-            // `completed | interrupted | failed`. A fourth value still ends
-            // the turn, so it closes as completed — but counted and stated,
-            // never folded in silently (decision 0031).
+            // `completed | interrupted | failed`. Anything else is protocol
+            // drift and must fail closed.
             other => {
                 let label = if other.is_empty() { "missing" } else { other };
                 self.count_unrecognized(&format!("turn/completed/{label}"), params);
@@ -419,17 +418,18 @@ impl CodexStreamParser {
                         message: bound(
                             &format!(
                                 "the engine ended the turn with an unrecognized status \
-                                 ({label}); it was recorded as completed"
+                                 ({label}); it was recorded as failed"
                             ),
                             MAX_NOTICE_CHARS,
                         ),
                     },
-                    HarnessEvent::TurnCompleted {
-                        usage: turn_usage_since(
-                            &self.last_usage,
-                            &self.turn_usage_baseline,
-                            self.turn_first_call_context_tokens,
-                        ),
+                    HarnessEvent::TurnFailed {
+                        error: BoundedError {
+                            message: bound(
+                                &format!("Codex protocol drift: turn ended with status {label}"),
+                                MAX_NOTICE_CHARS,
+                            ),
+                        },
                     },
                 ]
             }
@@ -538,9 +538,10 @@ impl CodexStreamParser {
         match item.get("tool").and_then(Value::as_str) {
             Some("spawnAgent") => {
                 let targets = collab_targets(item);
+                let outcome = self.collab_outcome(item);
                 let mut events = self.start_spawned_subagents(item, parent_call_id.clone());
                 if targets.is_empty() {
-                    if collab_outcome(item) == ToolOutcome::Failed {
+                    if outcome != ToolOutcome::Succeeded {
                         let call_id = item
                             .get("id")
                             .and_then(Value::as_str)
@@ -555,7 +556,7 @@ impl CodexStreamParser {
                             ));
                             events.extend(self.settle_subagent(
                                 call_id,
-                                ToolOutcome::Failed,
+                                outcome,
                                 "Codex could not start the subagent".to_owned(),
                             ));
                         }
@@ -563,14 +564,16 @@ impl CodexStreamParser {
                     return events;
                 }
                 for target in targets {
-                    if let Some((outcome, preview)) = subagent_state_outcome(item, &target) {
-                        events.extend(self.settle_subagent(target, outcome, preview));
-                    } else if collab_outcome(item) == ToolOutcome::Failed {
+                    if outcome != ToolOutcome::Succeeded {
                         events.extend(self.settle_subagent(
                             target,
-                            ToolOutcome::Failed,
+                            outcome,
                             "Codex could not start the subagent".to_owned(),
                         ));
+                    } else if let Some((task_outcome, preview)) =
+                        subagent_state_outcome(item, &target)
+                    {
+                        events.extend(self.settle_subagent(target, task_outcome, preview));
                     }
                 }
                 events
@@ -578,7 +581,7 @@ impl CodexStreamParser {
             Some("sendInput" | "resumeAgent" | "wait" | "closeAgent") => {
                 let targets = collab_targets(item);
                 let mut events = self.start_collab_companions(item);
-                let outcome = collab_outcome(item);
+                let outcome = self.collab_outcome(item);
                 for target in targets {
                     let call_id = collab_call_id(item, &target);
                     if !call_id.is_empty() {
@@ -702,8 +705,14 @@ impl CodexStreamParser {
             "turn/start" => {
                 if let Some(turn_id) = result.pointer("/turn/id").and_then(Value::as_str) {
                     self.last_turn_id = Some(turn_id.to_owned());
+                    return Vec::new();
                 }
-                Vec::new()
+                self.count_unrecognized("rpc-result/turn-start/missing-turn-id", value);
+                vec![HarnessEvent::TurnFailed {
+                    error: BoundedError {
+                        message: "Codex returned a malformed turn/start result".into(),
+                    },
+                }]
             }
             "initialize" | "turn/interrupt" | "turn/steer" | "" => Vec::new(),
             other => {
@@ -726,9 +735,9 @@ impl CodexStreamParser {
                 message: bound(message, MAX_NOTICE_CHARS),
             }];
         }
-        if method == "turn/steer" {
-            // The live session routes this response back to the caller that
-            // issued the control RPC. A rejected steer is not a failed turn.
+        if matches!(method.as_str(), "turn/steer" | "turn/interrupt") {
+            // The live session routes control responses back to their callers.
+            // A rejected control request is not itself a failed turn.
             return Vec::new();
         }
         if method.is_empty() {
@@ -806,9 +815,14 @@ impl CodexStreamParser {
         let exit_code = item.get("exitCode").and_then(Value::as_i64);
         let outcome = match status {
             "declined" => ToolOutcome::Denied,
-            "failed" => ToolOutcome::Failed,
+            "failed" | "cancelled" | "canceled" => ToolOutcome::Failed,
             "completed" if exit_code.unwrap_or(0) != 0 => ToolOutcome::Failed,
-            _ => ToolOutcome::Succeeded,
+            "completed" => ToolOutcome::Succeeded,
+            other => {
+                let label = if other.is_empty() { "missing" } else { other };
+                self.count_unrecognized(&format!("commandExecution/completed/{label}"), item);
+                ToolOutcome::Failed
+            }
         };
         let preview = item
             .get("aggregatedOutput")
@@ -874,7 +888,12 @@ impl CodexStreamParser {
         let outcome = match status {
             "declined" => ToolOutcome::Denied,
             "failed" | "cancelled" | "canceled" => ToolOutcome::Failed,
-            _ => ToolOutcome::Succeeded,
+            "completed" => ToolOutcome::Succeeded,
+            other => {
+                let label = if other.is_empty() { "missing" } else { other };
+                self.count_unrecognized(&format!("fileChange/completed/{label}"), item);
+                ToolOutcome::Failed
+            }
         };
         events.push(HarnessEvent::ToolCompleted {
             call_id,
@@ -884,6 +903,22 @@ impl CodexStreamParser {
             parent_call_id,
         });
         events
+    }
+
+    fn collab_outcome(&mut self, item: &Value) -> ToolOutcome {
+        match item.get("status").and_then(Value::as_str) {
+            Some("completed") => ToolOutcome::Succeeded,
+            Some("declined") => ToolOutcome::Denied,
+            Some("failed" | "interrupted" | "cancelled" | "canceled") => ToolOutcome::Failed,
+            Some(other) => {
+                self.count_unrecognized(&format!("collab/completed/{other}"), item);
+                ToolOutcome::Failed
+            }
+            None => {
+                self.count_unrecognized("collab/completed/missing", item);
+                ToolOutcome::Failed
+            }
+        }
     }
 
     fn count_unrecognized(&mut self, label: &str, payload: impl std::fmt::Display) {
@@ -973,13 +1008,6 @@ fn collab_detail(item: &Value, target: &str) -> ToolDetail {
     };
     ToolDetail::Other {
         summary: bound(&summary, MAX_TOOL_SUMMARY_CHARS),
-    }
-}
-
-fn collab_outcome(item: &Value) -> ToolOutcome {
-    match item.get("status").and_then(Value::as_str) {
-        Some("failed") => ToolOutcome::Failed,
-        _ => ToolOutcome::Succeeded,
     }
 }
 
@@ -1389,8 +1417,6 @@ mod tests {
 
     #[test]
     fn an_unknown_turn_status_is_counted_and_stated_before_the_turn_closes() {
-        // The turn still has to end — the plausible wrong implementation folds
-        // a fourth status into a plain completion and says nothing.
         let input = r#"
 {"dir":"in","msg":{"method":"turn/completed","params":{"turn":{"status":"abandoned"}}}}
 "#;
@@ -1405,8 +1431,157 @@ mod tests {
         ));
         assert!(matches!(
             out.events.last(),
-            Some(HarnessEvent::TurnCompleted { .. })
+            Some(HarnessEvent::TurnFailed { .. })
         ));
+    }
+
+    #[test]
+    fn a_missing_turn_status_fails_closed() {
+        let out =
+            CodexStreamParser::parse_ndjson(r#"{"method":"turn/completed","params":{"turn":{}}}"#);
+
+        assert_eq!(out.unrecognized, 1);
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::TurnFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_and_missing_command_statuses_fail_closed() {
+        for status in [Some("abandoned"), None] {
+            let mut item = serde_json::json!({
+                "type": "commandExecution",
+                "id": "command-1",
+                "command": "true",
+                "cwd": "/workspace",
+                "exitCode": 0
+            });
+            if let Some(status) = status {
+                item["status"] = serde_json::json!(status);
+            }
+            let input = serde_json::json!({
+                "method": "item/completed",
+                "params": { "item": item }
+            });
+            let out = CodexStreamParser::parse_ndjson(&input.to_string());
+
+            assert_eq!(out.unrecognized, 1, "status: {status:?}");
+            assert!(out.events.iter().any(|event| matches!(
+                event,
+                HarnessEvent::ToolCompleted {
+                    outcome: ToolOutcome::Failed,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
+    fn unknown_and_missing_file_change_statuses_fail_closed() {
+        for status in [Some("abandoned"), None] {
+            let mut item = serde_json::json!({
+                "type": "fileChange",
+                "id": "edit-1",
+                "changes": [{"path": "note.txt", "diff": "+text"}]
+            });
+            if let Some(status) = status {
+                item["status"] = serde_json::json!(status);
+            }
+            let input = serde_json::json!({
+                "method": "item/completed",
+                "params": { "item": item }
+            });
+            let out = CodexStreamParser::parse_ndjson(&input.to_string());
+
+            assert_eq!(out.unrecognized, 1, "status: {status:?}");
+            assert!(out.events.iter().any(|event| matches!(
+                event,
+                HarnessEvent::ToolCompleted {
+                    outcome: ToolOutcome::Failed,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
+    fn unknown_and_missing_collaboration_statuses_fail_closed() {
+        for status in [Some("abandoned"), None] {
+            let mut item = serde_json::json!({
+                "type": "collabAgentToolCall",
+                "id": "wait-1",
+                "tool": "wait",
+                "receiverThreadIds": ["child"],
+                "agentsStates": {"child": {"status": "running", "message": null}}
+            });
+            if let Some(status) = status {
+                item["status"] = serde_json::json!(status);
+            }
+            let input = serde_json::json!({
+                "method": "item/completed",
+                "params": { "item": item }
+            });
+            let out = CodexStreamParser::parse_ndjson(&input.to_string());
+
+            assert_eq!(out.unrecognized, 1, "status: {status:?}");
+            assert!(out.events.iter().any(|event| matches!(
+                event,
+                HarnessEvent::ToolCompleted {
+                    outcome: ToolOutcome::Failed,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
+    fn unknown_spawn_status_overrides_a_successful_child_snapshot() {
+        let input = r#"{"method":"item/completed","params":{"item":{"type":"collabAgentToolCall","id":"spawn-1","tool":"spawnAgent","status":"abandoned","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed","message":"done"}}}}}"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+
+        assert_eq!(out.unrecognized, 1);
+        assert!(out.events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: ToolOutcome::Failed,
+                ..
+            } if call_id == "child"
+        )));
+        assert!(!out.events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCompleted {
+                call_id,
+                outcome: ToolOutcome::Succeeded,
+                ..
+            } if call_id == "child"
+        )));
+    }
+
+    #[test]
+    fn captured_success_statuses_still_succeed() {
+        let input = r#"
+{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"command-1","status":"completed","command":"true","cwd":"/workspace","exitCode":0}}}
+{"method":"item/completed","params":{"item":{"type":"fileChange","id":"edit-1","status":"completed","changes":[{"path":"note.txt","diff":"+text"}]}}}
+{"method":"item/completed","params":{"item":{"type":"collabAgentToolCall","id":"wait-1","tool":"wait","status":"completed","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"running","message":null}}}}}
+"#;
+        let out = CodexStreamParser::parse_ndjson(input);
+
+        assert_eq!(out.unrecognized, 0);
+        assert_eq!(
+            out.events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCompleted {
+                        outcome: ToolOutcome::Succeeded,
+                        ..
+                    }
+                ))
+                .count(),
+            3
+        );
     }
 
     #[test]
