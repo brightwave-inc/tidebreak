@@ -856,6 +856,7 @@ async fn reject_pending_commands_after_permission_mode_abort(
                 let _ = reply.send(Err(turn_error()));
             }
             WorkerCommand::SetPermissionMode { reply, .. }
+            | WorkerCommand::SetExecutionSettings { reply, .. }
             | WorkerCommand::Decide { reply, .. }
             | WorkerCommand::Interrupt { reply }
             | WorkerCommand::Steer { reply, .. } => {
@@ -2656,8 +2657,6 @@ mod tests {
         assert!(commands
             .send(WorkerCommand::RunTurn {
                 message: "must not disappear".into(),
-                model: None,
-                reasoning_effort: None,
                 attachments: Vec::new(),
                 trigger_delivery: None,
                 reply,
