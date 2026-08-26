@@ -11,12 +11,13 @@ use tokio::sync::oneshot;
 use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
-    abandon_pending_approval, arm_trigger, claim_approval, delete_trigger, delete_workspace,
-    get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_workspace,
-    insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_fork_events,
-    list_repos, list_sessions, list_sessions_all_owners, list_sessions_for_workspace,
-    list_triggers_for_repo, list_turns, list_workspaces, mark_repo_removed, queued_turn_head,
-    save_repo, save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
+    abandon_pending_approval, arm_trigger, claim_approval, compare_and_set_workspace_status,
+    delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo, get_repo_by_root_path,
+    get_session, get_workspace, insert_repo, insert_session, insert_workspace, list_approvals,
+    list_events, list_fork_events, list_repos, list_sessions, list_sessions_all_owners,
+    list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
+    list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head, save_repo,
+    save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
     ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
@@ -230,6 +231,8 @@ pub(crate) struct CodeRuntime {
     /// reads the model handles the app state owns and this runtime is built
     /// first. `None` until then, and in deployments that install none.
     recap: Mutex<Option<Arc<dyn super::recap::TurnRecap>>>,
+    #[cfg(test)]
+    archive_shutdown_timeout: AtomicBool,
 }
 
 /// How long one base branch's rules answer stands before the next read.
@@ -416,6 +419,8 @@ impl CodeRuntime {
             pr_refresh_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
+            #[cfg(test)]
+            archive_shutdown_timeout: AtomicBool::new(false),
         }
     }
 
@@ -544,6 +549,8 @@ impl CodeRuntime {
             pr_refresh_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
+            #[cfg(test)]
+            archive_shutdown_timeout: AtomicBool::new(false),
         }
     }
 
@@ -571,6 +578,12 @@ impl CodeRuntime {
     #[cfg(test)]
     pub(crate) fn set_forge_api_base(&self, base: Option<String>) {
         *self.forge_api_base.lock().expect("forge api base") = base;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_archive_shutdown_timeout(&self, enabled: bool) {
+        self.archive_shutdown_timeout
+            .store(enabled, Ordering::SeqCst);
     }
 
     /// The REST base decision 65's pull-request operations drive: the
@@ -642,6 +655,31 @@ impl CodeRuntime {
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
         self.ensure_stall_sweep();
+        for workspace in
+            list_workspaces_by_status_all_owners(&self.db, CodeWorkspaceStatus::Archiving).await?
+        {
+            if !std::path::Path::new(&workspace.worktree_path).exists() {
+                tracing::warn!(
+                    workspace = %workspace.id,
+                    "code-mode: archive recovery left a missing checkout fenced as archiving"
+                );
+                continue;
+            }
+            if !compare_and_set_workspace_status(
+                &self.db,
+                &workspace.owner,
+                workspace.id,
+                CodeWorkspaceStatus::Archiving,
+                CodeWorkspaceStatus::Active,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    workspace = %workspace.id,
+                    "code-mode: archive recovery lost its lifecycle compare-and-set"
+                );
+            }
+        }
         let actions = recovery::recover_running_sessions(&self.db, &self.bus)
             .await
             .map_err(ServerError::from)?;
@@ -1149,18 +1187,25 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: WorkspaceId,
         force: bool,
+        terminals: &super::terminal::TerminalHub,
     ) -> Result<CodeWorkspace, ServerError> {
         let mut workspace = self.get_workspace(owner, id).await?;
         if workspace.status == CodeWorkspaceStatus::Archived {
             return Ok(workspace);
         }
+        if workspace.status != CodeWorkspaceStatus::Active {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_ready",
+                format!("workspace is {}", workspace.status.as_str()),
+            ));
+        }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         // Blockers first: a refused archive must leave the workspace exactly as
         // it was, and running the hook script is not "exactly as it was".
         self.refuse_running_sessions(owner, id, force).await?;
-        let path = std::path::Path::new(&workspace.worktree_path);
+        let path = std::path::PathBuf::from(&workspace.worktree_path);
         if path.exists() {
-            if let Some(block) = archive_blockers(path, &workspace.base_ref)
+            if let Some(block) = archive_blockers(&path, &workspace.base_ref)
                 .await
                 .map_err(map_worktree)?
             {
@@ -1171,19 +1216,107 @@ impl CodeRuntime {
                     ));
                 }
             }
+        }
+        if !compare_and_set_workspace_status(
+            &self.db,
+            owner,
+            id,
+            CodeWorkspaceStatus::Active,
+            CodeWorkspaceStatus::Archiving,
+        )
+        .await?
+        {
+            return Err(ServerError::conflict_kind(
+                "workspace_lifecycle_busy",
+                "another workspace lifecycle operation started first",
+            ));
+        }
+        workspace.status = CodeWorkspaceStatus::Archiving;
+
+        let archived = self
+            .archive_workspace_exclusive(owner, workspace, repo, force, terminals)
+            .await;
+        if archived.is_err() && path.exists() {
+            if !compare_and_set_workspace_status(
+                &self.db,
+                owner,
+                id,
+                CodeWorkspaceStatus::Archiving,
+                CodeWorkspaceStatus::Active,
+            )
+            .await?
+            {
+                tracing::warn!(
+                    workspace = %id,
+                    "code-mode: failed to restore Active after a refused archive"
+                );
+            }
+        }
+        archived
+    }
+
+    async fn archive_workspace_exclusive(
+        &self,
+        owner: &OwnerId,
+        mut workspace: CodeWorkspace,
+        repo: CodeRepo,
+        force: bool,
+        terminals: &super::terminal::TerminalHub,
+    ) -> Result<CodeWorkspace, ServerError> {
+        if !terminals.close_workspace_and_wait(workspace.id).await {
+            return Err(ServerError::conflict_kind(
+                "terminal_shutdown_timeout",
+                "a workspace terminal did not stop; the checkout was preserved",
+            ));
+        }
+        let workers_stopped = self.end_workspace_sessions(owner, workspace.id).await?;
+        #[cfg(test)]
+        let workers_stopped =
+            workers_stopped && !self.archive_shutdown_timeout.load(Ordering::SeqCst);
+        if !workers_stopped {
+            return Err(ServerError::conflict_kind(
+                "workspace_shutdown_timeout",
+                "a workspace worker did not stop; the checkout was preserved",
+            ));
+        }
+
+        let turn = self.worktree_turn_lock(workspace.id);
+        let _turn_guard = turn.lock().await;
+        let current = self.get_workspace(owner, workspace.id).await?;
+        if current.status != CodeWorkspaceStatus::Archiving {
+            return Err(ServerError::conflict_kind(
+                "workspace_lifecycle_changed",
+                format!(
+                    "workspace became {} during archive",
+                    current.status.as_str()
+                ),
+            ));
+        }
+
+        let path = std::path::Path::new(&workspace.worktree_path);
+        if path.exists() {
             // Decision 0032: the archive script obeys the same
-            // failure-preserves rule as setup. A script that backs up or
-            // pushes state and exits non-zero must stop the archive, not have
-            // its checkout removed underneath it. A worktree that is already
-            // gone has nothing to run the script against.
+            // failure-preserves rule as setup. Lifecycle exclusion starts
+            // before the hook so no in-process writer can overlap it.
             if let Err(err) = run_archive_script(path, repo.archive_script.as_deref()).await {
                 return Err(ServerError::unprocessable_kind(
                     "archive_script_failed",
                     err.to_string(),
                 ));
             }
+            if let Some(block) = archive_blockers(path, &workspace.base_ref)
+                .await
+                .map_err(map_worktree)?
+            {
+                if !force {
+                    return Err(ServerError::conflict_kind(
+                        block.as_str(),
+                        "workspace changed during archive; the checkout was preserved",
+                    ));
+                }
+            }
         }
-        let workers_stopped = self.end_workspace_sessions(owner, id).await?;
+
         remove_worktree(std::path::Path::new(&repo.root_path), path)
             .await
             .map_err(map_worktree)?;
@@ -1198,24 +1331,17 @@ impl CodeRuntime {
         }
         workspace.status = CodeWorkspaceStatus::Archived;
         workspace.archived_at = Some(Utc::now());
-        save_workspace(&self.db, &workspace).await?;
-        // Drop the turn lock only once every worker confirmed it was gone.
-        // The lock is an `Arc`, so forgetting it here does not disturb a
-        // worker that outlived its shutdown grace — it hands the *next* one a
-        // second lock over the same checkout, which is the one thing this is
-        // supposed to make impossible. Keeping the entry costs a map slot per
-        // archived workspace and keeps restore on the same lock.
-        if workers_stopped {
-            self.worktree_turns
-                .lock()
-                .expect("worktree turn locks")
-                .remove(&workspace.id);
-        } else {
-            tracing::warn!(
-                workspace = %workspace.id,
-                "code-mode: keeping the workspace turn lock; a worker outlived its shutdown"
-            );
+        if !save_workspace(&self.db, &workspace).await? {
+            return Err(ServerError::conflict_kind(
+                "workspace_lifecycle_changed",
+                "the workspace row changed before archive completed",
+            ));
         }
+        drop(_turn_guard);
+        self.worktree_turns
+            .lock()
+            .expect("worktree turn locks")
+            .remove(&workspace.id);
         Ok(workspace)
     }
 
@@ -2536,10 +2662,10 @@ impl CodeRuntime {
         id: WorkspaceId,
     ) -> Result<CodeWorkspace, ServerError> {
         let workspace = self.get_workspace(owner, id).await?;
-        if workspace.status == CodeWorkspaceStatus::Archived {
+        if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(
                 "workspace_not_ready",
-                "workspace is archived",
+                format!("workspace is {}", workspace.status.as_str()),
             ));
         }
         if !std::path::Path::new(&workspace.worktree_path).exists() {
@@ -2848,6 +2974,13 @@ impl CodeRuntime {
             }
         }
         let mut session = self.get_session(owner, id).await?;
+        let workspace = self.get_workspace(owner, session.workspace_id).await?;
+        if workspace.status != CodeWorkspaceStatus::Active {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_ready",
+                format!("workspace is {}", workspace.status.as_str()),
+            ));
+        }
         if session.lifecycle == CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "session_fenced",
@@ -4465,6 +4598,13 @@ impl CodeRuntime {
             .clone()
     }
 
+    pub(crate) fn workspace_write_lock(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.worktree_turn_lock(workspace_id)
+    }
+
     fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
         self.workers
             .lock()
@@ -5036,6 +5176,9 @@ fn map_worktree(err: WorktreeError) -> ServerError {
             }
         }
         WorktreeError::Internal(message) => ServerError::internal(message),
+        WorktreeError::ArchiveUncertain(message) => {
+            ServerError::conflict_kind("archive_inspection_uncertain", message)
+        }
     }
 }
 

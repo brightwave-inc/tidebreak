@@ -55,6 +55,7 @@ impl MigratorTrait for Migrator {
             Box::new(PrePinCodeLifecycleRepair),
             Box::new(CodeApprovalBinding),
             Box::new(CodeSessionProcessIdentity),
+            Box::new(CodeWorkspaceArchiving),
         ]
     }
 }
@@ -65,6 +66,15 @@ struct CodeSessionProcessIdentity;
 impl MigrationName for CodeSessionProcessIdentity {
     fn name(&self) -> &str {
         "m20260826_000017_code_session_process_identity"
+    }
+}
+
+/// Add the transient workspace state that excludes writers during archive.
+struct CodeWorkspaceArchiving;
+
+impl MigrationName for CodeWorkspaceArchiving {
+    fn name(&self) -> &str {
+        "m20260826_000018_code_workspace_archiving"
     }
 }
 
@@ -89,6 +99,109 @@ impl MigrationTrait for CodeSessionProcessIdentity {
 
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // Removing the identity would make a recorded pid unsafe to reap.
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeWorkspaceArchiving {
+    fn use_transaction(&self) -> Option<bool> {
+        // SQLite must disable foreign-key enforcement while it rebuilds the
+        // table to widen the CHECK constraint. PRAGMA foreign_keys is ignored
+        // inside a transaction.
+        None
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        match manager.get_database_backend() {
+            DbBackend::Postgres => manager
+                .get_connection()
+                .execute_unprepared(
+                    r#"
+DO $repair$
+DECLARE
+    old_constraint text;
+BEGIN
+    FOR old_constraint IN
+        SELECT constraint_row.conname
+        FROM pg_constraint AS constraint_row
+        JOIN pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conrelid = 'code_workspace'::regclass
+          AND constraint_row.contype = 'c'
+          AND attribute_row.attname = 'status'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE "code_workspace" DROP CONSTRAINT %I',
+            old_constraint
+        );
+    END LOOP;
+END
+$repair$;
+ALTER TABLE "code_workspace"
+    ADD CONSTRAINT "code_workspace_status_check"
+    CHECK ("status" IN (
+        'creating', 'setup_failed', 'active', 'archiving', 'archived', 'released'
+    ));
+"#,
+                )
+                .await
+                .map(|_| ()),
+            DbBackend::Sqlite => manager
+                .get_connection()
+                .execute_unprepared(
+                    r#"
+PRAGMA foreign_keys = OFF;
+CREATE TABLE "code_workspace_archiving" (
+    "id" text NOT NULL PRIMARY KEY,
+    "owner" text NOT NULL DEFAULT 'local',
+    "repo_id" text NOT NULL,
+    "title" text NOT NULL,
+    "worktree_path" text NOT NULL UNIQUE,
+    "branch_name" text NOT NULL,
+    "base_ref" text NOT NULL,
+    "status" text NOT NULL CHECK ("status" IN (
+        'creating', 'setup_failed', 'active', 'archiving', 'archived', 'released'
+    )),
+    "pr" text,
+    "created_at" text NOT NULL,
+    "archived_at" text,
+    "released_at" text,
+    "released_tip" text,
+    "bundle_bytes" integer,
+    FOREIGN KEY ("repo_id") REFERENCES "code_repo" ("id")
+);
+INSERT INTO "code_workspace_archiving" (
+    "id", "owner", "repo_id", "title", "worktree_path", "branch_name",
+    "base_ref", "status", "pr", "created_at", "archived_at",
+    "released_at", "released_tip", "bundle_bytes"
+)
+SELECT
+    "id", "owner", "repo_id", "title", "worktree_path", "branch_name",
+    "base_ref", "status", "pr", "created_at", "archived_at",
+    "released_at", "released_tip", "bundle_bytes"
+FROM "code_workspace";
+DROP TABLE "code_workspace";
+ALTER TABLE "code_workspace_archiving" RENAME TO "code_workspace";
+CREATE UNIQUE INDEX "idx_code_workspace_repo_branch"
+    ON "code_workspace" ("repo_id", "branch_name");
+CREATE INDEX "idx_code_workspace_owner_created"
+    ON "code_workspace" ("owner", "created_at");
+PRAGMA foreign_keys = ON;
+"#,
+                )
+                .await
+                .map(|_| ()),
+            backend => Err(DbErr::Custom(format!(
+                "unsupported database backend for workspace archiving migration: {backend:?}"
+            ))),
+        }
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // An interrupted archive can persist this value. Removing it would
+        // make that row unreadable instead of recoverable.
         Ok(())
     }
 }
@@ -2076,6 +2189,7 @@ mod tests {
                 "m20260825_000015_pre_pin_code_lifecycle_repair",
                 "m20260825_000016_code_approval_binding",
                 "m20260826_000017_code_session_process_identity",
+                "m20260826_000018_code_workspace_archiving",
             ]
         );
         assert!(db

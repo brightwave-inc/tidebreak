@@ -24,17 +24,17 @@ use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
     accept_trigger_turn_delivery, append_event, bump_spawn_epoch, delete_queued_turn,
-    get_open_turn, get_session, get_session_all_owners, insert_approval_for_worker, insert_turn,
-    next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
-    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
-    CodeJournalError,
+    get_open_turn, get_session, get_session_all_owners, get_workspace, insert_approval_for_worker,
+    insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
+    save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
+    set_session_subagents, CodeJournalError,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
-    CodeTurnId, CodeTurnStatus, CodeUsage, DbStore, FenceReason, HarnessNoticeLevel, OwnerId,
-    PermissionMode, ReasoningEffort, ToolOutcome,
+    CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspaceStatus, DbStore, FenceReason,
+    HarnessNoticeLevel, OwnerId, PermissionMode, ReasoningEffort, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -1272,6 +1272,16 @@ async fn drive_turn_inner(
     // read a session that may be minutes stale by now.
     if session_was_ended(&sink.db, session).await {
         return Err(WorkerError::Conflict("session has ended".into()));
+    }
+    let workspace = get_workspace(&sink.db, &session.owner, session.workspace_id)
+        .await
+        .map_err(|error| WorkerError::Failed(error.to_string()))?
+        .ok_or_else(|| WorkerError::Conflict("workspace no longer exists".into()))?;
+    if workspace.status != CodeWorkspaceStatus::Active {
+        return Err(WorkerError::Conflict(format!(
+            "workspace is {}",
+            workspace.status.as_str()
+        )));
     }
 
     if let Some(model) = model.clone() {

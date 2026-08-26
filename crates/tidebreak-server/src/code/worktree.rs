@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -26,6 +26,9 @@ pub(crate) const DEFAULT_SEARCH_LIMIT: u32 = 200;
 pub(crate) const MAX_SEARCH_LIMIT: u32 = 500;
 const MAX_SEARCH_QUERY_CHARS: usize = 500;
 const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
+const ARCHIVE_SCAN_MAX_ENTRIES: usize = 10_000;
+const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
+const ARCHIVE_DISPOSABLE_PATH_KEY: &str = "tidebreak.archiveDisposablePath";
 
 const ADJECTIVES: &[&str] = &[
     "amber", "brave", "calm", "crisp", "dusk", "ember", "faint", "gentle", "hidden", "ivory",
@@ -127,6 +130,7 @@ pub(crate) enum ArchiveBlock {
     Uncommitted,
     Unpushed,
     UncommittedAndUnpushed,
+    IgnoredContent,
 }
 
 impl ArchiveBlock {
@@ -135,6 +139,7 @@ impl ArchiveBlock {
             Self::Uncommitted => "uncommitted",
             Self::Unpushed => "unpushed",
             Self::UncommittedAndUnpushed => "uncommitted_and_unpushed",
+            Self::IgnoredContent => "ignored_content",
         }
     }
 }
@@ -146,6 +151,8 @@ pub(crate) enum WorktreeError {
     User(String),
     #[error("{0}")]
     Internal(String),
+    #[error("{0}")]
+    ArchiveUncertain(String),
 }
 
 impl WorktreeError {
@@ -155,6 +162,10 @@ impl WorktreeError {
 
     fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
+    }
+
+    fn archive_uncertain(message: impl Into<String>) -> Self {
+        Self::ArchiveUncertain(message.into())
     }
 }
 
@@ -614,11 +625,16 @@ pub(crate) async fn archive_blockers(
 ) -> Result<Option<ArchiveBlock>, WorktreeError> {
     let uncommitted = has_uncommitted_work(worktree_path).await?;
     let unpushed = has_unpushed_work(worktree_path, base_ref).await?;
-    Ok(match (uncommitted, unpushed) {
-        (true, true) => Some(ArchiveBlock::UncommittedAndUnpushed),
-        (true, false) => Some(ArchiveBlock::Uncommitted),
-        (false, true) => Some(ArchiveBlock::Unpushed),
-        (false, false) => None,
+    let ignored = has_non_disposable_ignored_content(worktree_path).await?;
+    Ok(if ignored {
+        Some(ArchiveBlock::IgnoredContent)
+    } else {
+        match (uncommitted, unpushed) {
+            (true, true) => Some(ArchiveBlock::UncommittedAndUnpushed),
+            (true, false) => Some(ArchiveBlock::Uncommitted),
+            (false, true) => Some(ArchiveBlock::Unpushed),
+            (false, false) => None,
+        }
     })
 }
 
@@ -1018,6 +1034,182 @@ async fn has_uncommitted_work(worktree_path: &Path) -> Result<bool, WorktreeErro
         .await
         .map_err(|err| WorktreeError::internal(format!("git status failed: {err}")))?;
     Ok(!status.is_empty())
+}
+
+async fn has_non_disposable_ignored_content(worktree_path: &Path) -> Result<bool, WorktreeError> {
+    let disposable = archive_disposable_paths(worktree_path).await?;
+    let mut stack = vec![worktree_path.to_path_buf()];
+    let mut candidates = Vec::new();
+    let mut entry_count = 0usize;
+    let mut path_bytes = 0usize;
+
+    while let Some(directory) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&directory).await.map_err(|error| {
+            WorktreeError::archive_uncertain(format!(
+                "archive could not inspect {}: {error}",
+                directory.display()
+            ))
+        })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|error| {
+            WorktreeError::archive_uncertain(format!(
+                "archive could not continue inspecting {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry.path();
+            let relative = path.strip_prefix(worktree_path).map_err(|_| {
+                WorktreeError::archive_uncertain("archive scan escaped the worktree")
+            })?;
+            if relative == Path::new(".git") || path_is_disposable(relative, &disposable) {
+                continue;
+            }
+            entry_count = entry_count.saturating_add(1);
+            path_bytes = path_bytes.saturating_add(relative.as_os_str().len());
+            if entry_count > ARCHIVE_SCAN_MAX_ENTRIES || path_bytes > ARCHIVE_SCAN_MAX_PATH_BYTES {
+                return Err(WorktreeError::archive_uncertain(format!(
+                    "archive inspection exceeded its {}-entry or {}-byte path budget; configure generated directories with git config --add {ARCHIVE_DISPOSABLE_PATH_KEY} <directory>",
+                    ARCHIVE_SCAN_MAX_ENTRIES, ARCHIVE_SCAN_MAX_PATH_BYTES
+                )));
+            }
+            let file_type = entry.file_type().await.map_err(|error| {
+                WorktreeError::archive_uncertain(format!(
+                    "archive could not inspect {}: {error}",
+                    path.display()
+                ))
+            })?;
+            candidates.push(relative.to_string_lossy().replace('\\', "/"));
+            if file_type.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    git_check_ignored(worktree_path, &candidates).await
+}
+
+async fn archive_disposable_paths(worktree_path: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
+    let mut command = Command::new("git");
+    command
+        .args(["config", "--null", "--get-all", ARCHIVE_DISPOSABLE_PATH_KEY])
+        .current_dir(worktree_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let child = command
+        .spawn()
+        .map_err(|error| WorktreeError::archive_uncertain(format!("git config failed: {error}")))?;
+    let output = timeout(GIT_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| WorktreeError::archive_uncertain("git config timed out during archive"))?
+        .map_err(|error| WorktreeError::archive_uncertain(format!("git config failed: {error}")))?;
+    if output.status.code() == Some(1) && output.stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !output.status.success() {
+        return Err(WorktreeError::archive_uncertain(format!(
+            "git config failed during archive: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if output.stdout.len() > ARCHIVE_SCAN_MAX_PATH_BYTES {
+        return Err(WorktreeError::archive_uncertain(
+            "archive disposable-path configuration exceeded its path budget",
+        ));
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .map(|value| validate_disposable_path(&String::from_utf8_lossy(value)))
+        .collect()
+}
+
+fn validate_disposable_path(value: &str) -> Result<PathBuf, WorktreeError> {
+    let path = Path::new(value.trim());
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(WorktreeError::archive_uncertain(format!(
+            "{ARCHIVE_DISPOSABLE_PATH_KEY} must name a relative directory without . or ..: {value}"
+        )));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn path_is_disposable(path: &Path, disposable: &[PathBuf]) -> bool {
+    disposable
+        .iter()
+        .any(|configured| path.starts_with(configured))
+}
+
+async fn git_check_ignored(
+    worktree_path: &Path,
+    candidates: &[String],
+) -> Result<bool, WorktreeError> {
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+    let mut input = Vec::new();
+    for candidate in candidates {
+        input.extend_from_slice(candidate.as_bytes());
+        input.push(0);
+    }
+    let mut command = Command::new("git");
+    command
+        .args(["check-ignore", "--stdin", "-z"])
+        .current_dir(worktree_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut child = command.spawn().map_err(|error| {
+        WorktreeError::archive_uncertain(format!("git check-ignore failed: {error}"))
+    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WorktreeError::archive_uncertain("git check-ignore did not open stdin"))?;
+    let writer = tokio::spawn(async move {
+        let result = stdin.write_all(&input).await;
+        drop(stdin);
+        result
+    });
+    let output = timeout(GIT_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| WorktreeError::archive_uncertain("git check-ignore timed out"))?
+        .map_err(|error| {
+            WorktreeError::archive_uncertain(format!("git check-ignore failed: {error}"))
+        })?;
+    writer
+        .await
+        .map_err(|error| {
+            WorktreeError::archive_uncertain(format!("git check-ignore input failed: {error}"))
+        })?
+        .map_err(|error| {
+            WorktreeError::archive_uncertain(format!("git check-ignore input failed: {error}"))
+        })?;
+    match output.status.code() {
+        Some(0) => {
+            if output.stdout.len() > ARCHIVE_SCAN_MAX_PATH_BYTES {
+                Err(WorktreeError::archive_uncertain(
+                    "git check-ignore output exceeded the archive path budget",
+                ))
+            } else {
+                Ok(!output.stdout.is_empty())
+            }
+        }
+        Some(1) if output.stdout.is_empty() => Ok(false),
+        _ => Err(WorktreeError::archive_uncertain(format!(
+            "git check-ignore failed during archive: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
 }
 
 async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool, WorktreeError> {

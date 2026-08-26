@@ -1996,6 +1996,9 @@ describe("archive force kinds", () => {
       archiveForceKind(new HttpError(409, "both", "uncommitted_and_unpushed")),
     ).toBe("uncommitted_and_unpushed");
     expect(
+      archiveForceKind(new HttpError(409, "ignored", "ignored_content")),
+    ).toBe("ignored_content");
+    expect(
       archiveForceKind(new HttpError(409, "busy", "session_running")),
     ).toBeNull();
   });

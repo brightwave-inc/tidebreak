@@ -261,6 +261,8 @@ pub enum CodeWorkspaceStatus {
     SetupFailed,
     /// Ready for sessions.
     Active,
+    /// Archive owns the checkout and rejects every new writer.
+    Archiving,
     /// Archived; worktree removed, branch kept.
     Archived,
     /// Released; worktree and branch both gone, commits kept as a bundle.
@@ -280,6 +282,7 @@ impl CodeWorkspaceStatus {
             Self::Creating => "creating",
             Self::SetupFailed => "setup_failed",
             Self::Active => "active",
+            Self::Archiving => "archiving",
             Self::Archived => "archived",
             Self::Released => "released",
         }
@@ -293,6 +296,7 @@ impl CodeWorkspaceStatus {
             "creating" => Some(Self::Creating),
             "setup_failed" => Some(Self::SetupFailed),
             "active" => Some(Self::Active),
+            "archiving" => Some(Self::Archiving),
             "archived" => Some(Self::Archived),
             "released" => Some(Self::Released),
             _ => None,
