@@ -264,12 +264,13 @@ purpose:
   Channels that cannot carry interactive approvals restrict the session to
   permission modes that need none, under the same visible-capability rules
   as any other limitation.
-- **A supervision-first mobile client.** Every code-mode capability is a
-  server route, and the updates channel (restated digests, attention,
-  approvals) is deliberately cheap enough for a phone. A mobile client that
-  fires off sessions and supervises them — approve, deny with feedback,
-  steer, review completion — is a thin client of a reachable deployment and
-  waits on the self-host member-client path above.
+- **A supervision-first mobile client.** Recorded in
+  [decision 71](decisions/0071-mobile-client.md) and tracked as epic
+  [#2644](https://github.com/brightwave-inc/tidebreak/issues/2644). The
+  in-repo Expo client at `mobile/` pairs with Model Gateway and attaches to
+  a hosted machine. What remains deferred is the supervision UI itself
+  (launch, approve, steer, review) and a local relay so a laptop can be
+  the machine the phone attaches to.
 
 ## Memory that outlives a session
 

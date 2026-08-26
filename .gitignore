@@ -14,12 +14,14 @@
 secrets.toml
 credentials.json
 
-# Node / frontend (desktop UI)
+# Node / frontend (desktop UI and mobile)
 node_modules/
 dist/
 storybook-static/
 .vite/
 .vercel/
+.expo/
+mobile/.expo/
 
 # Python helper bytecode
 __pycache__/
