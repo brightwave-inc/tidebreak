@@ -2,7 +2,7 @@ import {
   assertResourceEcho,
   tidebreakMachineResource,
 } from "./resource";
-import { fetchRefusingRedirects } from "./http";
+import { fetchRefusingRedirects, type HttpFetch, type HttpResponse } from "./http";
 import { urlsMatch, validatedBaseUrl } from "./url";
 import type { AuthDiscovery } from "./types";
 
@@ -38,7 +38,7 @@ export type DiscoveredMachine = {
 export async function discoverMachine(
   machineUrl: string,
   pairedGatewayUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: HttpFetch,
 ): Promise<DiscoveredMachine> {
   let baseUrl: string;
   try {
@@ -51,11 +51,12 @@ export async function discoverMachine(
     );
   }
   const derived = tidebreakMachineResource(baseUrl);
-  let response: Response;
+  let response: HttpResponse;
   try {
     response = await fetchRefusingRedirects(
-      fetchImpl,
       `${baseUrl}/auth/discovery`,
+      undefined,
+      fetchImpl,
     );
   } catch (error) {
     throw new AttachError(
@@ -125,13 +126,15 @@ export async function discoverMachine(
 export async function probePolicy(
   machineUrl: string,
   accessToken: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: HttpFetch,
 ): Promise<void> {
-  let response: Response;
+  let response: HttpResponse;
   try {
-    response = await fetchRefusingRedirects(fetchImpl, `${machineUrl}/policy`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    response = await fetchRefusingRedirects(
+      `${machineUrl}/policy`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+      fetchImpl,
+    );
   } catch (error) {
     throw new AttachError(
       "probe",

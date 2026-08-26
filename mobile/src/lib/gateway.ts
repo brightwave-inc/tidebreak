@@ -1,6 +1,6 @@
 import { createPkcePair } from "./pkce";
 import { randomUrlSafe } from "./crypto";
-import { fetchRefusingRedirects } from "./http";
+import { fetchRefusingRedirects, type HttpFetch } from "./http";
 import {
   CLIENT_ID,
   OAUTH_SCOPE,
@@ -64,12 +64,13 @@ export function parseOAuthCallback(
 
 export async function fetchGatewayMeta(
   gatewayUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: HttpFetch,
 ): Promise<GatewayMeta> {
   const base = validatedBaseUrl(gatewayUrl);
   const response = await fetchRefusingRedirects(
-    fetchImpl,
     `${base}/api/v1/meta`,
+    undefined,
+    fetchImpl,
   );
   if (!response.ok) {
     throw new Error(`Gateway metadata request failed (HTTP ${response.status})`);
@@ -84,7 +85,7 @@ export async function exchangeAuthorizationCode(
     verifier: string;
     redirectUri: string;
   },
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: HttpFetch,
 ): Promise<TokenResponse> {
   const base = validatedBaseUrl(gatewayUrl);
   const body = new URLSearchParams({
@@ -94,11 +95,15 @@ export async function exchangeAuthorizationCode(
     client_id: CLIENT_ID,
     redirect_uri: params.redirectUri,
   });
-  const response = await fetchRefusingRedirects(fetchImpl, `${base}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  const response = await fetchRefusingRedirects(
+    `${base}/oauth/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    },
+    fetchImpl,
+  );
   if (!response.ok) {
     throw new Error(`Token exchange failed (HTTP ${response.status})`);
   }
@@ -108,26 +113,32 @@ export async function exchangeAuthorizationCode(
 export async function fetchIdentity(
   gatewayUrl: string,
   accessToken: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: HttpFetch,
 ): Promise<GatewayIdentity> {
   const base = validatedBaseUrl(gatewayUrl);
-  const response = await fetchRefusingRedirects(fetchImpl, `${base}/api/v1/cli/me`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const response = await fetchRefusingRedirects(
+    `${base}/api/v1/cli/me`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+    fetchImpl,
+  );
   if (!response.ok) {
     throw new Error(`Identity request failed (HTTP ${response.status})`);
   }
   return (await response.json()) as GatewayIdentity;
 }
 
-export function fetchTokenHttp(fetchImpl: typeof fetch = fetch) {
+export function fetchTokenHttp(fetchImpl?: HttpFetch) {
   return {
     async postForm(url: string, body: Record<string, string>) {
-      const response = await fetchRefusingRedirects(fetchImpl, url, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams(body).toString(),
-      });
+      const response = await fetchRefusingRedirects(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams(body).toString(),
+        },
+        fetchImpl,
+      );
       let json: unknown = null;
       try {
         json = await response.json();

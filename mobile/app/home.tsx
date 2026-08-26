@@ -32,7 +32,6 @@ export default function HomeScreen() {
     queryFn: async () => {
       const token = await tokenStore.getAccessToken(session!.machine!.resource);
       const response = await fetchRefusingRedirects(
-        fetch,
         `${session!.machine!.baseUrl}/code/workspaces`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
