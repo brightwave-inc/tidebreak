@@ -1,5 +1,6 @@
 import { createPkcePair } from "./pkce";
 import { randomUrlSafe } from "./crypto";
+import { fetchRefusingRedirects } from "./http";
 import {
   CLIENT_ID,
   OAUTH_SCOPE,
@@ -66,7 +67,10 @@ export async function fetchGatewayMeta(
   fetchImpl: typeof fetch = fetch,
 ): Promise<GatewayMeta> {
   const base = validatedBaseUrl(gatewayUrl);
-  const response = await fetchImpl(`${base}/api/v1/meta`);
+  const response = await fetchRefusingRedirects(
+    fetchImpl,
+    `${base}/api/v1/meta`,
+  );
   if (!response.ok) {
     throw new Error(`Gateway metadata request failed (HTTP ${response.status})`);
   }
@@ -90,7 +94,7 @@ export async function exchangeAuthorizationCode(
     client_id: CLIENT_ID,
     redirect_uri: params.redirectUri,
   });
-  const response = await fetchImpl(`${base}/oauth/token`, {
+  const response = await fetchRefusingRedirects(fetchImpl, `${base}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
@@ -107,7 +111,7 @@ export async function fetchIdentity(
   fetchImpl: typeof fetch = fetch,
 ): Promise<GatewayIdentity> {
   const base = validatedBaseUrl(gatewayUrl);
-  const response = await fetchImpl(`${base}/api/v1/cli/me`, {
+  const response = await fetchRefusingRedirects(fetchImpl, `${base}/api/v1/cli/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!response.ok) {
@@ -119,7 +123,7 @@ export async function fetchIdentity(
 export function fetchTokenHttp(fetchImpl: typeof fetch = fetch) {
   return {
     async postForm(url: string, body: Record<string, string>) {
-      const response = await fetchImpl(url, {
+      const response = await fetchRefusingRedirects(fetchImpl, url, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(body).toString(),

@@ -4,6 +4,7 @@ import { Pressable, Text, View } from "react-native";
 import { Screen, Body, ErrorText } from "../src/components/Screen";
 import { parseWorkspaceList, workspaceDisplayName } from "../src/lib/attach";
 import { fetchIdentity } from "../src/lib/gateway";
+import { fetchRefusingRedirects } from "../src/lib/http";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
 import { tokenStore } from "../src/session/runtime";
 import { useSessionStore } from "../src/session/store";
@@ -30,9 +31,11 @@ export default function HomeScreen() {
     enabled: !!session?.machine,
     queryFn: async () => {
       const token = await tokenStore.getAccessToken(session!.machine!.resource);
-      const response = await fetch(`${session!.machine!.baseUrl}/code/workspaces`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = await fetchRefusingRedirects(
+        fetch,
+        `${session!.machine!.baseUrl}/code/workspaces`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
       if (!response.ok) {
         throw new Error(`Workspace list failed (HTTP ${response.status})`);
       }

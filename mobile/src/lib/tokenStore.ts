@@ -76,6 +76,18 @@ export class TokenStore {
   }
 
   async clear(): Promise<void> {
+    // Ride the refresh queue so a refresh already in flight finishes (or
+    // fails) before the wipe: otherwise its persist() could write a fresh
+    // refresh token back to storage after sign-out deleted it.
+    const run = this.refreshTail.then(() => this.clearNow());
+    this.refreshTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async clearNow(): Promise<void> {
     this.session = null;
     this.inflight.clear();
     await this.storage.deleteItem(SESSION_STORAGE_KEY);
@@ -163,7 +175,8 @@ export class TokenStore {
       resource,
     });
     if (result.status === 400 || result.status === 401) {
-      await this.clear();
+      // Already on the refresh queue; queueing through clear() would deadlock.
+      await this.clearNow();
       throw new SignedOutError();
     }
     if (result.status < 200 || result.status >= 300) {

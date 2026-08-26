@@ -2,6 +2,7 @@ import {
   assertResourceEcho,
   tidebreakMachineResource,
 } from "./resource";
+import { fetchRefusingRedirects } from "./http";
 import { urlsMatch, validatedBaseUrl } from "./url";
 import type { AuthDiscovery } from "./types";
 
@@ -52,7 +53,10 @@ export async function discoverMachine(
   const derived = tidebreakMachineResource(baseUrl);
   let response: Response;
   try {
-    response = await fetchImpl(`${baseUrl}/auth/discovery`);
+    response = await fetchRefusingRedirects(
+      fetchImpl,
+      `${baseUrl}/auth/discovery`,
+    );
   } catch (error) {
     throw new AttachError(
       "discover",
@@ -125,7 +129,7 @@ export async function probePolicy(
 ): Promise<void> {
   let response: Response;
   try {
-    response = await fetchImpl(`${machineUrl}/policy`, {
+    response = await fetchRefusingRedirects(fetchImpl, `${machineUrl}/policy`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
   } catch (error) {

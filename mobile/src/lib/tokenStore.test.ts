@@ -77,6 +77,28 @@ describe("TokenStore", () => {
     expect(store.snapshot()).toBeNull();
   });
 
+  it("signing out during an in-flight refresh cannot resurrect the session", async () => {
+    let release!: (value: { status: number; json: unknown }) => void;
+    const gate = new Promise<{ status: number; json: unknown }>((resolve) => {
+      release = resolve;
+    });
+    const http: TokenHttp = {
+      postForm: vi.fn(async () => gate),
+    };
+    const storage = memoryStorage();
+    const store = new TokenStore(storage, http);
+    await store.replace(session());
+
+    const minted = store.getAccessToken("control");
+    const cleared = store.clear();
+    release({ status: 200, json: tokens(1) });
+    await minted;
+    await cleared;
+
+    expect(store.snapshot()).toBeNull();
+    expect(await storage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+  });
+
   it("keeps access tokens out of persistent storage", async () => {
     const http: TokenHttp = {
       postForm: vi.fn(async () => ({ status: 200, json: tokens(1) })),
