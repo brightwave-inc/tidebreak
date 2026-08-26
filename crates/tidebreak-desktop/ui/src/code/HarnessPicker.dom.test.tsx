@@ -37,6 +37,7 @@ function entry(
     tier: "reference",
     caps: { ...CAPS },
     commands: [],
+    auth_mode: "local_sign_in",
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,

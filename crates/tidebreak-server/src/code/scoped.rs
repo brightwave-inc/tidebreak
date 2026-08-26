@@ -833,6 +833,14 @@ impl ScopedCode {
         self.runtime.invalidate_probes();
     }
 
+    /// Whether the on-behalf-of inference relay is active (decision 71):
+    /// true only on a gateway-authenticated hosted machine, whose engines
+    /// carry no provider credentials of their own. The doctor reads this to
+    /// decide whether the local sign-in probe answers the right question.
+    pub(crate) fn harness_llm_relay_active(&self) -> bool {
+        self.runtime.harness_llm().is_some()
+    }
+
     /// Warm the pinned install of one engine. See
     /// [`CodeRuntime::start_harness_install`].
     ///

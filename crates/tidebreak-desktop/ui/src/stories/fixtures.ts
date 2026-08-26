@@ -482,6 +482,7 @@ function doctorEntry(
     found: true,
     installable: true,
     authenticated: true,
+    auth_mode: "local_sign_in",
     tier: "reference",
     caps: fullCaps,
     commands: [],
@@ -585,6 +586,58 @@ export const harnessDoctorMixed: HarnessDoctorReport = {
           version: undefined,
         },
   ),
+};
+
+/**
+ * A gateway-hosted machine (decision 71): the relay engines are ready with no
+ * sign-in to perform, and the ones the relay does not cover yet say so
+ * instead of demanding a terminal nobody can open.
+ */
+export const harnessDoctorHosted: HarnessDoctorReport = {
+  harnesses: [
+    doctorEntry({
+      kind: "claude_code",
+      version: "2.1.234 (Claude Code)",
+      path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
+      authenticated: false,
+      auth_mode: "gateway_relay",
+    }),
+    doctorEntry({
+      kind: "codex",
+      version: "codex-cli 0.147.0",
+      tier: "secondary",
+      authenticated: false,
+      auth_mode: "gateway_relay",
+      caps: {
+        ...fullCaps,
+        mid_turn_steering: "supported",
+        image_input: "unknown",
+      },
+    }),
+    doctorEntry({
+      kind: "opencode",
+      version: "1.18.18",
+      tier: "tertiary",
+      authenticated: false,
+      auth_mode: "hosted_unavailable",
+      remediation: "opencode is not available on hosted machines yet.",
+      caps: { ...fullCaps, allow_mode: "unknown", reasoning_levels: "unknown" },
+    }),
+    doctorEntry({
+      kind: "grok",
+      version: "grok 1.0.5",
+      tier: "best_effort",
+      authenticated: false,
+      auth_mode: "hosted_unavailable",
+      remediation: "Grok CLI is not available on hosted machines yet.",
+      caps: {
+        ...fullCaps,
+        mid_turn_steering: "unsupported",
+        plan_mode: "unsupported",
+        structured_approvals: "unsupported",
+      },
+    }),
+  ],
 };
 
 /** One engine mid-download, one that failed, for the doctor's live states. */

@@ -362,6 +362,21 @@ pub struct HarnessDoctorReport {
     pub harnesses: Vec<HarnessDoctorEntry>,
 }
 
+/// How a session of one engine authenticates on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessAuthMode {
+    /// The engine's own local sign-in — the probe result decides readiness.
+    LocalSignIn,
+    /// The on-behalf-of relay (decision 71): a gateway-hosted machine, where
+    /// turns run as the caller through the gateway and no local sign-in is
+    /// needed.
+    GatewayRelay,
+    /// The relay does not cover this engine yet, so it cannot run on a
+    /// hosted machine.
+    HostedUnavailable,
+}
+
 /// One engine's probe, capabilities, and remediation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct HarnessDoctorEntry {
@@ -385,6 +400,13 @@ pub struct HarnessDoctorEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub authenticated: Option<bool>,
+    /// How a session of this engine authenticates here: the engine's own
+    /// local sign-in, the on-behalf-of relay on a gateway-hosted machine
+    /// (decision 71), or nothing where the relay does not cover the engine
+    /// yet. Readiness follows this — `authenticated` stays the local probe
+    /// observation, which on a hosted machine is not what a session
+    /// authenticates with.
+    pub auth_mode: HarnessAuthMode,
     pub remediation: String,
     pub stderr: String,
     pub unrecognized_event_count: i64,

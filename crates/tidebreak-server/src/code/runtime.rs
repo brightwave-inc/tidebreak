@@ -616,6 +616,17 @@ impl CodeRuntime {
         self
     }
 
+    /// Wire the engine inference relay from tests, standing in for the
+    /// on-behalf-of handle a hosted deployment constructs.
+    #[cfg(test)]
+    pub(crate) fn with_harness_llm(
+        mut self,
+        relay: Arc<super::harness_llm::HarnessLlmRelay>,
+    ) -> Self {
+        self.harness_llm = Some(relay);
+        self
+    }
+
     pub(crate) fn with_clone_parent_default(mut self, parent: PathBuf) -> Self {
         self.clone_parent_default = Some(parent);
         self

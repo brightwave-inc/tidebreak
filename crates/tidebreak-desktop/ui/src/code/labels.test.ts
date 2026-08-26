@@ -112,6 +112,50 @@ describe("harnessUnusableReason", () => {
     expect(isHarnessReady({ found: true })).toBe(false);
   });
 
+  it("reads a relay-covered engine as ready on a hosted machine", () => {
+    // The local probe observation is not the verdict there: the relay
+    // carries the turn (decision 71), signed out or not.
+    expect(
+      isHarnessReady({
+        found: true,
+        authenticated: false,
+        auth_mode: "gateway_relay",
+      }),
+    ).toBe(true);
+    expect(isHarnessReady({ found: false, auth_mode: "gateway_relay" })).toBe(
+      false,
+    );
+    // An engine the relay does not cover can never be ready hosted.
+    expect(
+      isHarnessReady({
+        found: true,
+        authenticated: true,
+        auth_mode: "hosted_unavailable",
+      }),
+    ).toBe(false);
+  });
+
+  it("gates hosted rows on relay coverage, not a terminal sign-in", () => {
+    expect(
+      harnessUnusableReason({
+        found: true,
+        installable: true,
+        authenticated: false,
+        auth_mode: "gateway_relay",
+        caps: caps("supported", "supported", "supported"),
+      }),
+    ).toBeNull();
+    expect(
+      harnessUnusableReason({
+        found: true,
+        installable: true,
+        authenticated: true,
+        auth_mode: "hosted_unavailable",
+        caps: caps("supported", "supported", "supported"),
+      }),
+    ).toBe("Not available on hosted machines yet");
+  });
+
   it("names the one reason a picker row cannot be chosen", () => {
     expect(
       harnessUnusableReason({

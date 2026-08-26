@@ -282,6 +282,16 @@ pub(crate) fn spawn_wiring(
     }
 }
 
+/// Whether the on-behalf-of relay can carry this engine's inference.
+///
+/// Exactly the engines [`spawn_wiring`] points at the relay. The doctor reads
+/// this on a gateway-hosted machine, where a covered engine needs no local
+/// sign-in and an uncovered one cannot run at all; everywhere else the local
+/// probe decides, and this answer does not matter.
+pub(crate) fn relay_covered(kind: HarnessKind) -> bool {
+    matches!(kind, HarnessKind::ClaudeCode | HarnessKind::Codex)
+}
+
 fn generate_key() -> String {
     format!("tbreak_hl_{}", uuid::Uuid::new_v4())
 }

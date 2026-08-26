@@ -149,6 +149,8 @@ pub(crate) struct ScriptedAdapter {
     /// Sleep once at the start of each turn, so a caller can observe Running
     /// and queue a follow-up before the script plays.
     turn_delay: Duration,
+    /// What the probe reports as this engine's local sign-in state.
+    authenticated: Option<bool>,
 }
 
 impl ScriptedAdapter {
@@ -183,6 +185,7 @@ impl ScriptedAdapter {
             approval_ack_delay: Duration::ZERO,
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
+            authenticated: Some(true),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
         }
@@ -378,6 +381,22 @@ impl ScriptedAdapter {
         self.silent_interrupt = true;
         self
     }
+
+    /// Stand in for a different engine, so a surface that walks every kind —
+    /// the doctor — can be exercised with more than one row.
+    #[allow(dead_code)]
+    pub(crate) fn with_kind(mut self, kind: HarnessKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Report this local sign-in state from the probe, for surfaces that
+    /// branch on it — the doctor's hosted report among them.
+    #[allow(dead_code)]
+    pub(crate) fn with_authenticated(mut self, authenticated: Option<bool>) -> Self {
+        self.authenticated = authenticated;
+        self
+    }
 }
 
 #[async_trait]
@@ -392,7 +411,7 @@ impl HarnessAdapter for ScriptedAdapter {
             found: true,
             binary_path: Some(PathBuf::from("/scripted/engine")),
             version: Some("scripted".into()),
-            authenticated: Some(true),
+            authenticated: self.authenticated,
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),

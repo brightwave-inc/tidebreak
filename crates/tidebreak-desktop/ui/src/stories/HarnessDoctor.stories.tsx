@@ -6,6 +6,7 @@ import {
   harnessDoctor,
   harnessDoctorCold,
   harnessDoctorDegraded,
+  harnessDoctorHosted,
   harnessDoctorMixed,
   harnessInstallsInFlight,
 } from "./fixtures";
@@ -63,6 +64,15 @@ export const Downloading: Story = {
 /** Nothing a download fixes: one unverified engine and one signed-out engine. */
 export const NeedsYou: Story = {
   args: { report: harnessDoctorDegraded },
+};
+
+/**
+ * A gateway-hosted machine: the relay engines are ready with no sign-in to
+ * perform — turns run as the caller through the Model Gateway — and the
+ * engines the relay does not cover yet say so.
+ */
+export const Hosted: Story = {
+  args: { report: harnessDoctorHosted },
 };
 
 /** The re-probe is running. */

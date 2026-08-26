@@ -38,6 +38,7 @@ import type {
   CodeWorkspaceStatus,
   FenceReason,
   HarnessCaps,
+  HarnessAuthMode,
   HarnessDoctorEntry,
   HarnessDoctorReport,
   HarnessKind,
@@ -195,6 +196,11 @@ const HARNESS_TIERS = new Set<HarnessTier>([
   "secondary",
   "tertiary",
   "best_effort",
+]);
+const HARNESS_AUTH_MODES = new Set<HarnessAuthMode>([
+  "local_sign_in",
+  "gateway_relay",
+  "hosted_unavailable",
 ]);
 const CAP_LEVELS = new Set<CapLevel>(["supported", "unsupported", "unknown"]);
 const PERMISSION_MODES = new Set<PermissionMode>([
@@ -3056,6 +3062,7 @@ export function parseHarnessDoctorEntry(
       "caps",
       "commands",
       "authenticated",
+      "auth_mode",
       "remediation",
       "stderr",
       "unrecognized_event_count",
@@ -3067,6 +3074,8 @@ export function parseHarnessDoctorEntry(
     !isMember(value.tier, HARNESS_TIERS) ||
     (value.authenticated !== undefined &&
       typeof value.authenticated !== "boolean") ||
+    (value.auth_mode !== undefined &&
+      !isMember(value.auth_mode, HARNESS_AUTH_MODES)) ||
     typeof value.remediation !== "string" ||
     typeof value.stderr !== "string" ||
     !isFiniteNumber(value.unrecognized_event_count)
@@ -3083,6 +3092,9 @@ export function parseHarnessDoctorEntry(
     // A server that predates the field offers no on-demand download, which
     // is what this build did before the pin became lazy.
     installable: value.installable === true,
+    // Ditto the hosted doctor: a server that predates it knows only the
+    // local sign-in probe, and that is the local answer.
+    auth_mode: value.auth_mode ?? "local_sign_in",
     tier: value.tier,
     caps,
     remediation: value.remediation,
