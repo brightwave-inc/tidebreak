@@ -2001,12 +2001,13 @@ async fn watch_submission_failure_retries_without_consuming_the_head() {
 
     let first_detail = "submitting failing checks for head abc123";
     let first_reserved_at = created_at + chrono::Duration::seconds(1);
-    let first_claim = reserve_watch_submission(&store, &watch, first_detail, first_reserved_at)
-        .await
-        .unwrap()
-        .expect("first reservation");
+    let first_claim =
+        reserve_watch_submission(&store, &owner, &watch, first_detail, first_reserved_at)
+            .await
+            .unwrap()
+            .expect("first reservation");
     assert!(
-        reserve_watch_submission(&store, &watch, first_detail, first_reserved_at)
+        reserve_watch_submission(&store, &owner, &watch, first_detail, first_reserved_at)
             .await
             .unwrap()
             .is_none(),
@@ -2022,9 +2023,11 @@ async fn watch_submission_failure_retries_without_consuming_the_head() {
     assert_eq!(reserved.cycles, 0);
 
     let released_at = first_reserved_at + chrono::Duration::seconds(1);
-    assert!(release_watch_submission(&store, &first_claim, released_at)
-        .await
-        .unwrap());
+    assert!(
+        release_watch_submission(&store, &owner, &first_claim, released_at)
+            .await
+            .unwrap()
+    );
     let retry = latest_watch_for_workspace(&store, &owner, workspace_id)
         .await
         .unwrap()
@@ -2036,13 +2039,15 @@ async fn watch_submission_failure_retries_without_consuming_the_head() {
 
     let second_detail = "submitting failing checks for head abc123";
     let second_reserved_at = released_at + chrono::Duration::seconds(1);
-    let second_claim = reserve_watch_submission(&store, &retry, second_detail, second_reserved_at)
-        .await
-        .unwrap()
-        .expect("retry reservation");
+    let second_claim =
+        reserve_watch_submission(&store, &owner, &retry, second_detail, second_reserved_at)
+            .await
+            .unwrap()
+            .expect("retry reservation");
     let accepted_at = second_reserved_at + chrono::Duration::seconds(1);
     assert!(accept_watch_submission(
         &store,
+        &owner,
         &second_claim,
         Some("abc123"),
         "fixing failing checks",
@@ -2053,6 +2058,7 @@ async fn watch_submission_failure_retries_without_consuming_the_head() {
     assert!(
         !release_watch_submission(
             &store,
+            &owner,
             &second_claim,
             accepted_at + chrono::Duration::seconds(1),
         )

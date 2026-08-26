@@ -595,9 +595,14 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             }
             let reservation_detail = watch_submission_detail(reason, pr.head_sha.as_deref());
             let reserved_at = Utc::now();
-            let Some(claim) =
-                reserve_watch_submission(&runtime.db, watch, &reservation_detail, reserved_at)
-                    .await?
+            let Some(claim) = reserve_watch_submission(
+                &runtime.db,
+                &owner,
+                watch,
+                &reservation_detail,
+                reserved_at,
+            )
+            .await?
             else {
                 return Ok(());
             };
@@ -657,6 +662,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                     Some(true) => {
                         match accept_watch_submission(
                             &task_runtime.db,
+                            &task_owner,
                             &claim,
                             head.as_deref(),
                             &accepted_detail,
@@ -682,7 +688,14 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
                         }
                     }
                     Some(false) => {
-                        match release_watch_submission(&task_runtime.db, &claim, Utc::now()).await {
+                        match release_watch_submission(
+                            &task_runtime.db,
+                            &task_owner,
+                            &claim,
+                            Utc::now(),
+                        )
+                        .await
+                        {
                             Ok(true) => {
                                 emit_workspace_digests(
                                     &task_runtime.db,
@@ -743,6 +756,7 @@ async fn reconcile_watch_submission(
         let reservation_head = reservation.head.map(str::to_owned);
         let changed = accept_watch_submission(
             &runtime.db,
+            &watch.owner,
             &claim,
             reservation_head.as_deref(),
             &detail,
@@ -763,7 +777,7 @@ async fn reconcile_watch_submission(
         return Ok(true);
     }
     let released_at = Utc::now();
-    let changed = release_watch_submission(&runtime.db, &claim, released_at).await?;
+    let changed = release_watch_submission(&runtime.db, &watch.owner, &claim, released_at).await?;
     if !changed {
         return Ok(true);
     }

@@ -107,10 +107,14 @@ pub async fn list_active_watches_all_owners(store: &DbStore) -> Result<Vec<CodeW
 /// sweeps cannot both reserve the same transition.
 pub async fn reserve_watch_submission(
     store: &DbStore,
+    owner: &OwnerId,
     watch: &CodeWatch,
     detail: &str,
     reserved_at: DateTime<Utc>,
 ) -> Result<Option<WatchSubmissionClaim>> {
+    if &watch.owner != owner {
+        return Ok(None);
+    }
     let mut update = entities::code_watch::Entity::update_many()
         .col_expr(
             entities::code_watch::Column::State,
@@ -125,7 +129,7 @@ pub async fn reserve_watch_submission(
             sea_orm::sea_query::Expr::value(reserved_at),
         )
         .filter(entities::code_watch::Column::Id.eq(watch.id.0))
-        .filter(entities::code_watch::Column::Owner.eq(watch.owner.as_str()))
+        .filter(entities::code_watch::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_watch::Column::State.eq(watch.state.as_str()))
         .filter(entities::code_watch::Column::UpdatedAt.eq(watch.updated_at));
     update = match watch.detail.as_deref() {
@@ -139,7 +143,7 @@ pub async fn reserve_watch_submission(
     let result = update.exec(&store.conn).await.map_err(store_err)?;
     Ok((result.rows_affected == 1).then(|| WatchSubmissionClaim {
         watch_id: watch.id,
-        owner: watch.owner.clone(),
+        owner: owner.clone(),
         detail: detail.to_owned(),
         reserved_at,
         cycles: watch.cycles,
@@ -150,11 +154,15 @@ pub async fn reserve_watch_submission(
 /// persisted turn proves that the detached submission was durably accepted.
 pub async fn accept_watch_submission(
     store: &DbStore,
+    owner: &OwnerId,
     claim: &WatchSubmissionClaim,
     head: Option<&str>,
     detail: &str,
     accepted_at: DateTime<Utc>,
 ) -> Result<bool> {
+    if &claim.owner != owner {
+        return Ok(false);
+    }
     let result = entities::code_watch::Entity::update_many()
         .col_expr(
             entities::code_watch::Column::Detail,
@@ -173,7 +181,7 @@ pub async fn accept_watch_submission(
             sea_orm::sea_query::Expr::value(accepted_at),
         )
         .filter(entities::code_watch::Column::Id.eq(claim.watch_id.0))
-        .filter(entities::code_watch::Column::Owner.eq(claim.owner.as_str()))
+        .filter(entities::code_watch::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_watch::Column::State.eq(CodeWatchState::Fixing.as_str()))
         .filter(entities::code_watch::Column::Detail.eq(claim.detail.as_str()))
         .filter(entities::code_watch::Column::UpdatedAt.eq(claim.reserved_at))
@@ -188,9 +196,13 @@ pub async fn accept_watch_submission(
 /// timestamp and detail fence a late failure from clearing a newer retry.
 pub async fn release_watch_submission(
     store: &DbStore,
+    owner: &OwnerId,
     claim: &WatchSubmissionClaim,
     released_at: DateTime<Utc>,
 ) -> Result<bool> {
+    if &claim.owner != owner {
+        return Ok(false);
+    }
     let result = entities::code_watch::Entity::update_many()
         .col_expr(
             entities::code_watch::Column::State,
@@ -205,7 +217,7 @@ pub async fn release_watch_submission(
             sea_orm::sea_query::Expr::value(released_at),
         )
         .filter(entities::code_watch::Column::Id.eq(claim.watch_id.0))
-        .filter(entities::code_watch::Column::Owner.eq(claim.owner.as_str()))
+        .filter(entities::code_watch::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_watch::Column::State.eq(CodeWatchState::Fixing.as_str()))
         .filter(entities::code_watch::Column::Detail.eq(claim.detail.as_str()))
         .filter(entities::code_watch::Column::UpdatedAt.eq(claim.reserved_at))
