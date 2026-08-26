@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CodeEvent, SequencedCodeEventFrame } from "../api/types";
 import {
   applyAcceptedTurn,
+  applyCodeTurnSnapshot,
   hydrateCodeTurns,
   initialCodeSessionState,
   mainAgentTranscriptItems,
   markCodeSessionHydrated,
+  reconcileCodeTurnSnapshot,
+  reconcilePendingCodeTurns,
   reduceCodeSessionEvent,
   subagentTranscriptItems,
   userItemId,
@@ -15,6 +18,10 @@ import {
 
 const NOW = "2026-08-15T12:00:00.000Z";
 const LATER = "2026-08-15T12:00:02.500Z";
+const LONG_TURN_START = "2026-08-15T20:41:23.000Z";
+const LONG_TURN_END = "2026-08-15T20:42:28.000Z";
+const FAST_REPLAY_START = "2026-08-15T20:45:00.000Z";
+const FAST_REPLAY_END = "2026-08-15T20:45:00.040Z";
 
 const NO_USAGE = {
   input_tokens: 10,
@@ -510,6 +517,1240 @@ const SNAPSHOT_TURN = {
 };
 
 describe("hydrate then replay", () => {
+  it("does not let a stale running snapshot reopen a completed turn", () => {
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(NOW)
+      .mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const started = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_started", turn_id: "t1" }),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }),
+      clock,
+    );
+
+    const refreshed = applyCodeTurnSnapshot(completed.state, {
+      ...SNAPSHOT_TURN,
+      status: "running",
+      ended_at: undefined,
+    });
+
+    expect(refreshed).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      turnStartedAt: null,
+      lifecycle: "idle",
+    });
+    expect(refreshed.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+  });
+
+  it("does not let an older running snapshot replace a newer active turn", () => {
+    const clock: CodeSessionDeps = {
+      nextId: deps().nextId,
+      now: vi
+        .fn<() => string>()
+        .mockReturnValueOnce(NOW)
+        .mockReturnValueOnce(LATER)
+        .mockReturnValue("2026-08-15T12:00:03.000Z"),
+    };
+    const t1Started = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_started", turn_id: "t1" }),
+      clock,
+    );
+    const t1Completed = reduceCodeSessionEvent(
+      t1Started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }),
+      clock,
+    );
+    const t2Started = reduceCodeSessionEvent(
+      t1Completed.state,
+      framed(3, { type: "turn_started", turn_id: "t2" }),
+      clock,
+    );
+
+    const refreshed = applyCodeTurnSnapshot(t2Started.state, {
+      ...SNAPSHOT_TURN,
+      status: "running",
+      ended_at: undefined,
+    });
+
+    expect(refreshed).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t2",
+      turnStartedAt: "2026-08-15T12:00:03.000Z",
+      lifecycle: "running",
+    });
+  });
+
+  it("keeps a long completed turn's durable duration during fast replay", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        started_at: LONG_TURN_START,
+        ended_at: LONG_TURN_END,
+      },
+    ]);
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(FAST_REPLAY_START)
+      .mockReturnValue(FAST_REPLAY_END);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+
+    const started = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+
+    expect(completed.state.items[0]).toMatchObject({
+      kind: "user",
+      createdAt: LONG_TURN_START,
+    });
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 65_000,
+    });
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it("keeps one durable boundary after duplicate replayed terminal events", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        started_at: LONG_TURN_START,
+        ended_at: LONG_TURN_END,
+      },
+    ]);
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(FAST_REPLAY_START)
+      .mockReturnValue(FAST_REPLAY_END);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const started = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+    const duplicate = reduceCodeSessionEvent(
+      completed.state,
+      framed(3, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+    const boundaries = duplicate.state.items.filter(
+      (item) => item.kind === "turn_boundary",
+    );
+
+    expect(boundaries).toHaveLength(1);
+    expect(boundaries[0]).toMatchObject({
+      turnId: "t1",
+      durationMs: 65_000,
+    });
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it("keeps replay duration unknown when the snapshot has no durable end", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, ended_at: undefined },
+    ]);
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(FAST_REPLAY_START)
+      .mockReturnValue(FAST_REPLAY_END);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const started = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: null,
+    });
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it("requests and applies exact timing after a replay-only terminal", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const replayedStart = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const completed = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+
+    expect(completed.effects).toEqual([
+      { type: "turn_resolved" },
+      { type: "turn_snapshot_needed", turnId: "t1" },
+    ]);
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: null,
+    });
+
+    const reconciled = reconcileCodeTurnSnapshot(completed.state, {
+      ...SNAPSHOT_TURN,
+      started_at: LONG_TURN_START,
+      ended_at: LONG_TURN_END,
+    });
+    expect(reconciled).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 65_000,
+    });
+  });
+
+  it("does not reopen an attributed terminal from a stale running hydration", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const replayedStart = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const completed = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+
+    const staleHydration = hydrateCodeTurns(completed.state, [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+
+    expect(staleHydration).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      journalTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(staleHydration.pendingTerminalReconciliations.get(2)).toMatchObject({
+      eventSeq: 2,
+      turnId: "t1",
+      status: "completed",
+    });
+  });
+
+  it("keeps a newly accepted turn active while buffered replay finishes an older turn", () => {
+    const accepted = applyAcceptedTurn(initialCodeSessionState(), {
+      ...SNAPSHOT_TURN,
+      id: "t2",
+      ordinal: 2,
+      status: "running",
+      user_input: "run the tests",
+      ended_at: undefined,
+    });
+
+    expect(accepted).toMatchObject({
+      lastSeq: 0,
+      activeTurnId: "t2",
+      journalTurnId: null,
+      acceptedTurnFence: { turnId: "t2", afterSeq: 0 },
+      turnActivityRevision: 1,
+    });
+
+    const replayedStart = reduceCodeSessionEvent(
+      accepted,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const replayedTerminal = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+
+    expect(replayedStart.state).toMatchObject({
+      lastSeq: 1,
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t1",
+      acceptedTurnFence: { turnId: "t2", afterSeq: 0 },
+      turnActivityRevision: 1,
+    });
+    expect(replayedTerminal.state).toMatchObject({
+      lastSeq: 2,
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: null,
+      acceptedTurnFence: { turnId: "t2", afterSeq: 0 },
+      turnActivityRevision: 1,
+      lifecycle: "running",
+    });
+    expect(
+      replayedTerminal.state.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t1",
+      ),
+    ).toMatchObject({ status: "completed", usage: NO_USAGE });
+  });
+
+  it("rejects a snapshot activity update captured before an accepted turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const replayedStart = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const terminal = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+    const observedTurnActivityRevision = terminal.state.turnActivityRevision;
+    const accepted = applyAcceptedTurn(terminal.state, {
+      ...SNAPSHOT_TURN,
+      id: "t2",
+      ordinal: 2,
+      status: "running",
+      user_input: "run the tests",
+      ended_at: undefined,
+    });
+
+    expect(accepted.lastSeq).toBe(terminal.state.lastSeq);
+    const reconciled = reconcilePendingCodeTurns(
+      accepted,
+      [SNAPSHOT_TURN],
+      [
+        {
+          turnId: "t1",
+          eventSeq: 2,
+          observedSeq: 2,
+          observedTurnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled).toMatchObject({
+      lastSeq: 2,
+      busy: true,
+      activeTurnId: "t2",
+      acceptedTurnFence: { turnId: "t2", afterSeq: 2 },
+      lifecycle: "running",
+    });
+    expect(
+      reconciled.items.find((item) => item.id === "boundary:t1"),
+    ).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+  });
+
+  it("reconciles a capped terminal against the hydrated active turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "running",
+        user_input: "run the tests",
+        ended_at: undefined,
+      },
+    ]);
+    const terminal = reduceCodeSessionEvent(
+      hydrated,
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: { type: "turn_completed", usage: NO_USAGE },
+      },
+      deps(),
+    );
+
+    expect(terminal.state).toMatchObject({
+      lastSeq: 2_001,
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: null,
+      lifecycle: "running",
+    });
+    expect(terminal.effects).toEqual([
+      { type: "turn_snapshot_needed", turnId: null },
+      { type: "turn_resolved" },
+    ]);
+
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          user_input: "run the tests",
+          started_at: NOW,
+          ended_at: LATER,
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+    expect(reconciled).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      journalTurnId: null,
+      turnStartedAt: null,
+      lifecycle: "idle",
+    });
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      durationMs: 2_500,
+    });
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+  });
+
+  it("keeps a capped failure unassigned when only its snapshot candidate completes", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "running",
+        user_input: "run the tests",
+        ended_at: undefined,
+      },
+    ]);
+    const terminal = reduceCodeSessionEvent(
+      hydrated,
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: {
+          type: "turn_failed",
+          error: { message: "compiler crashed: missing libssl" },
+        },
+      },
+      deps(),
+    );
+
+    expect(terminal.state.pendingTerminalReconciliations.get(2_001)).toEqual({
+      eventSeq: 2_001,
+      turnId: null,
+      candidateTurnId: "t2",
+      nextTurnId: null,
+      status: "failed",
+      usage: null,
+      error: "compiler crashed: missing libssl",
+      diffstat: null,
+      previousUsage: null,
+    });
+    expect(
+      terminal.state.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t2",
+      ),
+    ).toBeUndefined();
+
+    const reconciled = hydrateCodeTurns(terminal.state, [
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "failed",
+        user_input: "run the tests",
+        started_at: NOW,
+        ended_at: LATER,
+      },
+    ]);
+
+    expect(reconciled).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "failed",
+      durationMs: 2_500,
+      error: null,
+    });
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+  });
+
+  it("does not attach a capped failure after hydration already returned the terminal turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "failed",
+        user_input: "run the tests",
+      },
+    ]);
+    const terminal = reduceCodeSessionEvent(
+      hydrated,
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: {
+          type: "turn_failed",
+          error: { message: "compiler crashed: missing libssl" },
+        },
+      },
+      deps(),
+    );
+
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          status: "failed",
+          user_input: "run the tests",
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+    expect(
+      reconciled.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t2",
+      ),
+    ).toMatchObject({
+      status: "failed",
+      durationMs: 2_500,
+      error: null,
+    });
+  });
+
+  it("does not attach a capped failure when no initial turn snapshot was available", () => {
+    const terminal = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: {
+          type: "turn_failed",
+          error: { message: "compiler crashed: missing libssl" },
+        },
+      },
+      deps(),
+    );
+
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [
+        SNAPSHOT_TURN,
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          status: "failed",
+          user_input: "run the tests",
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "failed",
+      error: null,
+    });
+  });
+
+  it("does not give a later completed turn an earlier unattributed terminal's usage", () => {
+    const replayUsage = {
+      ...NO_USAGE,
+      input_tokens: 91,
+      output_tokens: 37,
+    };
+    const terminal = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: { type: "turn_completed", usage: replayUsage },
+      },
+      deps(),
+    );
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          user_input: "later completed work",
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "completed",
+      usage: null,
+      error: null,
+    });
+    expect(reconciled.lastUsage).toBeNull();
+  });
+
+  it("keeps a capped failure pending while its stale candidate still runs", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "running",
+        user_input: "run the tests",
+        ended_at: undefined,
+      },
+    ]);
+    const terminal = reduceCodeSessionEvent(
+      hydrated,
+      {
+        seq: 2_001,
+        replayed: true,
+        truncated: true,
+        event: {
+          type: "turn_failed",
+          error: { message: "belongs to an older turn" },
+        },
+      },
+      deps(),
+    );
+
+    const reconciled = hydrateCodeTurns(terminal.state, [
+      {
+        ...SNAPSHOT_TURN,
+        status: "failed",
+      },
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "running",
+        user_input: "run the tests",
+        ended_at: undefined,
+      },
+    ]);
+
+    expect(reconciled).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      lifecycle: "running",
+      contentRevision: 1,
+    });
+    expect(reconciled.pendingTerminalReconciliations.get(2_001)).toMatchObject({
+      turnId: null,
+      candidateTurnId: "t2",
+      status: "failed",
+      error: "belongs to an older turn",
+    });
+    expect(
+      reconciled.items.find(
+        (item) =>
+          item.kind === "turn_boundary" &&
+          item.error === "belongs to an older turn",
+      ),
+    ).toBeUndefined();
+    expect(
+      reconciled.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t1",
+      ),
+    ).toMatchObject({ error: null });
+    expect(
+      reconciled.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t2",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not attribute capped replay output to a stale retained turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        id: "t1",
+        ordinal: 1,
+        status: "running",
+        user_input: "old work",
+        ended_at: undefined,
+      },
+    ]);
+    const output = reduceCodeSessionEvent(
+      hydrated,
+      {
+        seq: 2_000,
+        replayed: true,
+        truncated: true,
+        event: { type: "assistant_delta", text: "new turn output" },
+      },
+      deps(),
+    );
+    const terminal = reduceCodeSessionEvent(
+      output.state,
+      framed(
+        2_001,
+        { type: "turn_failed", error: { message: "new turn failed" } },
+        true,
+      ),
+      deps(),
+    );
+
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [
+        {
+          ...SNAPSHOT_TURN,
+          id: "t1",
+          ordinal: 1,
+          status: "completed",
+          user_input: "old work",
+        },
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          status: "failed",
+          user_input: "new work",
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 2_001,
+          observedSeq: 2_001,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(
+      reconciled.items.find((item) => item.kind === "assistant"),
+    ).toMatchObject({ turnId: null, text: "new turn output" });
+    expect(
+      reconciled.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t1",
+      ),
+    ).toMatchObject({ error: null });
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      error: null,
+    });
+    expect(reconciled.pendingTerminalReconciliations.size).toBe(1);
+  });
+
+  it("inserts a recovered boundary before the following turn", () => {
+    const terminal = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      {
+        seq: 100,
+        replayed: true,
+        truncated: true,
+        event: { type: "turn_completed", usage: NO_USAGE },
+      },
+      deps(),
+    );
+    const started = reduceCodeSessionEvent(
+      terminal.state,
+      framed(101, { type: "turn_started", turn_id: "t2" }, true),
+      deps(),
+    );
+    const output = reduceCodeSessionEvent(
+      started.state,
+      framed(102, { type: "assistant_delta", text: "second turn" }, true),
+      deps(),
+    );
+
+    const reconciled = reconcilePendingCodeTurns(
+      output.state,
+      [
+        SNAPSHOT_TURN,
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          status: "running",
+          user_input: "run the tests",
+          ended_at: undefined,
+        },
+      ],
+      [
+        {
+          turnId: null,
+          eventSeq: 100,
+          observedSeq: 102,
+          observedTurnActivityRevision: output.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled.items.map((item) => item.id)).toEqual([
+      "notice:truncated-replay",
+      "user:t1",
+      "boundary:t1",
+      "user:t2",
+      "c1",
+    ]);
+    expect(reconciled).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t2",
+    });
+  });
+
+  it("promotes confirmed replay usage when the snapshot omits usage", () => {
+    const usage = { ...NO_USAGE, input_tokens: 44, output_tokens: 12 };
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const started = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const terminal = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage }, true),
+      deps(),
+    );
+
+    expect(terminal.state.lastUsage).toBeNull();
+    const reconciled = reconcilePendingCodeTurns(
+      terminal.state,
+      [SNAPSHOT_TURN],
+      [
+        {
+          turnId: "t1",
+          eventSeq: 2,
+          observedSeq: 2,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled.lastUsage).toEqual(usage);
+    expect(reconciled.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      usage,
+    });
+  });
+
+  it("uses a stale refresh for history without settling a newer live turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const started = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const terminal = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+    const newer = reduceCodeSessionEvent(
+      terminal.state,
+      framed(3, { type: "turn_started", turn_id: "t2" }),
+      deps(),
+    );
+
+    const reconciled = reconcilePendingCodeTurns(
+      newer.state,
+      [
+        {
+          ...SNAPSHOT_TURN,
+          started_at: LONG_TURN_START,
+          ended_at: LONG_TURN_END,
+        },
+        {
+          ...SNAPSHOT_TURN,
+          id: "t2",
+          ordinal: 2,
+          status: "running",
+          user_input: "run the tests",
+          ended_at: undefined,
+        },
+      ],
+      [
+        {
+          turnId: "t1",
+          eventSeq: 2,
+          observedSeq: 2,
+          observedTurnActivityRevision: terminal.state.turnActivityRevision,
+        },
+      ],
+    );
+
+    expect(reconciled).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t2",
+      lifecycle: "running",
+    });
+    expect(
+      reconciled.items.find((item) => item.id === "boundary:t1"),
+    ).toMatchObject({ durationMs: 65_000 });
+  });
+
+  it("does not let an older terminal refresh settle a newer turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const replayedStart = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      deps(),
+    );
+    const completed = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      deps(),
+    );
+    const t2Started = reduceCodeSessionEvent(
+      completed.state,
+      framed(3, { type: "turn_started", turn_id: "t2" }),
+      deps(),
+    );
+
+    const reconciled = reconcileCodeTurnSnapshot(t2Started.state, {
+      ...SNAPSHOT_TURN,
+      started_at: LONG_TURN_START,
+      ended_at: LONG_TURN_END,
+    });
+
+    expect(reconciled).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t2",
+      lifecycle: "running",
+    });
+    expect(
+      reconciled.items.find((item) => item.id === "boundary:t1"),
+    ).toMatchObject({
+      kind: "turn_boundary",
+      durationMs: 65_000,
+    });
+  });
+
+  it("clears stale activity when an authoritative snapshot has no running turn", () => {
+    const running = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "running", ended_at: undefined },
+    ]);
+    const completed = hydrateCodeTurns(running, [SNAPSHOT_TURN]);
+
+    expect(completed).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      journalTurnId: null,
+      turnStartedAt: null,
+      turnStartObservedLive: false,
+      lifecycle: "idle",
+    });
+    expect(completed.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+  });
+
+  it("lets live timing replace a replay-only unknown boundary", () => {
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(NOW)
+      .mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const replayedStart = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      clock,
+    );
+    const replayedEnd = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+    expect(replayedEnd.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: null,
+    });
+
+    const liveStart = reduceCodeSessionEvent(
+      replayedEnd.state,
+      framed(3, { type: "turn_started", turn_id: "t1" }),
+      clock,
+    );
+    const liveEnd = reduceCodeSessionEvent(
+      liveStart.state,
+      framed(4, { type: "turn_completed", usage: NO_USAGE }),
+      clock,
+    );
+
+    expect(liveEnd.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+    expect(now).toHaveBeenCalledTimes(2);
+  });
+
+  it("measures a genuinely live turn from the client clock", () => {
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(NOW)
+      .mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const started = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_started", turn_id: "t1" }),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }),
+      clock,
+    );
+
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+    expect(now).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps live timing when completion arrives through replay", () => {
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce(NOW)
+      .mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const started = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_started", turn_id: "t1" }),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      started.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+    expect(now).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps live provenance when prompt hydration replaces the start timestamp", () => {
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("2026-08-15T12:00:00.100Z")
+      .mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const started = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_started", turn_id: "t1" }),
+      clock,
+    );
+    const hydrated = applyAcceptedTurn(started.state, {
+      ...SNAPSHOT_TURN,
+      status: "running",
+      ended_at: undefined,
+    });
+    const completed = reduceCodeSessionEvent(
+      hydrated,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }, true),
+      clock,
+    );
+
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+    expect(now).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a hydrated running turn's durable start for live completion", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        status: "running",
+        ended_at: undefined,
+      },
+    ]);
+    const now = vi.fn<() => string>().mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const replayedStart = reduceCodeSessionEvent(
+      hydrated,
+      framed(1, { type: "turn_started", turn_id: "t1" }, true),
+      clock,
+    );
+
+    expect(replayedStart.state.turnStartedAt).toBe(NOW);
+    expect(now).not.toHaveBeenCalled();
+
+    const completed = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(2, { type: "turn_completed", usage: NO_USAGE }),
+      clock,
+    );
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+    expect(now).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not assign a truncated replay terminal to the hydrated running turn", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      {
+        ...SNAPSHOT_TURN,
+        started_at: LONG_TURN_START,
+        ended_at: LONG_TURN_END,
+      },
+      {
+        ...SNAPSHOT_TURN,
+        id: "t2",
+        ordinal: 2,
+        status: "running",
+        user_input: "run the tests",
+        started_at: NOW,
+        ended_at: undefined,
+      },
+    ]);
+    const now = vi.fn<() => string>().mockReturnValue(LATER);
+    const clock: CodeSessionDeps = { nextId: deps().nextId, now };
+    const staleTerminal = reduceCodeSessionEvent(
+      hydrated,
+      {
+        seq: 100,
+        replayed: true,
+        truncated: true,
+        event: { type: "turn_completed", usage: NO_USAGE },
+      },
+      clock,
+    );
+
+    expect(staleTerminal.effects).toEqual([
+      { type: "turn_snapshot_needed", turnId: null },
+      { type: "turn_resolved" },
+    ]);
+    expect(staleTerminal.state.busy).toBe(true);
+    expect(staleTerminal.state.activeTurnId).toBe("t2");
+    expect(staleTerminal.state.lifecycle).toBe("running");
+    expect(staleTerminal.state.lastUsage).toBeNull();
+    expect(
+      staleTerminal.state.items.find(
+        (item) => item.kind === "turn_boundary" && item.turnId === "t2",
+      ),
+    ).toBeUndefined();
+    expect(now).not.toHaveBeenCalled();
+
+    const replayedStart = reduceCodeSessionEvent(
+      staleTerminal.state,
+      framed(101, { type: "turn_started", turn_id: "t2" }, true),
+      clock,
+    );
+    const completed = reduceCodeSessionEvent(
+      replayedStart.state,
+      framed(102, {
+        type: "turn_completed",
+        usage: { ...NO_USAGE, input_tokens: 20, output_tokens: 8 },
+      }),
+      clock,
+    );
+
+    expect(completed.state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      durationMs: 2_500,
+      usage: { input_tokens: 20, output_tokens: 8 },
+    });
+    expect(now).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the user prompt after a disposed store reopens from after=0", () => {
     const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
       SNAPSHOT_TURN,
@@ -763,6 +2004,22 @@ describe("file_changed", () => {
       },
     });
     expect(state.contentRevision).toBe(3);
+  });
+});
+
+describe("unattributed terminals", () => {
+  it("invalidates worktree readers without inventing a transcript boundary", () => {
+    const terminal = reduceCodeSessionEvent(
+      initialCodeSessionState(),
+      framed(1, { type: "turn_completed", usage: NO_USAGE }),
+      deps(),
+    );
+
+    expect(terminal.effects).toEqual([{ type: "turn_resolved" }]);
+    expect(terminal.state.contentRevision).toBe(1);
+    expect(
+      terminal.state.items.some((item) => item.kind === "turn_boundary"),
+    ).toBe(false);
   });
 });
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SequencedCodeEventFrame } from "../api/types";
+import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
 import {
   acquireCodeSession,
   MAX_RETAINED_CODE_SESSIONS,
@@ -21,6 +21,46 @@ class FakeSocket {
   close() {
     this.closed = true;
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+const NO_USAGE = {
+  input_tokens: 10,
+  output_tokens: 4,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+  context_tokens: 0,
+};
+
+function turnSnapshot(
+  id: string,
+  status: CodeTurnSnapshot["status"],
+  startedAt: string,
+  endedAt?: string,
+): CodeTurnSnapshot {
+  return {
+    id,
+    session_id: "s1",
+    ordinal: id === "t1" ? 1 : 2,
+    status,
+    user_input: id === "t1" ? "list the files" : "run the tests",
+    attachments: [],
+    started_at: startedAt,
+    ...(endedAt ? { ended_at: endedAt, usage: NO_USAGE } : {}),
+  };
 }
 
 afterEach(() => {
@@ -273,6 +313,573 @@ describe("CodeSessionRegistry", () => {
 
     sockets[0]?.onclose?.();
     expect(store.getState().connectionState).toBe("reconnecting");
+  });
+
+  it("keeps live turn timing when reconnect replays the terminal row", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("2026-08-15T12:00:00.000Z")
+      .mockReturnValue("2026-08-15T12:00:02.500Z");
+    const store = acquireCodeSession("s1", openSocket, {
+      nextId: () => "id",
+      now,
+    });
+
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    sockets[0]?.onclose?.();
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(sockets.map((socket) => socket.after)).toEqual([0, 1]);
+    sockets[1]?.emit({
+      seq: 2,
+      replayed: true,
+      event: {
+        type: "turn_completed",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 4,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          context_tokens: 0,
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+    expect(now).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reopen a finished turn when delayed prompt hydration resolves", async () => {
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const promptRead = deferred<CodeTurnSnapshot[]>();
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => promptRead.promise);
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("2026-08-15T12:00:00.000Z")
+      .mockReturnValue("2026-08-15T12:00:02.500Z");
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    sockets[0]?.emit({
+      seq: 2,
+      event: { type: "turn_completed", usage: NO_USAGE },
+    });
+
+    promptRead.resolve([
+      turnSnapshot("t1", "running", "2026-08-15T12:00:00.000Z"),
+    ]);
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      turnStartedAt: null,
+      lifecycle: "idle",
+    });
+    expect(store.getState().items).toContainEqual({
+      kind: "user",
+      id: userItemId("t1"),
+      turnId: "t1",
+      text: "list the files",
+      createdAt: "2026-08-15T12:00:00.000Z",
+      attachments: [],
+    });
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 2_500,
+    });
+  });
+
+  it("does not replace a newer active turn when an older prompt read resolves", async () => {
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const t1PromptRead = deferred<CodeTurnSnapshot[]>();
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => t1PromptRead.promise)
+      .mockResolvedValueOnce([
+        turnSnapshot("t2", "running", "2026-08-15T12:00:03.000Z"),
+      ]);
+    const now = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("2026-08-15T12:00:00.000Z")
+      .mockReturnValueOnce("2026-08-15T12:00:02.500Z")
+      .mockReturnValue("2026-08-15T12:00:03.000Z");
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    sockets[0]?.emit({
+      seq: 2,
+      event: { type: "turn_completed", usage: NO_USAGE },
+    });
+    sockets[0]?.emit({
+      seq: 3,
+      event: { type: "turn_started", turn_id: "t2" },
+    });
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t2",
+      turnStartedAt: "2026-08-15T12:00:03.000Z",
+      lifecycle: "running",
+    });
+
+    t1PromptRead.resolve([
+      turnSnapshot("t1", "running", "2026-08-15T12:00:00.000Z"),
+    ]);
+    await flushMicrotasks();
+
+    expect(store.getState()).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      journalTurnId: "t2",
+      turnStartedAt: "2026-08-15T12:00:03.000Z",
+      lifecycle: "running",
+    });
+    expect(store.getState().items).toContainEqual({
+      kind: "user",
+      id: userItemId("t1"),
+      turnId: "t1",
+      text: "list the files",
+      createdAt: "2026-08-15T12:00:00.000Z",
+      attachments: [],
+    });
+  });
+
+  it("refreshes exact duration after a replay terminal lacks a durable boundary", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockResolvedValueOnce([
+        turnSnapshot("t1", "running", "2026-08-15T20:41:23.000Z"),
+      ])
+      .mockResolvedValueOnce([
+        turnSnapshot(
+          "t1",
+          "completed",
+          "2026-08-15T20:41:23.000Z",
+          "2026-08-15T20:42:28.000Z",
+        ),
+      ]);
+    const now = vi.fn<() => string>();
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 1,
+      replayed: true,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    sockets[0]?.emit({
+      seq: 2,
+      replayed: true,
+      event: { type: "turn_completed", usage: NO_USAGE },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    expect(store.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      durationMs: 65_000,
+    });
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it("settles a hydrated turn when capped replay contains only its terminal", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockResolvedValueOnce([
+        turnSnapshot("t2", "running", "2026-08-15T12:00:00.000Z"),
+      ])
+      .mockResolvedValueOnce([
+        turnSnapshot(
+          "t2",
+          "completed",
+          "2026-08-15T12:00:00.000Z",
+          "2026-08-15T12:00:02.500Z",
+        ),
+      ]);
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: vi.fn<() => string>() },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 2_001,
+      replayed: true,
+      truncated: true,
+      event: { type: "turn_completed", usage: NO_USAGE },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    expect(store.getState()).toMatchObject({
+      lastSeq: 2_001,
+      busy: false,
+      activeTurnId: null,
+      journalTurnId: null,
+      turnStartedAt: null,
+      lifecycle: "idle",
+      lastUsage: NO_USAGE,
+    });
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      durationMs: 2_500,
+    });
+  });
+
+  it("keeps a capped failure unassigned after initial hydration already saw it end", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const failed = turnSnapshot(
+      "t2",
+      "failed",
+      "2026-08-15T12:00:00.000Z",
+      "2026-08-15T12:00:02.500Z",
+    );
+    const hydrateTurns = vi.fn(async () => [failed]);
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: vi.fn<() => string>() },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      error: null,
+    });
+    sockets[0]?.emit({
+      seq: 2_001,
+      replayed: true,
+      truncated: true,
+      event: {
+        type: "turn_failed",
+        error: { message: "compiler crashed: missing libssl" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "failed",
+      durationMs: 2_500,
+      error: null,
+    });
+  });
+
+  it("keeps a capped failure unassigned after initial hydration was unavailable", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([
+        turnSnapshot(
+          "t2",
+          "failed",
+          "2026-08-15T12:00:00.000Z",
+          "2026-08-15T12:00:02.500Z",
+        ),
+      ]);
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: vi.fn<() => string>() },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 2_001,
+      replayed: true,
+      truncated: true,
+      event: {
+        type: "turn_failed",
+        error: { message: "compiler crashed: missing libssl" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
+    expect(store.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "failed",
+      durationMs: 2_500,
+      error: null,
+    });
+  });
+
+  it("retries an unresolved terminal refresh with bounded backoff", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockResolvedValueOnce([
+        turnSnapshot("t2", "running", "2026-08-15T12:00:00.000Z"),
+      ])
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([
+        turnSnapshot(
+          "t2",
+          "failed",
+          "2026-08-15T12:00:00.000Z",
+          "2026-08-15T12:00:02.500Z",
+        ),
+      ]);
+    const store = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: vi.fn<() => string>() },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 2_001,
+      replayed: true,
+      truncated: true,
+      event: {
+        type: "turn_failed",
+        error: { message: "compiler crashed: missing libssl" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
+    expect(store.getState()).toMatchObject({
+      busy: true,
+      activeTurnId: "t2",
+      lifecycle: "running",
+    });
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(hydrateTurns).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    expect(hydrateTurns).toHaveBeenCalledTimes(3);
+    expect(store.getState().pendingTerminalReconciliations.size).toBe(1);
+    expect(store.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(store.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "failed",
+      durationMs: 2_500,
+      error: null,
+    });
+  });
+
+  it("keeps an unattributed capped terminal pending across a retained reconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    };
+    const hydrateTurns = vi
+      .fn<() => Promise<CodeTurnSnapshot[]>>()
+      .mockResolvedValueOnce([
+        turnSnapshot("t2", "running", "2026-08-15T12:00:00.000Z"),
+      ])
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([
+        turnSnapshot(
+          "t2",
+          "failed",
+          "2026-08-15T12:00:00.000Z",
+          "2026-08-15T12:00:02.500Z",
+        ),
+      ]);
+    const first = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: vi.fn<() => string>() },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    sockets[0]?.emit({
+      seq: 2_001,
+      replayed: true,
+      truncated: true,
+      event: {
+        type: "turn_failed",
+        error: { message: "compiler crashed: missing libssl" },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(40);
+    await flushMicrotasks();
+    expect(first.getState().pendingTerminalReconciliations.size).toBe(1);
+
+    releaseCodeSession("s1");
+    const reopened = acquireCodeSession(
+      "s1",
+      openSocket,
+      { nextId: () => "id", now: vi.fn<() => string>() },
+      hydrateTurns,
+    );
+    await flushMicrotasks();
+
+    expect(reopened).toBe(first);
+    expect(hydrateTurns).toHaveBeenCalledTimes(3);
+    expect(sockets.map((socket) => socket.after)).toEqual([0, 2_001]);
+    expect(reopened.getState().pendingTerminalReconciliations.size).toBe(1);
+    expect(reopened.getState()).toMatchObject({
+      busy: false,
+      activeTurnId: null,
+      lifecycle: "idle",
+    });
+    expect(reopened.getState().items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t2",
+      status: "failed",
+      durationMs: 2_500,
+      error: null,
+    });
   });
 
   it("fills in the prompt of a turn the socket announces", async () => {
