@@ -235,6 +235,8 @@ pub(crate) struct CodeRuntime {
     recap: Mutex<Option<Arc<dyn super::recap::TurnRecap>>>,
     #[cfg(test)]
     archive_shutdown_timeout: AtomicBool,
+    #[cfg(test)]
+    fail_next_workspace_final_save: AtomicBool,
 }
 
 /// How long one base branch's rules answer stands before the next read.
@@ -424,6 +426,8 @@ impl CodeRuntime {
             recap: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_final_save: AtomicBool::new(false),
         }
     }
 
@@ -555,6 +559,8 @@ impl CodeRuntime {
             recap: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_final_save: AtomicBool::new(false),
         }
     }
 
@@ -588,6 +594,12 @@ impl CodeRuntime {
     pub(crate) fn set_archive_shutdown_timeout(&self, enabled: bool) {
         self.archive_shutdown_timeout
             .store(enabled, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_final_save(&self) {
+        self.fail_next_workspace_final_save
+            .store(true, Ordering::SeqCst);
     }
 
     /// The REST base decision 65's pull-request operations drive: the
@@ -1139,13 +1151,16 @@ impl CodeRuntime {
             bundle_bytes: None,
         };
         insert_workspace(&self.db, &workspace).await?;
-        match create_worktree(std::path::Path::new(&repo.root_path), &path, &branch, &base).await {
-            Ok(()) => {}
-            Err(err) => {
-                let _ = delete_workspace(&self.db, owner, id).await;
-                return Err(map_worktree(err));
-            }
-        }
+        let operation =
+            match create_worktree(std::path::Path::new(&repo.root_path), &path, &branch, &base)
+                .await
+            {
+                Ok(operation) => operation,
+                Err(err) => {
+                    let _ = delete_workspace(&self.db, owner, id).await;
+                    return Err(map_worktree(err));
+                }
+            };
         // Before the setup script, which may itself commit: from here on,
         // anything this workspace commits should already carry the right
         // name.
@@ -1153,19 +1168,58 @@ impl CodeRuntime {
         match run_setup_script(&path, repo.setup_script.as_deref()).await {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
-                save_workspace(&self.db, &workspace).await?;
+                match self.save_workspace_final(&workspace).await {
+                    Ok(true) => operation.complete().await,
+                    Ok(false) => {
+                        operation.rollback().await;
+                        return Err(ServerError::not_found(format!(
+                            "workspace {} not found",
+                            workspace.id
+                        )));
+                    }
+                    Err(error) => {
+                        operation.rollback().await;
+                        return Err(error);
+                    }
+                }
                 gh::run_auto_create_actions(&path, &repo.quick_actions).await;
                 Ok(workspace)
             }
             Err(err) => {
                 workspace.status = CodeWorkspaceStatus::SetupFailed;
-                save_workspace(&self.db, &workspace).await?;
+                match self.save_workspace_final(&workspace).await {
+                    Ok(true) => operation.complete().await,
+                    Ok(false) => {
+                        operation.rollback().await;
+                        return Err(ServerError::not_found(format!(
+                            "workspace {} not found",
+                            workspace.id
+                        )));
+                    }
+                    Err(error) => {
+                        operation.rollback().await;
+                        return Err(error);
+                    }
+                }
                 Err(ServerError::unprocessable_kind(
                     "setup_failed",
                     err.to_string(),
                 ))
             }
         }
+    }
+
+    async fn save_workspace_final(&self, workspace: &CodeWorkspace) -> Result<bool, ServerError> {
+        #[cfg(test)]
+        if self
+            .fail_next_workspace_final_save
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(ServerError::internal(
+                "injected workspace lifecycle persistence failure",
+            ));
+        }
+        Ok(save_workspace(&self.db, workspace).await?)
     }
 
     pub(crate) async fn list_workspaces(
@@ -1458,16 +1512,20 @@ impl CodeRuntime {
     /// did — usually kilobytes against a checkout measured in gigabytes — so
     /// dropping the ref frees nearly everything and a restore still rebuilds
     /// exactly. The transcript is not touched at any tier.
-    /// Drop a restored workspace's release bookkeeping and its bundle.
+    /// Drop a restored workspace's release bookkeeping.
     ///
-    /// The branch is back in the repository, so the bundle is a second copy of
-    /// commits git already has. Removing it is best-effort: a bundle left
-    /// behind wastes space, while failing the restore over it would strand a
-    /// workspace whose checkout is already on disk.
-    fn clear_release(workspace: &mut CodeWorkspace, data_dir: &std::path::Path) {
+    /// The bundle stays until the row carrying these cleared fields is durable.
+    fn clear_release(workspace: &mut CodeWorkspace) {
         if workspace.released_at.is_none() && workspace.bundle_bytes.is_none() {
             return;
         }
+        workspace.released_at = None;
+        workspace.released_tip = None;
+        workspace.bundle_bytes = None;
+    }
+
+    /// Remove a restored workspace's bundle after its final row is durable.
+    fn remove_release_bundle(workspace: &CodeWorkspace, data_dir: &std::path::Path) {
         let bundle = worktree::bundle_path(data_dir, &workspace.id.0);
         if let Err(error) = std::fs::remove_file(&bundle) {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -1478,9 +1536,6 @@ impl CodeRuntime {
                 );
             }
         }
-        workspace.released_at = None;
-        workspace.released_tip = None;
-        workspace.bundle_bytes = None;
     }
 
     pub(crate) async fn release_workspace(
@@ -1563,6 +1618,8 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<CodeWorkspace, ServerError> {
+        let lifecycle = self.workspace_lifecycle_lock(id);
+        let _lifecycle_guard = lifecycle.lock().await;
         let mut workspace = self.get_workspace(owner, id).await?;
         if workspace.status == CodeWorkspaceStatus::Active {
             return Ok(workspace);
@@ -1577,64 +1634,80 @@ impl CodeRuntime {
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
         let repo_root = std::path::Path::new(&repo.root_path);
-        // A released workspace has no branch: release bundled its commits and
-        // dropped the ref. Put the branch back from the bundle first, and the
-        // rest of restore is the archived path unchanged.
-        if released
-            && !worktree::branch_exists(repo_root, &workspace.branch_name)
-                .await
-                .map_err(map_worktree)?
-        {
+        let path = std::path::Path::new(&workspace.worktree_path);
+        let operation = if released {
+            let released_tip = workspace.released_tip.as_deref().ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "released_tip_missing",
+                    "the released workspace has no recorded commit; its bundle was preserved",
+                )
+            })?;
             let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
-            worktree::unbundle_branch(repo_root, &bundle, &workspace.branch_name)
-                .await
-                .map_err(map_worktree)?;
-        }
-        if !worktree::branch_exists(repo_root, &workspace.branch_name)
+            worktree::restore_released_worktree(
+                repo_root,
+                path,
+                &workspace.branch_name,
+                &bundle,
+                released_tip,
+            )
             .await
             .map_err(map_worktree)?
-        {
-            return Err(ServerError::conflict_kind(
-                "branch_missing",
-                format!(
-                    "branch {} no longer exists; create a new workspace instead",
-                    workspace.branch_name
-                ),
-            ));
-        }
-        let path = std::path::Path::new(&workspace.worktree_path);
-        if path.exists() {
-            return Err(ServerError::conflict_kind(
-                "worktree_path_occupied",
-                format!("something already exists at {}", workspace.worktree_path),
-            ));
-        }
-        worktree::restore_worktree(repo_root, path, &workspace.branch_name)
-            .await
-            .map_err(map_worktree)?;
+        } else {
+            if !worktree::branch_exists(repo_root, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?
+            {
+                return Err(ServerError::conflict_kind(
+                    "branch_missing",
+                    format!(
+                        "branch {} no longer exists; create a new workspace instead",
+                        workspace.branch_name
+                    ),
+                ));
+            }
+            worktree::restore_worktree(repo_root, path, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?
+        };
         // Mirror create's tail exactly: setup decides between Active and
         // SetupFailed, and a failing script preserves the checkout
         // (Decision 0032's failure-preserves rule). One vocabulary for both
         // paths — a reader debugging "setup_failed" should not need to know
         // whether the workspace was created or restored.
-        match run_setup_script(path, repo.setup_script.as_deref()).await {
-            Ok(()) => {
-                workspace.status = CodeWorkspaceStatus::Active;
-                workspace.archived_at = None;
-                Self::clear_release(&mut workspace, &self.data_dir);
-                save_workspace(&self.db, &workspace).await?;
-                Ok(workspace)
+        let setup = run_setup_script(path, repo.setup_script.as_deref()).await;
+        workspace.status = if setup.is_ok() {
+            CodeWorkspaceStatus::Active
+        } else {
+            CodeWorkspaceStatus::SetupFailed
+        };
+        workspace.archived_at = None;
+        if released {
+            Self::clear_release(&mut workspace);
+        }
+        match self.save_workspace_final(&workspace).await {
+            Ok(true) => {}
+            Ok(false) => {
+                operation.rollback().await;
+                return Err(ServerError::not_found(format!(
+                    "workspace {} not found",
+                    workspace.id
+                )));
             }
-            Err(err) => {
-                workspace.status = CodeWorkspaceStatus::SetupFailed;
-                workspace.archived_at = None;
-                Self::clear_release(&mut workspace, &self.data_dir);
-                save_workspace(&self.db, &workspace).await?;
-                Err(ServerError::unprocessable_kind(
-                    "setup_failed",
-                    err.to_string(),
-                ))
+            Err(error) => {
+                operation.rollback().await;
+                return Err(error);
             }
+        }
+        operation.complete().await;
+        if released {
+            Self::remove_release_bundle(&workspace, &self.data_dir);
+        }
+        match setup {
+            Ok(()) => Ok(workspace),
+            Err(error) => Err(ServerError::unprocessable_kind(
+                "setup_failed",
+                error.to_string(),
+            )),
         }
     }
 
@@ -5284,6 +5357,7 @@ fn map_worktree(err: WorktreeError) -> ServerError {
         WorktreeError::ArchiveUncertain(message) => {
             ServerError::conflict_kind("archive_inspection_uncertain", message)
         }
+        WorktreeError::Conflict { kind, message } => ServerError::conflict_kind(kind, message),
     }
 }
 

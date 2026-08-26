@@ -119,8 +119,9 @@ pub async fn release_workspace(
 /// The worktree comes back at the same path on the kept branch; session rows
 /// and journal history were never deleted, so the conversation is readable
 /// again the moment this returns. 409 kinds: `branch_missing` (the branch was
-/// deleted since archive — fall back to a new workspace), and
-/// `worktree_path_occupied`.
+/// deleted since archive — fall back to a new workspace),
+/// `released_branch_mismatch`, `released_tip_mismatch`,
+/// `worktree_path_busy`, and `worktree_path_occupied`.
 pub async fn restore_workspace(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,

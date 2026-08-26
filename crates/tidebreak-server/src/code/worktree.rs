@@ -3,11 +3,13 @@
 //! Every git call is a bounded, non-interactive subprocess of the user's own
 //! `git` binary. Arguments are an argv array, never a shell string.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -29,6 +31,8 @@ const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
 const ARCHIVE_SCAN_MAX_ENTRIES: usize = 10_000;
 const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
 const ARCHIVE_DISPOSABLE_PATH_KEY: &str = "tidebreak.archiveDisposablePath";
+const WORKTREE_OPERATION_SUFFIX: &str = ".tidebreak-operation";
+const WORKTREE_REGISTRATION_MARKER: &str = "tidebreak-operation.json";
 
 const ADJECTIVES: &[&str] = &[
     "amber", "brave", "calm", "crisp", "dusk", "ember", "faint", "gentle", "hidden", "ivory",
@@ -66,6 +70,11 @@ pub(crate) fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
     unsafe {
         CompareStringOrdinal(left.as_ptr(), left_len, right.as_ptr(), right_len, 1) == CSTR_EQUAL
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
+    left == right
 }
 
 #[cfg(windows)]
@@ -153,6 +162,8 @@ pub(crate) enum WorktreeError {
     Internal(String),
     #[error("{0}")]
     ArchiveUncertain(String),
+    #[error("{message}")]
+    Conflict { kind: &'static str, message: String },
 }
 
 impl WorktreeError {
@@ -167,6 +178,41 @@ impl WorktreeError {
     fn archive_uncertain(message: impl Into<String>) -> Self {
         Self::ArchiveUncertain(message.into())
     }
+
+    fn conflict(kind: &'static str, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorktreeOperationMarker {
+    operation_id: uuid::Uuid,
+    repository: String,
+    worktree_path: String,
+    branch: String,
+    expected_tip: String,
+}
+
+/// A checkout operation that still owns the target reservation.
+///
+/// The caller keeps this value until the workspace's final lifecycle row is
+/// durable. A failed durable write can then remove only the checkout and ref
+/// that still match this operation.
+#[derive(Debug)]
+pub(crate) struct WorktreeOperation {
+    repo_root: PathBuf,
+    marker_path: PathBuf,
+    marker: WorktreeOperationMarker,
+    branch_created: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoredBranch {
+    Created,
+    Existing,
 }
 
 /// Name-matched git-tracked and untracked-unignored paths. Never file contents.
@@ -470,39 +516,16 @@ pub(crate) async fn create_worktree(
     worktree_path: &Path,
     branch: &str,
     base_ref: &str,
-) -> Result<(), WorktreeError> {
-    if let Some(parent) = worktree_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|err| {
-            WorktreeError::internal(format!(
-                "could not create worktree parent {}: {err}",
-                parent.display()
-            ))
-        })?;
+) -> Result<WorktreeOperation, WorktreeError> {
+    let expected_tip = resolve_ref(repo_root, base_ref).await?;
+    let mut operation =
+        reserve_worktree_target(repo_root, worktree_path, branch, &expected_tip).await?;
+    if let Err(err) = create_branch_at(repo_root, branch, &expected_tip).await {
+        operation.rollback().await;
+        return Err(err);
     }
-    let add = git(
-        Some(repo_root),
-        &[
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            &worktree_path.to_string_lossy(),
-            base_ref,
-        ],
-        GIT_WORKTREE_TIMEOUT,
-    )
-    .await;
-    if let Err(err) = add {
-        cleanup_half_created(repo_root, worktree_path).await;
-        return Err(classify_worktree_add(err, branch));
-    }
-    match verify_inside_worktree(worktree_path).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            cleanup_half_created(repo_root, worktree_path).await;
-            Err(err)
-        }
-    }
+    operation.branch_created = true;
+    operation.add_existing_branch_or_rollback().await
 }
 
 /// True when `refs/heads/<branch>` exists in the repository.
@@ -532,40 +555,619 @@ pub(crate) async fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool
 /// Re-create a worktree checking out an existing branch.
 ///
 /// The restore counterpart of [`create_worktree`], deliberately a sibling and
-/// not a flag on it: create always mints a branch (`-b`), restore must never
-/// mint one — the branch surviving archive is what makes the workspace worth
-/// restoring. The caller has already verified the branch exists; a race that
-/// deletes it between the check and this call still fails cleanly here.
+/// not a flag on it: create atomically mints a branch, while restore must never
+/// mint one. The branch surviving archive is what makes the workspace worth
+/// restoring.
 pub(crate) async fn restore_worktree(
     repo_root: &Path,
     worktree_path: &Path,
     branch: &str,
-) -> Result<(), WorktreeError> {
-    if let Some(parent) = worktree_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|err| {
+) -> Result<WorktreeOperation, WorktreeError> {
+    let expected_tip = branch_tip(repo_root, branch).await?;
+    let operation =
+        reserve_worktree_target(repo_root, worktree_path, branch, &expected_tip).await?;
+    if let Err(err) = require_branch_tip(repo_root, branch, &expected_tip).await {
+        operation.rollback().await;
+        return Err(err);
+    }
+    operation.add_existing_branch_or_rollback().await
+}
+
+/// Re-create a released branch from its bundle and check out its exact tip.
+pub(crate) async fn restore_released_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    bundle: &Path,
+    released_tip: &str,
+) -> Result<WorktreeOperation, WorktreeError> {
+    let mut operation =
+        reserve_worktree_target(repo_root, worktree_path, branch, released_tip).await?;
+    let restored = match restore_released_branch(&operation, bundle).await {
+        Ok(restored) => restored,
+        Err(err) => {
+            operation.rollback().await;
+            return Err(err);
+        }
+    };
+    operation.branch_created = restored == RestoredBranch::Created;
+    operation.add_existing_branch_or_rollback().await
+}
+
+impl WorktreeOperation {
+    async fn add_existing_branch_or_rollback(mut self) -> Result<Self, WorktreeError> {
+        if let Err(err) = self.add_existing_branch().await {
+            self.rollback().await;
+            return Err(err);
+        }
+        Ok(self)
+    }
+
+    async fn add_existing_branch(&mut self) -> Result<(), WorktreeError> {
+        let repo_root = &self.repo_root;
+        let worktree_path = Path::new(&self.marker.worktree_path);
+        let branch = self.marker.branch.as_str();
+        self.require_repository_identity().await?;
+        let add = git(
+            Some(repo_root),
+            &["worktree", "add", &worktree_path.to_string_lossy(), branch],
+            GIT_WORKTREE_TIMEOUT,
+        )
+        .await;
+        if let Err(err) = add {
+            return Err(classify_worktree_add(err, branch));
+        }
+        self.write_registration_marker().await?;
+        verify_worktree_identity(repo_root, worktree_path, branch, &self.marker.expected_tip).await
+    }
+
+    /// Release the reservation after the final workspace row is durable.
+    pub(crate) async fn complete(self) {
+        if let Err(error) = self.remove_registration_marker().await {
+            tracing::warn!(
+                path = %self.marker.worktree_path,
+                operation = %self.marker.operation_id,
+                "code-mode: could not release worktree registration marker: {error}"
+            );
+            return;
+        }
+        if let Err(error) = self.remove_owned_marker().await {
+            tracing::warn!(
+                path = %self.marker_path.display(),
+                operation = %self.marker.operation_id,
+                "code-mode: could not release worktree path marker: {error}"
+            );
+        }
+    }
+
+    /// Remove only the unchanged checkout and branch created by this attempt.
+    pub(crate) async fn rollback(&self) {
+        let owns_marker = match self.owns_marker().await {
+            Ok(owns_marker) => owns_marker,
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.marker_path.display(),
+                    operation = %self.marker.operation_id,
+                    "code-mode: could not verify worktree operation ownership: {error}"
+                );
+                return;
+            }
+        };
+        if !owns_marker {
+            return;
+        }
+
+        if let Err(error) = self.require_repository_identity().await {
+            tracing::warn!(
+                repository = %self.repo_root.display(),
+                operation = %self.marker.operation_id,
+                "code-mode: refused worktree rollback after repository replacement: {error}"
+            );
+            let _ = self.remove_owned_marker().await;
+            return;
+        }
+
+        let repo_root = &self.repo_root;
+        let worktree_path = Path::new(&self.marker.worktree_path);
+        let expected_branch = format!("refs/heads/{}", self.marker.branch);
+        match registered_worktree(repo_root, worktree_path).await {
+            Ok(Some(registered))
+                if registered.head == self.marker.expected_tip
+                    && registered.branch.as_deref() == Some(expected_branch.as_str()) =>
+            {
+                match self.owns_registration_marker().await {
+                    Ok(true) => match git(
+                        Some(repo_root),
+                        &[
+                            "worktree",
+                            "remove",
+                            "--force",
+                            &registered.path.to_string_lossy(),
+                        ],
+                        GIT_WORKTREE_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                path = %worktree_path.display(),
+                                operation = %self.marker.operation_id,
+                                "code-mode: could not roll back owned worktree: {error}"
+                            );
+                        }
+                    },
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %worktree_path.display(),
+                            operation = %self.marker.operation_id,
+                            "code-mode: could not verify worktree registration ownership: {error}"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Ok(Some(_)) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %worktree_path.display(),
+                    operation = %self.marker.operation_id,
+                    "code-mode: could not inspect failed worktree registration: {error}"
+                );
+            }
+        }
+
+        let _ = prune_worktrees(repo_root).await;
+        if self.branch_created
+            && !branch_is_registered(repo_root, &self.marker.branch)
+                .await
+                .unwrap_or(true)
+        {
+            let branch_ref = format!("refs/heads/{}", self.marker.branch);
+            let _ = git(
+                Some(repo_root),
+                &["update-ref", "-d", &branch_ref, &self.marker.expected_tip],
+                GIT_TIMEOUT,
+            )
+            .await;
+        }
+        if let Err(error) = self.remove_owned_marker().await {
+            tracing::warn!(
+                path = %self.marker_path.display(),
+                operation = %self.marker.operation_id,
+                "code-mode: could not release failed worktree marker: {error}"
+            );
+        }
+    }
+
+    async fn require_repository_identity(&self) -> Result<(), WorktreeError> {
+        let current = repository_identity(&self.repo_root).await?;
+        if current == self.marker.repository {
+            Ok(())
+        } else {
+            Err(WorktreeError::conflict(
+                "worktree_repository_changed",
+                format!(
+                    "repository {} changed during worktree operation {}",
+                    self.repo_root.display(),
+                    self.marker.operation_id
+                ),
+            ))
+        }
+    }
+
+    async fn write_registration_marker(&self) -> Result<(), WorktreeError> {
+        let path = self.registration_marker_path().await?;
+        let bytes = serde_json::to_vec(&self.marker).map_err(|error| {
             WorktreeError::internal(format!(
-                "could not create worktree parent {}: {err}",
+                "could not encode worktree registration marker: {error}"
+            ))
+        })?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        let mut file = options.open(&path).await.map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not write worktree registration marker {}: {error}",
+                path.display()
+            ))
+        })?;
+        file.write_all(&bytes).await.map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not write worktree registration marker {}: {error}",
+                path.display()
+            ))
+        })?;
+        file.sync_all().await.map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not sync worktree registration marker {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    async fn registration_marker_path(&self) -> Result<PathBuf, WorktreeError> {
+        let git_dir = git_stdout(
+            Some(Path::new(&self.marker.worktree_path)),
+            &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
+            GIT_TIMEOUT,
+        )
+        .await
+        .map_err(|error| {
+            WorktreeError::internal(format!("could not resolve worktree git directory: {error}"))
+        })?;
+        Ok(PathBuf::from(git_dir.trim()).join(WORKTREE_REGISTRATION_MARKER))
+    }
+
+    async fn owns_registration_marker(&self) -> Result<bool, WorktreeError> {
+        let path = self.registration_marker_path().await?;
+        marker_matches(&path, &self.marker).await
+    }
+
+    async fn remove_registration_marker(&self) -> Result<(), WorktreeError> {
+        let path = self.registration_marker_path().await?;
+        if !marker_matches(&path, &self.marker).await? {
+            return Err(WorktreeError::internal(format!(
+                "worktree registration marker {} no longer belongs to operation {}",
+                path.display(),
+                self.marker.operation_id
+            )));
+        }
+        tokio::fs::remove_file(&path).await.map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not remove worktree registration marker {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    async fn owns_marker(&self) -> Result<bool, WorktreeError> {
+        marker_matches(&self.marker_path, &self.marker).await
+    }
+
+    async fn remove_owned_marker(&self) -> Result<(), WorktreeError> {
+        if !self.owns_marker().await? {
+            return Ok(());
+        }
+        match tokio::fs::remove_file(&self.marker_path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(WorktreeError::internal(format!(
+                "could not remove operation marker {}: {error}",
+                self.marker_path.display()
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegisteredWorktree {
+    path: PathBuf,
+    head: String,
+    branch: Option<String>,
+}
+
+async fn reserve_worktree_target(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    expected_tip: &str,
+) -> Result<WorktreeOperation, WorktreeError> {
+    let repo_root = repo_root.canonicalize().map_err(|error| {
+        WorktreeError::internal(format!(
+            "could not canonicalize repository {}: {error}",
+            repo_root.display()
+        ))
+    })?;
+    let repository = repository_identity(&repo_root).await?;
+    if let Some(parent) = worktree_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not create worktree parent {}: {error}",
                 parent.display()
             ))
         })?;
     }
-    let add = git(
-        Some(repo_root),
-        &["worktree", "add", &worktree_path.to_string_lossy(), branch],
-        GIT_WORKTREE_TIMEOUT,
-    )
-    .await;
-    if let Err(err) = add {
-        cleanup_half_created(repo_root, worktree_path).await;
-        return Err(classify_worktree_add(err, branch));
+    let marker_path = worktree_operation_marker_path(worktree_path)?;
+    let marker = WorktreeOperationMarker {
+        operation_id: uuid::Uuid::new_v4(),
+        repository,
+        worktree_path: worktree_path.display().to_string(),
+        branch: branch.to_owned(),
+        expected_tip: expected_tip.to_owned(),
+    };
+    let bytes = serde_json::to_vec(&marker).map_err(|error| {
+        WorktreeError::internal(format!(
+            "could not encode worktree operation marker: {error}"
+        ))
+    })?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    let mut file = match options.open(&marker_path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(WorktreeError::conflict(
+                "worktree_path_busy",
+                format!(
+                    "another worktree operation owns {}",
+                    worktree_path.display()
+                ),
+            ));
+        }
+        Err(error) => {
+            return Err(WorktreeError::internal(format!(
+                "could not reserve worktree path {}: {error}",
+                worktree_path.display()
+            )));
+        }
+    };
+    if let Err(error) = file.write_all(&bytes).await {
+        let _ = tokio::fs::remove_file(&marker_path).await;
+        return Err(WorktreeError::internal(format!(
+            "could not write worktree operation marker {}: {error}",
+            marker_path.display()
+        )));
     }
-    match verify_inside_worktree(worktree_path).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            cleanup_half_created(repo_root, worktree_path).await;
-            Err(err)
+    if let Err(error) = file.sync_all().await {
+        let _ = tokio::fs::remove_file(&marker_path).await;
+        return Err(WorktreeError::internal(format!(
+            "could not sync worktree operation marker {}: {error}",
+            marker_path.display()
+        )));
+    }
+    drop(file);
+    let operation = WorktreeOperation {
+        repo_root,
+        marker_path,
+        marker,
+        branch_created: false,
+    };
+    match tokio::fs::symlink_metadata(worktree_path).await {
+        Ok(_) => {
+            operation.remove_owned_marker().await?;
+            Err(WorktreeError::conflict(
+                "worktree_path_occupied",
+                format!("something already exists at {}", worktree_path.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(operation),
+        Err(error) => {
+            operation.remove_owned_marker().await?;
+            Err(WorktreeError::internal(format!(
+                "could not inspect worktree path {}: {error}",
+                worktree_path.display()
+            )))
         }
     }
+}
+
+async fn repository_identity(repo_root: &Path) -> Result<String, WorktreeError> {
+    let git_dir = git_stdout(
+        Some(repo_root),
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        WorktreeError::internal(format!("could not resolve repository identity: {error}"))
+    })?;
+    Path::new(git_dir.trim())
+        .canonicalize()
+        .map(|path| path.display().to_string())
+        .map_err(|error| {
+            WorktreeError::internal(format!(
+                "could not canonicalize repository identity {}: {error}",
+                git_dir.trim()
+            ))
+        })
+}
+
+async fn marker_matches(
+    path: &Path,
+    expected: &WorktreeOperationMarker,
+) -> Result<bool, WorktreeError> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(serde_json::from_slice::<WorktreeOperationMarker>(&bytes)
+            .map(|marker| &marker == expected)
+            .unwrap_or(false)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(WorktreeError::internal(format!(
+            "could not read operation marker {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn worktree_operation_marker_path(worktree_path: &Path) -> Result<PathBuf, WorktreeError> {
+    let Some(file_name) = worktree_path.file_name() else {
+        return Err(WorktreeError::internal(format!(
+            "worktree path {} has no leaf",
+            worktree_path.display()
+        )));
+    };
+    let mut marker_name = OsString::from(".");
+    marker_name.push(file_name);
+    marker_name.push(WORKTREE_OPERATION_SUFFIX);
+    Ok(worktree_path.with_file_name(marker_name))
+}
+
+async fn resolve_ref(repo_root: &Path, reference: &str) -> Result<String, WorktreeError> {
+    git_stdout(
+        Some(repo_root),
+        &["rev-parse", &format!("{reference}^{{commit}}")],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map(|tip| tip.trim().to_owned())
+    .map_err(|error| WorktreeError::user(format!("could not resolve {reference}: {error}")))
+}
+
+async fn create_branch_at(
+    repo_root: &Path,
+    branch: &str,
+    expected_tip: &str,
+) -> Result<(), WorktreeError> {
+    let branch_ref = format!("refs/heads/{branch}");
+    git(
+        Some(repo_root),
+        &["update-ref", &branch_ref, expected_tip, ""],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        WorktreeError::conflict(
+            "branch_collision",
+            format!("branch {branch} already exists: {error}"),
+        )
+    })
+}
+
+async fn require_branch_tip(
+    repo_root: &Path,
+    branch: &str,
+    expected_tip: &str,
+) -> Result<(), WorktreeError> {
+    let actual_tip = branch_tip(repo_root, branch).await?;
+    if actual_tip == expected_tip {
+        Ok(())
+    } else {
+        Err(WorktreeError::conflict(
+            "branch_tip_changed",
+            format!("branch {branch} moved from {expected_tip} to {actual_tip} during restore"),
+        ))
+    }
+}
+
+async fn verify_worktree_identity(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    expected_tip: &str,
+) -> Result<(), WorktreeError> {
+    verify_inside_worktree(worktree_path).await?;
+    let actual_repo = git_stdout(
+        Some(worktree_path),
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        WorktreeError::internal(format!("worktree repository check failed: {error}"))
+    })?;
+    let expected_git_dir = git_stdout(
+        Some(repo_root),
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        WorktreeError::internal(format!("repository identity check failed: {error}"))
+    })?;
+    if !repo_paths_equivalent(
+        Path::new(actual_repo.trim()),
+        Path::new(expected_git_dir.trim()),
+    ) {
+        return Err(WorktreeError::internal(format!(
+            "worktree {} belongs to a different repository",
+            worktree_path.display()
+        )));
+    }
+    let head = resolve_ref(worktree_path, "HEAD").await?;
+    if head != expected_tip {
+        return Err(WorktreeError::conflict(
+            "worktree_tip_changed",
+            format!(
+                "worktree {} checked out {head}, expected {expected_tip}",
+                worktree_path.display()
+            ),
+        ));
+    }
+    let checked_out = git_stdout(
+        Some(worktree_path),
+        &["symbolic-ref", "--quiet", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| WorktreeError::internal(format!("worktree branch check failed: {error}")))?;
+    if checked_out.trim() != format!("refs/heads/{branch}") {
+        return Err(WorktreeError::internal(format!(
+            "worktree {} checked out {}, expected {branch}",
+            worktree_path.display(),
+            checked_out.trim()
+        )));
+    }
+    Ok(())
+}
+
+async fn registered_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+) -> Result<Option<RegisteredWorktree>, WorktreeError> {
+    let fields = git_nul_stdout(
+        Some(repo_root),
+        &["worktree", "list", "--porcelain", "-z"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| WorktreeError::internal(format!("git worktree list failed: {error}")))?;
+    let mut matches_path = false;
+    let mut registered_path = None;
+    let mut head = None;
+    let mut branch = None;
+    for field in fields {
+        if let Some(path) = field.strip_prefix("worktree ") {
+            if matches_path {
+                return Ok(head.map(|head| RegisteredWorktree {
+                    path: registered_path.expect("a matched worktree has a path"),
+                    head,
+                    branch,
+                }));
+            }
+            let path = PathBuf::from(path);
+            matches_path = existing_paths_equivalent(&path, worktree_path);
+            registered_path = matches_path.then_some(path);
+            head = None;
+            branch = None;
+        } else if matches_path {
+            if let Some(value) = field.strip_prefix("HEAD ") {
+                head = Some(value.to_owned());
+            } else if let Some(value) = field.strip_prefix("branch ") {
+                branch = Some(value.to_owned());
+            }
+        }
+    }
+    if matches_path {
+        Ok(head.map(|head| RegisteredWorktree {
+            path: registered_path.expect("a matched worktree has a path"),
+            head,
+            branch,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn existing_paths_equivalent(left: &Path, right: &Path) -> bool {
+    if repo_paths_equivalent(left, right) {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => repo_paths_equivalent(&left, &right),
+        _ => false,
+    }
+}
+
+async fn branch_is_registered(repo_root: &Path, branch: &str) -> Result<bool, WorktreeError> {
+    let expected = format!("branch refs/heads/{branch}");
+    git_nul_stdout(
+        Some(repo_root),
+        &["worktree", "list", "--porcelain", "-z"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map(|fields| fields.iter().any(|field| field == &expected))
+    .map_err(|error| WorktreeError::internal(format!("git worktree list failed: {error}")))
 }
 
 /// Run the setup script, if any. Failure preserves the checkout.
@@ -763,16 +1365,14 @@ pub(crate) async fn create_bundle(
     Ok(size)
 }
 
-/// Restore a branch from its bundle.
-///
-/// Verifies the bundle before fetching: a truncated or corrupt file must fail
-/// here, with the branch still absent, rather than half-populate the object
-/// store and leave a ref pointing at commits whose parents never arrived.
-pub(crate) async fn unbundle_branch(
-    repo_root: &Path,
+/// Restore the exact released branch tip through a temporary Tidebreak ref.
+async fn restore_released_branch(
+    operation: &WorktreeOperation,
     bundle: &Path,
-    branch: &str,
-) -> Result<(), WorktreeError> {
+) -> Result<RestoredBranch, WorktreeError> {
+    let repo_root = &operation.repo_root;
+    let branch = operation.marker.branch.as_str();
+    let expected_tip = operation.marker.expected_tip.as_str();
     if !bundle.exists() {
         return Err(WorktreeError::user(format!(
             "bundle {} is missing; this workspace cannot be restored",
@@ -787,18 +1387,72 @@ pub(crate) async fn unbundle_branch(
     )
     .await
     .map_err(|err| WorktreeError::user(format!("bundle {path} is not usable: {err}")))?;
-    git(
+
+    let temporary_ref = format!(
+        "refs/tidebreak/restores/{}",
+        operation.marker.operation_id.simple()
+    );
+    let result = async {
+        git(
+            Some(repo_root),
+            &[
+                "fetch",
+                path.as_ref(),
+                &format!("refs/heads/{branch}:{temporary_ref}"),
+            ],
+            GIT_WORKTREE_TIMEOUT,
+        )
+        .await
+        .map_err(|err| WorktreeError::user(format!("bundle does not contain {branch}: {err}")))?;
+
+        let bundled_tip = resolve_ref(repo_root, &temporary_ref).await?;
+        if bundled_tip != expected_tip {
+            Err(WorktreeError::conflict(
+                "released_tip_mismatch",
+                format!(
+                    "bundle for {branch} contains {bundled_tip}, expected released tip \
+                         {expected_tip}"
+                ),
+            ))
+        } else if branch_exists(repo_root, branch).await? {
+            require_branch_tip(repo_root, branch, expected_tip)
+                .await
+                .map(|()| RestoredBranch::Existing)
+                .map_err(|_| {
+                    WorktreeError::conflict(
+                        "released_branch_mismatch",
+                        format!(
+                            "branch {branch} exists at a different commit; the released \
+                                 bundle was preserved"
+                        ),
+                    )
+                })
+        } else {
+            match create_branch_at(repo_root, branch, expected_tip).await {
+                Ok(()) => Ok(RestoredBranch::Created),
+                Err(_) => require_branch_tip(repo_root, branch, expected_tip)
+                    .await
+                    .map(|()| RestoredBranch::Existing)
+                    .map_err(|_| {
+                        WorktreeError::conflict(
+                            "released_branch_mismatch",
+                            format!(
+                                "branch {branch} was created at a different commit; the \
+                                     released bundle was preserved"
+                            ),
+                        )
+                    }),
+            }
+        }
+    }
+    .await;
+    let _ = git(
         Some(repo_root),
-        &[
-            "fetch",
-            path.as_ref(),
-            &format!("refs/heads/{branch}:refs/heads/{branch}"),
-        ],
-        GIT_WORKTREE_TIMEOUT,
+        &["update-ref", "-d", &temporary_ref],
+        GIT_TIMEOUT,
     )
-    .await
-    .map_err(|err| WorktreeError::internal(format!("git fetch from bundle failed: {err}")))?;
-    Ok(())
+    .await;
+    result
 }
 
 /// Delete a branch, discarding the ref whether or not it merged.
@@ -1012,20 +1666,6 @@ async fn verify_inside_worktree(path: &Path) -> Result<(), WorktreeError> {
         Err(WorktreeError::internal(
             "worktree verification failed: path is not inside a work tree".to_owned(),
         ))
-    }
-}
-
-async fn cleanup_half_created(repo_root: &Path, worktree_path: &Path) {
-    let path = worktree_path.to_string_lossy();
-    let _ = git(
-        Some(repo_root),
-        &["worktree", "remove", "--force", path.as_ref()],
-        GIT_TIMEOUT,
-    )
-    .await;
-    let _ = git(Some(repo_root), &["worktree", "prune"], GIT_TIMEOUT).await;
-    if worktree_path.exists() {
-        let _ = tokio::fs::remove_dir_all(worktree_path).await;
     }
 }
 
@@ -1338,6 +1978,14 @@ mod tests {
         assert!(status.success(), "{args:?} failed in {}", cwd.display());
     }
 
+    async fn create_ready(repo: &Path, path: &Path, branch: &str, base_ref: &str) {
+        create_worktree(repo, path, branch, base_ref)
+            .await
+            .unwrap()
+            .complete()
+            .await;
+    }
+
     #[tokio::test]
     async fn validate_repo_refuses_bare_and_nested_non_repos() {
         let (dir, repo) = init_repo();
@@ -1363,9 +2011,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
         let path = scratch_worktree(data.path(), "first");
-        create_worktree(&repo, &path, "tidebreak/first", "main")
-            .await
-            .unwrap();
+        create_ready(&repo, &path, "tidebreak/first", "main").await;
         verify_inside_worktree(&path).await.unwrap();
 
         let err = run_setup_script(&path, Some("exit 7")).await.unwrap_err();
@@ -1403,8 +2049,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
         let path = scratch_worktree(data.path(), "ghost");
-        // Point at a missing base so `worktree add` fails after creating the branch
-        // attempt; cleanup must not leave a registered worktree.
+        // A missing base fails before branch or checkout creation.
         let err = create_worktree(&repo, &path, "tidebreak/ghost", "no-such-ref")
             .await
             .unwrap_err();
@@ -1424,9 +2069,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
         let path = scratch_worktree(data.path(), "dirty");
-        create_worktree(&repo, &path, "tidebreak/dirty", "main")
-            .await
-            .unwrap();
+        create_ready(&repo, &path, "tidebreak/dirty", "main").await;
         std::fs::write(path.join("extra.txt"), "uncommitted\n").unwrap();
         assert_eq!(
             archive_blockers(&path, "main").await.unwrap(),
@@ -1438,9 +2081,7 @@ mod tests {
 
         // Already-removed: deleting the directory out of band, then archive.
         let path2 = scratch_worktree(data.path(), "gone");
-        create_worktree(&repo, &path2, "tidebreak/gone", "main")
-            .await
-            .unwrap();
+        create_ready(&repo, &path2, "tidebreak/gone", "main").await;
         std::fs::remove_dir_all(&path2).unwrap();
         remove_worktree(&repo, &path2).await.unwrap();
         let listed = git_stdout(Some(&repo), &["worktree", "list"], GIT_TIMEOUT)
@@ -1457,9 +2098,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
         let first = scratch_worktree(data.path(), "one");
-        create_worktree(&repo, &first, "tidebreak/same", "main")
-            .await
-            .unwrap();
+        create_ready(&repo, &first, "tidebreak/same", "main").await;
         let second = scratch_worktree(data.path(), "two");
         let err = create_worktree(&repo, &second, "tidebreak/same", "main")
             .await
@@ -1469,6 +2108,101 @@ mod tests {
             "collision must not auto-suffix: {err}"
         );
         assert!(!second.exists());
+    }
+
+    #[tokio::test]
+    async fn occupied_foreign_directory_is_never_removed() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "foreign");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("keep.txt"), "foreign\n").unwrap();
+
+        let err = create_worktree(&repo, &path, "tidebreak/foreign", "main")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            WorktreeError::Conflict {
+                kind: "worktree_path_occupied",
+                ..
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.join("keep.txt")).unwrap(),
+            "foreign\n"
+        );
+        assert!(!branch_exists(&repo, "tidebreak/foreign").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_restores_leave_one_complete_checkout() {
+        let (_dir, repo) = init_repo();
+        run(&repo, &["git", "branch", "tidebreak/archive", "main"]);
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "concurrent");
+
+        let (left, right) = tokio::join!(
+            restore_worktree(&repo, &path, "tidebreak/archive"),
+            restore_worktree(&repo, &path, "tidebreak/archive")
+        );
+        let (winner, loser) = match (left, right) {
+            (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
+            (left, right) => panic!("expected one restore winner, got {left:?} and {right:?}"),
+        };
+        assert!(matches!(
+            loser,
+            WorktreeError::Conflict {
+                kind: "worktree_path_busy" | "worktree_path_occupied",
+                ..
+            }
+        ));
+        verify_inside_worktree(&path).await.unwrap();
+        assert_eq!(
+            branch_tip(&repo, "tidebreak/archive").await.unwrap(),
+            resolve_ref(&path, "HEAD").await.unwrap()
+        );
+        winner.complete().await;
+    }
+
+    #[tokio::test]
+    async fn losing_add_cleanup_preserves_the_concurrent_winner() {
+        let (_dir, repo) = init_repo();
+        let expected_tip = branch_tip(&repo, "main").await.unwrap();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "winner");
+        let mut losing = reserve_worktree_target(&repo, &path, "tidebreak/loser", &expected_tip)
+            .await
+            .unwrap();
+        create_branch_at(&repo, "tidebreak/loser", &expected_tip)
+            .await
+            .unwrap();
+        losing.branch_created = true;
+
+        run(&repo, &["git", "checkout", "-b", "tidebreak/winner"]);
+        std::fs::write(repo.join("winner.txt"), "winner\n").unwrap();
+        run(&repo, &["git", "add", "winner.txt"]);
+        run(&repo, &["git", "commit", "-m", "winner"]);
+        let winner_tip = branch_tip(&repo, "tidebreak/winner").await.unwrap();
+        run(&repo, &["git", "checkout", "main"]);
+        run(
+            &repo,
+            &[
+                "git",
+                "worktree",
+                "add",
+                path.to_str().unwrap(),
+                "tidebreak/winner",
+            ],
+        );
+
+        assert!(losing.add_existing_branch_or_rollback().await.is_err());
+
+        verify_inside_worktree(&path).await.unwrap();
+        assert_eq!(resolve_ref(&path, "HEAD").await.unwrap(), winner_tip);
+        assert!(path.join("winner.txt").is_file());
+        assert!(branch_exists(&repo, "tidebreak/winner").await.unwrap());
+        assert!(!branch_exists(&repo, "tidebreak/loser").await.unwrap());
     }
 
     #[tokio::test]
@@ -1602,9 +2336,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
         let path = scratch_worktree(data.path(), "blob");
-        create_worktree(&repo, &path, "tidebreak/blob", "main")
-            .await
-            .unwrap();
+        create_ready(&repo, &path, "tidebreak/blob", "main").await;
         std::fs::write(path.join("notes.md"), "hello from blob\n").unwrap();
 
         let blob = read_worktree_file(&path, "notes.md").await.unwrap();
@@ -1622,9 +2354,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let data = TempDir::new().unwrap();
         let path = scratch_worktree(data.path(), "blob-cap");
-        create_worktree(&repo, &path, "tidebreak/blob-cap", "main")
-            .await
-            .unwrap();
+        create_ready(&repo, &path, "tidebreak/blob-cap", "main").await;
         let huge = format!("hello {}\n", "x".repeat(MAX_BLOB_BYTES + 64));
         std::fs::write(path.join("huge.txt"), &huge).unwrap();
 
@@ -1683,18 +2413,20 @@ mod tests {
         delete_branch(&repo, "tidebreak/work").await.unwrap();
         assert!(!branch_exists(&repo, "tidebreak/work").await.unwrap());
 
-        unbundle_branch(&repo, &bundle, "tidebreak/work")
+        let path = scratch_worktree(dir.path(), "released");
+        restore_released_worktree(&repo, &path, "tidebreak/work", &bundle, &tip)
             .await
-            .unwrap();
+            .unwrap()
+            .complete()
+            .await;
         assert!(branch_exists(&repo, "tidebreak/work").await.unwrap());
         // Same commit, not merely a branch of the same name.
         assert_eq!(branch_tip(&repo, "tidebreak/work").await.unwrap(), tip);
-        run(&repo, &["git", "checkout", "tidebreak/work"]);
         // Normalize: git checks out with CRLF under Windows' default
         // `core.autocrlf`, and the round trip is about the content, not the
         // platform's line endings.
         assert_eq!(
-            std::fs::read_to_string(repo.join("feature.txt"))
+            std::fs::read_to_string(path.join("feature.txt"))
                 .unwrap()
                 .replace("\r\n", "\n"),
             "work\n"
@@ -1753,12 +2485,95 @@ mod tests {
     async fn a_corrupt_bundle_is_refused_and_leaves_no_branch() {
         let (dir, repo) = init_repo();
         let bundle = dir.path().join("broken.bundle");
+        let path = scratch_worktree(dir.path(), "broken");
         std::fs::write(&bundle, b"not a bundle").unwrap();
 
-        let err = unbundle_branch(&repo, &bundle, "tidebreak/nope")
-            .await
-            .unwrap_err();
+        let err = restore_released_worktree(
+            &repo,
+            &path,
+            "tidebreak/nope",
+            &bundle,
+            &branch_tip(&repo, "main").await.unwrap(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, WorktreeError::User(_)), "{err:?}");
         assert!(!branch_exists(&repo, "tidebreak/nope").await.unwrap());
+        assert!(!path.exists());
+        assert!(bundle.exists());
+    }
+
+    #[tokio::test]
+    async fn released_restore_refuses_a_foreign_same_name_branch() {
+        let (dir, repo) = init_repo();
+        run(&repo, &["git", "checkout", "-b", "tidebreak/released"]);
+        std::fs::write(repo.join("released.txt"), "released\n").unwrap();
+        run(&repo, &["git", "add", "released.txt"]);
+        run(&repo, &["git", "commit", "-m", "released"]);
+        let released_tip = branch_tip(&repo, "tidebreak/released").await.unwrap();
+        run(&repo, &["git", "checkout", "main"]);
+        let bundle = dir.path().join("released.bundle");
+        create_bundle(&repo, "main", "tidebreak/released", &bundle)
+            .await
+            .unwrap();
+        delete_branch(&repo, "tidebreak/released").await.unwrap();
+
+        run(&repo, &["git", "checkout", "-b", "tidebreak/released"]);
+        std::fs::write(repo.join("foreign.txt"), "foreign\n").unwrap();
+        run(&repo, &["git", "add", "foreign.txt"]);
+        run(&repo, &["git", "commit", "-m", "foreign"]);
+        let foreign_tip = branch_tip(&repo, "tidebreak/released").await.unwrap();
+        run(&repo, &["git", "checkout", "main"]);
+
+        let path = scratch_worktree(dir.path(), "foreign-branch");
+        let err =
+            restore_released_worktree(&repo, &path, "tidebreak/released", &bundle, &released_tip)
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            WorktreeError::Conflict {
+                kind: "released_branch_mismatch",
+                ..
+            }
+        ));
+        assert_eq!(
+            branch_tip(&repo, "tidebreak/released").await.unwrap(),
+            foreign_tip
+        );
+        assert!(bundle.exists());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn released_restore_refuses_a_bundle_with_the_wrong_tip() {
+        let (dir, repo) = init_repo();
+        let expected_tip = branch_tip(&repo, "main").await.unwrap();
+        run(&repo, &["git", "checkout", "-b", "tidebreak/released"]);
+        std::fs::write(repo.join("wrong.txt"), "wrong\n").unwrap();
+        run(&repo, &["git", "add", "wrong.txt"]);
+        run(&repo, &["git", "commit", "-m", "wrong tip"]);
+        run(&repo, &["git", "checkout", "main"]);
+        let bundle = dir.path().join("wrong.bundle");
+        create_bundle(&repo, "main", "tidebreak/released", &bundle)
+            .await
+            .unwrap();
+        delete_branch(&repo, "tidebreak/released").await.unwrap();
+
+        let path = scratch_worktree(dir.path(), "wrong-tip");
+        let err =
+            restore_released_worktree(&repo, &path, "tidebreak/released", &bundle, &expected_tip)
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            WorktreeError::Conflict {
+                kind: "released_tip_mismatch",
+                ..
+            }
+        ));
+        assert!(!branch_exists(&repo, "tidebreak/released").await.unwrap());
+        assert!(bundle.exists());
+        assert!(!path.exists());
     }
 }
