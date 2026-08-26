@@ -1928,7 +1928,7 @@ pub(crate) async fn create_stack(
     run_gh(Path::new("."), &binary, &borrowed, GH_TIMEOUT)
         .await
         .map(|_| ())
-        .map_err(|error| classify_observed_gh(error, observation))
+        .map_err(|error| classify_observed_gh(error, &observation))
 }
 
 pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {

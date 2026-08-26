@@ -273,9 +273,7 @@ impl DeliveryApi {
     ) -> Result<(), ServerError> {
         match self {
             Self::Gh {
-                host,
-                search_path,
-                ..
+                host, search_path, ..
             } => gh::create_stack(
                 host,
                 &target.owner,
@@ -3733,7 +3731,7 @@ async fn persist_and_augment_pull_request_facts(
                     *forked.get_mut() = None;
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(Some(*identity));
+                    slot.insert(Some((*identity).clone()));
                 }
             }
         }
@@ -3744,8 +3742,8 @@ async fn persist_and_augment_pull_request_facts(
     // member reports the same bottom-to-top array.
     let mut chains: HashMap<StackPullRequestIdentity, Option<Vec<u64>>> = HashMap::new();
     let hop_limit = page_items.len() + 1;
-    for (&identity, &index) in &page_items {
-        let mut root = identity;
+    for (identity, &index) in &page_items {
+        let mut root = (*identity).clone();
         let mut hops = 0;
         let mut rooted = true;
         while let Some(parent_number) = items[page_items[&root]].summary.stack_parent_number {
@@ -3767,7 +3765,7 @@ async fn persist_and_augment_pull_request_facts(
         }
         if !chains.contains_key(&root) {
             let mut chain: Vec<u64> = Vec::new();
-            let mut node = root;
+            let mut node = root.clone();
             let mut hops = 0;
             loop {
                 chain.push(node.number);
@@ -3780,7 +3778,7 @@ async fn persist_and_augment_pull_request_facts(
                         break;
                     }
                     Some(Some(child)) => {
-                        node = *child;
+                        node = (*child).clone();
                         hops += 1;
                         if hops > hop_limit {
                             chain.clear();
@@ -3789,10 +3787,10 @@ async fn persist_and_augment_pull_request_facts(
                     }
                 }
             }
-            chains.insert(root, (chain.len() >= 2).then_some(chain));
+            chains.insert(root.clone(), (chain.len() >= 2).then_some(chain));
         }
         if let Some(Some(chain)) = chains.get(&root) {
-            items[index].summary.unregistered_stack_numbers = Some(chain.clone());
+            items[index].summary.unregistered_stack_numbers = Some(chain.to_vec());
         }
     }
 

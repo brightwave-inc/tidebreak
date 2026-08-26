@@ -218,7 +218,6 @@ const HOST_STACKS_JSON: &str = r#"[
   }
 ]"#;
 
-
 /// A host stack that registers the 412 → 413 chain exactly.
 const REGISTERED_STACK_JSON: &str = r#"[
   {
@@ -799,4 +798,3 @@ async fn a_forked_base_is_not_a_stack_and_offers_nothing() {
         );
     }
 }
-
