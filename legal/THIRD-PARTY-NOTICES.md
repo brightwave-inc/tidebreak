@@ -26,8 +26,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 829
-- Desktop UI production packages: 525
-- Distinct license texts: 575
+- Desktop UI production packages: 514
+- Distinct license texts: 576
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -558,19 +558,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/camino-rs/camino
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### cap-fs-ext 4.0.2
+### cap-fs-ext 4.0.3
 
 - License: `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`
 - Repository: https://github.com/bytecodealliance/cap-std
 - License text: `COPYRIGHT` ([L-d47c2d469d60](#l-d47c2d469d60)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### cap-primitives 4.0.2
+### cap-primitives 4.0.3
 
 - License: `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`
 - Repository: https://github.com/bytecodealliance/cap-std
 - License text: `COPYRIGHT` ([L-226fc6da9df7](#l-226fc6da9df7)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### cap-std 4.0.2
+### cap-std 4.0.3
 
 - License: `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`
 - Repository: https://github.com/bytecodealliance/cap-std
@@ -1272,7 +1272,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/servo/rust-url
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-33ed9a8ecf55](#l-33ed9a8ecf55))
 
-### fraction 0.15.4
+### fraction 0.16.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dnsl48/fraction.git
@@ -1920,19 +1920,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/chanced/jsonptr
 - License text: `LICENSE-APACHE` ([L-ae8de7e1b783](#l-ae8de7e1b783)), `LICENSE-MIT` ([L-055a17110636](#l-055a17110636))
 
-### jsonschema 0.49.9
+### jsonschema 0.50.1
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: `LICENSE` ([L-19c8b10a10ca](#l-19c8b10a10ca))
 
-### jsonschema-regex 0.49.9
+### jsonschema-regex 0.50.1
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: not distributed with this package
 
-### jsonschema-value 0.49.9
+### jsonschema-value 0.50.1
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -2884,7 +2884,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/ref-cast
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### referencing 0.49.9
+### referencing 0.50.1
 
 - License: `MIT`
 - Repository: https://github.com/Stranger6667/jsonschema
@@ -3418,7 +3418,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/mitsuhiko/similar
 - License text: `LICENSE` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
-### similar 3.1.2
+### similar 3.2.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/mitsuhiko/similar
@@ -4221,7 +4221,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/hsivonen/utf8_iter
 - License text: `COPYRIGHT` ([L-76c0e37c107d](#l-76c0e37c107d)), `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-7dc2f6402447](#l-7dc2f6402447))
 
-### uuid 1.24.1
+### uuid 1.25.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/uuid-rs/uuid
@@ -5230,7 +5230,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @extend-ai/react-docx 0.8.2
+### @extend-ai/react-docx 0.8.3
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-docx.git
@@ -5290,12 +5290,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/grpc/grpc-node.git
 - License text: `LICENSE` ([L-c5accbbd8546](#l-c5accbbd8546))
 
-### @hugeicons/core-free-icons 4.2.3
+### @hugeicons/core-free-icons 4.3.0
 
 - License: `MIT`
 - License text: not distributed with this package
 
-### @hugeicons/react 1.1.9
+### @hugeicons/react 1.1.10
 
 - License: `MIT`
 - Repository: https://github.com/hugeicons/hugeicons.git
@@ -5439,19 +5439,13 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/primitive 1.1.3
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/primitive 1.1.7
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-accordion 1.2.12
+### @radix-ui/react-accordion 1.2.20
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5475,7 +5469,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-collapsible 1.1.12
+### @radix-ui/react-collapsible 1.1.20
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5487,29 +5481,11 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-collection 1.1.7
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-compose-refs 1.1.2
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: not distributed with this package
-
 ### @radix-ui/react-compose-refs 1.1.5
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-context 1.1.2
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: not distributed with this package
 
 ### @radix-ui/react-context 1.2.2
 
@@ -5528,12 +5504,6 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-direction 1.1.1
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: not distributed with this package
 
 ### @radix-ui/react-direction 1.1.4
 
@@ -5571,12 +5541,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-id 1.1.1
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: not distributed with this package
-
 ### @radix-ui/react-id 1.1.4
 
 - License: `MIT`
@@ -5613,19 +5577,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-presence 1.1.5
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-primitive 2.1.10
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-primitive 2.1.3
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5667,12 +5619,6 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-slot 1.2.3
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-slot 1.3.3
 
 - License: `MIT`
@@ -5709,19 +5655,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
-### @radix-ui/react-use-controllable-state 1.2.2
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
 ### @radix-ui/react-use-controllable-state 1.2.6
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-use-effect-event 0.0.2
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -5738,12 +5672,6 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-use-layout-effect 1.1.1
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: not distributed with this package
 
 ### @radix-ui/react-use-layout-effect 1.1.4
 
@@ -5793,7 +5721,7 @@ License identifiers named across all declared expressions:
 - Repository: git+https://github.com/TanStack/router.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/react-router 1.170.29
+### @tanstack/react-router 1.170.32
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5805,13 +5733,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/TanStack/store.git
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
-### @tanstack/react-virtual 3.14.9
+### @tanstack/react-virtual 3.14.10
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/virtual.git
 - License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
 
-### @tanstack/router-core 1.171.24
+### @tanstack/router-core 1.171.27
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/router.git
@@ -5824,6 +5752,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-d71ca6db0f8b](#l-d71ca6db0f8b))
 
 ### @tanstack/virtual-core 3.17.7
+
+- License: `MIT`
+- Repository: git+https://github.com/TanStack/virtual.git
+- License text: `LICENSE` ([L-277d2a8e4597](#l-277d2a8e4597))
+
+### @tanstack/virtual-core 3.17.8
 
 - License: `MIT`
 - Repository: git+https://github.com/TanStack/virtual.git
@@ -5883,13 +5817,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react 19.2.17
+### @types/react 19.2.18
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react-dom 19.2.3
+### @types/react-dom 19.2.4
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
@@ -7201,7 +7135,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/KaTeX/KaTeX.git
 - License text: `LICENSE` ([L-d3c8c167dfa0](#l-d3c8c167dfa0))
 
-### katex 0.18.1
+### katex 0.18.4
 
 - License: `MIT`
 - Repository: https://github.com/KaTeX/KaTeX.git
@@ -7273,7 +7207,7 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/lowlight
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
-### lucide-react 1.25.0
+### lucide-react 1.33.0
 
 - License: `ISC`
 - Repository: https://github.com/lucide-icons/lucide.git
@@ -7297,7 +7231,7 @@ License identifiers named across all declared expressions:
 - Repository: git://github.com/markedjs/marked.git
 - License text: `LICENSE.md` ([L-dd923de97698](#l-dd923de97698))
 
-### marked 18.0.7
+### marked 18.0.10
 
 - License: `MIT`
 - Repository: git+https://github.com/markedjs/marked.git
@@ -7717,23 +7651,23 @@ License identifiers named across all declared expressions:
 - Repository: git://github.com/mourner/rbush.git
 - License text: `LICENSE` ([L-81a696f48238](#l-81a696f48238))
 
-### react 19.2.7
+### react 19.2.8
 
 - License: `MIT`
-- Repository: https://github.com/facebook/react.git
+- Repository: https://github.com/react/react.git
 - License text: `LICENSE` ([L-cf9b17822d1f](#l-cf9b17822d1f))
 
-### react-dom 19.2.7
+### react-dom 19.2.8
 
 - License: `MIT`
-- Repository: https://github.com/facebook/react.git
+- Repository: https://github.com/react/react.git
 - License text: `LICENSE` ([L-cf9b17822d1f](#l-cf9b17822d1f))
 
-### react-hotkeys-hook 5.2.3
+### react-hotkeys-hook 5.3.3
 
 - License: `MIT`
 - Repository: https://github.com/JohannesKlauss/react-keymap-hook.git
-- License text: not distributed with this package
+- License text: `LICENSE` ([L-0656477357f1](#l-0656477357f1))
 
 ### react-is 16.13.1
 
@@ -7861,13 +7795,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/facebook/react.git
 - License text: `LICENSE` ([L-cf9b17822d1f](#l-cf9b17822d1f))
 
-### seroval 1.6.2
+### seroval 1.6.3
 
 - License: `MIT`
 - Repository: https://github.com/lxsmnsyc/seroval.git
 - License text: `LICENSE` ([L-2bd8a2c61751](#l-2bd8a2c61751))
 
-### seroval-plugins 1.6.2
+### seroval-plugins 1.6.3
 
 - License: `MIT`
 - Repository: https://github.com/lxsmnsyc/seroval.git
@@ -7879,7 +7813,7 @@ License identifiers named across all declared expressions:
 - Repository: YuzuJS/setImmediate
 - License text: `LICENSE.txt` ([L-e989f62f4fdc](#l-e989f62f4fdc))
 
-### sonner 2.0.7
+### sonner 2.0.8
 
 - License: `MIT`
 - Repository: git+https://github.com/emilkowalski/sonner.git
@@ -8190,7 +8124,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sveltejs/zimmerframe
 - License text: `LICENSE` ([L-3ef5af147392](#l-3ef5af147392))
 
-### zustand 5.0.14
+### zustand 5.0.15
 
 - License: `MIT`
 - Repository: git+https://github.com/pmndrs/zustand.git
@@ -8469,6 +8403,32 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### L-0656477357f1
+
+```
+MIT License
+
+Copyright (c) 2018 Johannes Klauss
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-06c9885a0128
