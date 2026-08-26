@@ -1609,16 +1609,20 @@ pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerC
     if merge_state == "behind" {
         return Some(CodeTriggerCondition::Behind);
     }
-    if merge_state == "blocked" || merge_state == "unstable" || review == "review_required" {
-        return Some(CodeTriggerCondition::ReviewRequired);
-    }
     // Pending checks are the "not yet" the watch waits through. Reporting
-    // ready here would fire before the checks that decide it have reported.
+    // ready or review-required here would fire before the checks that decide
+    // the pull request have reported.
     if checks
         .iter()
         .any(|check| check.bucket == PullRequestCheckBucket::Pending)
     {
         return None;
+    }
+    if review == "review_required" {
+        return Some(CodeTriggerCondition::ReviewRequired);
+    }
+    if merge_state == "blocked" || merge_state == "unstable" {
+        return Some(CodeTriggerCondition::ReviewRequired);
     }
     if mergeable == "mergeable" && merge_state == "clean" {
         return Some(CodeTriggerCondition::ReadyToMerge);
@@ -1736,6 +1740,40 @@ mod tests {
         assert_eq!(
             classify_trigger_condition(&settled),
             Some(CodeTriggerCondition::ReadyToMerge)
+        );
+    }
+
+    /// A blocked or unstable merge-state summary can reflect checks that have
+    /// not finished. Wait for those checks before asking for review.
+    #[test]
+    fn pending_checks_outrank_blocked_merge_and_review_required() {
+        for merge_state in ["blocked", "unstable"] {
+            let pr = PullRequestDigest {
+                review_decision: Some("review_required".to_owned()),
+                merge_state_status: Some(merge_state.to_owned()),
+                checks: Some(vec![check(PullRequestCheckBucket::Pending)]),
+                ..digest()
+            };
+            assert_eq!(
+                classify_trigger_condition(&pr),
+                None,
+                "{merge_state} fired while checks were pending"
+            );
+        }
+    }
+
+    /// A requested change remains actionable while checks run.
+    #[test]
+    fn changes_requested_outranks_pending_checks() {
+        let pr = PullRequestDigest {
+            review_decision: Some("changes_requested".to_owned()),
+            merge_state_status: Some("blocked".to_owned()),
+            checks: Some(vec![check(PullRequestCheckBucket::Pending)]),
+            ..digest()
+        };
+        assert_eq!(
+            classify_trigger_condition(&pr),
+            Some(CodeTriggerCondition::ChangesRequested)
         );
     }
 
