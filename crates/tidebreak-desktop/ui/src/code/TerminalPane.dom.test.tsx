@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { ComponentProps } from "react";
 import {
   act,
   cleanup,
@@ -111,15 +112,9 @@ function readPage(
   };
 }
 
-function clientWith(
-  overrides: Partial<{
-    listCodeTerminals: ReturnType<typeof vi.fn>;
-    createCodeTerminal: ReturnType<typeof vi.fn>;
-    readCodeTerminal: ReturnType<typeof vi.fn>;
-    writeCodeTerminal: ReturnType<typeof vi.fn>;
-    resizeCodeTerminal: ReturnType<typeof vi.fn>;
-  }> = {},
-) {
+type TerminalClient = ComponentProps<typeof TerminalPane>["client"];
+
+function clientWith(overrides: Partial<TerminalClient> = {}): TerminalClient {
   return {
     listCodeTerminals: vi.fn().mockResolvedValue([snapshot()]),
     createCodeTerminal: vi.fn().mockResolvedValue(snapshot("term-new")),
