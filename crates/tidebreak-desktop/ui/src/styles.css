@@ -1280,6 +1280,54 @@ body {
     }
   }
 
+  /* Live status labels (Thinking, an in-progress tool phase). Solid muted
+     glyphs, plus a second copy that carries only the highlight band. The
+     band is a slice of a 400%-wide gradient, so it is off-screen at both
+     ends of the loop and the restart does not snap. */
+  .live-label-shimmer {
+    position: relative;
+    display: inline-block;
+    color: var(--muted-foreground);
+  }
+
+  .live-label-shimmer::before {
+    content: attr(data-text);
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      transparent 40%,
+      var(--foreground) 50%,
+      transparent 60%,
+      transparent 100%
+    );
+    background-size: 400% 100%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    animation: live-label-shimmer 2s linear infinite;
+  }
+
+  @keyframes live-label-shimmer {
+    0% {
+      background-position: 100% 0;
+    }
+    100% {
+      background-position: 0% 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-label-shimmer::before {
+      animation: none !important;
+      display: none !important;
+    }
+  }
+
   @keyframes code-reveal {
     from {
       opacity: 0;

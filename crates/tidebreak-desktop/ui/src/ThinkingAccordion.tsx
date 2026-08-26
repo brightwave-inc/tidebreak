@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Lightbulb } from "lucide-react";
 
+import { LiveLabel } from "./LiveLabel";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,7 +37,7 @@ export function ThinkingAccordion({
    * A surface that pauses to think several times in one turn — code mode does,
    * between every pair of tool calls — would otherwise stack open blocks until
    * they are the whole viewport. It passes false: the line still says
-   * "Thinking" and still pulses, so the work is legible, but the text is one
+   * "Thinking" and still shimmers, so the work is legible, but the text is one
    * click away rather than in the way.
    */
   expandWhileStreaming?: boolean;
@@ -67,9 +68,9 @@ export function ThinkingAccordion({
           className="text-muted-foreground h-auto px-0 py-1"
         >
           <Lightbulb className="size-4" />
-          <span className={cn(streaming && "animate-pulse")}>
+          <LiveLabel live={streaming}>
             {streaming ? "Thinking" : "Thought"}
-          </span>
+          </LiveLabel>
           <ChevronDown
             className={cn(
               "size-4 transition-transform",

@@ -7,6 +7,7 @@ import { ToolEntriesList } from "./ToolEntriesList";
 import { ToolIcon } from "./ToolIcon";
 import { toolPreviewHeadline } from "./ToolPreview";
 import { ToolStatusIcon } from "./ToolStatusIcon";
+import { LiveLabel } from "./LiveLabel";
 import { useTypewriterOnce } from "./useTypewriterOnce";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -173,9 +174,10 @@ function ToolActivityRail({
           aria-live="polite"
           aria-atomic="true"
           aria-label={summary.label}
-          className={cn(summary.inProgress && "animate-pulse")}
         >
-          <span aria-hidden="true">{displayedSummary}</span>
+          <LiveLabel live={summary.inProgress} aria-hidden="true">
+            {displayedSummary}
+          </LiveLabel>
         </span>
         <ChevronDown
           className={cn(
@@ -294,14 +296,11 @@ function ToolActivityRow({ activity }: { activity: ToolActivity }) {
         </div>
         <ToolStatusIcon tone={presentation.tone} />
         {/* Row titles do not type — only the phase line does. A running row
-            keeps the pulse so the rail still shows where the work is. */}
-        <p
-          className={cn(
-            "whitespace-nowrap",
-            presentation.tone === "running" && "animate-pulse",
-          )}
-        >
-          {presentation.title}
+            keeps the shimmer so the rail still shows where the work is. */}
+        <p className="whitespace-nowrap">
+          <LiveLabel live={presentation.tone === "running"}>
+            {presentation.title}
+          </LiveLabel>
         </p>
       </div>
       {headline !== null && (

@@ -194,6 +194,14 @@ It shows live work first, outputs otherwise, and collapses to a compact
 pill when a side panel is using the canvas. Do not build a second activity
 summary that duplicates outputs, folders, permissions, or agents.
 
+### Live labels
+
+While a status line is live — Thinking, an in-progress tool phase — the
+label keeps muted ink and a highlight of `--foreground` sweeps across the
+glyphs (`.live-label-shimmer`). Do not pulse the label's opacity, do not
+cycle invented statuses, and do not paint the text with `live` teal. The
+sweep stops under `prefers-reduced-motion`.
+
 ### Empty states and welcome surfaces
 
 `Empty` is the canonical null-state container, and `EmptyMedia variant="icon"`
