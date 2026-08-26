@@ -1227,6 +1227,7 @@ mod tests {
             stack_parent_number: None,
             stack_number: None,
             stack_size: None,
+            unregistered_stack_numbers: None,
             labels: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

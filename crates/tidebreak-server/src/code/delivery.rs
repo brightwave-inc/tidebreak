@@ -266,6 +266,32 @@ impl DeliveryApi {
         }
     }
 
+    async fn create_stack(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        numbers: &[u64],
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Gh {
+                host, search_path, ..
+            } => gh::create_stack(
+                host,
+                &target.owner,
+                &target.name,
+                numbers,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error),
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::forge_rest::create_stack(api_base, target, credential, numbers)
+                .await
+                .map_err(map_forge_action_error),
+        }
+    }
+
     async fn update_pull_request_state(
         &self,
         target: &CodeGitHubRepositoryTarget,
@@ -1568,6 +1594,25 @@ pub(crate) async fn act_on_pull_request(
                 format!("Pull request #{} merged", target.number)
             }))
         }
+        CodeDeliveryPullRequestAction::CreateStack { numbers } => {
+            let mut unique = HashSet::new();
+            if numbers.len() < 2
+                || numbers.iter().any(|number| !unique.insert(*number))
+                || !numbers.contains(&target.number)
+            {
+                return Err(ServerError::bad_request(
+                    "a stack needs at least two distinct pull requests, including this one",
+                ));
+            }
+            let chain = numbers;
+            api.create_stack(&target.repository, &chain).await?;
+            runtime.delivery_cache.invalidate();
+            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            Ok(delivery_action_result(format!(
+                "Registered a stack of {} pull requests on GitHub",
+                chain.len()
+            )))
+        }
         CodeDeliveryPullRequestAction::RerunFailed { workflow_run_ids } => {
             let unique = workflow_run_ids.into_iter().collect::<HashSet<_>>();
             let results = stream::iter(unique)
@@ -2812,6 +2857,7 @@ fn parse_pull_request(
             stack_parent_number: None,
             stack_number: None,
             stack_size: None,
+            unregistered_stack_numbers: None,
             labels,
             created_at: datetime_field(value, "createdAt").unwrap_or_else(Utc::now),
             updated_at: datetime_field(value, "updatedAt").unwrap_or_else(Utc::now),
@@ -3654,6 +3700,98 @@ async fn persist_and_augment_pull_request_facts(
         item.summary.stack_number = Some(stack_number);
         item.summary.stack_size = Some(stack_size);
         item.summary.stack_parent_number = parent_number;
+    }
+
+    // Detect stack-shaped chains the host has no stack for (GitHub stacked
+    // pull requests): consecutive inferred edges among this page's open pull
+    // requests, gapless from a root to a single top, with no member already
+    // host-registered. Every member has to be on the page — inference only
+    // resolves edges between page items, and a chain with a hole in it would
+    // be refused by the create call anyway. A fork (two pull requests on the
+    // same base branch) is not a stack and offers nothing.
+    let mut page_items: HashMap<StackPullRequestIdentity, usize> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.host_stack.is_none() && item.summary.state == "open" {
+            page_items.insert(item.pull_request_identity(), index);
+        }
+    }
+    let mut children: HashMap<StackPullRequestIdentity, Option<StackPullRequestIdentity>> =
+        HashMap::new();
+    for (identity, &index) in &page_items {
+        let Some(parent_number) = items[index].summary.stack_parent_number else {
+            continue;
+        };
+        let parent = StackPullRequestIdentity {
+            base_repository: identity.base_repository.clone(),
+            number: parent_number,
+        };
+        if page_items.contains_key(&parent) {
+            match children.entry(parent) {
+                std::collections::hash_map::Entry::Occupied(mut forked) => {
+                    *forked.get_mut() = None;
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(Some((*identity).clone()));
+                }
+            }
+        }
+    }
+
+    // Walk each member to its root, then memoize the chain that hangs below
+    // that root: a fork kills it, a chain of one is not a stack, and every
+    // member reports the same bottom-to-top array.
+    let mut chains: HashMap<StackPullRequestIdentity, Option<Vec<u64>>> = HashMap::new();
+    let hop_limit = page_items.len() + 1;
+    for (identity, &index) in &page_items {
+        let mut root = (*identity).clone();
+        let mut hops = 0;
+        let mut rooted = true;
+        while let Some(parent_number) = items[page_items[&root]].summary.stack_parent_number {
+            let parent = StackPullRequestIdentity {
+                base_repository: root.base_repository.clone(),
+                number: parent_number,
+            };
+            if !page_items.contains_key(&parent) || hops > hop_limit {
+                // A hole above — off-page, closed, or host-registered — or a
+                // cycle: the chain cannot be verified end to end.
+                rooted = false;
+                break;
+            }
+            root = parent;
+            hops += 1;
+        }
+        if !rooted {
+            continue;
+        }
+        if !chains.contains_key(&root) {
+            let mut chain: Vec<u64> = Vec::new();
+            let mut node = root.clone();
+            let mut hops = 0;
+            loop {
+                chain.push(node.number);
+                match children.get(&node) {
+                    None => break,
+                    // Two pull requests on the same base branch: a fork, not
+                    // a stack.
+                    Some(None) => {
+                        chain.clear();
+                        break;
+                    }
+                    Some(Some(child)) => {
+                        node = (*child).clone();
+                        hops += 1;
+                        if hops > hop_limit {
+                            chain.clear();
+                            break;
+                        }
+                    }
+                }
+            }
+            chains.insert(root.clone(), (chain.len() >= 2).then_some(chain));
+        }
+        if let Some(Some(chain)) = chains.get(&root) {
+            items[index].summary.unregistered_stack_numbers = Some(chain.to_vec());
+        }
     }
 
     if fact_ids.is_empty() {

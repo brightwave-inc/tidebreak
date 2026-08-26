@@ -306,6 +306,27 @@ pub(crate) async fn create_pull_request(
     Ok(fact_value(&value))
 }
 
+/// Register a stack of pull requests (GitHub stacked pull requests), from the
+/// chain's numbers, bottom to top.
+pub(crate) async fn create_stack(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    numbers: &[u64],
+) -> Result<(), String> {
+    let (status, value) = request(
+        reqwest::Method::POST,
+        format!("{api_base}/repos/{}/{}/stacks", target.owner, target.name),
+        credential,
+        Some(&serde_json::json!({ "pull_requests": numbers })),
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(())
+}
+
 /// Merge one pull request only when its head still matches the reviewed SHA.
 pub(crate) async fn merge_pull_request(
     api_base: &str,

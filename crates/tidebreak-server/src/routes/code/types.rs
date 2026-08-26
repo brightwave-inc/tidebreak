@@ -1116,6 +1116,15 @@ pub struct CodeDeliveryPullRequestSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stack_parent_number: Option<u64>,
+    /// A stack-shaped chain of inferred edges the host has no stack for,
+    /// bottom to top, when one resolves gaplessly around this pull request
+    /// and no member is host-registered. Creating the stack on GitHub makes
+    /// the host own the ordering, the retargeting, and the whole-chain merge
+    /// — without it, merging a layer lands it into the branch below rather
+    /// than the default branch, which is easy to do by accident.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unregistered_stack_numbers: Option<Vec<u64>>,
     pub labels: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -1279,6 +1288,11 @@ pub enum CodeDeliveryPullRequestAction {
         #[serde(default)]
         admin: bool,
         expected_head_sha: String,
+    },
+    CreateStack {
+        /// The chain to register, bottom to top. Every pull request's base
+        /// ref must match the previous one's head ref.
+        numbers: Vec<u64>,
     },
     RerunFailed {
         workflow_run_ids: Vec<u64>,

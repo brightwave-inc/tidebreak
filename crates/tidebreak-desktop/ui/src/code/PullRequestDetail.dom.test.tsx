@@ -19,6 +19,7 @@ import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
   stackedDeliveryPullRequests,
+  unregisteredDeliveryPullRequests,
 } from "../stories/fixtures";
 import { PullRequestDetailSheet } from "./PullRequestDetail";
 
@@ -575,5 +576,59 @@ describe("merge stack", () => {
       expect.stringMatching(/#2301 was added to the merge queue/),
     );
     expect(toast.success).not.toHaveBeenCalledWith("Stack merged.");
+  });
+});
+
+describe("create stack", () => {
+  async function renderUnregisteredPanel(number: number, api = client()) {
+    const summary = unregisteredDeliveryPullRequests.find(
+      (item) => item.number === number,
+    );
+    if (!summary) throw new Error(`no unregistered fixture for #${number}`);
+    render(
+      <PullRequestDetailSheet
+        client={api}
+        summary={summary}
+        onClose={vi.fn()}
+        onChanged={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    await screen.findByRole("tab", { name: /Conversation/ });
+  }
+
+  it("offers to register the chain and posts it bottom to top", async () => {
+    const runAction = vi.fn(
+      async (_body: CodeDeliveryPullRequestActionBody) => ({
+        success: true,
+        message: "Registered a stack of 3 pull requests on GitHub",
+      }),
+    );
+    await renderUnregisteredPanel(
+      2311,
+      client({ runCodeDeliveryPullRequestAction: runAction }),
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /Create stack \(3 layers\)/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Create stack" }));
+
+    expect(runAction).toHaveBeenCalledTimes(1);
+    expect(runAction.mock.calls[0]![0]).toMatchObject({
+      target: { number: 2311 },
+      action: { type: "create_stack", numbers: [2310, 2311, 2312] },
+    });
+  });
+
+  it("keeps the single-layer merge beside the offer", async () => {
+    await renderUnregisteredPanel(2311);
+    expect(
+      screen.getByRole("button", { name: /Create stack \(3 layers\)/ }),
+    ).toBeInTheDocument();
+    // The chain is not registered, so no merge-stack offer exists — but the
+    // ordinary merge is still there, and its confirm names the branch below.
+    expect(screen.queryByRole("button", { name: /Merge stack/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Merge" })).toBeInTheDocument();
   });
 });

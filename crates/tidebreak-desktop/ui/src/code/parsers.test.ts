@@ -1364,6 +1364,7 @@ describe("pull request facts (decision 62)", () => {
             },
           ],
           stack_parent_number: 400,
+          unregistered_stack_numbers: [400, 412],
           labels: [],
           created_at: "2026-08-22T10:00:00Z",
           updated_at: "2026-08-22T11:00:00Z",

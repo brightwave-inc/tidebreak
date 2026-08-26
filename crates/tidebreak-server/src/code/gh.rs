@@ -1895,6 +1895,42 @@ async fn rerun_workflow_endpoint_with_observation(
         .map_err(|error| classify_observed_gh(error, observation))
 }
 
+/// Register a stack of pull requests on the host (GitHub stacked pull
+/// requests), from the chain's numbers, bottom to top.
+///
+/// The array rides `--field pull_requests[]=N` per member: that is the one
+/// `gh api` spelling that serializes as a JSON array, which the stacks
+/// endpoint requires.
+pub(crate) async fn create_stack(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    search_path: Option<&str>,
+) -> Result<(), GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let endpoint = format!("repos/{owner}/{repo}/stacks");
+    let mut args = vec![
+        "api".to_owned(),
+        "--method".to_owned(),
+        "POST".to_owned(),
+        endpoint,
+    ];
+    for number in numbers {
+        args.push("--field".to_owned());
+        args.push(format!("pull_requests[]={number}"));
+    }
+    if host != "github.com" {
+        args.extend(["--hostname".to_owned(), host.to_owned()]);
+    }
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_gh(Path::new("."), &binary, &borrowed, GH_TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(|error| classify_observed_gh(error, &observation))
+}
+
 pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
     if host == "github.com" {
         format!("{owner}/{repo}")
@@ -2679,6 +2715,37 @@ exit 3
             "{logged}"
         );
         assert!(!logged.contains("auth status"), "{logged}");
+    }
+
+    #[tokio::test]
+    async fn create_stack_posts_the_chain_as_array_fields() {
+        let shim_dir = TempDir::new().unwrap();
+        let log = shim_dir.path().join("log");
+        let binary = shim_dir.path().join("gh");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> {}\n[ \"$1\" = auth ] && echo '{{\"hosts\":{{\"github.com\":[{{\"active\":true,\"state\":\"success\",\"login\":\"tester\"}}]}}}}' && exit 0\n[ \"$1\" = api ] && exit 0\nexit 3\n",
+                log.display()
+            ),
+        );
+        create_stack(
+            "github.com",
+            "acme",
+            "app",
+            &[101, 102, 103],
+            Some(shim_dir.path().to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let logged = std::fs::read_to_string(log).unwrap();
+        assert!(
+            logged.contains(
+                "api --method POST repos/acme/app/stacks --field pull_requests[]=101 --field pull_requests[]=102 --field pull_requests[]=103"
+            ),
+            "the chain posts bottom to top as one array: {logged}"
+        );
     }
 
     #[test]
