@@ -38,17 +38,14 @@ use std::collections::HashMap;
 use std::future::Future as _;
 use std::io::{IsTerminal as _, Write as _};
 
-use futures::StreamExt as _;
 use tidebreak_core::{
     AgentError, CallId, ChatId, RequestFolderAccessResult, Result, TurnId,
     REQUEST_FOLDER_ACCESS_TOOL,
 };
-use tokio_tungstenite::tungstenite::Message;
 
-use crate::api::client::{
-    Client, ClientExecutionOutcome, DurableTurn, DurableTurnStatus, EventSocket,
-};
-use crate::api::wire::{ChatFrame, ClientEvent, ToolCallStatus};
+use crate::api::client::{Client, ClientExecutionOutcome, DurableTurn, DurableTurnStatus};
+use crate::api::wire::{ClientEvent, ToolCallStatus};
+use crate::event_stream::{EventStream as Stream, StreamNext};
 
 mod driver;
 pub mod protocol;
@@ -67,20 +64,6 @@ const EXIT_DECISION_FAILED: i32 = 4;
 /// Exit status for interruption by SIGINT, following the shell's 128+signal
 /// convention.
 const EXIT_INTERRUPTED: i32 = 130;
-
-/// Attempts to re-open the event socket after it closes mid-turn before giving
-/// up. The retries cover a transient hiccup — an accept-loop stumble when the
-/// server is in-process, a dropped connection when it is not.
-const RECONNECT_DELAYS: [std::time::Duration; 8] = [
-    std::time::Duration::from_millis(250),
-    std::time::Duration::from_millis(500),
-    std::time::Duration::from_secs(1),
-    std::time::Duration::from_secs(2),
-    std::time::Duration::from_secs(4),
-    std::time::Duration::from_secs(5),
-    std::time::Duration::from_secs(6),
-    std::time::Duration::from_secs(6),
-];
 
 /// How often a folder refusal asks whether its call has become claimable, and
 /// the ceiling that interval backs off to.
@@ -894,85 +877,6 @@ async fn resolve_declined(
         Ok(()) => ResolveDeclined::Declined,
         Err(error) if error.is_conflict() => ResolveDeclined::HandledElsewhere,
         Err(error) => ResolveDeclined::Failed(error.into()),
-    }
-}
-
-/// The event socket plus the cursor a reconnect resumes from.
-struct Stream {
-    socket: EventSocket,
-    last_seq: i64,
-}
-
-enum StreamNext {
-    Frame(String, ClientEvent),
-    Durable(DurableTurn),
-    Ignore,
-}
-
-impl Stream {
-    async fn open(client: &Client, chat: ChatId) -> Result<Self> {
-        Ok(Self {
-            socket: client.open_events(chat, 0).await?,
-            last_seq: 0,
-        })
-    }
-
-    /// The next journaled frame, a durable terminal fallback, or an ignorable
-    /// payload such as metadata, a ping, or undecodable text.
-    async fn next(
-        &mut self,
-        client: &mut Client,
-        chat: ChatId,
-        turn_id: TurnId,
-    ) -> Result<StreamNext> {
-        match self.socket.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let Ok(ChatFrame::Event(frame)) = serde_json::from_str::<ChatFrame>(&text) else {
-                    return Ok(StreamNext::Ignore);
-                };
-                self.last_seq = frame.seq;
-                Ok(StreamNext::Frame(text.to_string(), frame.event))
-            }
-            Some(Ok(_)) => Ok(StreamNext::Ignore),
-            Some(Err(_)) | None => match self.reconnect(client, chat, turn_id).await? {
-                Some(turn) => Ok(StreamNext::Durable(turn)),
-                None => Ok(StreamNext::Ignore),
-            },
-        }
-    }
-
-    async fn reconnect(
-        &mut self,
-        client: &mut Client,
-        chat: ChatId,
-        turn_id: TurnId,
-    ) -> Result<Option<DurableTurn>> {
-        let mut last = None;
-        for delay in RECONNECT_DELAYS {
-            tokio::time::sleep(delay).await;
-            if let Err(error) = client.refresh_attach_endpoint() {
-                last = Some(error);
-                continue;
-            }
-            match client.open_events(chat, self.last_seq).await {
-                Ok(socket) => {
-                    self.socket = socket;
-                    return Ok(None);
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        if client.refresh_attach_endpoint().is_ok() {
-            match client.durable_turn(chat, turn_id).await {
-                Ok(Some(turn)) => return Ok(Some(turn)),
-                Ok(None) => {}
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(AgentError::msg(format!(
-            "the event stream closed mid-turn and could not be reopened{}",
-            last.map(|error| format!(": {error}")).unwrap_or_default()
-        )))
     }
 }
 

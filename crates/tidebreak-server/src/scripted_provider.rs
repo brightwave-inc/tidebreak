@@ -49,9 +49,17 @@ enum Step {
         tool: String,
         #[serde(default)]
         input: serde_json::Value,
+        /// Hold this completion before streaming the call, so a follower can
+        /// observe an in-flight turn.
+        #[serde(default)]
+        delay_ms: u64,
     },
     /// Answer with `text` and end the turn.
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(default)]
+        delay_ms: u64,
+    },
 }
 
 /// Replays [`Step`]s, one per completion.
@@ -68,8 +76,15 @@ impl ModelProvider for ScriptedProvider {
 
     async fn stream(&self, _request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let step = self.calls.fetch_add(1, Ordering::SeqCst);
+        let delay_ms = match self.steps.get(step) {
+            Some(Step::Tool { delay_ms, .. } | Step::Text { delay_ms, .. }) => *delay_ms,
+            None => 0,
+        };
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
         let events = match self.steps.get(step) {
-            Some(Step::Tool { tool, input }) => vec![
+            Some(Step::Tool { tool, input, .. }) => vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
                     id: format!("scripted_{step}"),
@@ -83,7 +98,7 @@ impl ModelProvider for ScriptedProvider {
                     reason: StopReason::ToolUse,
                 },
             ],
-            Some(Step::Text { text }) => vec![
+            Some(Step::Text { text, .. }) => vec![
                 ProviderEvent::TextDelta { text: text.clone() },
                 ProviderEvent::Stop {
                     reason: StopReason::EndTurn,

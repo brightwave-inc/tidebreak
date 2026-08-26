@@ -136,12 +136,15 @@ impl Client {
             .map_err(|error| AgentError::msg(format!("invalid server token: {error}")))?;
         value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .map_err(|error| {
-                AgentError::msg(format!("could not build the HTTP client: {error}"))
-            })?;
+        let mut http = reqwest::Client::builder().default_headers(headers);
+        if loopback_http_base(&base) {
+            // Ambient HTTP_PROXY must not intercept loopback: a proxy that
+            // claims 127.0.0.1 black-holes `serve` and `--attach`.
+            http = http.no_proxy();
+        }
+        let http = http.build().map_err(|error| {
+            AgentError::msg(format!("could not build the HTTP client: {error}"))
+        })?;
         Ok(Self {
             http,
             base,
@@ -457,6 +460,30 @@ impl Client {
             .map_err(request_error)?;
         Self::expect_success(response).await?;
         Ok(())
+    }
+
+    /// Tool-call approvals awaiting a decision on this chat.
+    pub async fn list_pending_approvals(&self, chat: ChatId) -> Result<Vec<serde_json::Value>> {
+        self.get_json(format!("{}/chats/{chat}/approvals", self.base))
+            .await
+    }
+
+    /// Host-folder access requests awaiting operator consent on this chat.
+    ///
+    /// This is the renderer-facing pending set (bearer auth), not the native
+    /// executor's raw claim list. A call appears here only after it has parked.
+    pub async fn list_pending_folder_access(&self, chat: ChatId) -> Result<Vec<serde_json::Value>> {
+        self.get_json(format!(
+            "{}/chats/{chat}/client-executions/pending",
+            self.base
+        ))
+        .await
+    }
+
+    /// The durable transcript plus terminal turns and the journal watermark.
+    pub async fn chat_transcript(&self, chat: ChatId) -> Result<serde_json::Value> {
+        self.get_json(format!("{}/chats/{chat}/messages", self.base))
+            .await
     }
 
     /// Plans awaiting review on this chat.
@@ -1184,6 +1211,16 @@ impl Client {
             Err(error) => Err(ClientExecutionError::Failed(error)),
         }
     }
+}
+
+/// True when `base` names a loopback HTTP origin.
+fn loopback_http_base(base: &str) -> bool {
+    let rest = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))
+        .unwrap_or(base);
+    let host = rest.split(['/', ':']).next().unwrap_or(rest);
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
 }
 
 /// reqwest's `Display` already strips nothing for loopback URLs, but keep the
