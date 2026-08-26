@@ -5,12 +5,20 @@ pub mod browser;
 pub mod parse;
 pub mod session;
 
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
+use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::claude::session::ClaudeSession;
 use crate::probe::{observe_version, probe_shell, HostEnv};
 use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionSpec};
+
+const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Claude Code adapter. Capabilities below are for the captured version
 /// 2.1.233: verified flags are `Supported`/`Unsupported`; anything not
@@ -125,12 +133,12 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         match probe_shell(host, "claude").await {
             Ok(capture) => {
                 let version = observe_version(&capture.binary, &capture.env).await.ok();
-                // Auth observation is not captured for 2.1.233. Do not guess.
+                let authenticated = observe_auth(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,
                     binary_path: Some(capture.binary),
                     version,
-                    authenticated: None,
+                    authenticated,
                     stderr: capture.stderr,
                     env: capture.env,
                     commands: Vec::new(),
@@ -188,6 +196,36 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 }
 
+/// `claude auth status --json` reports `loggedIn` without exposing a token.
+async fn observe_auth(
+    binary: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<bool> {
+    let mut command = Command::new(binary);
+    command
+        .args(["auth", "status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.env_clear();
+    for (key, value) in crate::filter_child_env(env.iter().cloned()) {
+        command.env(key, value);
+    }
+    let child = crate::spawn_process_tree(&mut command).ok()?;
+    let output = timeout(AUTH_TIMEOUT, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    auth_status_from_json(&output.stdout)
+}
+
+fn auth_status_from_json(stdout: &[u8]) -> Option<bool> {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()?
+        .get("loggedIn")?
+        .as_bool()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +262,24 @@ mod tests {
             );
         }
         (out.events, out.unrecognized)
+    }
+
+    #[test]
+    fn auth_status_reads_authenticated_unauthenticated_and_unknown_states() {
+        assert_eq!(
+            auth_status_from_json(
+                br#"{"loggedIn":true,"authMethod":"oauth","apiProvider":"firstParty"}"#,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            auth_status_from_json(
+                br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            ),
+            Some(false)
+        );
+        assert_eq!(auth_status_from_json(br#"{"authMethod":"oauth"}"#), None);
+        assert_eq!(auth_status_from_json(b"not json"), None);
     }
 
     #[test]

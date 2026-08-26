@@ -61,7 +61,9 @@ export function DoctorList({
             // know "can I start work" does not walk every row to find out.
             <p className="text-muted-foreground text-sm">
               {ready === 0
-                ? "No engine is ready yet. Download one, or pick it when you start a workspace."
+                ? report.harnesses.every((entry) => entry.found)
+                  ? "No engine is ready yet. Sign in to one below, then re-check."
+                  : "No engine is ready yet. Download one, or pick it when you start a workspace."
                 : `${ready} of ${total} ${total === 1 ? "engine" : "engines"} ready.`}
             </p>
           )}
@@ -127,7 +129,11 @@ function statusBadge(
   if (install?.error) return { label: "Download failed", variant: "critical" };
   if (isHarnessReady(entry)) return { label: "Ready", variant: "success" };
   // A state, not an instruction — the instruction is the line below it.
-  if (entry.found) return { label: "Signed out", variant: "warning" };
+  if (entry.found) {
+    return entry.authenticated === false
+      ? { label: "Signed out", variant: "warning" }
+      : { label: "Unverified", variant: "warning" };
+  }
   if (harnessNeedsDownload(entry)) {
     return { label: "Not downloaded", variant: "outline" };
   }
@@ -150,6 +156,9 @@ function subtitle(
   }
   if (install?.error) return install.error;
   if (entry.remediation) return entry.remediation;
+  if (entry.found && entry.authenticated !== true) {
+    return "Sign in via your terminal, then re-check.";
+  }
   if (harnessNeedsDownload(entry)) {
     return "Downloads the first time you pick it.";
   }

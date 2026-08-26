@@ -109,10 +109,15 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 .sum();
             let install_error = code.pin_install_error(*kind);
             let installable = tidebreak_harness::pin_for(*kind).is_some();
+            let label = harness_label(*kind);
             let remediation = if let Some(err) = install_error {
                 format!("could not download the pinned {kind} binary: {err}")
             } else if probe.found && probe.authenticated == Some(false) {
-                format!("sign in to {kind} in your own terminal, then re-check")
+                format!("Sign in to {label} in your own terminal, then re-check.")
+            } else if probe.found && probe.authenticated.is_none() {
+                format!(
+                    "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal, then re-check."
+                )
             } else if !probe.found && !installable {
                 format!("this build ships no pinned {kind} binary to download")
             } else {
@@ -141,4 +146,13 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
     }))
     .await;
     Ok(HarnessDoctorReport { harnesses })
+}
+
+fn harness_label(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => "Claude Code",
+        HarnessKind::Codex => "Codex CLI",
+        HarnessKind::Opencode => "opencode",
+        HarnessKind::Grok => "Grok CLI",
+    }
 }

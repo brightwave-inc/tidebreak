@@ -30,8 +30,8 @@ import { middleTruncate } from "./workspaceCards";
  *
  * A machine with nothing downloaded yet is not blocked: picking an engine in
  * the New Workspace dialog fetches it. The doctor only takes the page when
- * every engine is signed out or unsupported, which is the one case a reader
- * cannot resolve by starting a workspace.
+ * every engine is signed out, unverified, or unsupported, which is the one
+ * case a reader cannot resolve by starting a workspace.
  */
 
 export function CodeHome() {

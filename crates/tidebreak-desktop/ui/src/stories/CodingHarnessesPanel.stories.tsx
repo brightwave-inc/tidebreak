@@ -76,7 +76,7 @@ export const Downloading: Story = {
   args: { report: harnessDoctorCold, installs: harnessInstallsInFlight },
 };
 
-/** States no download fixes: no pin for one engine, no sign-in for the other. */
+/** States no download fixes: one unverified engine and one signed-out engine. */
 export const NeedsYou: Story = { args: { report: harnessDoctorDegraded } };
 
 /** The first read has not landed. */

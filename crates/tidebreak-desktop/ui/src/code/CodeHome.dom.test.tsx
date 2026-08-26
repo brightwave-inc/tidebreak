@@ -38,6 +38,7 @@ const READY_DOCTOR: HarnessDoctorReport = {
       kind: "claude_code",
       found: true,
       installable: true,
+      authenticated: true,
       tier: "reference",
       caps: {
         resume: "supported",

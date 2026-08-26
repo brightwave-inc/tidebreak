@@ -51,8 +51,8 @@ describe("HarnessPicker", () => {
     await renderWithRouter(
       <HarnessPicker
         harnesses={[
-          entry({ kind: "claude_code" }),
-          entry({ kind: "codex" }),
+          entry({ kind: "claude_code", authenticated: true }),
+          entry({ kind: "codex", authenticated: true }),
           entry({ kind: "opencode", found: false, installable: false }),
         ]}
         value="claude_code"
@@ -81,7 +81,7 @@ describe("HarnessPicker", () => {
     await renderWithRouter(
       <HarnessPicker
         harnesses={[
-          entry({ kind: "claude_code" }),
+          entry({ kind: "claude_code", authenticated: true }),
           entry({
             kind: "opencode",
             found: false,
@@ -107,10 +107,15 @@ describe("HarnessPicker", () => {
     await renderWithRouter(
       <HarnessPicker
         harnesses={[
-          entry({ kind: "claude_code", version: "2.1.233" }),
+          entry({
+            kind: "claude_code",
+            version: "2.1.233",
+            authenticated: true,
+          }),
           entry({
             kind: "grok",
             version: "1.0.4",
+            authenticated: true,
             caps: {
               ...CAPS,
               plan_mode: "unsupported",
@@ -131,11 +136,37 @@ describe("HarnessPicker", () => {
     expect(onChange).toHaveBeenCalledWith("grok");
   });
 
+  it("disables an engine whose sign-in status is unverified", async () => {
+    const onChange = vi.fn();
+    await renderWithRouter(
+      <HarnessPicker
+        harnesses={[
+          entry({
+            kind: "claude_code",
+            authenticated: undefined,
+            remediation: "Sign in via your terminal, then re-check.",
+          }),
+          entry({ kind: "codex", authenticated: true }),
+        ]}
+        value="codex"
+        onChange={onChange}
+      />,
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("combobox", { name: "Harness" }));
+    const row = screen.getByRole("option", { name: /Claude Code/ });
+    expect(row).toHaveTextContent("Unverified — sign in via your terminal");
+    expect(row).toHaveAttribute("aria-disabled", "true");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("does not add a settings button beside the composer control", async () => {
     await renderWithRouter(
       <HarnessPicker
         harnesses={[
-          entry({ kind: "claude_code" }),
+          entry({ kind: "claude_code", authenticated: true }),
           entry({ kind: "opencode", found: false, installable: false }),
         ]}
         value="claude_code"

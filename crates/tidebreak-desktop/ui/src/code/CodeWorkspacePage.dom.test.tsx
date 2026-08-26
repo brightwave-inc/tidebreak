@@ -190,6 +190,7 @@ const START_HARNESS: HarnessDoctorEntry = {
   kind: "claude_code",
   found: true,
   installable: true,
+  authenticated: true,
   tier: "reference",
   caps: {
     resume: "supported",

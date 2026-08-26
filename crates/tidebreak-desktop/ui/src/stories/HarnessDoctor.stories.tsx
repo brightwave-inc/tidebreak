@@ -60,7 +60,7 @@ export const Downloading: Story = {
   },
 };
 
-/** Nothing a download fixes: an engine with no pin, and one signed out. */
+/** Nothing a download fixes: one unverified engine and one signed-out engine. */
 export const NeedsYou: Story = {
   args: { report: harnessDoctorDegraded },
 };

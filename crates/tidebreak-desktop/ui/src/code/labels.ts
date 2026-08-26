@@ -119,7 +119,7 @@ export function isHarnessReady(entry: {
   found: boolean;
   authenticated?: boolean;
 }): boolean {
-  return entry.found && entry.authenticated !== false;
+  return entry.found && entry.authenticated === true;
 }
 
 /** True when create can post at least one permission mode this engine honors. */
@@ -151,10 +151,14 @@ export function harnessUnusableReason(entry: {
   found: boolean;
   installable: boolean;
   authenticated?: boolean;
+  remediation?: string;
   caps: ModeCaps;
 }): string | null {
   if (!entry.found && !entry.installable) return "Not installed";
   if (entry.authenticated === false) return "Sign in via your terminal";
+  if (entry.found && entry.authenticated === undefined) {
+    return "Unverified — sign in via your terminal";
+  }
   if (!harnessHonorsAnyCreateMode(entry)) return "Not available yet";
   return null;
 }
@@ -164,6 +168,7 @@ export function harnessCanStartNow(entry: {
   found: boolean;
   installable: boolean;
   authenticated?: boolean;
+  remediation?: string;
   caps: ModeCaps;
 }): boolean {
   return entry.found && !harnessUnusableReason(entry);

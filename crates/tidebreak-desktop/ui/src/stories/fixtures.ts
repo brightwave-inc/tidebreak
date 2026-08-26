@@ -481,6 +481,7 @@ function doctorEntry(
   return {
     found: true,
     installable: true,
+    authenticated: true,
     tier: "reference",
     caps: fullCaps,
     commands: [],
@@ -539,17 +540,18 @@ export const harnessDoctorDegraded: HarnessDoctorReport = {
   harnesses: [
     doctorEntry({
       kind: "claude_code",
-      found: false,
-      installable: false,
-      remediation: "This build ships no pinned Claude Code binary to download.",
-      stderr: "claude: command not found",
+      version: "2.1.234 (Claude Code)",
+      path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
+      authenticated: undefined,
+      remediation:
+        "Tidebreak could not verify the Claude Code sign-in. Sign in to Claude Code in your own terminal, then re-check.",
     }),
     doctorEntry({
       kind: "codex",
       version: "codex-cli 0.147.0",
       tier: "secondary",
       authenticated: false,
-      remediation: "Sign in to codex in your own terminal, then re-check.",
+      remediation: "Sign in to Codex CLI in your own terminal, then re-check.",
       caps: { ...fullCaps, mid_turn_steering: "supported" },
     }),
   ],
