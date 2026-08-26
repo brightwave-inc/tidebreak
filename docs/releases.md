@@ -170,7 +170,8 @@ automatic.
 7. The macOS and Windows production jobs verify those archives before loading
    signing material, then run `tauri bundle` against the prepared binaries.
    They do not compile Rust or rebuild the frontend. The macOS job signs the app
-   with the Developer ID identity, notarizes and staples the app and DMG,
+   with the Developer ID identity, submits the DMG to Apple's notary service
+   once, staples the resulting ticket to both the DMG and the app,
    verifies them with Apple tooling, and creates a signed Tauri updater archive.
    Parallel Windows and Linux jobs produce x86_64 and ARM64 NSIS, AppImage, and
    Debian packages; every package is signed with the Tauri updater key after
@@ -201,8 +202,9 @@ automatic.
     frozen title and notes and publish the draft. GitHub then locks the release
     tag and assets. The workflow uses GitHub's resulting publication timestamp
     to create and attest the hosted manifest, uploads immutable versioned files,
-    advances the public manifests, invalidates their CDN paths, and smoke-tests
-    the hosted release. If a prior attempt already uploaded the complete
+    advances the public manifests, requests CDN invalidation of their paths
+    without waiting for propagation, and smoke-tests
+    the hosted release with cache-busting reads. If a prior attempt already uploaded the complete
     immutable prefix, a new dispatch validates and reuses those bytes, skips the
     desktop build, and resumes only mutable metadata publication, CDN
     invalidation, and smoke testing. If GitHub publication succeeded but hosted
@@ -255,14 +257,15 @@ installer itself, so no separate updater archive exists on Windows. Release
 builds check that authenticated feed and ask before restarting into the new
 installer.
 
-Unlike macOS, no cache-warming workflow exists for Windows: the credential-free
-`prepare_windows` job compiles the tag from scratch (or from an earlier
-release's prepared cache) and is the single writer of the Windows Cargo
-registry and prepared-build caches. The Windows ARM job keeps the
-`aarch64-pc-windows-msvc` Rust target and compiles whisper.cpp with Ninja plus
-`clang-cl`, because ggml refuses MSVC on ARM. The credential-free prepare job
-restores only caches for the same commit SHA, so a failed MSVC CMake tree from
-an earlier attempt cannot be reused after that compiler switch. After the
+Like macOS, Windows has a cache-warming workflow: **Warm Windows release
+cache** compiles each architecture on pushes to `main` and saves the compiler
+outputs, so the credential-free `prepare_windows` job usually restores a warm
+archive instead of compiling the tag from scratch. That prepare job remains a
+fallback writer of the Windows Cargo registry cache and saves the
+release-specific prepared cache. The Windows ARM jobs keep the
+`aarch64-pc-windows-msvc` Rust target and compile whisper.cpp with Ninja plus
+`clang-cl`, because ggml refuses MSVC on ARM; the warm workflow uses the same
+compiler setup so its CMake trees stay reusable in the release. After the
 compile, the job transfers only the final binary, sidecars, and Tauri
 configuration to the production job. The production job verifies and bundles
 those files without installing a compiler or rebuilding the frontend.
@@ -291,7 +294,10 @@ capability checks; packaging the desktop does not claim those features on
 Linux.
 
 The Linux packaging job uses compiler and Cargo download caches in read-only
-mode and does not enable pnpm caching. It builds both formats from the validated
+mode and does not enable pnpm caching. It restores the unsigned build archive
+that **Warm Linux release cache** saves from `main`, discards any restored
+product binaries so the shipped bytes are always produced by the release job,
+and never saves a cache of its own. It builds both formats from the validated
 release tag before the updater private key enters the step environment, then
 signs and collects only the completed package bytes. This avoids exposing a
 default-branch cache writer to code executed during a manually dispatched
@@ -364,9 +370,10 @@ older installed binaries have no updater and therefore cannot discover it.
 Users must install that first updater-enabled release manually; subsequent
 releases can advance automatically.
 
-**Warm macOS release cache** runs independently after relevant changes land on
-`main`. A short prerequisite job saves Cargo dependency downloads before the
-build job compiles the desktop app with `--no-bundle`. This keeps a later UI
+**Warm macOS release cache**, **Warm Windows release cache**, and **Warm Linux
+release cache** run independently after relevant changes land on `main`. In
+each workflow a short prerequisite job saves Cargo dependency downloads before
+the build job compiles the desktop app with `--no-bundle`. This keeps a later UI
 setup or compilation failure from also losing newly downloaded Cargo
 dependencies. Each architecture then saves one unsigned archive containing
 Cargo fingerprints, build-script outputs, compiled dependency files, and the
@@ -376,16 +383,18 @@ those final unsigned products lets an exact-source build skip the otherwise
 expensive desktop relink. The archive is saved before a failed compile is
 reported, so successful partial work remains reusable. None of these jobs load
 the `desktop-production` environment, sign, or publish. Because cache warming
-has its own workflow and failure boundary, a later signing, notarization, or
+has its own workflows and failure boundary, a later signing, notarization, or
 publication failure cannot prevent that main-tip cache run from finishing. If
-the shared cache is empty or has been evicted, manually run **Warm macOS release
-cache** from `main`; the production release workflow also compiles the exact tag
+a shared cache is empty or has been evicted, manually run the matching warm
+workflow from `main`; the production release workflow also compiles the exact tag
 and product version in a credential-free prerequisite. That prerequisite saves
 its release-specific unsigned cache before reporting a compile failure. After a
 successful compile, it uploads the final binary, universal sidecars, and Tauri
 configuration in a one-day, run-scoped artifact. The `desktop-production` job
 verifies that artifact before it loads signing material, then packages those
-exact binaries without compiling again.
+exact binaries without compiling again. Six warm archives plus the
+release-specific ones compete for the repository's shared cache budget, so an
+evicted archive costs a slower release, never a broken one.
 
 To use a larger macOS runner for production compiles, set the repository
 variable `PRODUCTION_MACOS_RUNNER` to a provisioned ARM64 organization runner
@@ -524,12 +533,12 @@ Treat the release workflow as public even while the repository is private:
   Apple key files. `sccache` remains a read-only fallback because GitHub
   throttles its many small writes; the separate Cargo download cache retains
   `cache-targets: false`.
-- The independent cache-warm workflow runs only for relevant pushes to `main`
-  or an explicit manual dispatch. It has no production environment and receives
-  no Apple, Tauri, or AWS credentials. It fetches Cargo dependencies early and
-  stops after compiling with `--no-bundle`; it cannot sign or publish a
-  release. Signing, notarization, or publication failures therefore do not
-  cancel or roll back the separate main-tip cache run.
+- The independent cache-warm workflows run only for relevant pushes to `main`
+  or an explicit manual dispatch. They have no production environment and
+  receive no Apple, Tauri, or AWS credentials. Each fetches Cargo dependencies
+  early and stops after compiling with `--no-bundle`; none can sign or publish
+  a release. Signing, notarization, or publication failures therefore do not
+  cancel or roll back the separate main-tip cache runs.
 - Production artifacts are collected only after code-signing, notarization,
   stapling, and local verification succeed. The temporary App Store Connect key
   is removed even when the build fails.
@@ -539,9 +548,12 @@ Treat the release workflow as public even while the repository is private:
   can skip rebuilding. The publisher then derives `latest.json` from that
   authoritative manifest and reruns metadata publication, CloudFront
   invalidation, and the complete hosted smoke test.
-- Tauri notarizes and staples the app bundle. The workflow separately submits
-  the signed DMG to Apple's notary service, requires an accepted result, and
-  staples its ticket before artifact verification or upload.
+- Notarization happens once per build: Tauri signs the app and DMG without
+  notary credentials, then the workflow submits the signed DMG to Apple's
+  notary service, requires an accepted result, and staples that one ticket to
+  both the DMG and the identically signed app bundle before artifact
+  verification or upload. The App Store Connect key reaches the job
+  environment only after bundling.
 
 Public source does not eliminate the need for operational controls. Restrict
 who can publish releases and change Actions configuration, protect `main`, and
