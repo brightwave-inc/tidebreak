@@ -2087,6 +2087,42 @@ async fn a_hosted_delivery_page_reads_lists_and_details_over_forge_rest() {
         deployment_detail["deployment_statuses"][0]["state"],
         "success"
     );
+
+    for (path, body) in [
+        (
+            "/code/delivery/pull-requests/action",
+            serde_json::json!({
+                "target": { "repository": target.clone(), "number": 17 },
+                "action": { "type": "close" }
+            }),
+        ),
+        (
+            "/code/delivery/runs/action",
+            serde_json::json!({
+                "target": {
+                    "repository": target.clone(),
+                    "kind": "workflow_run",
+                    "id": 44
+                },
+                "action": { "type": "rerun_failed" }
+            }),
+        ),
+    ] {
+        let response = client
+            .post(format!("http://{addr}{path}"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        let error: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(error["kind"], "git_forge_actions_unsupported");
+        assert!(error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Open the pull request or run on GitHub"));
+    }
     assert_eq!(
         lender.minted(),
         vec![

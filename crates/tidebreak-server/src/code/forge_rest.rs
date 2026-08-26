@@ -10,7 +10,8 @@
 //! Deliberately narrow: creation, the PR-card digest, the fact reads
 //! (decision 62), and the Delivery reads — repository lists, by-number
 //! sweeps, and the detail drawers. Mutations (merge, ready, close, comments,
-//! rerun) still shell out to `gh`.
+//! rerun) still shell out to `gh`, so a hosted Delivery action refuses with
+//! its own kind rather than a `gh` remediation no hosted machine can follow.
 
 use std::time::Duration;
 

@@ -1196,6 +1196,7 @@ pub(crate) async fn act_on_pull_request(
         std::slice::from_ref(&body.target.repository),
     )
     .await?;
+    require_gh_actions(runtime)?;
     let search_path = runtime.gh_search_path_owned();
     let target = body.target;
     // The canonical URL of the pull request being acted on: the key the
@@ -1636,6 +1637,7 @@ pub(crate) async fn act_on_run(
         std::slice::from_ref(&body.target.repository),
     )
     .await?;
+    require_gh_actions(runtime)?;
     match body.action {
         CodeDeliveryRunAction::RerunFailed => {
             if body.target.kind != CodeDeliveryRunKind::WorkflowRun {
@@ -1751,6 +1753,23 @@ async fn borrow_delivery_credential(
         .git_credential(owner, &format!("{}/{}", target.owner, target.name))
         .await
         .map_err(|refusal| super::clone::git_forge_refusal_message(&refusal))
+}
+
+/// Refuse Delivery actions on a hosted machine, by name.
+///
+/// Reads borrow per-operation credentials, but merge, ready, close, comment,
+/// and rerun still shell out to `gh`. Until those move to the forge REST
+/// API, a hosted caller gets one honest refusal instead of a `gh`
+/// remediation no hosted machine can follow.
+fn require_gh_actions(runtime: &CodeRuntime) -> Result<(), ServerError> {
+    if runtime.git_credentials().is_some() {
+        return Err(ServerError::conflict_kind(
+            "git_forge_actions_unsupported",
+            "This hosted machine cannot act on pull requests or runs yet. \
+             Open the pull request or run on GitHub to act there.",
+        ));
+    }
+    Ok(())
 }
 
 async fn require_authenticated(runtime: &CodeRuntime) -> Result<GhObservation, ServerError> {
