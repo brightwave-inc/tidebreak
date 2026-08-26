@@ -1,7 +1,8 @@
+import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn, userEvent, within } from "storybook/test";
 
-import type { CodeWorkspacePrSnapshot } from "@/api";
+import { HttpError, type CodeWorkspacePrSnapshot } from "@/api";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
 import type {
   CodeWorkspacePrMutation,
@@ -22,6 +23,8 @@ import {
 function resourceFor(
   snapshot: CodeWorkspacePrSnapshot | null,
   busy: CodeWorkspacePrMutation | null = null,
+  mutationError: string | null = null,
+  setMutationError: (error: string | null) => void = () => {},
 ): CodeWorkspacePrResource {
   return {
     data: snapshot,
@@ -30,10 +33,10 @@ function resourceFor(
     refresh: async () => {},
     adopt: () => {},
     busy,
-    mutationError: null,
-    setMutationError: () => {},
+    mutationError,
+    setMutationError,
     refreshFromHost: async () => undefined,
-    runMutation: async () => undefined,
+    runMutation: async (_mutation, operation) => operation(),
   };
 }
 
@@ -42,6 +45,7 @@ function WorkflowState({
   busy = null,
   watchTaskLink = false,
   checkLogsHang = false,
+  mergeConflict = false,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   busy?: CodeWorkspacePrMutation | null;
@@ -49,14 +53,25 @@ function WorkflowState({
   watchTaskLink?: boolean;
   /** Leave the check-log download in flight, to hold the reading state. */
   checkLogsHang?: boolean;
+  /** Reject merge after confirmation because the pull request head moved. */
+  mergeConflict?: boolean;
 }) {
+  const [mutationError, setMutationError] = useState<string | null>(null);
   return (
     <WorkspaceWorkflowControl
       client={{
         pushCodeWorkspace: fn(),
         createCodePullRequest: fn(),
         markCodePrReady: fn(),
-        mergeCodePr: fn(),
+        mergeCodePr: mergeConflict
+          ? fn(async () => {
+              throw new HttpError(
+                409,
+                "409: pull request head changed from 8a1f2240 to d94e0301",
+                "pr_head_changed",
+              );
+            })
+          : fn(),
         startCodeWatch: fn(),
         stopCodeWatch: fn(),
         writeCodeCheckLogs: checkLogsHang
@@ -66,7 +81,7 @@ function WorkflowState({
       workspaceId="ws-1"
       branchName="tidebreak/scoped-ui-workshop"
       baseRef="main"
-      resource={resourceFor(snapshot, busy)}
+      resource={resourceFor(snapshot, busy, mutationError, setMutationError)}
       onOpenSourceControl={fn()}
       onOpenWatchTask={watchTaskLink ? fn() : undefined}
     />
@@ -102,6 +117,38 @@ export const ReadyForPullRequest: Story = {
 };
 
 export const PullRequestOpen: Story = {};
+
+/** The server rechecked the confirmed merge and found a replacement head. */
+export const MergePreconditionChanged: Story = {
+  args: {
+    snapshot: {
+      ...openPrGit,
+      ahead: 0,
+      pr: {
+        ...openPrGit.pr!,
+        head_branch: "tidebreak/scoped-ui-workshop",
+        base_branch: "main",
+        head_sha: "8a1f2240e66d32a8",
+        mergeable: "mergeable",
+        merge_state_status: "clean",
+        checks_summary: "9 passing, 0 pending, 0 failing",
+        checks: [{ name: "required checks", bucket: "pass" }],
+      },
+    },
+    mergeConflict: true,
+  },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      within(canvasElement).getByRole("button", { name: "Merge" }),
+    );
+    const dialog = await body.findByRole("alertdialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Merge" }),
+    );
+    await body.findByRole("button", { name: "Refresh workspace status" });
+  },
+};
 
 /** GitHub's merge queue uses the shared orange status treatment. */
 export const MergeQueued: Story = {

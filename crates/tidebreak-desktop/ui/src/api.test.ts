@@ -1824,6 +1824,102 @@ describe("code workspace git flow", () => {
       "http://127.0.0.1/code/workspaces/ws-1/pr",
     );
   });
+
+  it("posts the exact pull request target and reconciles the accepted head", async () => {
+    const head = "abcdef1234567890";
+    const digest = {
+      dirty: false,
+      unpushed: false,
+      ahead: 1,
+      has_upstream: true,
+      suggested_commit_message: "",
+      gh_found: true,
+      gh_authenticated: true,
+      remediation: "",
+      pr: {
+        number: 41,
+        url: "https://github.com/acme/app/pull/41",
+        state: "open",
+        head_branch: "thet/exact-merge",
+        head_sha: head,
+      },
+    };
+    const merged = {
+      ...digest,
+      pr: { ...digest.pr, state: "merged", merged: true },
+    };
+    const target = {
+      repository: { host: "github.com", owner: "acme", name: "app" },
+      number: 41,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(digest), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            target,
+            accepted_head_sha: head,
+            status: merged,
+          }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await client.getCodeWorkspacePr("ws-1");
+    await expect(
+      client.mergeCodePr("ws-1", { method: "squash", auto: true }),
+    ).resolves.toEqual(merged);
+
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/pr/merge");
+    expect(JSON.parse(String(init.body))).toEqual({
+      target,
+      expected_head_sha: head,
+      method: "squash",
+      auto: true,
+    });
+  });
+
+  it("refuses a merge response for a different target or accepted head", async () => {
+    const target = {
+      repository: { host: "github.com", owner: "acme", name: "app" },
+      number: 41,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          target: { ...target, number: 42 },
+          accepted_head_sha: "different",
+          status: {
+            dirty: false,
+            unpushed: false,
+            ahead: 0,
+            has_upstream: true,
+            suggested_commit_message: "",
+            gh_found: true,
+            gh_authenticated: true,
+            remediation: "",
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("http://127.0.0.1", "token");
+
+    await expect(
+      client.mergeCodePr("ws-1", {
+        target,
+        expected_head_sha: "abcdef1234567890",
+        method: "squash",
+      }),
+    ).rejects.toThrow("merge response contains invalid data");
+  });
 });
 
 describe("archive force kinds", () => {

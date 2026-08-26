@@ -143,6 +143,106 @@ async fn seed_workspace_pull_request(runtime: &CodeRuntime, id: &str, url: &str,
     runtime.save_workspace(&workspace).await.unwrap();
 }
 
+struct MergeFixture {
+    client: reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: Arc<str>,
+    runtime: Arc<CodeRuntime>,
+    _data: tempfile::TempDir,
+    _shim: tempfile::TempDir,
+    id: String,
+    repo_id: RepoId,
+    path: std::path::PathBuf,
+    branch: String,
+    head: String,
+    log: std::path::PathBuf,
+}
+
+async fn merge_fixture(
+    live_repository: &str,
+    live_number: u64,
+    live_head: Option<&str>,
+) -> MergeFixture {
+    let (router, token, runtime, data) = code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(data.path());
+    let (repo_body, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "exact merge").await;
+    let repo_id: RepoId = json_id(&repo_body).parse().unwrap();
+    let id = json_id(&workspace).to_owned();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    let branch = workspace["branch_name"].as_str().unwrap().to_owned();
+    run(&path, &["git", "push", "-u", "origin", &branch]);
+    let head = run_stdout(&path, &["git", "rev-parse", "HEAD"]);
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/example/demo.git",
+        ],
+    );
+    seed_workspace_pull_request(&runtime, &id, "https://github.com/example/demo/pull/12", 12).await;
+
+    let shim = tempfile::TempDir::new().unwrap();
+    let log = shim.path().join("log");
+    let live_head = live_head.unwrap_or(&head);
+    let (live_owner, live_name) = live_repository.split_once('/').unwrap();
+    write_executable(
+        &shim.path().join("gh"),
+        &format!(
+            r#"#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  echo '{{"number":{live_number},"url":"https://github.com/{live_owner}/{live_name}/pull/{live_number}","state":"OPEN","headRefName":"{branch}","headRefOid":"{live_head}"}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = merge ]; then exit 0; fi
+exit 3
+"#,
+            log = log.display(),
+        ),
+    );
+    runtime.set_gh_search_path(Some(shim.path().display().to_string()));
+    MergeFixture {
+        client,
+        addr,
+        token,
+        runtime,
+        _data: data,
+        _shim: shim,
+        id,
+        repo_id,
+        path,
+        branch,
+        head,
+        log,
+    }
+}
+
+fn exact_merge_body(head: &str) -> serde_json::Value {
+    serde_json::json!({
+        "target": {
+            "repository": {
+                "host": "github.com",
+                "owner": "example",
+                "name": "demo"
+            },
+            "number": 12
+        },
+        "expected_head_sha": head,
+        "method": "squash",
+        "auto": false
+    })
+}
+
 async fn register_and_workspace(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
@@ -254,6 +354,277 @@ async fn commit_and_push_use_a_bare_origin_and_refuse_a_clean_tree() {
     assert_eq!(pr["dirty"], false);
     assert_eq!(pr["unpushed"], false);
     assert!(pr["ahead"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn workspace_merge_requires_the_exact_reviewed_target() {
+    let (router, token, _runtime, dir) = code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "exact merge body").await;
+    let id = json_id(&workspace);
+    let response = client
+        .post(format!("http://{addr}/code/workspaces/{id}/pr/merge"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "method": "squash", "auto": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn workspace_merge_rechecks_and_uses_the_repository_qualified_head() {
+    let fixture = merge_fixture("example/demo", 12, None).await;
+    let response = fixture
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            fixture.addr, fixture.id
+        ))
+        .bearer_auth(&fixture.token)
+        .json(&exact_merge_body(&fixture.head))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["target"]["repository"]["host"], "github.com");
+    assert_eq!(body["target"]["repository"]["owner"], "example");
+    assert_eq!(body["target"]["repository"]["name"], "demo");
+    assert_eq!(body["target"]["number"], 12);
+    assert_eq!(body["accepted_head_sha"], fixture.head);
+    assert!(body["status"].is_object(), "{body}");
+
+    let logged = std::fs::read_to_string(&fixture.log).unwrap();
+    assert!(logged.contains("pr view --json"), "{logged}");
+    assert!(
+        logged.contains(&format!(
+            "pr merge 12 --repo example/demo --squash --match-head-commit {}",
+            fixture.head
+        )),
+        "{logged}"
+    );
+}
+
+#[tokio::test]
+async fn workspace_merge_returns_typed_local_and_remote_conflicts() {
+    let dirty = merge_fixture("example/demo", 12, None).await;
+    std::fs::write(dirty.path.join("dirty.txt"), "changed\n").unwrap();
+    let response = dirty
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            dirty.addr, dirty.id
+        ))
+        .bearer_auth(&dirty.token)
+        .json(&exact_merge_body(&dirty.head))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, _) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "workspace_dirty");
+    assert!(!dirty.log.exists(), "dirty work must fail before gh runs");
+
+    let unpushed = merge_fixture("example/demo", 12, None).await;
+    std::fs::write(unpushed.path.join("ahead.txt"), "ahead\n").unwrap();
+    run(&unpushed.path, &["git", "add", "ahead.txt"]);
+    run(&unpushed.path, &["git", "commit", "-m", "ahead"]);
+    let response = unpushed
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            unpushed.addr, unpushed.id
+        ))
+        .bearer_auth(&unpushed.token)
+        .json(&exact_merge_body(&unpushed.head))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, _) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "workspace_unpushed");
+    assert!(
+        !unpushed.log.exists(),
+        "unpushed work must fail before gh runs"
+    );
+
+    let no_upstream = merge_fixture("example/demo", 12, None).await;
+    run(&no_upstream.path, &["git", "branch", "--unset-upstream"]);
+    let response = no_upstream
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            no_upstream.addr, no_upstream.id
+        ))
+        .bearer_auth(&no_upstream.token)
+        .json(&exact_merge_body(&no_upstream.head))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, _) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "workspace_upstream_missing");
+
+    let changed_branch = merge_fixture("example/demo", 12, None).await;
+    run(
+        &changed_branch.path,
+        &["git", "switch", "-c", "other-branch"],
+    );
+    let response = changed_branch
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            changed_branch.addr, changed_branch.id
+        ))
+        .bearer_auth(&changed_branch.token)
+        .json(&exact_merge_body(&changed_branch.head))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, _) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "workspace_branch_changed");
+
+    let moved_head = merge_fixture("example/demo", 12, Some("bbbbbbbbbbbbbbbb")).await;
+    let response = moved_head
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            moved_head.addr, moved_head.id
+        ))
+        .bearer_auth(&moved_head.token)
+        .json(&exact_merge_body(&moved_head.head))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "pr_head_changed");
+    assert!(message.contains(&moved_head.head[..8]), "{message}");
+    assert!(message.contains("bbbbbbbb"), "{message}");
+    let logged = std::fs::read_to_string(&moved_head.log).unwrap();
+    assert!(!logged.contains("pr merge"), "{logged}");
+
+    let moved_target = merge_fixture("example/other", 19, None).await;
+    let response = moved_target
+        .client
+        .post(format!(
+            "http://{}/code/workspaces/{}/pr/merge",
+            moved_target.addr, moved_target.id
+        ))
+        .bearer_auth(&moved_target.token)
+        .json(&exact_merge_body(&moved_target.head))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "pr_target_changed");
+    assert!(message.contains("example/other#19"), "{message}");
+    let logged = std::fs::read_to_string(&moved_target.log).unwrap();
+    assert!(!logged.contains("pr merge"), "{logged}");
+}
+
+#[tokio::test]
+async fn workspace_merge_holds_the_turn_lock_through_the_host_action() {
+    let fixture = merge_fixture("example/demo", 12, None).await;
+    let entered = fixture._shim.path().join("view-entered");
+    let release = fixture._shim.path().join("release-view");
+    write_executable(
+        &fixture._shim.path().join("gh"),
+        &format!(
+            r#"#!/bin/sh
+echo "$@" >> {log}
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  : > {entered}
+  while [ ! -f {release} ]; do sleep 0.02; done
+  echo '{{"number":12,"url":"https://github.com/example/demo/pull/12","state":"OPEN","headRefName":"{branch}","headRefOid":"{head}"}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = merge ]; then exit 0; fi
+exit 3
+"#,
+            log = fixture.log.display(),
+            entered = entered.display(),
+            release = release.display(),
+            branch = fixture.branch,
+            head = fixture.head,
+        ),
+    );
+    let mut repo = fixture
+        .runtime
+        .get_repo(&tidebreak_core::OwnerId::local(), fixture.repo_id)
+        .await
+        .unwrap();
+    repo.quick_actions = vec![QuickAction {
+        name: "mutate".into(),
+        command: "printf 'changed\\n' > action.txt".into(),
+        auto_run_on_create: false,
+    }];
+    fixture.runtime.save_repo(&repo).await.unwrap();
+
+    let merge_client = fixture.client.clone();
+    let merge_token = fixture.token.clone();
+    let merge_url = format!(
+        "http://{}/code/workspaces/{}/pr/merge",
+        fixture.addr, fixture.id
+    );
+    let merge_body = exact_merge_body(&fixture.head);
+    let merge = tokio::spawn(async move {
+        merge_client
+            .post(merge_url)
+            .bearer_auth(merge_token)
+            .json(&merge_body)
+            .send()
+            .await
+            .unwrap()
+    });
+    for _ in 0..100 {
+        if entered.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        entered.exists(),
+        "the merge did not reach its locked host read"
+    );
+
+    let action_client = fixture.client.clone();
+    let action_token = fixture.token.clone();
+    let action_url = format!(
+        "http://{}/code/workspaces/{}/actions/mutate",
+        fixture.addr, fixture.id
+    );
+    let action = tokio::spawn(async move {
+        action_client
+            .post(action_url)
+            .bearer_auth(action_token)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !fixture.path.join("action.txt").exists(),
+        "another workspace action ran inside the merge preflight"
+    );
+
+    std::fs::write(&release, "go\n").unwrap();
+    assert_eq!(merge.await.unwrap().status(), reqwest::StatusCode::OK);
+    assert_eq!(action.await.unwrap().status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(fixture.path.join("action.txt")).unwrap(),
+        "changed\n"
+    );
 }
 
 #[tokio::test]

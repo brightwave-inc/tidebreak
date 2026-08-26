@@ -20,6 +20,7 @@ use tidebreak_harness::{filter_child_env, probe_shell, HostEnv};
 
 use super::setup_script::spawn_workspace_script;
 use crate::obo_gateway::GitCredential;
+use crate::routes::code::types::CodeGitHubRepositoryTarget;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -203,6 +204,27 @@ pub(crate) struct WorkspaceGitStatus {
     /// `Some(true)` when `pushes_as` is the caller's own account
     /// (decision 65) rather than the deployment's App.
     pub pushes_as_self: Option<bool>,
+}
+
+/// Mutable local facts that must still hold when a workspace merge reaches
+/// the host. The runtime reads them while it owns the workspace turn lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceMergeLocalState {
+    pub current_branch: Option<String>,
+    pub head_sha: String,
+    pub dirty: bool,
+    pub upstream: Option<String>,
+    pub ahead_of_upstream: u64,
+}
+
+/// The pull request `gh` resolves from the locked workspace branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspacePullRequestIdentity {
+    pub target: CodeGitHubRepositoryTarget,
+    pub number: u64,
+    pub state: String,
+    pub head_branch: String,
+    pub head_sha: String,
 }
 
 /// Outcome of one named quick action.
@@ -546,28 +568,6 @@ impl MergeMethod {
             Self::Rebase => "--rebase",
         }
     }
-}
-
-/// Merge the workspace PR, or enable auto-merge on it. This is the only path
-/// allowed to run `gh pr merge`, and it exists solely for the user-initiated
-/// merge endpoint — agent and automation paths go through [`run_gh`], which
-/// refuses merge argv outright.
-pub(crate) async fn merge_pull_request(
-    worktree: &Path,
-    method: MergeMethod,
-    auto: bool,
-    gh_search_path: Option<&str>,
-) -> Result<(), GhError> {
-    let gh = observe_gh(gh_search_path).await;
-    let binary = require_gh_binary(&gh)?;
-    let mut args = vec!["pr", "merge", method.flag()];
-    if auto {
-        args.push("--auto");
-    }
-    run_gh_user_merge(worktree, &binary, &args, GH_TIMEOUT)
-        .await
-        .map_err(classify_merge_error)?;
-    Ok(())
 }
 
 /// Mark the workspace's own draft pull request ready for review.
@@ -927,6 +927,52 @@ struct GitInspect {
     suggested_commit_message: String,
     suggested_pr_body: String,
     diffstat: Diffstat,
+}
+
+/// Read the local preconditions for merging a workspace pull request.
+///
+/// The caller owns the workspace turn lock for this read and the host action
+/// that follows. A missing upstream and a detached head stay distinct so the
+/// route can return a specific typed conflict.
+pub(crate) async fn inspect_workspace_merge_local_state(
+    worktree: &Path,
+) -> Result<WorkspaceMergeLocalState, GhError> {
+    let current_branch = git(
+        worktree,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|branch| !branch.is_empty());
+    let head_sha = git(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT).await?;
+    let dirty = has_uncommitted_work(worktree).await?;
+    let upstream = git(
+        worktree,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|upstream| !upstream.is_empty());
+    let ahead_of_upstream = match upstream {
+        Some(_) => parse_count(
+            &git(
+                worktree,
+                &["rev-list", "--count", "@{u}..HEAD"],
+                GIT_TIMEOUT,
+            )
+            .await?,
+        ),
+        None => 0,
+    };
+    Ok(WorkspaceMergeLocalState {
+        current_branch,
+        head_sha,
+        dirty,
+        upstream,
+        ahead_of_upstream,
+    })
 }
 
 async fn inspect_git(worktree: &Path, base_ref: &str, title: &str) -> Result<GitInspect, GhError> {
@@ -1821,6 +1867,70 @@ pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
 /// delivery list fields: no checks, review, or mergeability — those stay
 /// live-only.
 pub(crate) const PR_FACT_FIELDS: &str = "number,url,title,state,isDraft,author,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergedAt,closedAt";
+
+/// Resolve the pull request attached to the workspace's current branch.
+///
+/// This read deliberately carries no repository or pull request selector. The
+/// runtime compares the returned URL, number, branch, and head with the exact
+/// target the desktop confirmed before it calls the repository-qualified
+/// merge helper.
+pub(crate) async fn view_workspace_pull_request(
+    worktree: &Path,
+    search_path: Option<&str>,
+) -> Result<WorkspacePullRequestIdentity, GhError> {
+    let observation = observe_gh(search_path).await;
+    let binary = require_gh_binary(&observation)?;
+    let raw = run_gh(
+        worktree,
+        &binary,
+        &["pr", "view", "--json", PR_FACT_FIELDS],
+        GH_TIMEOUT,
+    )
+    .await
+    .map_err(|error| classify_observed_gh(error, &observation))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| GhError::Internal(format!("could not parse pull request: {error}")))?;
+    let number = value
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|number| *number > 0)
+        .ok_or_else(|| GhError::user("the pull request response did not name a pull request"))?;
+    let url = value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| GhError::user("the pull request response did not name its repository"))?;
+    let (host, owner, name, url_number) = super::pr_facts::pull_request_identity_from_url(url)
+        .ok_or_else(|| GhError::user("the pull request response had an invalid URL"))?;
+    if number != url_number {
+        return Err(GhError::user(format!(
+            "the pull request response named both #{number} and #{url_number}"
+        )));
+    }
+    let state = value
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| GhError::user("the pull request response did not name its state"))?;
+    let head_branch = value
+        .get("headRefName")
+        .and_then(serde_json::Value::as_str)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| GhError::user("the pull request response did not name its head branch"))?;
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| GhError::user("the pull request response did not name its head commit"))?;
+    Ok(WorkspacePullRequestIdentity {
+        target: CodeGitHubRepositoryTarget { host, owner, name },
+        number,
+        state,
+        head_branch,
+        head_sha,
+    })
+}
 
 /// Read one repository-qualified pull request's fact fields, as raw JSON.
 pub(crate) async fn view_pull_request_raw(
@@ -2723,25 +2833,44 @@ exit 3
         assert!(!log.exists(), "a refused argv must never spawn gh");
 
         // The dedicated merge operation is the one path that runs it.
-        merge_pull_request(
-            dir.path(),
+        merge_pull_request_target(
+            "github.com",
+            "acme",
+            "app",
+            42,
             MergeMethod::Squash,
             false,
+            false,
+            "abcdef123456",
             Some(shim_dir.path().to_str().unwrap()),
         )
         .await
         .unwrap();
-        merge_pull_request(
-            dir.path(),
+        merge_pull_request_target(
+            "github.com",
+            "acme",
+            "app",
+            42,
             MergeMethod::Merge,
             true,
+            false,
+            "abcdef123456",
             Some(shim_dir.path().to_str().unwrap()),
         )
         .await
         .unwrap();
         let logged = std::fs::read_to_string(&log).unwrap();
-        assert!(logged.contains("pr merge --squash"), "{logged}");
-        assert!(logged.contains("pr merge --merge --auto"), "{logged}");
+        assert!(
+            logged
+                .contains("pr merge 42 --repo acme/app --squash --match-head-commit abcdef123456"),
+            "{logged}"
+        );
+        assert!(
+            logged.contains(
+                "pr merge 42 --repo acme/app --merge --match-head-commit abcdef123456 --auto"
+            ),
+            "{logged}"
+        );
     }
 
     #[tokio::test]

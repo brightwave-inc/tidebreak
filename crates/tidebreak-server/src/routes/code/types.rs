@@ -805,10 +805,24 @@ impl From<CodeWatch> for CodeWatchSnapshot {
 #[derive(Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct MergeCodePrBody {
+    /// The repository and pull request shown in the confirmation.
+    pub target: CodeDeliveryPullRequestTarget,
+    /// The pull request head shown in the confirmation.
+    pub expected_head_sha: String,
     pub method: CodePrMergeMethod,
     /// True arms host auto-merge instead of merging immediately.
     #[serde(default)]
     pub auto: bool,
+}
+
+/// Accepted exact target plus the refreshed workspace status after a merge
+/// request. The desktop uses the echoed identity to reconcile the result with
+/// the confirmation it showed instead of inferring identity from the branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeWorkspaceMergeResult {
+    pub target: CodeDeliveryPullRequestTarget,
+    pub accepted_head_sha: String,
+    pub status: CodeWorkspacePrSnapshot,
 }
 
 /// Merge strategy for a user-initiated PR merge.

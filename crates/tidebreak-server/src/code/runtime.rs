@@ -57,6 +57,7 @@ use super::worktree::{
     run_archive_script, run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
+use crate::routes::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
 
 const MANAGED_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 const MANAGED_NODE_STARTUP_GRACE: Duration = Duration::from_secs(2);
@@ -246,6 +247,14 @@ const DELIVERY_NUDGE_DEBOUNCE: Duration = Duration::from_secs(3);
 #[derive(Default)]
 struct DeliveryNudgeDebounce {
     owners: Arc<Mutex<HashMap<OwnerId, DeliveryNudgeState>>>,
+}
+
+/// The exact merge target the runtime accepted plus the refreshed workspace
+/// status after the host action.
+pub(crate) struct WorkspaceMergeOutcome {
+    pub target: CodeDeliveryPullRequestTarget,
+    pub accepted_head_sha: String,
+    pub status: WorkspaceGitStatus,
 }
 
 struct DeliveryNudgeState {
@@ -1414,6 +1423,8 @@ impl CodeRuntime {
         id: WorkspaceId,
         message: Option<String>,
     ) -> Result<CommitOutcome, ServerError> {
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
         let workspace = self.require_live_workspace(owner, id).await?;
         gh::commit_all(
             std::path::Path::new(&workspace.worktree_path),
@@ -1429,6 +1440,8 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<PushOutcome, ServerError> {
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
         let workspace = self.require_live_workspace(owner, id).await?;
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
         let credential = self.borrow_git_credential(owner, &worktree).await?;
@@ -2210,30 +2223,166 @@ impl CodeRuntime {
         Ok(facts)
     }
 
-    /// User-initiated merge (or auto-merge arming) of the workspace PR, then a
-    /// fresh status read so the caller and the updates channel both see the
-    /// result. This is the only route to `gh pr merge`.
+    /// Merge the exact pull request head the desktop confirmed.
+    ///
+    /// The workspace turn lock covers every mutable local and host preflight
+    /// plus the repository-qualified merge invocation. The final helper also
+    /// sends `--match-head-commit`, so a force push after the live read fails
+    /// at GitHub instead of changing what this request lands.
     pub(crate) async fn merge_workspace_pr(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
+        target: CodeDeliveryPullRequestTarget,
+        expected_head_sha: String,
         method: gh::MergeMethod,
         auto: bool,
-    ) -> Result<WorkspaceGitStatus, ServerError> {
+    ) -> Result<WorkspaceMergeOutcome, ServerError> {
+        validate_workspace_merge_request(&target, &expected_head_sha)?;
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
         let workspace = self.require_live_workspace(owner, id).await?;
+        let worktree = std::path::Path::new(&workspace.worktree_path);
+        let local = gh::inspect_workspace_merge_local_state(worktree)
+            .await
+            .map_err(map_gh)?;
+        let current_branch = local.current_branch.ok_or_else(|| {
+            ServerError::conflict_kind(
+                "workspace_branch_changed",
+                format!(
+                    "the workspace is detached; check out {} and refresh before merging",
+                    workspace.branch_name
+                ),
+            )
+        })?;
+        if current_branch != workspace.branch_name {
+            return Err(ServerError::conflict_kind(
+                "workspace_branch_changed",
+                format!(
+                    "the workspace branch changed from {} to {current_branch}; refresh before merging",
+                    workspace.branch_name
+                ),
+            ));
+        }
+        if local.dirty {
+            return Err(ServerError::conflict_kind(
+                "workspace_dirty",
+                "the workspace now has uncommitted changes; review them before merging",
+            ));
+        }
+        let upstream = local.upstream.ok_or_else(|| {
+            ServerError::conflict_kind(
+                "workspace_upstream_missing",
+                "the workspace branch no longer has an upstream; push it and refresh before merging",
+            )
+        })?;
+        let expected_upstream = format!("origin/{}", workspace.branch_name);
+        if upstream != expected_upstream {
+            return Err(ServerError::conflict_kind(
+                "workspace_branch_changed",
+                format!(
+                    "the workspace branch now tracks {upstream} instead of {expected_upstream}; refresh before merging"
+                ),
+            ));
+        }
+        if local.ahead_of_upstream > 0 {
+            return Err(ServerError::conflict_kind(
+                "workspace_unpushed",
+                format!(
+                    "the workspace now has {} unpushed commit{}; push and refresh before merging",
+                    local.ahead_of_upstream,
+                    if local.ahead_of_upstream == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            ));
+        }
+
+        let local_target = super::delivery::repository_target_from_path(worktree)
+            .await
+            .map_err(|message| {
+                ServerError::conflict_kind(
+                    "workspace_repository_changed",
+                    format!("the workspace repository could not be verified: {message}"),
+                )
+            })?;
+        if !same_repository(&local_target, &target.repository) {
+            return Err(ServerError::conflict_kind(
+                "workspace_repository_changed",
+                format!(
+                    "the workspace repository changed from {} to {}; refresh before merging",
+                    repository_label(&target.repository),
+                    repository_label(&local_target)
+                ),
+            ));
+        }
+
         let gh_path = self.gh_search_path_owned();
-        gh::merge_pull_request(
-            std::path::Path::new(&workspace.worktree_path),
+        let live = gh::view_workspace_pull_request(worktree, gh_path.as_deref())
+            .await
+            .map_err(map_gh)?;
+        if !same_repository(&live.target, &target.repository) || live.number != target.number {
+            return Err(ServerError::conflict_kind(
+                "pr_target_changed",
+                format!(
+                    "the workspace now resolves to {}#{} instead of {}#{}; refresh before merging",
+                    repository_label(&live.target),
+                    live.number,
+                    repository_label(&target.repository),
+                    target.number
+                ),
+            ));
+        }
+        if live.head_branch != workspace.branch_name {
+            return Err(ServerError::conflict_kind(
+                "pr_target_changed",
+                format!(
+                    "pull request #{} now uses branch {} instead of {}; refresh before merging",
+                    target.number, live.head_branch, workspace.branch_name
+                ),
+            ));
+        }
+        if live.state != "open" {
+            return Err(ServerError::conflict_kind(
+                "pr_not_mergeable",
+                format!(
+                    "pull request #{} is {}; refresh before merging",
+                    target.number, live.state
+                ),
+            ));
+        }
+        if local.head_sha != expected_head_sha {
+            return Err(pr_head_changed(&expected_head_sha, &local.head_sha));
+        }
+        if live.head_sha != expected_head_sha {
+            return Err(pr_head_changed(&expected_head_sha, &live.head_sha));
+        }
+
+        gh::merge_pull_request_target(
+            &target.repository.host,
+            &target.repository.owner,
+            &target.repository.name,
+            target.number,
             method,
             auto,
+            false,
+            &expected_head_sha,
             gh_path.as_deref(),
         )
         .await
         .map_err(map_gh)?;
+        drop(_turn_guard);
         // A merge dirties the row (decision 66); the delivery lists hold the
         // pre-merge row.
         self.delivery_cache.invalidate();
-        self.refresh_workspace_pr(owner, id).await
+        let status = self.refresh_workspace_pr(owner, id).await?;
+        Ok(WorkspaceMergeOutcome {
+            target,
+            accepted_head_sha: expected_head_sha,
+            status,
+        })
     }
 
     /// Take the workspace's pull request out of draft and return a fresh
@@ -2245,6 +2394,8 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
         let workspace = self.require_live_workspace(owner, id).await?;
         let gh_path = self.gh_search_path_owned();
         gh::mark_workspace_pull_request_ready(
@@ -2264,6 +2415,8 @@ impl CodeRuntime {
         title: Option<String>,
         body: Option<String>,
     ) -> Result<WorkspaceGitStatus, ServerError> {
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
         let mut workspace = self.require_live_workspace(owner, id).await?;
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
         // On a hosted machine the pull request rides the forge REST API with
@@ -2363,6 +2516,8 @@ impl CodeRuntime {
         id: WorkspaceId,
         name: &str,
     ) -> Result<ActionOutcome, ServerError> {
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
         let workspace = self.require_live_workspace(owner, id).await?;
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         gh::run_named_action(
@@ -4708,7 +4863,11 @@ fn map_gh(err: GhError) -> ServerError {
         }
         GhError::MergeBlocked(message) => ServerError::conflict_kind("pr_not_mergeable", message),
         GhError::User(message) => {
-            if message.contains("no quick action") {
+            if let Some(message) = message.strip_prefix(gh::PR_HEAD_CHANGED_PREFIX) {
+                ServerError::conflict_kind("pr_head_changed", message)
+            } else if let Some(message) = message.strip_prefix(gh::GH_UNAVAILABLE_PREFIX) {
+                ServerError::conflict_kind("gh_unavailable", message)
+            } else if message.contains("no quick action") {
                 ServerError::not_found(message)
             } else {
                 ServerError::bad_request_kind("git", message)
@@ -4716,6 +4875,53 @@ fn map_gh(err: GhError) -> ServerError {
         }
         GhError::Internal(message) => ServerError::internal(message),
     }
+}
+
+fn validate_workspace_merge_request(
+    target: &CodeDeliveryPullRequestTarget,
+    expected_head_sha: &str,
+) -> Result<(), ServerError> {
+    if target.number == 0
+        || target.repository.host.trim().is_empty()
+        || target.repository.owner.trim().is_empty()
+        || target.repository.name.trim().is_empty()
+        || expected_head_sha.trim().is_empty()
+    {
+        return Err(ServerError::bad_request_kind(
+            "workspace_merge_target",
+            "repository, pull request number, and expected head commit are required",
+        ));
+    }
+    Ok(())
+}
+
+fn same_repository(left: &CodeGitHubRepositoryTarget, right: &CodeGitHubRepositoryTarget) -> bool {
+    left.host.eq_ignore_ascii_case(&right.host)
+        && left.owner.eq_ignore_ascii_case(&right.owner)
+        && left.name.eq_ignore_ascii_case(&right.name)
+}
+
+fn repository_label(target: &CodeGitHubRepositoryTarget) -> String {
+    if target.host.eq_ignore_ascii_case("github.com") {
+        format!("{}/{}", target.owner, target.name)
+    } else {
+        format!("{}/{}/{}", target.host, target.owner, target.name)
+    }
+}
+
+fn pr_head_changed(expected: &str, current: &str) -> ServerError {
+    ServerError::conflict_kind(
+        "pr_head_changed",
+        format!(
+            "pull request head changed from {} to {}; refresh before merging",
+            short_sha(expected),
+            short_sha(current)
+        ),
+    )
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..sha.len().min(8)).unwrap_or(sha)
 }
 
 /// The origin a hosted machine may lend the forge's App identity to: a

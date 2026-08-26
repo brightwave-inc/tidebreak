@@ -10,8 +10,8 @@ use crate::extract::{Json, Path};
 use super::types::{
     CodeActionSnapshot, CodeCheckLog, CodeCheckLogError, CodeCheckLogsSnapshot, CodeCommitSnapshot,
     CodePrCommentsSnapshot, CodePrMergeMethod, CodePushSnapshot, CodeWatchSnapshot,
-    CodeWorkspacePrSnapshot, CodeWorkspacePullRequestFact, CodeWorkspacePullRequests,
-    CommitWorkspaceBody, CreatePullRequestBody, MergeCodePrBody,
+    CodeWorkspaceMergeResult, CodeWorkspacePrSnapshot, CodeWorkspacePullRequestFact,
+    CodeWorkspacePullRequests, CommitWorkspaceBody, CreatePullRequestBody, MergeCodePrBody,
 };
 use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, WorkspaceGitStatus};
 use tidebreak_core::WorkspaceId;
@@ -165,15 +165,21 @@ pub async fn merge_workspace_pr(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
     Json(body): Json<MergeCodePrBody>,
-) -> Result<Json<CodeWorkspacePrSnapshot>, ServerError> {
+) -> Result<Json<CodeWorkspaceMergeResult>, ServerError> {
     let method = match body.method {
         CodePrMergeMethod::Squash => MergeMethod::Squash,
         CodePrMergeMethod::Merge => MergeMethod::Merge,
         CodePrMergeMethod::Rebase => MergeMethod::Rebase,
     };
-    let status = code.merge_workspace_pr(id, method, body.auto).await?;
+    let outcome = code
+        .merge_workspace_pr(id, body.target, body.expected_head_sha, method, body.auto)
+        .await?;
     let watch = code.latest_watch(id).await?;
-    Ok(Json(pr_snapshot(status, watch)))
+    Ok(Json(CodeWorkspaceMergeResult {
+        target: outcome.target,
+        accepted_head_sha: outcome.accepted_head_sha,
+        status: pr_snapshot(outcome.status, watch),
+    }))
 }
 
 pub async fn mark_workspace_pr_ready(

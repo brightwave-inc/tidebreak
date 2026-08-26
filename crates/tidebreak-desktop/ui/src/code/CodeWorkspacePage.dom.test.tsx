@@ -248,6 +248,7 @@ const PR: PullRequestDigest = {
   url: "https://github.com/acme/app/pull/41",
   draft: true,
   head_branch: "tidebreak/fix-login",
+  head_sha: "abcdef1234567890",
   base_branch: "main",
   checks: [
     { name: "ci / rust", bucket: "pass" as const },
@@ -1294,6 +1295,15 @@ describe("CodeWorkspacePage", () => {
 
     await waitFor(() =>
       expect(client.mergeCodePr).toHaveBeenCalledWith("ws-1", {
+        target: {
+          repository: {
+            host: "github.com",
+            owner: "acme",
+            name: "app",
+          },
+          number: 41,
+        },
+        expected_head_sha: "abcdef1234567890",
         method: "squash",
         auto: false,
       }),
@@ -1415,6 +1425,15 @@ describe("CodeWorkspacePage", () => {
 
     await waitFor(() =>
       expect(client.mergeCodePr).toHaveBeenCalledWith("ws-1", {
+        target: {
+          repository: {
+            host: "github.com",
+            owner: "acme",
+            name: "app",
+          },
+          number: 41,
+        },
+        expected_head_sha: "abcdef1234567890",
         method: "squash",
         auto: true,
       }),
