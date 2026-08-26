@@ -2233,24 +2233,19 @@ fn approval_file_paths(raw: &serde_json::Value, input: &serde_json::Value) -> Ve
 }
 
 fn normalize_approval_path(path: &str, cwd: Option<&str>) -> String {
+    let render = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
     let path = std::path::Path::new(path);
     if let Ok(relative) = path.strip_prefix("/workspace") {
         if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
-            return std::path::Path::new(cwd)
-                .join(relative)
-                .to_string_lossy()
-                .into_owned();
+            return render(&std::path::Path::new(cwd).join(relative));
         }
     }
     if path.is_relative() {
         if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
-            return std::path::Path::new(cwd)
-                .join(path)
-                .to_string_lossy()
-                .into_owned();
+            return render(&std::path::Path::new(cwd).join(path));
         }
     }
-    path.to_string_lossy().into_owned()
+    render(path)
 }
 
 fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEvent> {
