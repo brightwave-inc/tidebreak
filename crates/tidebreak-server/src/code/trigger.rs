@@ -1225,6 +1225,8 @@ mod tests {
             ready_to_merge: true,
             workspace_links: Vec::new(),
             stack_parent_number: None,
+            stack_number: None,
+            stack_size: None,
             labels: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

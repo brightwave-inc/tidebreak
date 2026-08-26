@@ -13,6 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { openExternal } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { FOCUS_RING } from "./interactive";
+import { STATUS_TONE_BADGE_VARIANT, prStateChips } from "./prState";
 import {
   useCodeWorkspacePr,
   type CodeWorkspacePrMutation,
@@ -369,16 +370,20 @@ export function PrCardView({
 
 function GitStateChips({ snapshot }: { snapshot: CodeWorkspacePrSnapshot }) {
   const chips: ReactNode[] = [];
+  // The pull request's own chips — lifecycle, review, queue — come from the
+  // one state module, so this card can never invent a second color or label
+  // for a state every other surface already settled.
   if (snapshot.pr) {
-    const queued = snapshot.pr.in_merge_queue === true;
     chips.push(
-      <Badge
-        key="pr"
-        variant={queued ? "warning" : prStateVariant(snapshot.pr.state)}
-        size="sm"
-      >
-        {queued ? "Queued" : snapshot.pr.state}
-      </Badge>,
+      ...prStateChips(snapshot.pr).map((chip) => (
+        <Badge
+          key={chip.key}
+          variant={STATUS_TONE_BADGE_VARIANT[chip.tone]}
+          size="sm"
+        >
+          {chip.label}
+        </Badge>
+      )),
     );
   }
   if (snapshot.dirty) {
@@ -482,14 +487,4 @@ function GhRemediation({ snapshot }: { snapshot: CodeWorkspacePrSnapshot }) {
       />
     </div>
   );
-}
-
-type StatusTone = "success" | "warning" | "critical" | "info" | "outline";
-
-function prStateVariant(state: string): StatusTone {
-  const token = state.toLowerCase();
-  if (token === "open") return "success";
-  if (token === "merged") return "info";
-  if (token === "closed") return "critical";
-  return "outline";
 }

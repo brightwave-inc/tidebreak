@@ -102,7 +102,7 @@ describe("workspaceWorkflowModel", () => {
       }),
     });
     expect(queued.summary).toBe("#41 · Queued");
-    expect(queued.tone).toBe("warning");
+    expect(queued.tone).toBe("pending");
     expect(queued.primary).toBe("open_pr");
     expect(workspaceWorkflowActionLabel(queued.primary!, queued.stage)).toBe(
       "View queue",
@@ -113,6 +113,7 @@ describe("workspaceWorkflowModel", () => {
       pr: pr({ state: "merged", merged: true }),
     });
     expect(merged.summary).toBe("#41 · Merged");
+    expect(merged.tone).toBe("merged");
     expect(merged.secondary).toEqual([]);
   });
 

@@ -66,7 +66,14 @@ import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { useWorkspacePullRequests } from "./useWorkspacePullRequests";
 import { digestFromFact, factKey, WorkspacePrList } from "./WorkspacePrList";
 import { STATUS_MARK } from "./statusTone";
-import { prStatusLabel, prStatusTone, prTone } from "./workspaceCards";
+import {
+  PULL_REQUEST_LIFECYCLE_TONE,
+  STATUS_TONE_BADGE_VARIANT,
+  checkCounts,
+  mergeBlockedReasons,
+  prStateChips,
+  pullRequestLifecycle,
+} from "./prState";
 
 export type InspectorTab = "files" | "source" | "pr";
 
@@ -204,7 +211,11 @@ export function CodeInspector({
               <GitPullRequest
                 className={cn(
                   "size-3.5",
-                  pr ? STATUS_MARK[prStatusTone(pr)] : undefined,
+                  pr
+                    ? STATUS_MARK[
+                        PULL_REQUEST_LIFECYCLE_TONE[pullRequestLifecycle(pr)]
+                      ]
+                    : undefined,
                 )}
               />
             </InspectorTabTrigger>
@@ -559,13 +570,15 @@ export function PrTab({
     );
   }
 
-  const tone = prTone(pr);
+  const lifecycle = pullRequestLifecycle(pr);
   const workflow = prWorkflowStatus(pr);
   const mergeControls = prMergeControls(workflow.state);
   const directMerge = prDirectMergeAction(pr);
   const showMergeMethod = directMerge !== null;
   const counts = checkCounts(pr);
-  const open = tone === "open" || tone === "draft";
+  const blockers = mergeBlockedReasons(pr);
+  const open = lifecycle === "open" || lifecycle === "draft";
+  const chips = prStateChips(pr);
   const branchLine =
     pr.head_branch && pr.base_branch
       ? `${pr.head_branch} → ${pr.base_branch}`
@@ -578,7 +591,10 @@ export function PrTab({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <GitPullRequest
-              className={cn("size-4 shrink-0", STATUS_MARK[prStatusTone(pr)])}
+              className={cn(
+                "size-4 shrink-0",
+                STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
+              )}
             />
             {pr.url ? (
               <a
@@ -616,12 +632,15 @@ export function PrTab({
           />
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <Badge
-            variant={pr.in_merge_queue ? "warning" : prStateVariant(tone)}
-            size="sm"
-          >
-            {prStatusLabel(pr)}
-          </Badge>
+          {chips.map((chip) => (
+            <Badge
+              key={chip.key}
+              variant={STATUS_TONE_BADGE_VARIANT[chip.tone]}
+              size="sm"
+            >
+              {chip.label}
+            </Badge>
+          ))}
           <Button
             type="button"
             variant="ghost"
@@ -640,15 +659,6 @@ export function PrTab({
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-1">
-        {open && <ReviewDecisionBadge decision={pr.review_decision} />}
-        {open && pr.auto_merge_enabled && !pr.in_merge_queue && (
-          <Badge variant="info" size="sm">
-            Auto-merge on
-          </Badge>
-        )}
-      </div>
-
       <CheckList checks={pr.checks ?? []} counts={counts} />
 
       {open && (
@@ -659,10 +669,23 @@ export function PrTab({
             </span>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-medium">Merge pull request</p>
-              <p className="text-muted-foreground mt-0.5 text-xs leading-4">
-                {mergeControls.explanation ??
-                  `Ready to land on ${pr.base_branch ?? "the base branch"}.`}
-              </p>
+              {blockers.length > 0 ? (
+                <ul className="mt-0.5 flex flex-col gap-0.5">
+                  {blockers.map((reason) => (
+                    <li
+                      key={reason}
+                      className="text-muted-foreground text-xs leading-4"
+                    >
+                      {reason}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-muted-foreground mt-0.5 text-xs leading-4">
+                  {mergeControls.explanation ??
+                    `Ready to land on ${pr.base_branch ?? "the base branch"}.`}
+                </p>
+              )}
             </div>
             {showMergeMethod && (
               <Select
@@ -708,7 +731,7 @@ export function PrTab({
               {directMerge.label}
             </Button>
           ) : workflow.state === "queued" ? (
-            <div className="text-warning-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
+            <div className="text-info-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
               <CircleDashed className="size-3.5" />
               In merge queue
             </div>
@@ -761,31 +784,6 @@ function mergeMethodLabel(method: CodePrMergeMethod): string {
     case "rebase":
       return "Rebase and merge";
   }
-}
-function ReviewDecisionBadge({ decision }: { decision?: string }) {
-  if (!decision) return null;
-  if (decision === "approved") {
-    return (
-      <Badge variant="success" size="sm">
-        Approved
-      </Badge>
-    );
-  }
-  if (decision === "changes_requested") {
-    return (
-      <Badge variant="critical" size="sm">
-        Changes requested
-      </Badge>
-    );
-  }
-  if (decision === "review_required") {
-    return (
-      <Badge variant="outline" size="sm">
-        Review required
-      </Badge>
-    );
-  }
-  return null;
 }
 
 /** Review conversation, newest last, in the order the server sorted it. */
@@ -1158,36 +1156,4 @@ function CheckRow({ check }: { check: PullRequestCheck }) {
       <ExternalLink className="text-muted-foreground size-3 shrink-0" />
     </a>
   );
-}
-
-function checkCounts(pr: PullRequestDigest): {
-  passing: number;
-  pending: number;
-  failing: number;
-  skipped: number;
-} {
-  const checks = pr.checks ?? [];
-  if (checks.length > 0) {
-    return {
-      passing: checks.filter((check) => check.bucket === "pass").length,
-      pending: checks.filter((check) => check.bucket === "pending").length,
-      failing: checks.filter((check) => check.bucket === "fail").length,
-      skipped: checks.filter((check) => check.bucket === "skipped").length,
-    };
-  }
-  const summary = pr.checks_summary ?? "";
-  const passing = Number(/(\d+) passing/.exec(summary)?.[1] ?? 0);
-  const pending = Number(/(\d+) pending/.exec(summary)?.[1] ?? 0);
-  const failing = Number(/(\d+) failing/.exec(summary)?.[1] ?? 0);
-  const skipped = Number(/(\d+) skipped/.exec(summary)?.[1] ?? 0);
-  return { passing, pending, failing, skipped };
-}
-
-function prStateVariant(
-  tone: ReturnType<typeof prTone>,
-): "success" | "critical" | "info" | "outline" {
-  if (tone === "open") return "success";
-  if (tone === "merged") return "info";
-  if (tone === "closed") return "critical";
-  return "outline";
 }

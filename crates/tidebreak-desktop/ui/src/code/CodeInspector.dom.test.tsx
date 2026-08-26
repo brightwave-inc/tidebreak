@@ -195,7 +195,7 @@ it("shows PR state, checks, comments, and holds merge for a draft", async () => 
   expect(client.getCodePrComments).toHaveBeenCalledWith("ws-1");
 });
 
-it("replaces open and auto-merge labels with the merge-queue state", async () => {
+it("shows the queue as its own chip beside the open lifecycle", async () => {
   const queued = {
     ...OPEN_PR,
     auto_merge_enabled: true,
@@ -214,9 +214,11 @@ it("replaces open and auto-merge labels with the merge-queue state", async () =>
     .setup()
     .click(screen.getByRole("tab", { name: "Pull request" }));
 
-  expect(screen.getByText("Queued")).toHaveClass("bg-warning-background");
-  expect(screen.getByText("In merge queue")).toHaveClass(
-    "text-warning-foreground",
+  // Queue membership is information, not a warning: the info tint, beside
+  // the lifecycle word it used to replace.
+  expect(screen.getByText("Open")).toBeInTheDocument();
+  expect(screen.getAllByText("In merge queue")[0]).toHaveClass(
+    "bg-info-background",
   );
   expect(screen.queryByText("Auto-merge on")).not.toBeInTheDocument();
   expect(screen.queryByText("Auto-merge is enabled")).not.toBeInTheDocument();
@@ -232,13 +234,13 @@ it.each([
   [
     "conflicts",
     { ...OPEN_PR, mergeable: "conflicting", merge_state_status: "dirty" },
-    "Resolve the merge conflicts before merging directly.",
+    "Resolve the conflicts with the base branch first.",
     false,
   ],
   [
     "a behind branch",
     { ...OPEN_PR, mergeable: "mergeable", merge_state_status: "behind" },
-    "Update the branch from its base before merging directly.",
+    "Update the branch from its base first.",
     true,
   ],
   [
@@ -270,7 +272,7 @@ it.each([
       merge_state_status: "clean",
       review_decision: "changes_requested",
     },
-    "Address the requested changes before merging directly.",
+    "Address the requested changes before merging.",
     true,
   ],
   [
@@ -281,7 +283,7 @@ it.each([
       merge_state_status: "clean",
       checks: [{ name: "ci / ui", bucket: "fail" }],
     },
-    "Fix the failing checks before merging directly.",
+    "Fix the failing check before merging.",
     true,
   ],
   [
@@ -292,7 +294,7 @@ it.each([
       merge_state_status: "clean",
       checks: [{ name: "ci / ui", bucket: "pending" }],
     },
-    "Wait for the pending checks before merging directly.",
+    "Wait for the running check before merging.",
     true,
   ],
   [

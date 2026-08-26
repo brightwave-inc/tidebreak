@@ -43,9 +43,10 @@ use crate::routes::code::types::{
     CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRerunOutcome,
     CodeDeliveryRunAction, CodeDeliveryRunActionBody, CodeDeliveryRunAttentionReason,
     CodeDeliveryRunDetail, CodeDeliveryRunKind, CodeDeliveryRunQuery, CodeDeliveryRunSummary,
-    CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeDeliverySourceError, CodeDeliveryWorkflowJob,
-    CodeDeliveryWorkspaceLink, CodeGitHubCapability, CodeGitHubRepositoryRef,
-    CodeGitHubRepositoryTarget, CodePrMergeMethod, ResolveCodeDeliveryRepositoriesBody,
+    CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeDeliverySourceError, CodeDeliveryStackMember,
+    CodeDeliveryWorkflowJob, CodeDeliveryWorkspaceLink, CodeGitHubCapability,
+    CodeGitHubRepositoryRef, CodeGitHubRepositoryTarget, CodePrMergeMethod,
+    ResolveCodeDeliveryRepositoriesBody,
 };
 
 const GH_READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -479,6 +480,11 @@ impl PullRequestRemotePlan {
 struct PullRequestObservation {
     summary: CodeDeliveryPullRequestSummary,
     head_repository: Option<StackRepositoryIdentity>,
+    /// Host-reported stack membership (GitHub stacked pull requests), when
+    /// the list read found one. Carried off the wire until the shared fact
+    /// pass applies it — the host edge is the authority over branch
+    /// inference there.
+    host_stack: Option<HostStackMembership>,
 }
 
 impl PullRequestObservation {
@@ -498,6 +504,17 @@ impl PullRequestObservation {
                 .then(|| self.summary.head_branch.clone()),
         }
     }
+}
+
+/// Host-reported membership in one stack (GitHub stacked pull requests).
+#[derive(Debug, Clone)]
+struct HostStackMembership {
+    stack_number: u64,
+    /// Total layers in the stack, bottom to top, including merged ones.
+    stack_size: u64,
+    /// The nearest open member below this one in stack order; `None` when
+    /// this pull request is the bottom layer or everything below merged.
+    parent_number: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -847,10 +864,12 @@ pub(crate) async fn query_pull_requests_by_number(
         .await;
 
     let mut reads = Vec::new();
+    let mut apis: HashMap<String, Arc<DeliveryApi>> = HashMap::new();
     let mut errors = Vec::new();
     for result in resolved {
         match result {
             Ok((target, api, repository, numbers)) => {
+                apis.insert(repository_key(&target), Arc::clone(&api));
                 reads.extend(
                     numbers.into_iter().map(|number| {
                         (target.clone(), Arc::clone(&api), repository.clone(), number)
@@ -892,7 +911,9 @@ pub(crate) async fn query_pull_requests_by_number(
     });
     // The trigger sweep reads through here, and its stacked-child suppression
     // keys on `stack_parent_number` (decision 62) — so this path persists and
-    // annotates the same way the list read does.
+    // annotates the same way the list read does. Host stacks join first so
+    // the shared pass sees the same host edges a list read would.
+    attach_host_stacks(&apis, &mut items).await;
     let workspaces_gaining_links =
         persist_and_augment_pull_request_facts(runtime, owner, &workspaces, &mut items).await;
     for workspace_id in workspaces_gaining_links {
@@ -1225,7 +1246,7 @@ pub(crate) async fn pull_request_detail(
         super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
             .await;
     }
-    let summary = observation.summary;
+    let mut summary = observation.summary;
 
     let pull_endpoint = api_endpoint(&target.repository, &format!("pulls/{}", target.number));
     let issue_comments_endpoint = api_endpoint(
@@ -1244,12 +1265,17 @@ pub(crate) async fn pull_request_detail(
         &target.repository,
         &format!("pulls/{}/files?per_page=100", target.number),
     );
-    let (pull, issue_comments, reviews, inline_comments, changed) = tokio::join!(
+    let stacks_endpoint = api_endpoint(
+        &target.repository,
+        &format!("stacks?pull_request={}&per_page=100", target.number),
+    );
+    let (pull, issue_comments, reviews, inline_comments, changed, stacks) = tokio::join!(
         api.get(&pull_endpoint),
         api.get(&issue_comments_endpoint),
         api.get(&reviews_endpoint),
         api.get(&inline_endpoint),
         api.get(&files_endpoint),
+        api.get(&stacks_endpoint),
     );
     let pull = pull.map_err(|message| ServerError::bad_request_kind("github", message))?;
     let mut comments = Vec::new();
@@ -1315,6 +1341,22 @@ pub(crate) async fn pull_request_detail(
     let files_truncated = pull_request_files_truncated(files.len(), changed_files);
     files.truncate(MAX_DETAIL_FILES);
 
+    // Stacks enrich the drawer but never gate it: a failed read (or a host
+    // without stacked pull requests) leaves the chain absent and adds no
+    // error entry. The host edge also restates the summary's stack fields,
+    // with the same authority the list read gives it.
+    if let Err(message) = &stacks {
+        tracing::debug!("the stacks read failed for the detail drawer: {message}");
+    }
+    let stack = parse_stack_detail(stacks.as_ref().map_err(String::as_str), target.number).map(
+        |(members, membership)| {
+            summary.stack_number = Some(membership.stack_number);
+            summary.stack_size = Some(membership.stack_size);
+            summary.stack_parent_number = membership.parent_number;
+            members
+        },
+    );
+
     let open = summary.state == "open";
     Ok(CodeDeliveryPullRequestDetail {
         can_mark_ready: open && summary.draft,
@@ -1337,6 +1379,7 @@ pub(crate) async fn pull_request_detail(
         merged_by: pull
             .get("merged_by")
             .and_then(|author| text_field(author, "login")),
+        stack,
         files,
         files_truncated,
         comments,
@@ -2467,6 +2510,65 @@ where
     }
 }
 
+/// Read one repository's host stacks over whichever transport the reader
+/// selected.
+///
+/// Stacks are best-effort enrichment (GitHub stacked pull requests): a host
+/// without the feature — GHES, or a repository the rollout has not reached —
+/// answers 404, and that must never fail an otherwise good pull-request
+/// list. A failure logs at debug and the stack fields stay absent.
+async fn fetch_stacks(api: &DeliveryApi, target: &CodeGitHubRepositoryTarget) -> Option<Value> {
+    let endpoint = api_endpoint(target, "stacks?per_page=100");
+    match with_transient_retry(|| api.get(&endpoint)).await {
+        Ok(value) => Some(value),
+        Err(message) => {
+            tracing::debug!(
+                repository = %repository_key(target),
+                "the stacks read failed; stack fields stay absent: {message}"
+            );
+            None
+        }
+    }
+}
+
+/// Attach host stack membership to exact-number reads: one stacks read per
+/// distinct repository, through the transports that path already borrowed —
+/// no new credential borrows.
+///
+/// Best-effort like the list read — a repository whose stacks cannot be read
+/// keeps its items as they came, and branch inference stays the fallback.
+async fn attach_host_stacks(
+    apis: &HashMap<String, Arc<DeliveryApi>>,
+    items: &mut [PullRequestObservation],
+) {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        groups
+            .entry(repository_key_ref(&item.summary.repository))
+            .or_default()
+            .push(index);
+    }
+    for (key, indices) in groups {
+        let Some(api) = apis.get(&key) else {
+            continue;
+        };
+        let repository = &items[indices[0]].summary.repository;
+        let target = CodeGitHubRepositoryTarget {
+            host: repository.host.clone(),
+            owner: repository.owner.clone(),
+            name: repository.name.clone(),
+        };
+        let Some(payload) = fetch_stacks(api, &target).await else {
+            continue;
+        };
+        let memberships = parse_stack_memberships(&payload);
+        for index in indices {
+            let item = &mut items[index];
+            item.host_stack = memberships.get(&item.summary.number).cloned();
+        }
+    }
+}
+
 async fn fetch_pull_requests(
     runtime: &CodeRuntime,
     owner: &OwnerId,
@@ -2476,8 +2578,12 @@ async fn fetch_pull_requests(
     plan: &PullRequestRemotePlan,
     force_refresh: bool,
 ) -> Result<Vec<PullRequestObservation>, String> {
-    let (repository, values) = match reader {
-        DeliveryReader::Gh(observation) => {
+    // One borrowed transport per repository, shared by the pull-request list
+    // and the stacks enrichment — the credential lender counts one borrow per
+    // repository operation, and a second one here would double it.
+    let api = delivery_api(runtime, owner, reader, target).await?;
+    let (repository, values, stacks) = match &api {
+        DeliveryApi::Gh { observation, .. } => {
             let binary = observation
                 .binary
                 .as_deref()
@@ -2502,35 +2608,57 @@ async fn fetch_pull_requests(
                 args.push("--author");
                 args.push(author);
             }
-            let raw =
-                with_transient_retry(|| gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT))
-                    .await?;
+            let (raw, stacks) = tokio::join!(
+                with_transient_retry(|| {
+                    gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)
+                }),
+                fetch_stacks(&api, target),
+            );
+            let raw = raw?;
             let value: Value = serde_json::from_str(&raw)
                 .map_err(|error| format!("could not parse pull requests: {error}"))?;
-            (repository, value.as_array().cloned().unwrap_or_default())
+            (
+                repository,
+                value.as_array().cloned().unwrap_or_default(),
+                stacks,
+            )
         }
-        DeliveryReader::Forge => {
-            let credential = borrow_delivery_credential(runtime, owner, target).await?;
+        DeliveryApi::Rest {
+            api_base,
+            credential,
+        } => {
             let repository =
-                resolve_repository_rest_cached(runtime, target, None, force_refresh, &credential)
+                resolve_repository_rest_cached(runtime, target, None, force_refresh, credential)
                     .await?;
-            let api_base = runtime.forge_api_base_for(&target.host);
-            let values = with_transient_retry(|| {
-                super::forge_rest::delivery_pull_requests(
-                    &api_base,
-                    target,
-                    &credential,
-                    plan.state,
-                    plan.checks_loaded,
-                )
-            })
-            .await?;
-            (repository, values)
+            let (values, stacks) = tokio::join!(
+                with_transient_retry(|| {
+                    super::forge_rest::delivery_pull_requests(
+                        api_base,
+                        target,
+                        credential,
+                        plan.state,
+                        plan.checks_loaded,
+                    )
+                }),
+                fetch_stacks(&api, target),
+            );
+            let values = values?;
+            (repository, values, stacks)
         }
     };
+    // Host stacks ride along as observations; the shared fact pass applies
+    // them so host edges and branch inference meet in one place.
+    let memberships = stacks
+        .as_ref()
+        .map(parse_stack_memberships)
+        .unwrap_or_default();
     Ok(values
         .iter()
         .filter_map(|value| parse_pull_request(&repository, value, workspaces))
+        .map(|mut observation| {
+            observation.host_stack = memberships.get(&observation.summary.number).cloned();
+            observation
+        })
         .collect())
 }
 
@@ -2682,6 +2810,8 @@ fn parse_pull_request(
             ready_to_merge,
             workspace_links,
             stack_parent_number: None,
+            stack_number: None,
+            stack_size: None,
             labels,
             created_at: datetime_field(value, "createdAt").unwrap_or_else(Utc::now),
             updated_at: datetime_field(value, "updatedAt").unwrap_or_else(Utc::now),
@@ -2689,6 +2819,7 @@ fn parse_pull_request(
             closed_at,
         },
         head_repository: parse_head_repository(repository, value),
+        host_stack: None,
     })
 }
 
@@ -2740,6 +2871,116 @@ fn parse_head_repository(
     Some(identity)
 }
 
+/// One layer of a host-reported stack, in the payload's bottom-to-top order.
+fn parse_stack_member(value: &Value) -> Option<CodeDeliveryStackMember> {
+    Some(CodeDeliveryStackMember {
+        number: u64_field(value, "number")?,
+        state: text_field(value, "state")?.to_ascii_lowercase(),
+        draft: bool_field(value, "draft").unwrap_or(false),
+        merged_at: text_field(value, "merged_at"),
+        head_branch: value
+            .pointer("/head/ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned)?,
+        head_sha: value
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+/// One host stack from `GET /repos/{owner}/{repo}/stacks`: its number, its
+/// layer count, and its parseable layers in payload order (bottom to top).
+#[derive(Debug)]
+struct HostStack {
+    number: u64,
+    /// Raw layer count from the payload: a malformed layer still counts
+    /// toward the stack size the host reports.
+    size: u64,
+    members: Vec<CodeDeliveryStackMember>,
+}
+
+fn parse_host_stack(stack: &Value) -> Option<HostStack> {
+    let number = u64_field(stack, "number")?;
+    let layers = stack.get("pull_requests")?.as_array()?;
+    Some(HostStack {
+        number,
+        size: layers.len() as u64,
+        members: layers.iter().filter_map(parse_stack_member).collect(),
+    })
+}
+
+/// The parent within one stack: the nearest open member below `position`.
+///
+/// Merged layers do not parent anything — a merged base is part of the
+/// target branch already, and the child's live dependency is the nearest
+/// layer still waiting to merge.
+fn stack_parent_below(members: &[CodeDeliveryStackMember], position: usize) -> Option<u64> {
+    members[..position]
+        .iter()
+        .rev()
+        .find(|member| member.state == "open")
+        .map(|member| member.number)
+}
+
+/// Host stack memberships keyed by pull-request number.
+///
+/// A payload that is not an array of the expected shape yields an empty
+/// map, which every caller treats as "no host stacks" — never as an error.
+fn parse_stack_memberships(payload: &Value) -> HashMap<u64, HostStackMembership> {
+    let mut memberships = HashMap::new();
+    for stack in payload.as_array().into_iter().flatten() {
+        let Some(stack) = parse_host_stack(stack) else {
+            continue;
+        };
+        for (position, member) in stack.members.iter().enumerate() {
+            memberships.insert(
+                member.number,
+                HostStackMembership {
+                    stack_number: stack.number,
+                    stack_size: stack.size,
+                    parent_number: stack_parent_below(&stack.members, position),
+                },
+            );
+        }
+    }
+    memberships
+}
+
+/// The stack chain for one pull request, from `stacks?pull_request={n}`.
+///
+/// The first stack naming the pull request is the chain, in payload order
+/// (bottom to top). `None` when the read failed, returned no stack, or no
+/// stack names the pull request — stacks are best-effort enrichment, never
+/// a load-bearing section of the drawer.
+fn parse_stack_detail<'a>(
+    payload: Result<&'a Value, &'a str>,
+    number: u64,
+) -> Option<(Vec<CodeDeliveryStackMember>, HostStackMembership)> {
+    let payload = payload.ok()?;
+    for stack in payload.as_array().into_iter().flatten() {
+        let Some(parsed) = parse_host_stack(stack) else {
+            continue;
+        };
+        let Some(position) = parsed
+            .members
+            .iter()
+            .position(|member| member.number == number)
+        else {
+            continue;
+        };
+        return Some((
+            parsed.members.clone(),
+            HostStackMembership {
+                stack_number: parsed.number,
+                stack_size: parsed.size,
+                parent_number: stack_parent_below(&parsed.members, position),
+            },
+        ));
+    }
+    None
+}
+
 fn parse_check(value: &Value) -> Option<CodeDeliveryCheck> {
     let name = text_field(value, "name")
         .or_else(|| text_field(value, "context"))
@@ -2772,6 +3013,11 @@ fn workflow_run_id_from_url(url: &str) -> Option<u64> {
     tail.split('/').next()?.parse().ok()
 }
 
+/// Why an open pull request belongs in the default Needs attention view.
+///
+/// Conflicts come first because a conflicted tree blocks every other fix:
+/// until the head rebases cleanly, requested changes, failing checks, and
+/// a behind base cannot even be evaluated on the final diff.
 fn pull_request_attention(
     state: &str,
     draft: bool,
@@ -2784,6 +3030,9 @@ fn pull_request_attention(
         return Vec::new();
     }
     let mut reasons = Vec::new();
+    if mergeable == Some("conflicting") || merge_state_status == Some("dirty") {
+        reasons.push(CodeDeliveryPrAttentionReason::Conflicts);
+    }
     if review_decision == Some("changes_requested") {
         reasons.push(CodeDeliveryPrAttentionReason::ChangesRequested);
     }
@@ -2792,9 +3041,6 @@ fn pull_request_attention(
         .any(|check| check.bucket == PullRequestCheckBucket::Fail)
     {
         reasons.push(CodeDeliveryPrAttentionReason::ChecksFailed);
-    }
-    if mergeable == Some("conflicting") || merge_state_status == Some("dirty") {
-        reasons.push(CodeDeliveryPrAttentionReason::Conflicts);
     }
     if merge_state_status == Some("behind") {
         reasons.push(CodeDeliveryPrAttentionReason::Behind);
@@ -3391,6 +3637,23 @@ async fn persist_and_augment_pull_request_facts(
                 );
             }
         }
+    }
+
+    for item in items.iter_mut() {
+        // A host-reported stack names the parent from the host's own stack
+        // order, and that edge is the authority: it wins over branch
+        // inference, including "no parent" for a bottom layer, which clears
+        // whatever inference would have guessed.
+        let Some((stack_number, stack_size, parent_number)) = item
+            .host_stack
+            .as_ref()
+            .map(|stack| (stack.stack_number, stack.stack_size, stack.parent_number))
+        else {
+            continue;
+        };
+        item.summary.stack_number = Some(stack_number);
+        item.summary.stack_size = Some(stack_size);
+        item.summary.stack_parent_number = parent_number;
     }
 
     if fact_ids.is_empty() {
@@ -4589,9 +4852,11 @@ mod tests {
                 &checks,
             ),
             vec![
+                // Conflicts outrank everything: a conflicted tree blocks
+                // the fixes every other reason would ask for.
+                CodeDeliveryPrAttentionReason::Conflicts,
                 CodeDeliveryPrAttentionReason::ChangesRequested,
                 CodeDeliveryPrAttentionReason::ChecksFailed,
-                CodeDeliveryPrAttentionReason::Conflicts,
                 CodeDeliveryPrAttentionReason::Behind,
             ]
         );
@@ -4604,6 +4869,111 @@ mod tests {
             &checks,
         )
         .is_empty());
+    }
+
+    #[test]
+    fn host_stacks_parse_in_payload_order_with_open_parents_only() {
+        let payload: Value = serde_json::from_str(
+            r#"[
+                {
+                    "id": 901,
+                    "number": 7,
+                    "node_id": "S_7",
+                    "url": "https://github.com/brightwave-inc/tidebreak/stacks/7",
+                    "base": {"ref": "main"},
+                    "open": true,
+                    "created_at": "2026-08-20T10:00:00Z",
+                    "pull_requests": [
+                        {"number": 410, "state": "closed", "draft": false,
+                         "merged_at": "2026-08-21T09:00:00Z",
+                         "head": {"ref": "tidebreak/base", "sha": "aaa000"}},
+                        {"number": 411, "state": "open", "draft": true,
+                         "merged_at": null,
+                         "head": {"ref": "tidebreak/middle", "sha": "bbb111"}},
+                        {"number": 412, "state": "open", "draft": false,
+                         "merged_at": null,
+                         "head": {"ref": "tidebreak/top", "sha": "ccc222"}}
+                    ]
+                },
+                {"number": 8, "pull_requests": []},
+                "not a stack"
+            ]"#,
+        )
+        .unwrap();
+        let memberships = parse_stack_memberships(&payload);
+        assert_eq!(memberships.len(), 3, "malformed stacks parse around");
+        // The merged bottom layer parents nothing: the nearest open member
+        // below decides, and 411 has none.
+        let bottom = &memberships[&411];
+        assert_eq!(bottom.stack_number, 7);
+        assert_eq!(bottom.stack_size, 3);
+        assert_eq!(bottom.parent_number, None);
+        let top = &memberships[&412];
+        assert_eq!(top.stack_number, 7);
+        assert_eq!(top.stack_size, 3);
+        assert_eq!(top.parent_number, Some(411));
+        assert_eq!(memberships[&410].parent_number, None);
+
+        let stack = payload
+            .as_array()
+            .and_then(|stacks| stacks.first())
+            .and_then(parse_host_stack)
+            .expect("the first stack parses");
+        assert_eq!(
+            stack
+                .members
+                .iter()
+                .map(|member| member.number)
+                .collect::<Vec<_>>(),
+            vec![410, 411, 412],
+            "members keep the payload's bottom-to-top order"
+        );
+        assert_eq!(stack.members[0].state, "closed");
+        assert_eq!(
+            stack.members[0].merged_at.as_deref(),
+            Some("2026-08-21T09:00:00Z")
+        );
+        assert!(stack.members[1].draft);
+        assert_eq!(stack.members[2].head_branch, "tidebreak/top");
+    }
+
+    #[test]
+    fn stack_detail_keeps_payload_order_and_stays_absent_on_failure() {
+        let payload: Value = serde_json::from_str(
+            r#"[
+                {"number": 9, "pull_requests": [
+                    {"number": 500, "state": "open", "draft": false, "merged_at": null,
+                     "head": {"ref": "tidebreak/far", "sha": "ddd333"}},
+                    {"number": 501, "state": "open", "draft": false, "merged_at": null,
+                     "head": {"ref": "tidebreak/near", "sha": "eee444"}}
+                ]},
+                {"number": 10, "pull_requests": [
+                    {"number": 501, "state": "open", "draft": false, "merged_at": null,
+                     "head": {"ref": "tidebreak/other", "sha": "fff555"}}
+                ]}
+            ]"#,
+        )
+        .unwrap();
+        let (members, membership) = parse_stack_detail(Ok(&payload), 501)
+            .expect("the first stack naming the pull request is the chain");
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.number)
+                .collect::<Vec<_>>(),
+            vec![500, 501],
+            "the chain keeps the payload's bottom-to-top order"
+        );
+        assert_eq!(membership.stack_number, 9);
+        assert_eq!(membership.stack_size, 2);
+        assert_eq!(membership.parent_number, Some(500));
+
+        // A read that failed, or a payload without this pull request, is
+        // simply no chain — never an error entry on the drawer.
+        assert!(parse_stack_detail(Err("gh api timed out"), 501).is_none());
+        let empty = serde_json::json!([]);
+        assert!(parse_stack_detail(Ok(&empty), 501).is_none());
+        assert!(parse_stack_detail(Ok(&payload), 499).is_none());
     }
 
     #[test]

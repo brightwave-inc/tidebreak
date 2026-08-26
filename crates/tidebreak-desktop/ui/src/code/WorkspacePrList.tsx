@@ -7,11 +7,11 @@ import type {
 import { cn } from "@/lib/utils";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import {
-  PR_CHIP_TONE_CLASSES,
-  PR_ICON_TONE_CLASSES,
-  prTone,
-  prToneLabel,
-} from "./workspaceCards";
+  PULL_REQUEST_LIFECYCLE_LABEL,
+  PULL_REQUEST_LIFECYCLE_TONE,
+  pullRequestLifecycle,
+} from "./prState";
+import { STATUS_CHIP, STATUS_MARK } from "./statusTone";
 
 /**
  * One fact's full identity. Numbers repeat across repositories, so every
@@ -42,16 +42,16 @@ export function WorkspacePrList({
       className="border-border-subtle flex flex-col gap-0.5 border-b px-2 pt-1.5 pb-2"
     >
       {items.map((item) => {
-        const tone = prTone(item);
+        const lifecycle = pullRequestLifecycle(item);
         const selected = factKey(item) === selectedKey;
         return (
           <button
             key={factKey(item)}
             type="button"
             aria-current={selected ? "true" : undefined}
-            aria-label={`Pull request #${item.number}: ${item.title}, ${prToneLabel(item)}${
-              item.relation === "authored" ? ", authored here" : ""
-            }`}
+            aria-label={`Pull request #${item.number}: ${item.title}, ${
+              PULL_REQUEST_LIFECYCLE_LABEL[lifecycle]
+            }${item.relation === "authored" ? ", authored here" : ""}`}
             onClick={() => onSelect(item)}
             className={cn(
               "flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs",
@@ -62,7 +62,10 @@ export function WorkspacePrList({
             )}
           >
             <GitPullRequest
-              className={cn("size-3.5 shrink-0", PR_ICON_TONE_CLASSES[tone])}
+              className={cn(
+                "size-3.5 shrink-0",
+                STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
+              )}
               aria-hidden
             />
             <span className="text-muted-foreground shrink-0 tabular-nums">
@@ -75,10 +78,10 @@ export function WorkspacePrList({
             <span
               className={cn(
                 "shrink-0 rounded-full px-1.5 py-px text-2xs font-medium",
-                PR_CHIP_TONE_CLASSES[tone],
+                STATUS_CHIP[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
               )}
             >
-              {prToneLabel(item)}
+              {PULL_REQUEST_LIFECYCLE_LABEL[lifecycle]}
             </span>
           </button>
         );

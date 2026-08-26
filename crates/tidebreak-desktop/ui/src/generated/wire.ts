@@ -987,7 +987,13 @@ export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullReques
  * Full PR drawer payload. Conversation entries retain the existing bounded
  * comment contract used by workspace PRs.
  */
-export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string, 
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, 
+/**
+ * The full stack chain this pull request belongs to, bottom to top,
+ * when the host reported one. Absent on hosts without stacked pull
+ * requests.
+ */
+stack?: Array<CodeDeliveryStackMember>, commits: number, merged_by?: string, 
 /**
  * Empty when the diff could not be read. Truncated by `files_truncated`
  * rather than paged: the panel is a review aid, not a diff viewer.
@@ -1038,11 +1044,21 @@ in_merge_queue?: boolean,
  */
 comment_count?: number, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, 
 /**
- * The open pull request this one is stacked on: its base branch is that
- * pull request's head branch in the same repository (decision 62).
- * Derived from the durable fact set, so a parent outside the current
- * page or filter still resolves. Absent when the base is the default
- * branch or nothing tracked owns it.
+ * The host stack this pull request belongs to (GitHub stacked pull
+ * requests), when the host reported one. Identifies the stack, not the
+ * PR.
+ */
+stack_number?: number, 
+/**
+ * Total layers in that stack, bottom to top, including merged ones.
+ */
+stack_size?: number, 
+/**
+ * The pull request this one is stacked on. Host stack order wins when
+ * the host reported a stack; branch inference from the durable fact set
+ * is the fallback (decision 62), so a parent outside the current page
+ * or filter still resolves. Absent when the base is the default branch
+ * or nothing tracked owns it.
  */
 stack_parent_number?: number, labels: Array<string>, created_at: string, updated_at: string, 
 /**
@@ -1106,6 +1122,23 @@ export type CodeDeliveryRunsPage = { capability: CodeGitHubCapability, items: Ar
  * One repository-level failure in an otherwise usable aggregate response.
  */
 export type CodeDeliverySourceError = { repository?: CodeGitHubRepositoryTarget, kind: string, message: string, retry_at?: string, };
+
+/**
+ * One layer of a pull-request stack, in bottom-to-top order.
+ */
+export type CodeDeliveryStackMember = { number: number, 
+/**
+ * Host state token (open, closed).
+ */
+state: string, draft: boolean, 
+/**
+ * Set once this layer merged.
+ */
+merged_at?: string, 
+/**
+ * Head branch name.
+ */
+head_branch: string, head_sha?: string, };
 
 export type CodeDeliveryWorkflowJob = { id: number, name: string, status: string, conclusion?: string, url: string, started_at: string | null, completed_at: string | null, failed_steps: Array<string>, };
 

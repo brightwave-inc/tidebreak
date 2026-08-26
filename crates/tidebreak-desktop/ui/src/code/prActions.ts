@@ -3,7 +3,16 @@ import type {
   CodeDeliveryPullRequestSummary,
   PullRequestDigest,
 } from "../api/types";
-import { prTone } from "./workspaceCards";
+import {
+  checkCounts,
+  prHasChangesRequested,
+  prHasConflicts,
+  prIsBehind,
+  pullRequestLifecycle,
+  prStatus,
+  type CheckCounts,
+  type PrGate,
+} from "./prState";
 
 export type PrWorkflowAction =
   | "watch_and_fix"
@@ -14,95 +23,19 @@ export type PrWorkflowAction =
   | "update_branch"
   | "resolve_conflicts";
 
-export type PrWorkflowState =
-  | "checking"
-  | "ready"
-  | "pending"
-  | "failing"
-  | "conflict"
-  | "behind"
-  | "blocked"
-  | "needs_approval"
-  | "changes_requested"
-  | "draft"
-  | "queued"
-  | "auto_merge"
-  | "merged"
-  | "closed";
-
-export type PrCheckCounts = {
-  passing: number;
-  pending: number;
-  failing: number;
-  skipped: number;
-  total: number;
-};
-
 export type PrWorkflowStatus = {
-  state: PrWorkflowState;
-  checks: PrCheckCounts;
+  state: PrGate;
+  checks: CheckCounts;
 };
 
-/** Counts from individual checks when present, else the one-line summary. */
-export function prCheckCounts(pr: PullRequestDigest): PrCheckCounts {
-  const checks = pr.checks ?? [];
-  if (checks.length > 0) {
-    const passing = checks.filter((check) => check.bucket === "pass").length;
-    const pending = checks.filter((check) => check.bucket === "pending").length;
-    const failing = checks.filter((check) => check.bucket === "fail").length;
-    const skipped = checks.filter((check) => check.bucket === "skipped").length;
-    return { passing, pending, failing, skipped, total: checks.length };
-  }
-  const summary = pr.checks_summary ?? "";
-  const passing = Number(/(\d+) passing/.exec(summary)?.[1] ?? 0);
-  const pending = Number(/(\d+) pending/.exec(summary)?.[1] ?? 0);
-  const failing = Number(/(\d+) failing/.exec(summary)?.[1] ?? 0);
-  const skipped = Number(/(\d+) skipped/.exec(summary)?.[1] ?? 0);
-  return {
-    passing,
-    pending,
-    failing,
-    skipped,
-    total: passing + pending + failing + skipped,
-  };
-}
-
-export function prHasConflicts(pr: PullRequestDigest): boolean {
-  const mergeable = pr.mergeable?.toLowerCase();
-  const mergeState = pr.merge_state_status?.toLowerCase();
-  return mergeable === "conflicting" || mergeState === "dirty";
-}
-
-/** Only an explicit host-timeline signal counts as merge-queue membership. */
-export function prIsQueued(pr: PullRequestDigest): boolean {
-  return pr.in_merge_queue === true;
-}
-
-export function prIsBehind(pr: PullRequestDigest): boolean {
-  return pr.merge_state_status?.trim().toLowerCase() === "behind";
-}
-
-export function prIsBlocked(pr: PullRequestDigest): boolean {
-  const mergeState = pr.merge_state_status?.trim().toLowerCase();
-  return mergeState === "blocked" || mergeState === "unstable";
-}
-
-/** GitHub still wants a review approval on this pull request. */
-export function prNeedsApproval(pr: PullRequestDigest): boolean {
-  return (
-    pr.review_decision?.trim().toLowerCase() === "review_required" &&
-    pr.merge_state_status?.trim().toLowerCase() === "blocked"
-  );
-}
-
-export function prHasChangesRequested(pr: PullRequestDigest): boolean {
-  return pr.review_decision?.trim().toLowerCase() === "changes_requested";
-}
-
-/** Classify a live pull request without choosing surface-specific actions. */
+/**
+ * Classify a live pull request without choosing surface-specific actions.
+ * The state itself comes from `prState.ts` — the one ladder — so every
+ * surface that asks gets the same answer.
+ */
 export function prWorkflowStatus(pr: PullRequestDigest): PrWorkflowStatus {
-  const checks = prCheckCounts(pr);
-  return { state: workflowState(pr, checks), checks };
+  const status = prStatus(pr);
+  return { state: status.gate, checks: status.checks };
 }
 
 /**
@@ -180,7 +113,7 @@ export function deliveryRepositoryHasMergeQueue(
   );
 }
 
-export function prMergeControls(state: PrWorkflowState): {
+export function prMergeControls(state: PrGate): {
   canMerge: boolean;
   canEnableAutoMerge: boolean;
   explanation: string | null;
@@ -305,13 +238,13 @@ export type PrAgentQuickAction = {
 export function prAgentQuickActions(
   pr: PullRequestDigest,
 ): PrAgentQuickAction[] {
-  const tone = prTone(pr);
-  if (tone === "merged" || tone === "closed") return [];
+  const lifecycle = pullRequestLifecycle(pr);
+  if (lifecycle === "merged" || lifecycle === "closed") return [];
   const items: PrAgentQuickAction[] = [];
   if (prHasConflicts(pr)) {
     items.push({ action: "resolve_conflicts", label: "Resolve conflicts" });
   }
-  if (prCheckCounts(pr).failing > 0) {
+  if (checkCounts(pr).failing > 0) {
     items.push({ action: "fix_errors", label: "Fix failing checks" });
   }
   if (prHasChangesRequested(pr)) {
@@ -416,7 +349,7 @@ function prWorkflowPromptContext(pr: PullRequestDigest): string {
   const url = pr.url?.trim();
   const head = pr.head_branch?.trim() || "current workspace branch";
   const base = pr.base_branch?.trim() || "base branch";
-  const checks = prCheckCounts(pr);
+  const checks = checkCounts(pr);
   const state = [
     pr.draft ? "draft" : pr.state.trim() || "open",
     pr.mergeable ? `mergeable: ${pr.mergeable}` : null,
@@ -451,33 +384,4 @@ function prWorkflowPromptContext(pr: PullRequestDigest): string {
     );
   }
   return lines.join("\n");
-}
-
-function workflowState(
-  pr: PullRequestDigest,
-  checks: PrCheckCounts,
-): PrWorkflowState {
-  const chip = prTone(pr);
-  if (chip === "merged") return "merged";
-  if (chip === "closed") return "closed";
-  if (chip === "draft") return "draft";
-  if (prHasConflicts(pr)) return "conflict";
-  if (prHasChangesRequested(pr)) return "changes_requested";
-  if (checks.failing > 0) return "failing";
-  if (prIsQueued(pr)) return "queued";
-  if (prIsBehind(pr)) return "behind";
-  // GitHub reports the merge state as blocked while required checks run, so
-  // pending checks must outrank it or every open pull request reads
-  // "Blocked" for its whole life (decision 66).
-  if (checks.pending > 0) return "pending";
-  // With no checks left to wait for, a required review is its own state,
-  // said in those words, rather than a generic block.
-  if (prNeedsApproval(pr)) return "needs_approval";
-  if (prIsBlocked(pr)) return "blocked";
-  if (pr.auto_merge_enabled) return "auto_merge";
-  const mergeable = pr.mergeable?.trim().toLowerCase();
-  const mergeState = pr.merge_state_status?.trim().toLowerCase();
-  return mergeable === "mergeable" && mergeState === "clean"
-    ? "ready"
-    : "checking";
 }

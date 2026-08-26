@@ -8,9 +8,9 @@ import {
   prDirectMergeAction,
   prMergeControls,
   prWorkflowStatus,
-  type PrCheckCounts,
   type PrWorkflowAction,
 } from "./prActions";
+import { checkSummaryText, type CheckCounts } from "./prState";
 
 export type WorkspaceWorkflowAction =
   | PrWorkflowAction
@@ -25,7 +25,8 @@ export type WorkspaceWorkflowTone =
   | "ready"
   | "pending"
   | "warning"
-  | "critical";
+  | "critical"
+  | "merged";
 
 export type WorkspaceWorkflowModel = {
   stage:
@@ -56,7 +57,7 @@ export type WorkspaceWorkflowModel = {
   primary?: WorkspaceWorkflowAction;
   secondary: WorkspaceWorkflowAction[];
   pr?: PullRequestDigest;
-  checks?: PrCheckCounts;
+  checks?: CheckCounts;
 };
 
 export type WorkspaceMergeIdentity = {
@@ -307,7 +308,7 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
         tone: "critical",
         summary: `#${pr.number} · ${status.checks.failing} failing`,
         title: `Pull request #${pr.number} needs attention`,
-        detail: checkSummary(status.checks),
+        detail: checkSummaryText(status.checks),
         primary: "fix_errors",
         secondary: withOpenPr(pr, ["watch_and_fix"]),
       };
@@ -315,7 +316,7 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
       return {
         ...common,
         stage: "queued",
-        tone: "warning",
+        tone: "pending",
         summary: `#${pr.number} · Queued`,
         title: `Pull request #${pr.number} is queued`,
         detail: "GitHub will merge it when the queue requirements pass.",
@@ -340,7 +341,7 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
         tone: "pending",
         summary: `#${pr.number} · ${status.checks.pending} pending`,
         title: `Pull request #${pr.number} is checking`,
-        detail: checkSummary(status.checks),
+        detail: checkSummaryText(status.checks),
         primary: "watch_and_fix",
         secondary: withOpenPr(pr, []),
       };
@@ -353,7 +354,7 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
         summary: `#${pr.number} · Ready`,
         title: `Pull request #${pr.number} is ready`,
         detail: exact
-          ? checkSummary(status.checks) || "No blockers reported."
+          ? checkSummaryText(status.checks) || "No blockers reported."
           : "Refresh the pull request before merging it.",
         primary: exact ? "merge" : pr.url ? "open_pr" : "watch_and_fix",
         secondary: withOpenPr(pr, ["watch_and_fix"]),
@@ -362,7 +363,7 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
       return {
         ...common,
         stage: "merged",
-        tone: "ready",
+        tone: "merged",
         summary: `#${pr.number} · Merged`,
         title: `Pull request #${pr.number} merged`,
         detail: "The change has landed on the base branch.",
@@ -549,15 +550,6 @@ function withOpenPr(
   actions: WorkspaceWorkflowAction[],
 ): WorkspaceWorkflowAction[] {
   return pr.url ? [...actions, "open_pr"] : actions;
-}
-
-export function checkSummary(checks: PrCheckCounts): string {
-  const parts: string[] = [];
-  if (checks.passing > 0) parts.push(`${checks.passing} passing`);
-  if (checks.pending > 0) parts.push(`${checks.pending} pending`);
-  if (checks.failing > 0) parts.push(`${checks.failing} failing`);
-  if (checks.skipped > 0) parts.push(`${checks.skipped} skipped`);
-  return parts.join(" · ");
 }
 
 export function workspaceWorkflowActionLabel(

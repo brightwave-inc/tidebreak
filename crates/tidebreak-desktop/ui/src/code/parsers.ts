@@ -73,6 +73,7 @@ import type {
   CodeDeliveryPullRequestDetail,
   CodeDeliveryPullRequestFile,
   CodeDeliveryPullRequestSummary,
+  CodeDeliveryStackMember,
   CodeDeliveryPullRequestsPage,
   CodeDeliveryRepositoriesSnapshot,
   CodeDeliveryRunDetail,
@@ -154,6 +155,7 @@ import type {
   CodeDeliveryDeploymentStatus as WireCodeDeliveryDeploymentStatus,
   CodeDeliveryPullRequestDetail as WireCodeDeliveryPullRequestDetail,
   CodeDeliveryPullRequestFile as WireCodeDeliveryPullRequestFile,
+  CodeDeliveryStackMember as WireCodeDeliveryStackMember,
   CodeDeliveryPullRequestSummary as WireCodeDeliveryPullRequestSummary,
   CodeDeliveryPullRequestsPage as WireCodeDeliveryPullRequestsPage,
   CodeDeliveryRepositoriesSnapshot as WireCodeDeliveryRepositoriesSnapshot,
@@ -616,6 +618,8 @@ function parseCodeDeliveryPullRequestSummary(
       "ready_to_merge",
       "workspace_links",
       "stack_parent_number",
+      "stack_number",
+      "stack_size",
       "labels",
       "created_at",
       "updated_at",
@@ -649,6 +653,8 @@ function parseCodeDeliveryPullRequestSummary(
     typeof value.ready_to_merge !== "boolean" ||
     (value.stack_parent_number !== undefined &&
       !isFiniteNumber(value.stack_parent_number)) ||
+    (value.stack_number !== undefined && !isFiniteNumber(value.stack_number)) ||
+    (value.stack_size !== undefined && !isFiniteNumber(value.stack_size)) ||
     !Array.isArray(value.workspace_links) ||
     !isStringList(value.labels) ||
     !nonEmpty(value.created_at) ||
@@ -696,6 +702,10 @@ function parseCodeDeliveryPullRequestSummary(
     ...(value.stack_parent_number !== undefined
       ? { stack_parent_number: value.stack_parent_number }
       : {}),
+    ...(value.stack_number !== undefined
+      ? { stack_number: value.stack_number }
+      : {}),
+    ...(value.stack_size !== undefined ? { stack_size: value.stack_size } : {}),
     labels: [...value.labels],
     created_at: value.created_at,
     updated_at: value.updated_at,
@@ -809,6 +819,7 @@ export function parseCodeDeliveryPullRequestDetail(
       "deletions",
       "commits",
       "merged_by",
+      "stack",
       "files",
       "files_truncated",
       "comments",
@@ -844,6 +855,15 @@ export function parseCodeDeliveryPullRequestDetail(
   const summary = parseCodeDeliveryPullRequestSummary(value.summary);
   const errors = parseDeliveryErrors(value.errors);
   if (!summary || !errors) return null;
+  const stack: CodeDeliveryStackMember[] = [];
+  if (value.stack !== undefined) {
+    if (!Array.isArray(value.stack)) return null;
+    for (const item of value.stack) {
+      const member = parseCodeDeliveryStackMember(item);
+      if (!member) return null;
+      stack.push(member);
+    }
+  }
   const comments: PullRequestComment[] = [];
   for (const item of value.comments) {
     const comment = parsePullRequestComment(item);
@@ -870,6 +890,7 @@ export function parseCodeDeliveryPullRequestDetail(
     files_truncated: value.files_truncated,
     comments,
     errors,
+    ...(stack.length > 0 ? { stack } : {}),
     can_mark_ready: value.can_mark_ready,
     can_merge: value.can_merge,
     can_rerun_failed: value.can_rerun_failed,
@@ -877,6 +898,38 @@ export function parseCodeDeliveryPullRequestDetail(
     can_reopen: value.can_reopen,
     can_comment: value.can_comment,
     ...(value.merged_by !== undefined ? { merged_by: value.merged_by } : {}),
+  };
+}
+
+function parseCodeDeliveryStackMember(
+  value: unknown,
+): CodeDeliveryStackMember | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeDeliveryStackMember>(value, [
+      "number",
+      "state",
+      "draft",
+      "merged_at",
+      "head_branch",
+      "head_sha",
+    ]) ||
+    !isPositiveInteger(value.number) ||
+    !nonEmpty(value.state) ||
+    typeof value.draft !== "boolean" ||
+    !nonEmpty(value.head_branch) ||
+    !optionalString(value.merged_at) ||
+    !optionalString(value.head_sha)
+  ) {
+    return null;
+  }
+  return {
+    number: value.number,
+    state: value.state,
+    draft: value.draft,
+    head_branch: value.head_branch,
+    ...(value.merged_at !== undefined ? { merged_at: value.merged_at } : {}),
+    ...(value.head_sha !== undefined ? { head_sha: value.head_sha } : {}),
   };
 }
 

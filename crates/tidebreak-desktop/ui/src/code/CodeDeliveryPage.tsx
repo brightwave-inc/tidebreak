@@ -99,10 +99,9 @@ import {
 import {
   checkCounts,
   checkSummary,
-  pullRequestLifecycle,
-  pullRequestListStatus,
+  prStatus,
   type PullRequestListGroup,
-} from "./pullRequestPresentation";
+} from "./prState";
 import { arrangeStackLanes, type StackedRow } from "./pullRequestStacks";
 import {
   deliveryPullRequestDigest,
@@ -1764,7 +1763,7 @@ function groupedPullRequestRows(
     }
     return [...repositories.entries()].flatMap(([key, group]) => {
       const attention = group.items.filter(
-        (item) => pullRequestListStatus(item).group === "attention",
+        (item) => prStatus(item).group === "attention",
       ).length;
       return pullRequestGroupRows({
         key: `repository:${key}`,
@@ -1783,7 +1782,7 @@ function groupedPullRequestRows(
   const groups = new Map<PullRequestListGroup, StackedRow[]>();
   for (const lane of pullRequestStackLanes(items)) {
     const group = lane.reduce<PullRequestListGroup>((mostUrgent, row) => {
-      const candidate = pullRequestListStatus(row.item).group;
+      const candidate = prStatus(row.item).group;
       return (PULL_REQUEST_GROUP_RANK.get(candidate) ??
         Number.MAX_SAFE_INTEGER) <
         (PULL_REQUEST_GROUP_RANK.get(mostUrgent) ?? Number.MAX_SAFE_INTEGER)
@@ -1904,9 +1903,9 @@ function PullRequestRow({
   onSelect: () => void;
   onMerge: () => void;
 }) {
-  const lifecycle = pullRequestLifecycle(item);
-  const status = pullRequestListStatus(item);
-  const checks = checkSummary(checkCounts(item.checks));
+  const status = prStatus(item);
+  const lifecycle = status.lifecycle;
+  const checks = checkSummary(checkCounts(item));
   const comments = item.comment_count;
   const mergeAction = item.head_sha
     ? prDirectMergeAction(deliveryPullRequestDigest(item), { hasMergeQueue })
@@ -1944,9 +1943,9 @@ function PullRequestRow({
           )}
           <PrLifecycleIcon
             lifecycle={lifecycle}
-            className={cn("size-4", STATUS_MARK[status.tone])}
+            className={cn("size-4", STATUS_MARK[status.headline.tone])}
           />
-          <span className="sr-only">{status.label}:</span>
+          <span className="sr-only">{status.headline.label}:</span>
           <span className="truncate text-sm font-medium">{item.title}</span>
         </span>
         <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
@@ -1987,8 +1986,13 @@ function PullRequestRow({
         </span>
       </span>
       <span className="flex items-center">
-        <span className={cn("text-xs font-medium", STATUS_TEXT[status.tone])}>
-          {status.label}
+        <span
+          className={cn(
+            "text-xs font-medium",
+            STATUS_TEXT[status.headline.tone],
+          )}
+        >
+          {status.headline.label}
         </span>
       </span>
       <span className="flex items-center">

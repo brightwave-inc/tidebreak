@@ -47,12 +47,11 @@ import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
 import { HARNESS_LABELS, LIFECYCLE_LABELS } from "./labels";
 import type { WorkspaceCommand } from "./workspaceActions";
 import {
-  checkSummary,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
 } from "./workspaceWorkflow";
-import { pullRequestReviewSummary } from "./pullRequestPresentation";
+import { checkSummaryText, pullRequestReviewSummary } from "./prState";
 import {
   attentionMarkForDigest,
   digestStatusTone,
@@ -68,9 +67,6 @@ import {
   isSessionRowWorthy,
   isPutAway,
   middleTruncate,
-  prStatusLabel,
-  prStatusTone,
-  prTone,
   repoAccentClass,
   sessionRowLabel,
   watchRowLabel,
@@ -78,6 +74,12 @@ import {
   workspacePrChipSummary,
   type CardDensity,
 } from "./workspaceCards";
+import {
+  PULL_REQUEST_LIFECYCLE_TONE,
+  prCompactStatusLabel,
+  prCompactStatusTone,
+  pullRequestLifecycle,
+} from "./prState";
 
 /**
  * One workspace in the rail.
@@ -404,7 +406,7 @@ function WorkspaceDetailPanel({
   const prTitle = pr?.title?.trim();
   const showPrTitle = prTitle && prTitle !== title.trim();
   const checkLabel = model?.checks?.total
-    ? checkSummary(model.checks)
+    ? checkSummaryText(model.checks)
     : pr?.checks_summary?.trim() || null;
   const checkTone: StatusTone = model?.checks?.failing
     ? "critical"
@@ -462,10 +464,10 @@ function WorkspaceDetailPanel({
             <span
               className={cn(
                 "shrink-0 rounded-md px-1.5 py-0.5 font-medium",
-                STATUS_CHIP[prStatusTone(pr)],
+                STATUS_CHIP[prCompactStatusTone(pr)],
               )}
             >
-              {prStatusLabel(pr)}
+              {prCompactStatusLabel(pr)}
             </span>
           ) : null}
         </div>
@@ -504,7 +506,7 @@ function WorkspaceDetailPanel({
               <GitPullRequest
                 className={cn(
                   "mt-0.5 size-3.5 shrink-0",
-                  STATUS_MARK[prStatusTone(pr)],
+                  STATUS_MARK[prCompactStatusTone(pr)],
                 )}
                 aria-hidden
               />
@@ -616,7 +618,7 @@ function WorkspaceDetailPanel({
             size="sm"
             className={cn(
               "h-7 gap-1.5 px-2 text-xs",
-              STATUS_TEXT[prStatusTone(pr)],
+              STATUS_TEXT[prCompactStatusTone(pr)],
             )}
             aria-label={`Open pull request #${pr.number}`}
             onClick={() => onCommand("open-pr")}
@@ -872,11 +874,14 @@ function WorkspaceMenuItem({
 }
 
 function PrGlyph({ pr }: { pr: PullRequestDigest }) {
-  const tone = prTone(pr);
+  const lifecycle = pullRequestLifecycle(pr);
   return (
     <GitPullRequest
-      className={cn("size-3 shrink-0", STATUS_MARK[prStatusTone(pr)])}
-      data-pr-state={tone}
+      className={cn(
+        "size-3 shrink-0",
+        STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
+      )}
+      data-pr-state={lifecycle}
       aria-hidden
     />
   );

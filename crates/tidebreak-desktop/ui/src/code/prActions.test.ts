@@ -6,11 +6,10 @@ import {
   prAgentQuickActions,
   prDirectMergeAction,
   prFreshAgentPrompt,
-  prHasConflicts,
-  prIsQueued,
   prWorkflowPrompt,
   prWorkflowStatus,
 } from "./prActions";
+import { prHasConflicts, prIsQueued } from "./prState";
 
 function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
   return {

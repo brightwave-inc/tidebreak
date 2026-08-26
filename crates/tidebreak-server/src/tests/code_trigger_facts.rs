@@ -27,6 +27,16 @@ use tidebreak_harness::AdapterRegistry;
 const PR_412: &str = r#"{"number":412,"url":"https://github.com/acme/tools/pull/412","state":"OPEN","title":"Tracked work","isDraft":false,"author":{"login":"octocat"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","autoMergeRequest":null,"headRefName":"tidebreak/tracked","headRefOid":"aaa111","baseRefName":"main","updatedAt":"2026-08-22T12:00:00Z","createdAt":"2026-08-22T10:00:00Z","mergedAt":null,"closedAt":null,"labels":[],"statusCheckRollup":[]}"#;
 const PR_413: &str = r#"{"number":413,"url":"https://github.com/acme/tools/pull/413","state":"OPEN","title":"Stacked child","isDraft":false,"author":{"login":"octocat"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"BEHIND","autoMergeRequest":null,"headRefName":"tidebreak/tracked-child","headRefOid":"ccc333","baseRefName":"tidebreak/tracked","updatedAt":"2026-08-22T12:30:00Z","createdAt":"2026-08-22T12:00:00Z","mergedAt":null,"closedAt":null,"labels":[],"statusCheckRollup":[]}"#;
 
+/// A behind child whose base branch matches nothing on the page, so branch
+/// inference cannot explain a stack parent — only the host stack can.
+const PR_416: &str = r#"{"number":416,"url":"https://github.com/acme/tools/pull/416","state":"OPEN","title":"Host-stacked child","isDraft":false,"author":{"login":"octocat"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"BEHIND","autoMergeRequest":null,"headRefName":"tidebreak/host-child","headRefOid":"ggg777","baseRefName":"tidebreak/unrelated","updatedAt":"2026-08-22T13:00:00Z","createdAt":"2026-08-22T12:50:00Z","mergedAt":null,"closedAt":null,"labels":[],"statusCheckRollup":[]}"#;
+
+/// The same behind shape with no host stack: its Behind fire must land.
+const PR_417: &str = r#"{"number":417,"url":"https://github.com/acme/tools/pull/417","state":"OPEN","title":"Unstacked behind","isDraft":false,"author":{"login":"octocat"},"reviewDecision":null,"mergeable":"MERGEABLE","mergeStateStatus":"BEHIND","autoMergeRequest":null,"headRefName":"tidebreak/solo-child","headRefOid":"hhh888","baseRefName":"tidebreak/nowhere","updatedAt":"2026-08-22T13:00:00Z","createdAt":"2026-08-22T12:55:00Z","mergedAt":null,"closedAt":null,"labels":[],"statusCheckRollup":[]}"#;
+
+/// The host's own stack: 412 below 416, bottom to top.
+const HOST_STACKS_JSON: &str = r#"[{"id":901,"number":7,"node_id":"S_7","url":"https://github.com/acme/tools/stacks/7","base":{"ref":"main"},"open":true,"created_at":"2026-08-22T12:00:00Z","pull_requests":[{"number":412,"state":"open","draft":false,"merged_at":null,"head":{"ref":"tidebreak/tracked","sha":"aaa111"}},{"number":416,"state":"open","draft":false,"merged_at":null,"head":{"ref":"tidebreak/host-child","sha":"ggg777"}}]}]"#;
+
 fn write_executable(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
     let mut perms = std::fs::metadata(path).unwrap().permissions();
@@ -87,6 +97,45 @@ fn write_gh_shim(dir: &std::path::Path) {
                       fi\n\
                       if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = 413 ]; then\n\
                         echo '{PR_413}'\n\
+                        exit 0\n\
+                      fi\n"
+        )
+        + "         echo unexpected \"$@\" >&2\n\
+         exit 3\n";
+    write_executable(&dir.join("gh"), &body);
+}
+
+/// The seeded shim plus host stacks for `repos/acme/tools/stacks` and the
+/// two extra exact-number views the host-stack test reads.
+fn write_gh_shim_with_host_stacks(dir: &std::path::Path) {
+    let body = "#!/bin/sh\n\
+         if [ \"$1\" = auth ]; then\n\
+           echo '{\"hosts\":{\"github.com\":[{\"active\":true,\"state\":\"success\",\"login\":\"tester\"}]}}'\n\
+           exit 0\n\
+         fi\n"
+        .to_owned()
+        + "         if [ \"$1\" = api ] && [ \"$2\" = \"repos/acme/tools/stacks?per_page=100\" ]; then\n"
+        + &format!("           echo '{HOST_STACKS_JSON}'\n           exit 0\n         fi\n")
+        + "         if [ \"$1\" = api ]; then echo '{}'; exit 0; fi\n"
+        + &format!(
+            "         if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n\
+                        echo '[{PR_412},{PR_413},{PR_416},{PR_417}]'\n\
+                        exit 0\n\
+                      fi\n\
+                      if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = 412 ]; then\n\
+                        echo '{PR_412}'\n\
+                        exit 0\n\
+                      fi\n\
+                      if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = 413 ]; then\n\
+                        echo '{PR_413}'\n\
+                        exit 0\n\
+                      fi\n\
+                      if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = 416 ]; then\n\
+                        echo '{PR_416}'\n\
+                        exit 0\n\
+                      fi\n\
+                      if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = 417 ]; then\n\
+                        echo '{PR_417}'\n\
                         exit 0\n\
                       fi\n"
         )
@@ -343,4 +392,62 @@ async fn durable_facts_do_not_guess_stack_parents_from_branch_names() {
         .await
         .unwrap();
     assert_eq!(heads, vec!["ccc333".to_owned()]);
+}
+
+/// Host stack edges reach the trigger sweep's fetched path (decision 62):
+/// 416's base branch matches nothing on the page, so only the host stack can
+/// say it waits on 412 — and the sweep must hold its Behind fire there while
+/// an identical unstacked pull request still fires.
+#[tokio::test]
+async fn host_stack_edges_hold_a_stacked_childs_behind_fire() {
+    let (dir, runtime, db, repo_id, _tracked, _child) = seeded_runtime().await;
+    write_gh_shim_with_host_stacks(&dir.path().join("bin"));
+    let owner = OwnerId::local();
+    let host_child = WorkspaceId::new();
+    insert_workspace(
+        &db,
+        &workspace_row(
+            host_child,
+            &owner,
+            repo_id,
+            "host child",
+            &dir.path().join("host-child"),
+            "tidebreak/host-child",
+            Some(open_pr_digest(416)),
+        ),
+    )
+    .await
+    .unwrap();
+    let solo = WorkspaceId::new();
+    insert_workspace(
+        &db,
+        &workspace_row(
+            solo,
+            &owner,
+            repo_id,
+            "solo",
+            &dir.path().join("solo"),
+            "tidebreak/solo-child",
+            Some(open_pr_digest(417)),
+        ),
+    )
+    .await
+    .unwrap();
+    let behind = armed(&db, &owner, repo_id, CodeTriggerCondition::Behind).await;
+
+    // No facts exist yet, so every number takes the exact-number read — the
+    // path whose summaries carry stack parents.
+    crate::code::trigger::sweep_triggers(&runtime).await;
+
+    let held = trigger_fire_heads_for_pr(&db, &owner, behind, host_child, 416)
+        .await
+        .unwrap();
+    assert!(
+        held.is_empty(),
+        "a host-stacked child's behind fire is held: {held:?}"
+    );
+    let fired = trigger_fire_heads_for_pr(&db, &owner, behind, solo, 417)
+        .await
+        .unwrap();
+    assert_eq!(fired, vec!["hhh888".to_owned()]);
 }
