@@ -1749,7 +1749,8 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             "created_at": "2026-08-25T10:00:00Z",
             "updated_at": "2026-08-25T11:00:00Z",
             "merged_at": null,
-            "closed_at": null
+            "closed_at": null,
+            "node_id": "PR_kwDOTEST17"
         })
     }
 
@@ -1904,6 +1905,32 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             "created_at": "2026-08-25T10:35:00Z"
         }]))
     };
+    let timeline = |headers: axum::http::HeaderMap| async move {
+        assert_borrowed_forge_credential(&headers);
+        axum::Json(serde_json::json!([
+            { "event": "committed" },
+            { "event": "added_to_merge_queue" }
+        ]))
+    };
+    let graphql_actions = Arc::clone(&recorded_actions);
+    let graphql = move |headers: axum::http::HeaderMap,
+                        axum::Json(body): axum::Json<serde_json::Value>| {
+        let recorded = Arc::clone(&graphql_actions);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(serde_json::json!({ "action": "graphql", "body": body }));
+            axum::Json(serde_json::json!({
+                "data": {
+                    "enablePullRequestAutoMerge": {
+                        "pullRequest": { "number": 17 }
+                    }
+                }
+            }))
+        }
+    };
     let merge_actions = Arc::clone(&recorded_actions);
     let merge = move |headers: axum::http::HeaderMap,
                       axum::Json(body): axum::Json<serde_json::Value>| {
@@ -1987,6 +2014,11 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             axum::routing::get(pull).patch(update_pull),
         )
         .route("/repos/acme/demo/pulls/17/merge", axum::routing::put(merge))
+        .route("/graphql", axum::routing::post(graphql))
+        .route(
+            "/repos/acme/demo/issues/17/timeline",
+            axum::routing::get(timeline),
+        )
         .route(
             "/repos/acme/demo/issues/17/comments",
             axum::routing::get(issue_comments).post(comment),
@@ -2094,6 +2126,7 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         .await
         .unwrap();
     assert_eq!(pull_requests["items"][0]["number"], 17);
+    assert_eq!(pull_requests["items"][0]["in_merge_queue"], true);
     assert_eq!(pull_requests["items"][0]["comment_count"], 2);
     assert_eq!(
         pull_requests["items"][0]["checks"][0]["name"],
@@ -2109,9 +2142,12 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         pull_requests["items"][0]["checks"][1]["workflow_run_id"],
         45
     );
-    assert_eq!(
-        pull_requests["items"][0]["attention_reasons"][0],
-        "checks_failed"
+    assert!(
+        pull_requests["items"][0]["attention_reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a queued pull request leaves the attention list"
     );
 
     let pull_request_detail: serde_json::Value = client
@@ -2128,6 +2164,7 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         .await
         .unwrap();
     assert_eq!(pull_request_detail["summary"]["number"], 17);
+    assert_eq!(pull_request_detail["summary"]["in_merge_queue"], true);
     assert_eq!(
         pull_request_detail["body"],
         "Read the delivery detail over REST."
@@ -2211,6 +2248,16 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         }),
         serde_json::json!({
             "target": { "repository": target.clone(), "number": 17 },
+            "action": {
+                "type": "merge",
+                "method": "squash",
+                "auto": true,
+                "admin": false,
+                "expected_head_sha": "feedfeedfeedfeedfeed"
+            }
+        }),
+        serde_json::json!({
+            "target": { "repository": target.clone(), "number": 17 },
             "action": { "type": "close" }
         }),
         serde_json::json!({
@@ -2267,16 +2314,6 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             serde_json::json!({
                 "type": "merge",
                 "method": "squash",
-                "auto": true,
-                "admin": false,
-                "expected_head_sha": "feedfeedfeedfeedfeed"
-            }),
-            "git_forge_auto_merge_unsupported",
-        ),
-        (
-            serde_json::json!({
-                "type": "merge",
-                "method": "squash",
                 "auto": false,
                 "admin": true,
                 "expected_head_sha": "feedfeedfeedfeedfeed"
@@ -2319,6 +2356,25 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             "merge_method": "squash"
         }
     })));
+    let auto_merge = actions
+        .iter()
+        .find(|action| action["action"] == "graphql")
+        .expect("hosted auto-merge posts the pinned mutation");
+    assert_eq!(
+        auto_merge["body"]["variables"],
+        serde_json::json!({
+            "id": "PR_kwDOTEST17",
+            "oid": "feedfeedfeedfeedfeed",
+            "method": "SQUASH"
+        })
+    );
+    assert!(
+        auto_merge["body"]["query"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("enablePullRequestAutoMerge"),
+        "{auto_merge}"
+    );
     assert!(actions.contains(&serde_json::json!({
         "action": "state",
         "body": { "state": "closed" }
@@ -2345,7 +2401,7 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     );
     assert_eq!(
         lender.minted(),
-        vec!["acme/demo".to_owned(); 13],
+        vec!["acme/demo".to_owned(); 14],
         "every read and action borrows only for the registered repository"
     );
 }

@@ -8,10 +8,11 @@
 //! parses — one JSON vocabulary, however the host was asked.
 //!
 //! Deliberately narrow: creation, the PR-card digest, the fact reads
-//! (decision 62), and Delivery's repository-scoped reads and actions. The
-//! stable REST API still has no ready-for-review transition, so that one
-//! hosted action remains an explicit refusal. Host stacks ride the same
-//! generic GET the rest of Delivery uses.
+//! (decision 62), and Delivery's repository-scoped reads and actions. Auto-merge
+//! (and merge-queue enqueue) rides one pinned GitHub mutation because the
+//! REST merge endpoint cannot arm it. Mark-ready and admin merge stay
+//! explicit refusals. Host stacks ride the same generic GET the rest of
+//! Delivery uses.
 
 use std::time::Duration;
 
@@ -29,6 +30,15 @@ const REST_TIMEOUT: Duration = Duration::from_secs(30);
 /// bound exists so a confused origin cannot grow the process.
 const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 
+/// Pinned mutation that arms auto-merge, or enqueues when the repository
+/// uses a merge queue. Not a general GraphQL runner.
+const ENABLE_AUTO_MERGE_MUTATION: &str = "\
+mutation($id: ID!, $oid: GitObjectID!, $method: PullRequestMergeMethod!) {\
+  enablePullRequestAutoMerge(input: {\
+    pullRequestId: $id, expectedHeadOid: $oid, mergeMethod: $method\
+  }) { pullRequest { number } }\
+}";
+
 /// Bound the check-run fan-out within one repository list read.
 const CHECK_RUN_CONCURRENCY: usize = 4;
 
@@ -42,6 +52,14 @@ pub(crate) fn default_api_base(host: &str) -> String {
         "https://api.github.com".to_owned()
     } else {
         format!("https://{host}/api/v3")
+    }
+}
+
+/// GraphQL origin for the same forge `api_base` REST talks to.
+fn graphql_url(api_base: &str) -> String {
+    match api_base.strip_suffix("/api/v3") {
+        Some(root) => format!("{root}/api/graphql"),
+        None => format!("{api_base}/graphql"),
     }
 }
 
@@ -350,6 +368,70 @@ pub(crate) async fn merge_pull_request(
     )
     .await?;
     if !status.is_success() || value.get("merged").and_then(Value::as_bool) != Some(true) {
+        return Err(forge_message(status, &value));
+    }
+    Ok(())
+}
+
+/// Arm auto-merge for one pull request, or add it to the merge queue when
+/// the repository uses one. REST cannot do this; GitHub only exposes the
+/// transition as [`ENABLE_AUTO_MERGE_MUTATION`].
+pub(crate) async fn enable_pull_request_auto_merge(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    number: u64,
+    method: &str,
+    expected_head_sha: &str,
+) -> Result<(), String> {
+    let (status, pull) = request(
+        reqwest::Method::GET,
+        format!(
+            "{api_base}/repos/{}/{}/pulls/{number}",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &pull));
+    }
+    let node_id = pull
+        .get("node_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "the forge pull request did not name a node id".to_owned())?;
+    let merge_method = match method {
+        "squash" => "SQUASH",
+        "rebase" => "REBASE",
+        _ => "MERGE",
+    };
+    let body = serde_json::json!({
+        "query": ENABLE_AUTO_MERGE_MUTATION,
+        "variables": {
+            "id": node_id,
+            "oid": expected_head_sha,
+            "method": merge_method,
+        }
+    });
+    let (status, value) = request(
+        reqwest::Method::POST,
+        graphql_url(api_base),
+        credential,
+        Some(&body),
+    )
+    .await?;
+    if !status.is_success()
+        || value
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        || value
+            .pointer("/data/enablePullRequestAutoMerge")
+            .is_none_or(Value::is_null)
+    {
         return Err(forge_message(status, &value));
     }
     Ok(())
@@ -681,7 +763,7 @@ async fn check_run_values(
 /// Whether the pull request currently sits in a merge queue, from the same
 /// timeline events the `gh` loader reads. `None` when the read fails — the
 /// digest states nothing rather than guessing.
-async fn merge_queue_state(
+pub(crate) async fn merge_queue_state(
     api_base: &str,
     target: &CodeGitHubRepositoryTarget,
     credential: &GitCredential,
@@ -701,6 +783,12 @@ async fn merge_queue_state(
     if !status.is_success() {
         return None;
     }
+    queue_membership_from_timeline(&value)
+}
+
+/// Latest queue transition wins: added after removed is in, the reverse is
+/// out. An empty timeline is out, not unknown.
+pub(crate) fn queue_membership_from_timeline(value: &Value) -> Option<bool> {
     let last = value.as_array()?.iter().rev().find_map(|event| {
         match event.get("event").and_then(Value::as_str) {
             Some(event @ ("added_to_merge_queue" | "removed_from_merge_queue")) => Some(event),
@@ -801,5 +889,47 @@ mod tests {
             default_api_base("ghe.acme.test"),
             "https://ghe.acme.test/api/v3"
         );
+    }
+
+    #[test]
+    fn the_graphql_origin_follows_the_rest_base() {
+        assert_eq!(
+            graphql_url("https://api.github.com"),
+            "https://api.github.com/graphql"
+        );
+        assert_eq!(
+            graphql_url("https://ghe.acme.test/api/v3"),
+            "https://ghe.acme.test/api/graphql"
+        );
+    }
+
+    #[test]
+    fn merge_queue_membership_follows_the_latest_timeline_event() {
+        assert_eq!(
+            queue_membership_from_timeline(&serde_json::json!([
+                { "event": "added_to_merge_queue" }
+            ])),
+            Some(true)
+        );
+        assert_eq!(
+            queue_membership_from_timeline(&serde_json::json!([
+                { "event": "added_to_merge_queue" },
+                { "event": "removed_from_merge_queue" }
+            ])),
+            Some(false)
+        );
+        assert_eq!(
+            queue_membership_from_timeline(&serde_json::json!([
+                { "event": "removed_from_merge_queue" },
+                { "event": "committed" },
+                { "event": "added_to_merge_queue" }
+            ])),
+            Some(true)
+        );
+        assert_eq!(
+            queue_membership_from_timeline(&serde_json::json!([{ "event": "committed" }])),
+            Some(false)
+        );
+        assert_eq!(queue_membership_from_timeline(&Value::Null), None);
     }
 }

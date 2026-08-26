@@ -149,6 +149,27 @@ impl DeliveryApi {
         }
     }
 
+    async fn merge_queue_membership(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        number: u64,
+    ) -> Option<bool> {
+        match self {
+            Self::Gh { .. } => {
+                let endpoint = format!(
+                    "repos/{}/{}/issues/{number}/timeline?per_page=100",
+                    target.owner, target.name
+                );
+                let value = self.get(&endpoint).await.ok()?;
+                super::forge_rest::queue_membership_from_timeline(&value)
+            }
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::forge_rest::merge_queue_state(api_base, target, credential, number).await,
+        }
+    }
+
     async fn pull_request(
         &self,
         target: &CodeGitHubRepositoryTarget,
@@ -241,10 +262,16 @@ impl DeliveryApi {
                 credential,
             } => {
                 if auto {
-                    return Err(ServerError::conflict_kind(
-                        "git_forge_auto_merge_unsupported",
-                        "This hosted machine cannot enable auto-merge through GitHub's stable REST API. Open the pull request on GitHub to enable auto-merge.",
-                    ));
+                    return super::forge_rest::enable_pull_request_auto_merge(
+                        api_base,
+                        target,
+                        credential,
+                        number,
+                        rest_merge_method(method),
+                        expected_head_sha,
+                    )
+                    .await
+                    .map_err(map_forge_action_error);
                 }
                 if admin {
                     return Err(ServerError::conflict_kind(
@@ -1531,12 +1558,6 @@ pub(crate) async fn act_on_pull_request(
                     "This hosted machine cannot mark a draft pull request ready because GitHub's pinned REST API does not expose that transition. Open the pull request on GitHub to mark it ready.",
                 ));
             }
-            CodeDeliveryPullRequestAction::Merge { auto: true, .. } => {
-                return Err(ServerError::conflict_kind(
-                    "git_forge_auto_merge_unsupported",
-                    "This hosted machine cannot enable auto-merge through GitHub's stable REST API. Open the pull request on GitHub to enable auto-merge.",
-                ));
-            }
             CodeDeliveryPullRequestAction::Merge { admin: true, .. } => {
                 return Err(ServerError::conflict_kind(
                     "git_forge_admin_merge_unsupported",
@@ -2697,6 +2718,8 @@ async fn fetch_pull_requests(
         .as_ref()
         .map(parse_stack_memberships)
         .unwrap_or_default();
+    let mut values = values;
+    attach_merge_queue_membership(&api, target, &mut values).await;
     Ok(values
         .iter()
         .filter_map(|value| parse_pull_request(&repository, value, workspaces))
@@ -2747,9 +2770,50 @@ async fn fetch_pull_request(
     number: u64,
     workspaces: &[WorkspaceIndexEntry],
 ) -> Result<PullRequestObservation, String> {
-    let value = api.pull_request(target, repository, number).await?;
+    let mut value = api.pull_request(target, repository, number).await?;
+    attach_merge_queue_membership(api, target, std::slice::from_mut(&mut value)).await;
     parse_pull_request(repository, &value, workspaces)
         .ok_or_else(|| "GitHub returned an incomplete pull request".into())
+}
+
+/// REST `mergeable_state` never reports `queued`. Membership comes from the
+/// issue timeline both readers already share.
+async fn attach_merge_queue_membership(
+    api: &DeliveryApi,
+    target: &CodeGitHubRepositoryTarget,
+    values: &mut [Value],
+) {
+    let jobs = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            Some((
+                index,
+                u64_field(value, "number")?,
+                text_field(value, "state").is_some_and(|state| state.eq_ignore_ascii_case("open")),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let memberships = stream::iter(jobs)
+        .map(|(index, number, open)| async move {
+            let queued = if open {
+                api.merge_queue_membership(target, number).await
+            } else {
+                Some(false)
+            };
+            (index, queued)
+        })
+        .buffered(DELIVERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    for (index, queued) in memberships {
+        let Some(queued) = queued else {
+            continue;
+        };
+        if let Some(object) = values[index].as_object_mut() {
+            object.insert("inMergeQueue".to_owned(), Value::Bool(queued));
+        }
+    }
 }
 
 fn parse_pull_request(
@@ -2781,7 +2845,10 @@ fn parse_pull_request(
     let auto_merge_enabled = value
         .get("autoMergeRequest")
         .is_some_and(|request| !request.is_null());
-    let in_merge_queue = (merge_state_status.as_deref() == Some("queued")).then_some(true);
+    let in_merge_queue = match bool_field(value, "inMergeQueue") {
+        Some(queued) => Some(queued),
+        None => (merge_state_status.as_deref() == Some("queued")).then_some(true),
+    };
     let comment_count = value.get("comments").and_then(|comments| {
         comments
             .as_array()
@@ -4847,6 +4914,53 @@ mod tests {
         assert_eq!(parsed.summary.state, "open");
         assert!(parsed.summary.merged_at.is_none());
         assert!(parsed.summary.closed_at.is_none());
+    }
+
+    #[test]
+    fn merge_queue_membership_prefers_the_timeline_flag() {
+        let queued = serde_json::json!({
+            "number": 2740,
+            "title": "Queued change",
+            "state": "OPEN",
+            "url": "https://github.com/brightwave-inc/tidebreak/pull/2740",
+            "headRefName": "thet/fix",
+            "baseRefName": "main",
+            "mergeStateStatus": "BLOCKED",
+            "inMergeQueue": true,
+            "statusCheckRollup": [{
+                "name": "CI",
+                "status": "IN_PROGRESS",
+                "state": "PENDING",
+                "conclusion": null
+            }]
+        });
+        let parsed = parse_pull_request(&repository_ref(), &queued, &[]).unwrap();
+        assert_eq!(parsed.summary.in_merge_queue, Some(true));
+
+        let unqueued = serde_json::json!({
+            "number": 2740,
+            "title": "Open change",
+            "state": "OPEN",
+            "url": "https://github.com/brightwave-inc/tidebreak/pull/2740",
+            "headRefName": "thet/fix",
+            "baseRefName": "main",
+            "mergeStateStatus": "BLOCKED",
+            "inMergeQueue": false
+        });
+        let parsed = parse_pull_request(&repository_ref(), &unqueued, &[]).unwrap();
+        assert_eq!(parsed.summary.in_merge_queue, Some(false));
+
+        let host_queued = serde_json::json!({
+            "number": 2740,
+            "title": "Host queued",
+            "state": "OPEN",
+            "url": "https://github.com/brightwave-inc/tidebreak/pull/2740",
+            "headRefName": "thet/fix",
+            "baseRefName": "main",
+            "mergeStateStatus": "queued"
+        });
+        let parsed = parse_pull_request(&repository_ref(), &host_queued, &[]).unwrap();
+        assert_eq!(parsed.summary.in_merge_queue, Some(true));
     }
 
     #[test]
