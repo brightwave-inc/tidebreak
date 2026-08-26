@@ -62,6 +62,9 @@ export default defineConfig(async () => ({
     // in per file with an `@vitest-environment jsdom` docblock.
     environment: "node",
     setupFiles: ["./src/test/setup.ts"],
+    // Vitest 4's restoreAllMocks only undoes spyOn; vi.fn() call history
+    // otherwise leaks from one case into the next.
+    clearMocks: true,
     alias: {
       "monaco-editor/editor/editor.worker.js?worker": monacoWorkerStub,
     },

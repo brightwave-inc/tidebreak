@@ -538,6 +538,7 @@ afterEach(() => {
   browserMocks.close.mockClear();
   window.localStorage.clear();
   vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 describe("CodeWorkspacePage", () => {
