@@ -313,6 +313,21 @@ function makeClient() {
       title: body.title,
     })),
     setCodeAttention: vi.fn(async () => SESSION),
+    setCodeSessionPermissionMode: vi.fn(
+      async (
+        _sessionId: string,
+        permissionMode: "plan" | "ask" | "auto" | "allow",
+      ) => ({
+        ...SESSION,
+        permission_mode: permissionMode,
+      }),
+    ),
+    setCodeSessionFastMode: vi.fn(
+      async (_sessionId: string, fastMode: boolean) => ({
+        ...SESSION,
+        fast_mode: fastMode,
+      }),
+    ),
     runCodeWorkspaceAction: vi.fn(async () => ({
       name: "lint",
       success: false,
@@ -987,6 +1002,143 @@ describe("CodeWorkspacePage", () => {
       ),
     );
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("serializes session settings without letting an older response erase a newer choice", async () => {
+    const client = makeClient();
+    const permissionWrite = deferred<CodeSessionSnapshot>();
+    const fastModeWrite = deferred<CodeSessionSnapshot>();
+    const configurableSession: CodeSessionSnapshot = {
+      ...SESSION,
+      harness_kind: "codex",
+      model: "gpt-5.4",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([configurableSession]);
+    client.listCodeHarnessModels.mockResolvedValue({
+      kind: "codex",
+      models: [
+        {
+          id: "gpt-5.4",
+          label: "GPT-5.4",
+          reasoning_efforts: ["low", "high"],
+          fast_mode: true,
+        },
+      ],
+      reasoning_efforts: ["low", "high"],
+    } as never);
+    client.setCodeSessionPermissionMode.mockReturnValue(
+      permissionWrite.promise,
+    );
+    client.setCodeSessionFastMode.mockReturnValue(fastModeWrite.promise);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const permission = await screen.findByRole("button", {
+      name: "Permissions: Ask",
+    });
+    const fastMode = await screen.findByRole("switch", {
+      name: "Fast mode off",
+    });
+    await user.click(permission);
+    const auto = await screen.findByRole("menuitem", { name: /Auto/ });
+
+    await user.click(auto);
+    await user.click(fastMode);
+
+    await waitFor(() =>
+      expect(client.setCodeSessionPermissionMode).toHaveBeenCalledWith(
+        SESSION.id,
+        "auto",
+      ),
+    );
+    expect(client.setCodeSessionFastMode).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Permissions: Auto" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("switch", { name: "Fast mode on" }),
+    ).toHaveAttribute("aria-busy", "true");
+    expect(
+      screen.getByRole("button", { name: "Reasoning: Default" }),
+    ).toHaveAttribute("aria-busy", "true");
+
+    permissionWrite.resolve({
+      ...configurableSession,
+      permission_mode: "auto",
+      fast_mode: false,
+    });
+
+    await waitFor(() =>
+      expect(client.setCodeSessionFastMode).toHaveBeenCalledWith(
+        SESSION.id,
+        true,
+      ),
+    );
+    expect(
+      screen.getByRole("switch", { name: "Fast mode on" }),
+    ).toHaveAttribute("aria-checked", "true");
+
+    fastModeWrite.resolve({
+      ...configurableSession,
+      permission_mode: "auto",
+      fast_mode: true,
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Permissions: Auto" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.getByRole("switch", { name: "Fast mode on" })).toBeEnabled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("rolls back only the failed session setting and clears the shared pending state", async () => {
+    const client = makeClient();
+    const fastModeWrite = deferred<CodeSessionSnapshot>();
+    const configurableSession: CodeSessionSnapshot = {
+      ...SESSION,
+      harness_kind: "codex",
+      model: "gpt-5.4",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([configurableSession]);
+    client.listCodeHarnessModels.mockResolvedValue({
+      kind: "codex",
+      models: [
+        {
+          id: "gpt-5.4",
+          label: "GPT-5.4",
+          reasoning_efforts: ["low", "high"],
+          fast_mode: true,
+        },
+      ],
+      reasoning_efforts: ["low", "high"],
+    } as never);
+    client.setCodeSessionFastMode.mockReturnValue(fastModeWrite.promise);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Fast mode off" }),
+    );
+    expect(
+      screen.getByRole("switch", { name: "Fast mode on" }),
+    ).toHaveAttribute("aria-busy", "true");
+
+    fastModeWrite.reject(new Error("fast mode is unavailable"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Fast mode off" }),
+      ).toBeEnabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Permissions: Ask" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Reasoning: Default" }),
+    ).toBeEnabled();
+    expect(toast.error).toHaveBeenCalledWith("fast mode is unavailable");
   });
 
   it("keeps the Codex session model selectable before its catalog loads", async () => {

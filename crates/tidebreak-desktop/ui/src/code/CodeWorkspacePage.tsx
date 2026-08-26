@@ -1975,38 +1975,114 @@ function CodeSessionPane({
   // channel rather than the journal, so the transcript reads it from here
   // instead of from an item the reducer built.
   const sessionDigest = useSessionDigest(workspaceId, session.id);
-  // The row the server last answered with, so the pickers follow a switch the
-  // route made rather than the list this page loaded the workspace with.
-  const [settings, setSettings] = useState({
+  type SessionSettings = {
+    permissionMode: PermissionMode;
+    reasoningEffort: ReasoningEffort | null;
+    fastMode: boolean;
+  };
+  const settingsFromSession = useCallback(
+    (snapshot: CodeSessionSnapshot): SessionSettings => ({
+      permissionMode: snapshot.permission_mode,
+      reasoningEffort: snapshot.reasoning_effort ?? null,
+      fastMode: snapshot.fast_mode,
+    }),
+    [],
+  );
+  const initialSettings: SessionSettings = {
     permissionMode: session.permission_mode,
     reasoningEffort: session.reasoning_effort ?? null,
     fastMode: session.fast_mode,
-  });
+  };
+  // One confirmed baseline plus ordered optimistic patches keeps a full
+  // response from an older write from erasing a choice that is still queued.
+  const [settings, setSettings] = useState(initialSettings);
+  const settingsRef = useRef(initialSettings);
+  const confirmedSettingsRef = useRef(initialSettings);
+  const pendingSettingsWritesRef = useRef(
+    new Map<number, Partial<SessionSettings>>(),
+  );
+  const settingsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const settingsWriteGenerationRef = useRef(0);
+  const settingsScopeRef = useRef(session.id);
+  const [settingsPending, setSettingsPending] = useState(false);
   const pendingReasoningEffortRef = useRef<{
     value: ReasoningEffort | null;
   } | null>(null);
+  const reconcileSettings = useCallback(() => {
+    let next = { ...confirmedSettingsRef.current };
+    for (const patch of pendingSettingsWritesRef.current.values()) {
+      next = { ...next, ...patch };
+    }
+    const pendingReasoningEffort = pendingReasoningEffortRef.current;
+    if (pendingReasoningEffort) {
+      next.reasoningEffort = pendingReasoningEffort.value;
+    }
+    settingsRef.current = next;
+    setSettings(next);
+  }, []);
+
+  function queueSettingsWrite(
+    patch: Partial<SessionSettings>,
+    write: () => Promise<CodeSessionSnapshot>,
+    failureMessage: string,
+  ) {
+    const scope = session.id;
+    const generation = ++settingsWriteGenerationRef.current;
+    pendingSettingsWritesRef.current.set(generation, patch);
+    reconcileSettings();
+    setSettingsPending(true);
+
+    const result = settingsWriteQueueRef.current.then(() => {
+      if (settingsScopeRef.current !== scope) return null;
+      return write();
+    });
+    settingsWriteQueueRef.current = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    void result.then(
+      (updated) => {
+        if (!updated || settingsScopeRef.current !== scope) return;
+        confirmedSettingsRef.current = settingsFromSession(updated);
+        pendingSettingsWritesRef.current.delete(generation);
+        reconcileSettings();
+        setSettingsPending(pendingSettingsWritesRef.current.size > 0);
+      },
+      (err) => {
+        if (settingsScopeRef.current !== scope) return;
+        pendingSettingsWritesRef.current.delete(generation);
+        reconcileSettings();
+        setSettingsPending(pendingSettingsWritesRef.current.size > 0);
+        toast.error(friendlyErrorMessage(err, failureMessage));
+      },
+    );
+  }
 
   useEffect(() => {
     setModel(session.model ?? inferred);
   }, [inferred, session.model]);
 
   useEffect(() => {
+    if (settingsScopeRef.current !== session.id) {
+      settingsScopeRef.current = session.id;
+      settingsWriteGenerationRef.current += 1;
+      pendingSettingsWritesRef.current.clear();
+      settingsWriteQueueRef.current = Promise.resolve();
+      pendingReasoningEffortRef.current = null;
+      setSettingsPending(false);
+    }
     // A refreshed row can still carry the stored effort while a mid-turn
-    // choice waits for its first submission. Keep that choice until an
-    // accepted submission clears it; changing sessions remounts this pane.
-    const pendingReasoningEffort = pendingReasoningEffortRef.current;
-    setSettings({
-      permissionMode: session.permission_mode,
-      reasoningEffort: pendingReasoningEffort
-        ? pendingReasoningEffort.value
-        : (session.reasoning_effort ?? null),
-      fastMode: session.fast_mode,
-    });
+    // choice waits for its first submission. Reconciliation keeps that choice
+    // and any queued writes on top of the confirmed row.
+    confirmedSettingsRef.current = settingsFromSession(session);
+    reconcileSettings();
   }, [
+    reconcileSettings,
     session.id,
     session.permission_mode,
     session.reasoning_effort,
     session.fast_mode,
+    settingsFromSession,
   ]);
 
   useEffect(() => {
@@ -2154,71 +2230,37 @@ function CodeSessionPane({
     });
   }
 
-  async function changePermissionMode(mode: PermissionMode) {
-    const previous = settings.permissionMode;
-    setSettings((current) => ({ ...current, permissionMode: mode }));
-    try {
-      const updated = await client.setCodeSessionPermissionMode(
-        session.id,
-        mode,
-      );
-      const pendingReasoningEffort = pendingReasoningEffortRef.current;
-      setSettings({
-        permissionMode: updated.permission_mode,
-        reasoningEffort: pendingReasoningEffort
-          ? pendingReasoningEffort.value
-          : (updated.reasoning_effort ?? null),
-        fastMode: updated.fast_mode,
-      });
-    } catch (err) {
-      setSettings((current) => ({ ...current, permissionMode: previous }));
-      toast.error(friendlyErrorMessage(err, "Could not change the mode"));
-    }
+  function changePermissionMode(mode: PermissionMode) {
+    queueSettingsWrite(
+      { permissionMode: mode },
+      () => client.setCodeSessionPermissionMode(session.id, mode),
+      "Could not change the mode",
+    );
   }
 
-  async function changeReasoningEffort(effort: ReasoningEffort | null) {
-    const previous = settings.reasoningEffort;
-    setSettings((current) => ({ ...current, reasoningEffort: effort }));
+  function changeReasoningEffort(effort: ReasoningEffort | null) {
     // A running turn keeps the effort it started with. The selected level
     // rides on the next submission, where the server also makes it sticky.
     if (turnRunning) {
       pendingReasoningEffortRef.current = { value: effort };
+      settingsRef.current = { ...settingsRef.current, reasoningEffort: effort };
+      setSettings(settingsRef.current);
       return;
     }
     pendingReasoningEffortRef.current = null;
-    try {
-      const updated = await client.setCodeSessionReasoningEffort(
-        session.id,
-        effort,
-      );
-      setSettings({
-        permissionMode: updated.permission_mode,
-        reasoningEffort: updated.reasoning_effort ?? null,
-        fastMode: updated.fast_mode,
-      });
-    } catch (err) {
-      setSettings((current) => ({ ...current, reasoningEffort: previous }));
-      toast.error(friendlyErrorMessage(err, "Could not change the reasoning"));
-    }
+    queueSettingsWrite(
+      { reasoningEffort: effort },
+      () => client.setCodeSessionReasoningEffort(session.id, effort),
+      "Could not change the reasoning",
+    );
   }
 
-  async function changeFastMode(fastMode: boolean) {
-    const previous = settings.fastMode;
-    setSettings((current) => ({ ...current, fastMode }));
-    try {
-      const updated = await client.setCodeSessionFastMode(session.id, fastMode);
-      const pendingReasoningEffort = pendingReasoningEffortRef.current;
-      setSettings({
-        permissionMode: updated.permission_mode,
-        reasoningEffort: pendingReasoningEffort
-          ? pendingReasoningEffort.value
-          : (updated.reasoning_effort ?? null),
-        fastMode: updated.fast_mode,
-      });
-    } catch (err) {
-      setSettings((current) => ({ ...current, fastMode: previous }));
-      toast.error(friendlyErrorMessage(err, "Could not change fast mode"));
-    }
+  function changeFastMode(fastMode: boolean) {
+    queueSettingsWrite(
+      { fastMode },
+      () => client.setCodeSessionFastMode(session.id, fastMode),
+      "Could not change fast mode",
+    );
   }
 
   async function steer(message: string) {
@@ -2311,6 +2353,7 @@ function CodeSessionPane({
             availableModes={availableModes}
             reasoningEffort={settings.reasoningEffort}
             fastMode={settings.fastMode}
+            settingsPending={settingsPending}
             engineEfforts={engineEfforts}
             harness={session.harness_kind}
             model={model ?? undefined}
