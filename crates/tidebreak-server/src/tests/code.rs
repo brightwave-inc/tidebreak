@@ -7752,7 +7752,9 @@ async fn legacy_managed_repo_and_worktree_paths_remain_accessible() {
         legacy_worktree_root.join(format!("demo-{}", &workspace_id.to_string()[..8]));
     create_worktree(&repo_root, &worktree_path, "thet/legacy-owner-path", "main")
         .await
-        .unwrap();
+        .unwrap()
+        .complete()
+        .await;
     let workspace = CodeWorkspace {
         id: workspace_id,
         owner: owner.clone(),
@@ -8149,6 +8151,112 @@ async fn release_frees_the_branch_and_restore_rebuilds_it_from_the_bundle() {
             .replace("\r\n", "\n"),
         "survives release\n",
         "the released commit did not come back"
+    );
+}
+
+/// A released restore keeps its only durable recovery material until the
+/// Active row commits. If that write fails after checkout creation, the exact
+/// attempt is removed and the Released row can retry from the same bundle.
+#[tokio::test]
+async fn released_restore_keeps_the_bundle_when_the_final_row_fails() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id: WorkspaceId = json_id(&workspace).parse().unwrap();
+    let branch = workspace["branch_name"].as_str().unwrap().to_owned();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    std::fs::write(path.join("kept.txt"), "retry me\n").unwrap();
+    for args in [
+        ["add", "kept.txt"].as_slice(),
+        ["commit", "-m", "keep the released tip"].as_slice(),
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&path)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/archive"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    let released = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/release"
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), reqwest::StatusCode::OK);
+    let released_body: serde_json::Value = released.json().await.unwrap();
+    let released_tip = released_body["released_tip"].as_str().unwrap().to_owned();
+    let bundle = dir
+        .path()
+        .join("code")
+        .join("bundles")
+        .join(format!("{}.bundle", workspace_id.as_uuid()));
+    assert!(bundle.is_file());
+
+    runtime.fail_next_workspace_final_save();
+    let failed = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/restore"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(bundle.is_file(), "a failed final row write lost the bundle");
+    assert!(
+        !path.exists(),
+        "the failed restore left its checkout behind"
+    );
+    assert!(
+        !branch_exists_in(&repo, &branch),
+        "the failed restore left its temporary branch behind"
+    );
+    let still_released = client
+        .get(format!("http://{addr}/code/workspaces/{workspace_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(still_released.status(), reqwest::StatusCode::OK);
+    let still_released: serde_json::Value = still_released.json().await.unwrap();
+    assert_eq!(still_released["status"], "released");
+    assert_eq!(still_released["released_tip"], released_tip);
+
+    let retried = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/restore"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        retried.status(),
+        reqwest::StatusCode::OK,
+        "restore retry failed: {}",
+        retried.text().await.unwrap()
+    );
+    assert!(path.join("kept.txt").is_file());
+    assert!(
+        !bundle.exists(),
+        "the durable Active row should retire the bundle"
     );
 }
 
