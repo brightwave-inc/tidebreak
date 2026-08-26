@@ -30,6 +30,7 @@ import type {
   CodeDeliveryPullRequestDetail,
   CodeDeliveryPullRequestFile,
   CodeDeliveryPullRequestSummary,
+  CodeDeliveryStackMember,
 } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -75,32 +76,26 @@ import {
 import { GithubAvatar } from "./GithubAvatar";
 import { PrCommentCard } from "./PrCommentCard";
 import {
-  checkCounts,
   expandGithubEmojiShortcodes,
   fileStatusLabel,
   fileStatusTone,
-  mergeBlockedReason,
   orderPullRequestComments,
+  type PullRequestCommentOrder,
+} from "./pullRequestPresentation";
+import {
+  PULL_REQUEST_LIFECYCLE_LABEL,
+  PULL_REQUEST_LIFECYCLE_TONE,
+  STATUS_TONE_BADGE_VARIANT,
+  checkCounts,
+  mergeBlockedReasons,
   pullRequestLifecycle,
   pullRequestSettledAt,
-  PULL_REQUEST_LIFECYCLE_LABEL,
-  type PullRequestCommentOrder,
   type PullRequestLifecycle,
-} from "./pullRequestPresentation";
+} from "./prState";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
 
 type MergeMethod = "squash" | "merge" | "rebase";
 type DetailTab = "conversation" | "files" | "checks";
-
-const LIFECYCLE_BADGE_VARIANT: Record<
-  PullRequestLifecycle,
-  "outline" | "success" | "critical" | "merged"
-> = {
-  draft: "outline",
-  open: "success",
-  merged: "merged",
-  closed: "critical",
-};
 
 /**
  * The frame both delivery detail surfaces share: a large sheet floated over
@@ -293,7 +288,7 @@ export function PullRequestDetailSheet({
   // behind this sheet may still be a poll behind.
   const current = detail?.summary ?? summary;
   const lifecycle = pullRequestLifecycle(current);
-  const counts = checkCounts(current.checks);
+  const counts = checkCounts(current);
   const workflowRunIds = useMemo(
     () => [
       ...new Set(
@@ -304,6 +299,56 @@ export function PullRequestDetailSheet({
     ],
     [current.checks],
   );
+
+  const mergeStack = async (members: readonly CodeDeliveryStackMember[]) => {
+    if (busy) return;
+    const targetId = summary.id;
+    setBusy("merge-stack");
+    try {
+      for (const member of members) {
+        // Merging a lower layer rebases the ones above, so every hop reads a
+        // fresh head rather than trusting the SHA this sheet loaded — the
+        // expected-head guard would refuse a stale one.
+        const fresh = await client.getCodeDeliveryPullRequestDetail({
+          repository: codeDeliveryRepositoryTarget(summary.repository),
+          number: member.number,
+        });
+        const head = fresh.summary.head_sha;
+        if (fresh.summary.state !== "open" || !head) continue;
+        const result = await client.runCodeDeliveryPullRequestAction({
+          target: {
+            repository: codeDeliveryRepositoryTarget(summary.repository),
+            number: member.number,
+          },
+          action: {
+            type: "merge",
+            method: mergeMethod,
+            auto: hasMergeQueue,
+            admin: false,
+            expected_head_sha: head,
+          },
+        });
+        if (!result.success) {
+          toast.warning(
+            `Stack merge stopped at #${member.number}: ${result.message}`,
+          );
+          return;
+        }
+      }
+      if (targetIsActive(targetId)) {
+        toast.success("Stack merged.");
+      }
+    } catch (caught) {
+      if (!targetIsActive(targetId)) return;
+      toast.error(friendlyErrorMessage(caught, "The stack merge failed."));
+    } finally {
+      if (targetIsActive(targetId)) {
+        setBusy(null);
+        onChanged();
+        await load();
+      }
+    }
+  };
 
   const adminMerge = async () => {
     if (!current.head_sha) return;
@@ -406,14 +451,14 @@ export function PullRequestDetailSheet({
                     <span
                       className={cn(
                         "tabular-nums",
-                        counts.failed > 0
+                        counts.failing > 0
                           ? STATUS_TEXT.critical
                           : counts.pending > 0
                             ? STATUS_TEXT.pending
                             : STATUS_TEXT.ready,
                       )}
                     >
-                      {counts.passed}/{counts.total}
+                      {counts.passing}/{counts.total}
                     </span>
                   )}
                 </TabsTrigger>
@@ -436,6 +481,7 @@ export function PullRequestDetailSheet({
                   onAdminMergeRequest={() => setConfirmingAdminMerge(true)}
                   onAdminMergeCancel={() => setConfirmingAdminMerge(false)}
                   onAdminMergeConfirm={() => void adminMerge()}
+                  onMergeStack={(members) => void mergeStack(members)}
                 />
                 <PrDescription body={detail.body} />
                 <PrConversation
@@ -560,7 +606,12 @@ function PrDetailHeader({
       </div>
 
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <Badge variant={LIFECYCLE_BADGE_VARIANT[lifecycle]} size="sm">
+        <Badge
+          variant={
+            STATUS_TONE_BADGE_VARIANT[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]]
+          }
+          size="sm"
+        >
           <PrLifecycleIcon lifecycle={lifecycle} className="size-3" />
           {PULL_REQUEST_LIFECYCLE_LABEL[lifecycle]}
         </Badge>
@@ -577,6 +628,14 @@ function PrDetailHeader({
           </span>
         )}
       </div>
+
+      {detail?.stack && detail.stack.length > 1 && (
+        <StackMap
+          stack={detail.stack}
+          currentNumber={summary.number}
+          url={summary.url}
+        />
+      )}
 
       <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
         <GithubAvatar
@@ -778,6 +837,7 @@ function PrActions({
   onAdminMergeRequest,
   onAdminMergeCancel,
   onAdminMergeConfirm,
+  onMergeStack,
 }: {
   detail: CodeDeliveryPullRequestDetail;
   summary: CodeDeliveryPullRequestSummary;
@@ -791,8 +851,10 @@ function PrActions({
   onAdminMergeRequest: () => void;
   onAdminMergeCancel: () => void;
   onAdminMergeConfirm: () => void;
+  onMergeStack: (members: readonly CodeDeliveryStackMember[]) => void;
 }) {
-  const blocked = mergeBlockedReason(summary);
+  const [confirmingStackMerge, setConfirmingStackMerge] = useState(false);
+  const blockers = mergeBlockedReasons(summary);
   const mergeAction =
     detail.can_merge && summary.head_sha
       ? prDirectMergeAction(deliveryPullRequestDigest(summary), {
@@ -801,15 +863,30 @@ function PrActions({
       : null;
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;
   const canAdminMerge = detail.can_merge && Boolean(summary.head_sha);
+  // The stack offer is GitHub's own: merging lands every unmerged layer, in
+  // order, bottom to top. A draft layer stops the chain — GitHub lands the
+  // layers below the latest ready pull request and leaves the drafts above
+  // open — so the offer counts only the non-draft layers. Two is the
+  // smallest stack worth confirming, and while the offer is on the table it
+  // replaces the single-layer merge: merging one layer of a live stack alone
+  // is the half-measure the stack exists to avoid.
+  const mergeableStackLayers = (detail.stack ?? []).filter(
+    (member) => member.state === "open" && !member.draft,
+  );
+  const canMergeStack =
+    detail.can_merge &&
+    Boolean(summary.head_sha) &&
+    mergeableStackLayers.length >= 2;
+  const showSingleMerge = !canMergeStack && mergeAction !== null;
   const anyAction =
     detail.can_mark_ready ||
     mergeAction !== null ||
+    canMergeStack ||
     canAdminMerge ||
     detail.can_close ||
     detail.can_reopen ||
     canRerun;
   if (!anyAction) return null;
-
   return (
     <section className="rounded-lg border border-border-subtle bg-muted/20 p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -824,7 +901,7 @@ function PrActions({
             Mark ready
           </Button>
         )}
-        {mergeAction && summary.head_sha && (
+        {showSingleMerge && summary.head_sha && (
           <>
             <Select
               value={mergeMethod}
@@ -862,6 +939,73 @@ function PrActions({
               {mergeAction.kind === "merge" ? <GitMerge /> : null}
               {mergeAction.label}
             </Button>
+          </>
+        )}
+
+        {canMergeStack && (
+          <>
+            <Select
+              value={mergeMethod}
+              onValueChange={(value) =>
+                onMergeMethodChange(value as MergeMethod)
+              }
+            >
+              <SelectTrigger size="sm" className="w-28">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="squash">Squash</SelectItem>
+                <SelectItem value="merge">Merge</SelectItem>
+                <SelectItem value="rebase">Rebase</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              size="sm"
+              variant="default"
+              disabled={Boolean(busy)}
+              onClick={() => setConfirmingStackMerge(true)}
+            >
+              {busy === "merge-stack" && (
+                <LoaderCircle className="animate-spin" />
+              )}
+              <GitMerge />
+              Merge stack ({openStackLayers.length} layers)
+            </Button>
+            {confirmingStackMerge && (
+              <div className="mt-2.5 flex w-full flex-col gap-2 rounded-md border border-border-subtle bg-background p-2.5">
+                <p className="text-xs text-muted-foreground">
+                  Lands {openStackLayers.length} open layers bottom to top:
+                  {openStackLayers.map((member) => ` #${member.number}`)}. Each
+                  layer merges with{" "}
+                  {hasMergeQueue
+                    ? "the merge queue"
+                    : "a direct " + mergeMethod + " merge"}
+                  , and the chain stops at the first layer that cannot merge.
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    disabled={Boolean(busy)}
+                    onClick={() => {
+                      setConfirmingStackMerge(false);
+                      onMergeStack(openStackLayers);
+                    }}
+                  >
+                    Merge stack
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => setConfirmingStackMerge(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
           </>
         )}
         {canRerun && (
@@ -967,11 +1111,15 @@ function PrActions({
           </div>
         </div>
       )}
-      {blocked && detail.can_merge && mergeAction === null && (
-        <p className="mt-2.5 flex items-start gap-1.5 border-t border-border-subtle pt-2.5 text-xs text-warning-foreground">
-          <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-          {blocked}
-        </p>
+      {blockers.length > 0 && detail.can_merge && mergeAction === null && (
+        <ul className="mt-2.5 flex flex-col gap-1 border-t border-border-subtle pt-2.5 text-xs text-warning-foreground">
+          {blockers.map((reason) => (
+            <li key={reason} className="flex items-start gap-1.5">
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              {reason}
+            </li>
+          ))}
+        </ul>
       )}
       {summary.workspace_links.length === 0 && (
         <p className="mt-2.5 border-t border-border-subtle pt-2.5 text-xs text-muted-foreground">
@@ -1191,7 +1339,6 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
 /**
  * A unified patch, colored the way a diff should be: a quiet background tint
  * per changed line and a colored sign, with the code itself kept in the
- * ordinary foreground. Recoloring whole lines of code green and red made the
  * text fight the tint in both themes; the tint alone carries the meaning.
  */
 function DiffPatch({ patch }: { patch: string }) {
@@ -1240,7 +1387,7 @@ function DiffPatch({ patch }: { patch: string }) {
 }
 
 function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
-  const counts = checkCounts(checks);
+  const counts = checkCounts({ checks });
   if (checks.length === 0) {
     return <p className="text-xs text-muted-foreground">No checks reported.</p>;
   }
@@ -1252,8 +1399,8 @@ function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-muted-foreground">
-        {counts.passed} of {counts.total} passed
-        {counts.failed > 0 && `, ${counts.failed} failed`}
+        {counts.passing} of {counts.total} passed
+        {counts.failing > 0 && `, ${counts.failing} failed`}
         {counts.pending > 0 && `, ${counts.pending} pending`}
         {counts.skipped > 0 && `, ${counts.skipped} skipped`}
       </p>
@@ -1303,6 +1450,71 @@ export function PrLifecycleIcon({
     return <GitPullRequestClosed className={shared} />;
   if (lifecycle === "draft") return <GitPullRequestDraft className={shared} />;
   return <GitPullRequest className={shared} />;
+}
+
+/**
+ * The stack chain this pull request belongs to, bottom to top — the map
+ * GitHub pins to the top of a stacked pull request. Each layer links to its
+ * GitHub page; the layer behind this sheet carries its own ring so the
+ * reader can see where in the stack they are standing.
+ */
+export function StackMap({
+  stack,
+  currentNumber,
+  url,
+}: {
+  stack: readonly CodeDeliveryStackMember[];
+  currentNumber: number;
+  url: string;
+}) {
+  return (
+    <nav
+      aria-label="Pull request stack, bottom layer first"
+      className="mt-2 flex flex-wrap items-center gap-1"
+    >
+      {stack.map((member, index) => {
+        const lifecycle = pullRequestLifecycle(member);
+        const current = member.number === currentNumber;
+        const memberUrl = url.replace(/\/pull\/\d+$/, `/pull/${member.number}`);
+        return (
+          <span key={member.number} className="flex items-center gap-1">
+            {index > 0 && (
+              <span
+                className="text-muted-foreground/70 text-xs"
+                aria-label="stacked on"
+              >
+                ←
+              </span>
+            )}
+            <a
+              href={memberUrl}
+              title={`${lifecycle} · ${member.head_branch}`}
+              onClick={(event) => {
+                event.preventDefault();
+                void openInBrowser(memberUrl);
+              }}
+              className={cn(
+                "flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs tabular-nums transition-colors",
+                current
+                  ? "border-border bg-muted font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+            >
+              <PrLifecycleIcon
+                lifecycle={lifecycle}
+                className={cn(
+                  "size-3",
+                  STATUS_MARK[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]],
+                )}
+              />
+              #{member.number}
+              {current && <span className="sr-only">(this pull request)</span>}
+            </a>
+          </span>
+        );
+      })}
+    </nav>
+  );
 }
 
 export function CheckTone({

@@ -141,20 +141,19 @@ describe("WorkspaceCard", () => {
     expect(onCommand).toHaveBeenCalledWith("copy-worktree");
   });
 
-  it("announces a queued pull request and uses its orange chip", () => {
+  it("announces a queued pull request and paints it info blue", () => {
     renderCard({
       pr: { ...pr, in_merge_queue: true },
       detailDefaultOpen: true,
     });
 
     expect(
-      screen.getByRole("button", { name: /Pull request #184 Queued/ }),
+      screen.getByRole("button", { name: /Pull request #184 In merge queue/ }),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("Queued")[0]).toHaveClass(
-      "bg-warning-background",
+    expect(screen.getAllByText("In merge queue")[0]).toHaveClass(
+      "bg-info-background",
     );
   });
-
   it("keeps only the PR glyph in the row and puts its action in the hover detail", async () => {
     const user = userEvent.setup();
     const { onOpen, onCommand } = renderCard({

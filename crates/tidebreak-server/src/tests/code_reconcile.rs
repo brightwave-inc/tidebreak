@@ -113,6 +113,111 @@ const LIST_JSON: &str = r#"[
   }
 ]"#;
 
+/// A list where branch inference alone would stack 415 on 412 (its base is
+/// 412's head branch, the same shape as 413 above) and leave 416 unstacked
+/// (its base matches nothing tracked). The host stacks in
+/// [`HOST_STACKS_JSON`] disagree on purpose: 415 is a bottom layer, and
+/// 416's parent is 600, a pull request the page never lists.
+const HOST_STACK_LIST_JSON: &str = r#"[
+  {
+    "number": 412,
+    "url": "https://github.com/acme/tools/pull/412",
+    "state": "OPEN",
+    "title": "Tracked work",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/tracked",
+    "headRefOid": "aaa111",
+    "baseRefName": "main",
+    "updatedAt": "2026-08-22T12:00:00Z",
+    "createdAt": "2026-08-22T10:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 415,
+    "url": "https://github.com/acme/tools/pull/415",
+    "state": "OPEN",
+    "title": "Solo layer",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/solo",
+    "headRefOid": "eee444",
+    "baseRefName": "tidebreak/tracked",
+    "updatedAt": "2026-08-22T12:45:00Z",
+    "createdAt": "2026-08-22T12:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 416,
+    "url": "https://github.com/acme/tools/pull/416",
+    "state": "OPEN",
+    "title": "Host-stacked child",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/host-child",
+    "headRefOid": "fff666",
+    "baseRefName": "main",
+    "updatedAt": "2026-08-22T12:50:00Z",
+    "createdAt": "2026-08-22T12:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  }
+]"#;
+
+const HOST_STACKS_JSON: &str = r#"[
+  {
+    "id": 901,
+    "number": 8,
+    "node_id": "S_8",
+    "url": "https://github.com/acme/tools/stacks/8",
+    "base": {"ref": "main"},
+    "open": true,
+    "created_at": "2026-08-22T12:00:00Z",
+    "pull_requests": [
+      {"number": 600, "state": "open", "draft": false, "merged_at": null,
+       "head": {"ref": "tidebreak/far", "sha": "ddd999"}},
+      {"number": 416, "state": "open", "draft": false, "merged_at": null,
+       "head": {"ref": "tidebreak/host-child", "sha": "fff666"}}
+    ]
+  },
+  {
+    "id": 902,
+    "number": 9,
+    "node_id": "S_9",
+    "url": "https://github.com/acme/tools/stacks/9",
+    "base": {"ref": "main"},
+    "open": true,
+    "created_at": "2026-08-22T12:30:00Z",
+    "pull_requests": [
+      {"number": 415, "state": "open", "draft": false, "merged_at": null,
+       "head": {"ref": "tidebreak/solo", "sha": "eee444"}}
+    ]
+  }
+]"#;
+
 fn write_executable(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
     let mut perms = std::fs::metadata(path).unwrap().permissions();
@@ -155,18 +260,41 @@ fn init_github_shaped_repo(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn write_gh_shim(dir: &std::path::Path) {
+    write_gh_shim_responding(dir, LIST_JSON, None);
+}
+
+/// The delivery list read asks for host stacks (`repos/.../stacks`) next to
+/// the pull requests. `stacks` is the payload that read returns; `None`
+/// makes it fail outright so a test can exercise the silent fallback.
+fn write_gh_shim_responding(dir: &std::path::Path, list_json: &str, stacks: Option<&str>) {
+    let stacks_branch = match stacks {
+        Some(payload) => format!(
+            "         if [ \"$1\" = api ] && [ \"$2\" = \
+             \"repos/acme/tools/stacks?per_page=100\" ]; then\n\
+             \x20          echo '{payload}'\n\
+             \x20          exit 0\n\
+             \x20        fi\n"
+        ),
+        None => "         if [ \"$1\" = api ] && [ \"$2\" = \
+                 \"repos/acme/tools/stacks?per_page=100\" ]; then\n\
+                 \x20          echo 'stacks are unavailable' >&2\n\
+                 \x20          exit 1\n\
+                 \x20        fi\n"
+            .to_owned(),
+    };
     let body = "#!/bin/sh\n\
          if [ \"$1\" = auth ]; then\n\
            echo '{\"hosts\":{\"github.com\":[{\"active\":true,\"state\":\"success\",\"login\":\"tester\"}]}}'\n\
            exit 0\n\
-         fi\n\
-         if [ \"$1\" = api ]; then echo '{}'; exit 0; fi\n\
-         if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n"
+         fi\n"
         .to_owned()
-        + &format!("           echo '{LIST_JSON}'\n")
-        + "           exit 0\n\
-         fi\n\
-         echo unexpected \"$@\" >&2\n\
+        + &stacks_branch
+        + "         if [ \"$1\" = api ]; then echo '{}'; exit 0; fi\n"
+        + &format!("         if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n\
+                        echo '{list_json}'\n\
+                        exit 0\n\
+                      fi\n")
+        + "         echo unexpected \"$@\" >&2\n\
          exit 3\n";
     write_executable(&dir.join("gh"), &body);
 }
@@ -413,4 +541,106 @@ async fn a_delivery_read_serves_durable_links_with_the_relation() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].0.number, 412);
     let _ = db;
+}
+
+/// One unscoped list read of the fixture repository, as the delivery page
+/// issues it.
+async fn delivery_list_read(
+    runtime: &Arc<CodeRuntime>,
+) -> crate::routes::code::types::CodeDeliveryPullRequestsPage {
+    crate::code::delivery::query_pull_requests(
+        runtime,
+        &OwnerId::local(),
+        true,
+        crate::routes::code::types::CodeDeliveryPullRequestQuery {
+            repositories: vec![crate::routes::code::types::CodeGitHubRepositoryTarget {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "tools".into(),
+            }],
+            search: None,
+            states: Vec::new(),
+            review_states: Vec::new(),
+            check_states: Vec::new(),
+            authors: Vec::new(),
+            attention_only: false,
+            ready_only: false,
+            tidebreak_linked: None,
+            updated_after: None,
+            cursor: None,
+            limit: None,
+            refresh: false,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn host_stack_edges_override_branch_inference() {
+    let (dir, runtime, _db, _repo_id, _tracked, _fuzzy) = seeded_runtime().await;
+    write_gh_shim_responding(
+        &dir.path().join("bin"),
+        HOST_STACK_LIST_JSON,
+        Some(HOST_STACKS_JSON),
+    );
+    let page = delivery_list_read(&runtime).await;
+
+    // 415 has 412's head branch as its base — the exact shape that
+    // infers a parent for 413 in the test above. The host says stack 9 has
+    // one layer, so the inferred parent clears: a bottom layer has none.
+    let solo = page
+        .items
+        .iter()
+        .find(|item| item.number == 415)
+        .expect("the solo layer is on the page");
+    assert_eq!(solo.stack_parent_number, None);
+    assert_eq!(solo.stack_number, Some(9));
+    assert_eq!(solo.stack_size, Some(1));
+
+    // 416's base matches nothing tracked, so inference alone would leave it
+    // unstacked; the host names 600, a pull request the page never lists.
+    let host_child = page
+        .items
+        .iter()
+        .find(|item| item.number == 416)
+        .expect("the host-stacked child is on the page");
+    assert_eq!(host_child.stack_parent_number, Some(600));
+    assert_eq!(host_child.stack_number, Some(8));
+    assert_eq!(host_child.stack_size, Some(2));
+
+    // 412 belongs to no host stack, so it keeps the inference-only answer.
+    let parent = page
+        .items
+        .iter()
+        .find(|item| item.number == 412)
+        .expect("the tracked pull request is on the page");
+    assert_eq!(parent.stack_parent_number, None);
+    assert_eq!(parent.stack_number, None);
+    assert_eq!(parent.stack_size, None);
+}
+
+#[tokio::test]
+async fn a_failed_stacks_read_leaves_the_list_clean() {
+    let (dir, runtime, _db, _repo_id, _tracked, _fuzzy) = seeded_runtime().await;
+    // The stacks endpoint fails hard; hosts without stacked pull requests
+    // answer exactly this way, and the list must not notice.
+    write_gh_shim_responding(&dir.path().join("bin"), LIST_JSON, None);
+    let page = delivery_list_read(&runtime).await;
+
+    assert!(
+        page.errors.is_empty(),
+        "a stacks failure is not a source error"
+    );
+    for item in &page.items {
+        assert_eq!(item.stack_number, None);
+        assert_eq!(item.stack_size, None);
+    }
+    // Branch inference stays the fallback: 413 still stacks on 412.
+    let child = page
+        .items
+        .iter()
+        .find(|item| item.number == 413)
+        .expect("the stacked child is on the page");
+    assert_eq!(child.stack_parent_number, Some(412));
 }

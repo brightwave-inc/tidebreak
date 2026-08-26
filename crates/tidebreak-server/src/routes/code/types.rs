@@ -1098,11 +1098,21 @@ pub struct CodeDeliveryPullRequestSummary {
     pub attention_reasons: Vec<CodeDeliveryPrAttentionReason>,
     pub ready_to_merge: bool,
     pub workspace_links: Vec<CodeDeliveryWorkspaceLink>,
-    /// The open pull request this one is stacked on: its base branch is that
-    /// pull request's head branch in the same repository (decision 62).
-    /// Derived from the durable fact set, so a parent outside the current
-    /// page or filter still resolves. Absent when the base is the default
-    /// branch or nothing tracked owns it.
+    /// The host stack this pull request belongs to (GitHub stacked pull
+    /// requests), when the host reported one. Identifies the stack, not the
+    /// PR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stack_number: Option<u64>,
+    /// Total layers in that stack, bottom to top, including merged ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stack_size: Option<u64>,
+    /// The pull request this one is stacked on. Host stack order wins when
+    /// the host reported a stack; branch inference from the durable fact set
+    /// is the fallback (decision 62), so a parent outside the current page
+    /// or filter still resolves. Absent when the base is the default branch
+    /// or nothing tracked owns it.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stack_parent_number: Option<u64>,
@@ -1201,6 +1211,24 @@ pub struct CodeDeliveryPullRequestFile {
     pub patch: Option<String>,
 }
 
+/// One layer of a pull-request stack, in bottom-to-top order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeDeliveryStackMember {
+    pub number: u64,
+    /// Host state token (open, closed).
+    pub state: String,
+    pub draft: bool,
+    /// Set once this layer merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged_at: Option<String>,
+    /// Head branch name.
+    pub head_branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+}
+
 /// Full PR drawer payload. Conversation entries retain the existing bounded
 /// comment contract used by workspace PRs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1213,6 +1241,12 @@ pub struct CodeDeliveryPullRequestDetail {
     pub changed_files: u64,
     pub additions: u64,
     pub deletions: u64,
+    /// The full stack chain this pull request belongs to, bottom to top,
+    /// when the host reported one. Absent on hosts without stacked pull
+    /// requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stack: Option<Vec<CodeDeliveryStackMember>>,
     pub commits: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

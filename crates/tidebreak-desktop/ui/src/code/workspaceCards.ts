@@ -6,7 +6,7 @@ import type {
   CodeWorkspaceStatus,
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
-import { STATUS_CHIP, STATUS_MARK, type StatusTone } from "./statusTone";
+import { prCompactStatusLabel, pullRequestLifecycle } from "./prState";
 
 /**
  * Pure presentation logic for workspace cards: grouping by repo, the state
@@ -137,8 +137,8 @@ export function workspaceStatusRank(
   if (digest?.lifecycle === "running") return "running";
   const pr = digest?.pr_state ?? workspace.pr;
   if (pr) {
-    const tone = prTone(pr);
-    if (tone === "open" || tone === "draft") return "pr_open";
+    const lifecycle = pullRequestLifecycle(pr);
+    if (lifecycle === "open" || lifecycle === "draft") return "pr_open";
   }
   if (digest?.attention.state.type === "done_unreviewed") {
     return "done_unreviewed";
@@ -394,7 +394,9 @@ export function workspaceCardLabel(input: {
     parts.push(LIFECYCLE_LABELS[input.session.lifecycle]);
   }
   if (input.pr) {
-    parts.push(`Pull request #${input.pr.number} ${prStatusLabel(input.pr)}`);
+    parts.push(
+      `Pull request #${input.pr.number} ${prCompactStatusLabel(input.pr)}`,
+    );
   }
   if (input.terminalOpen) parts.push("Terminal open");
   parts.push(input.repoName);
@@ -449,95 +451,6 @@ export function repoAccentClass(id: string): string {
     REPO_ACCENT_CLASSES[Math.abs(hash) % REPO_ACCENT_CLASSES.length];
   return swatch ?? REPO_ACCENT_CLASSES[0];
 }
-
-export type PrChipTone = "open" | "draft" | "merged" | "closed" | "other";
-
-/** Host state token → chip tone. Unknown tokens stay neutral. */
-export function prChipTone(state: string): PrChipTone {
-  const token = state.trim().toLowerCase();
-  if (token === "open") return "open";
-  if (token === "draft") return "draft";
-  if (token === "merged") return "merged";
-  if (token === "closed") return "closed";
-  return "other";
-}
-
-/**
- * The tone for a whole digest: the draft flag wins over the state token,
- * since gh reports a draft PR's state as plain "open".
- */
-export function prTone(pr: { state: string; draft?: boolean }): PrChipTone {
-  const tone = prChipTone(pr.state);
-  return tone === "open" && pr.draft ? "draft" : tone;
-}
-
-/** The word a badge shows for a tone; unknown tones show the raw token. */
-export function prToneLabel(pr: { state: string; draft?: boolean }): string {
-  switch (prTone(pr)) {
-    case "open":
-      return "Open";
-    case "draft":
-      return "Draft";
-    case "merged":
-      return "Merged";
-    case "closed":
-      return "Closed";
-    case "other":
-      return pr.state;
-  }
-}
-
-/** Queue membership replaces the lifecycle word on compact status surfaces. */
-export function prStatusLabel(pr: {
-  state: string;
-  draft?: boolean;
-  in_merge_queue?: boolean;
-}): string {
-  return pr.in_merge_queue ? "Queued" : prToneLabel(pr);
-}
-
-/**
- * The PR vocabulary as a view of the shared status one. A PR chip is a status
- * chip; keeping its own color table is what let merged drift onto a hardcoded
- * purple while every other tone rode the theme.
- */
-const PR_STATUS_TONES: Record<PrChipTone, StatusTone> = {
-  open: "ready",
-  draft: "neutral",
-  merged: "merged",
-  closed: "critical",
-  other: "neutral",
-};
-
-/** The status tone a PR carries, for callers painting a surface of their own. */
-export function prStatusTone(pr: {
-  state: string;
-  draft?: boolean;
-  in_merge_queue?: boolean;
-}): StatusTone {
-  if (pr.in_merge_queue) return "warning";
-  return PR_STATUS_TONES[prTone(pr)];
-}
-
-function prToneClasses(
-  rungs: Record<StatusTone, string>,
-): Record<PrChipTone, string> {
-  return {
-    open: rungs[PR_STATUS_TONES.open],
-    draft: rungs[PR_STATUS_TONES.draft],
-    merged: rungs[PR_STATUS_TONES.merged],
-    closed: rungs[PR_STATUS_TONES.closed],
-    other: rungs[PR_STATUS_TONES.other],
-  };
-}
-
-/** Icon (text) classes per tone, for the PR mark itself. */
-export const PR_ICON_TONE_CLASSES: Record<PrChipTone, string> =
-  prToneClasses(STATUS_MARK);
-
-/** Chip classes per tone. */
-export const PR_CHIP_TONE_CLASSES: Record<PrChipTone, string> =
-  prToneClasses(STATUS_CHIP);
 
 /**
  * The chip suffix for a workspace's attributed pull-request set

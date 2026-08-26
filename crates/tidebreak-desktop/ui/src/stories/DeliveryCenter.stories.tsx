@@ -592,6 +592,34 @@ export const PullRequestStacks: Story = {
   },
 };
 
+/**
+ * The stacked pull request's detail sheet: the host stack map pins the chain
+ * bottom to top, and the merge offer is the whole stack rather than the one
+ * layer — the chain lands every open layer in order.
+ */
+export const PullRequestStackDetail: Story = {
+  args: { scenario: "pull-requests-stacked" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await canvas.findByText("Stack middle: reconcile sweep"),
+    );
+    await expect(
+      await body.findByRole("heading", {
+        name: "Stack middle: reconcile sweep",
+      }),
+    ).toBeVisible();
+    // The stack map: bottom layer, this layer, the draft tip.
+    await expect(await body.findByText("#2301")).toBeVisible();
+    await expect(await body.findByText("#2303")).toBeVisible();
+    await expect(await body.findByText("(this pull request)")).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: /Merge stack \(2 layers\)/ }),
+    ).toBeVisible();
+  },
+};
+
 export const PullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);

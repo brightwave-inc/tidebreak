@@ -12,15 +12,17 @@ import {
   groupWorkspacesByRepo,
   listArchivedWorkspaces,
   middleTruncate,
-  prChipTone,
-  prStatusLabel,
-  prStatusTone,
   sessionActivityLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
   workspaceStackParent,
   workspaceStatusRank,
 } from "./workspaceCards";
+import {
+  prCompactStatusLabel,
+  prCompactStatusTone,
+  pullRequestLifecycle,
+} from "./prState";
 
 function repo(id: string): CodeRepoSnapshot {
   return {
@@ -54,15 +56,23 @@ function workspace(
 
 const working: Attention = { state: { type: "working" }, source: "lifecycle" };
 
-describe("prStatusTone", () => {
+describe("compact PR status", () => {
   it("uses the host merge-queue color before the open lifecycle color", () => {
     expect(
-      prStatusTone({ state: "open", draft: false, in_merge_queue: true }),
-    ).toBe("warning");
-    expect(prStatusTone({ state: "open", draft: false })).toBe("ready");
+      prCompactStatusTone({
+        state: "open",
+        draft: false,
+        in_merge_queue: true,
+      }),
+    ).toBe("pending");
+    expect(prCompactStatusTone({ state: "open", draft: false })).toBe("ready");
     expect(
-      prStatusLabel({ state: "open", draft: false, in_merge_queue: true }),
-    ).toBe("Queued");
+      prCompactStatusLabel({
+        state: "open",
+        draft: false,
+        in_merge_queue: true,
+      }),
+    ).toBe("In merge queue");
   });
 });
 
@@ -293,13 +303,12 @@ describe("workspaceStatusRank", () => {
   });
 });
 
-describe("prChipTone", () => {
-  it("maps host state tokens case-insensitively and defaults unknowns", () => {
-    expect(prChipTone("OPEN")).toBe("open");
-    expect(prChipTone("draft")).toBe("draft");
-    expect(prChipTone("Merged")).toBe("merged");
-    expect(prChipTone("closed")).toBe("closed");
-    expect(prChipTone("locked")).toBe("other");
+describe("pullRequestLifecycle", () => {
+  it("maps host state tokens case-insensitively", () => {
+    expect(pullRequestLifecycle({ state: "OPEN" })).toBe("open");
+    expect(pullRequestLifecycle({ state: "draft", draft: true })).toBe("draft");
+    expect(pullRequestLifecycle({ state: "Merged" })).toBe("merged");
+    expect(pullRequestLifecycle({ state: "closed" })).toBe("closed");
   });
 });
 
@@ -418,7 +427,7 @@ describe("workspaceCardLabel", () => {
         branchName: "tidebreak/fix-login",
         pr: { number: 12, state: "open", in_merge_queue: true },
       }),
-    ).toContain("Pull request #12 Queued");
+    ).toContain("Pull request #12 In merge queue");
   });
 });
 

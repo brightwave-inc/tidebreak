@@ -36,6 +36,7 @@ import {
   type CodeDeliveryPullRequestAction as WireCodeDeliveryPullRequestAction,
   type CodeDeliveryPullRequestActionBody as WireCodeDeliveryPullRequestActionBody,
   type CodeDeliveryPullRequestDetail as WireCodeDeliveryPullRequestDetail,
+  type CodeDeliveryStackMember as WireCodeDeliveryStackMember,
   type CodeDeliveryPullRequestQuery as WireCodeDeliveryPullRequestQuery,
   type CodeDeliveryPullRequestSummary as WireCodeDeliveryPullRequestSummary,
   type CodeDeliveryPullRequestFile as WireCodeDeliveryPullRequestFile,
@@ -1146,6 +1147,7 @@ export type CodeDeliveryCheck = WireCodeDeliveryCheck;
 export type CodeDeliveryPrAttentionReason = WireCodeDeliveryPrAttentionReason;
 export type CodeDeliveryPullRequestSummary = WireCodeDeliveryPullRequestSummary;
 export type CodeDeliveryPullRequestDetail = WireCodeDeliveryPullRequestDetail;
+export type CodeDeliveryStackMember = WireCodeDeliveryStackMember;
 export type CodeDeliveryPullRequestQuery = WireCodeDeliveryPullRequestQuery;
 export type CodeDeliveryPullRequestsPage = WireCodeDeliveryPullRequestsPage;
 export type CodeDeliveryPullRequestTarget = WireCodeDeliveryPullRequestTarget;

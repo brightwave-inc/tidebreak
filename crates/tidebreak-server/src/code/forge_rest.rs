@@ -10,7 +10,8 @@
 //! Deliberately narrow: creation, the PR-card digest, the fact reads
 //! (decision 62), and Delivery's repository-scoped reads and actions. The
 //! stable REST API still has no ready-for-review transition, so that one
-//! hosted action remains an explicit refusal.
+//! hosted action remains an explicit refusal. Host stacks ride the same
+//! generic GET the rest of Delivery uses.
 
 use std::time::Duration;
 

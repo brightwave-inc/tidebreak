@@ -154,7 +154,7 @@ describe("PrCard", () => {
         checks_summary: "2 passing, 1 pending, 0 failing",
       },
     });
-    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
     expect(screen.getByText("Pull request #12")).toBeInTheDocument();
     const open = screen.getByRole("link", { name: "Open" });
     await userEvent.setup().click(open);
@@ -175,7 +175,9 @@ describe("PrCard", () => {
       },
     });
 
-    expect(screen.getByText("Queued")).toHaveClass("bg-warning-background");
+    expect(screen.getByText("In merge queue")).toHaveClass(
+      "bg-info-background",
+    );
     expect(screen.queryByText("open")).not.toBeInTheDocument();
   });
 
@@ -190,7 +192,7 @@ describe("PrCard", () => {
         checks_summary: "2 passing, 1 pending, 0 failing",
       },
     });
-    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
     expect(screen.getByText("Uncommitted")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Commit changes" }),
@@ -209,7 +211,7 @@ describe("PrCard", () => {
         checks_summary: "2 passing, 1 pending, 0 failing",
       },
     });
-    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
     expect(screen.getByText("Unpushed")).toBeInTheDocument();
     expect(screen.getByText(/update #12/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Push branch" })).toBeEnabled();
