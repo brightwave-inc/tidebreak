@@ -2560,7 +2560,8 @@ mod tests {
     fn sensitive_snapshot_nodes_hide_values_labels_and_actions() {
         let script = snapshot_script(25, "__marker");
         assert!(script.contains("const tidebreakTextWithoutFieldDescendants"));
-        assert!(script.contains("text.split(fieldText).join(\" \")"));
+        assert!(script.contains("node.nodeType === 3"));
+        assert!(script.contains("node.matches?.(tidebreakFieldSelector)"));
         assert!(script.contains("sensitive ? \"Sensitive field\""));
         assert!(script.contains("const value = !interactive || sensitive"));
         assert!(script.contains("text: sensitive ? null : (text || null)"));
