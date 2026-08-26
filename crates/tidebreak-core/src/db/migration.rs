@@ -56,6 +56,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeApprovalBinding),
             Box::new(CodeSessionProcessIdentity),
             Box::new(CodeWorkspaceArchiving),
+            Box::new(CodePermissionModeIntent),
         ]
     }
 }
@@ -315,6 +316,78 @@ FROM "code_workspace""#,
         (Err(rebuild), Err(enable)) => {
             Err(DbErr::Custom(format!("{rebuild}; additionally, {enable}")))
         }
+    }
+}
+
+/// Add the durable claim that brackets a live permission-mode mutation.
+struct CodePermissionModeIntent;
+
+impl MigrationName for CodePermissionModeIntent {
+    fn name(&self) -> &str {
+        "m20260826_000019_code_permission_mode_intent"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodePermissionModeIntent {
+    fn use_transaction(&self) -> Option<bool> {
+        Some(true)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let columns = [
+            (
+                "permission_mode_revision",
+                ColumnDef::new(idens::CodeSession::PermissionModeRevision)
+                    .big_integer()
+                    .not_null()
+                    .default(0)
+                    .to_owned(),
+            ),
+            (
+                "permission_mode_intent",
+                ColumnDef::new(idens::CodeSession::PermissionModeIntent)
+                    .text()
+                    .to_owned(),
+            ),
+            (
+                "permission_mode_intent_revision",
+                ColumnDef::new(idens::CodeSession::PermissionModeIntentRevision)
+                    .big_integer()
+                    .to_owned(),
+            ),
+            (
+                "permission_mode_intent_epoch",
+                ColumnDef::new(idens::CodeSession::PermissionModeIntentEpoch)
+                    .big_integer()
+                    .to_owned(),
+            ),
+            (
+                "permission_mode_intent_lifecycle",
+                ColumnDef::new(idens::CodeSession::PermissionModeIntentLifecycle)
+                    .text()
+                    .to_owned(),
+            ),
+        ];
+        for (name, column) in columns {
+            if !manager.has_column("code_session", name).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(idens::CodeSession::Table)
+                            .add_column(column)
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // A pending intent is a crash-recovery fence. Removing it can make an
+        // acknowledged native mode differ from the durable session posture.
+        Ok(())
     }
 }
 
@@ -2304,6 +2377,7 @@ mod tests {
                 "m20260825_000016_code_approval_binding",
                 "m20260826_000017_code_session_process_identity",
                 "m20260826_000018_code_workspace_archiving",
+                "m20260826_000019_code_permission_mode_intent",
             ]
         );
         assert!(db
