@@ -20,9 +20,10 @@ use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BlobStore, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent, CodeSessionId,
-    CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason,
-    HarnessKind, PermissionMode, ReasoningEffort, Store, WorkspaceId,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent, CodeRepo,
+    CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+    CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, PermissionMode, ReasoningEffort,
+    RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
@@ -7376,7 +7377,7 @@ async fn a_self_host_member_cannot_use_ambient_github_credentials_for_unowned_ta
 /// the second clone from landing on the first one's checkout.
 #[test]
 fn clone_targets_are_keyed_by_owner() {
-    use crate::code::clone::owner_dir;
+    use crate::code::clone::{legacy_owner_dir, owner_dir};
     let parent = std::path::Path::new("/srv/checkouts");
     // The local profile is single-user and keeps the paths people already have.
     assert_eq!(
@@ -7386,9 +7387,14 @@ fn clone_targets_are_keyed_by_owner() {
     let alice = owner_dir(parent, &tidebreak_core::OwnerId::new("alice").unwrap());
     let bob = owner_dir(parent, &tidebreak_core::OwnerId::new("bob").unwrap());
     assert_ne!(alice, bob);
-    assert_eq!(alice, parent.join("alice"));
-    // An owner key is visible ASCII, so it may carry separators and dots that
-    // must not escape the parent or resolve to it.
+    assert_eq!(alice.parent(), Some(parent));
+    assert!(alice.starts_with(parent));
+    // The compatibility path remains available for identifying existing rows,
+    // but new paths never use it.
+    assert_eq!(
+        legacy_owner_dir(parent, &tidebreak_core::OwnerId::new("alice").unwrap()),
+        parent.join("alice")
+    );
     let hostile = owner_dir(
         parent,
         &tidebreak_core::OwnerId::new("../../etc/passwd").unwrap(),
@@ -7396,7 +7402,114 @@ fn clone_targets_are_keyed_by_owner() {
     assert_eq!(hostile.parent(), Some(parent));
     assert!(hostile.starts_with(parent));
     let dots = owner_dir(parent, &tidebreak_core::OwnerId::new("..").unwrap());
-    assert_eq!(dots, parent.join("owner"));
+    assert_eq!(dots.parent(), Some(parent));
+    assert_ne!(dots, parent);
+}
+
+/// Rows created with the legacy owner directory keep their exact absolute
+/// paths. The new namespace applies only to later clones and worktrees.
+#[tokio::test]
+async fn legacy_managed_repo_and_worktree_paths_remain_accessible() {
+    use crate::code::clone::{legacy_owner_dir, owner_dir, registered_legacy_clone_target};
+    use crate::code::worktree::create_worktree;
+
+    let (dir, store) = temp_db_store("code-owner-path-compat.db").await;
+    let db = Arc::new(store);
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
+    let runtime = CodeRuntime::with_registry(db.clone(), dir.path().to_path_buf(), registry);
+    let owner = tidebreak_core::OwnerId::new("user:alice@example").unwrap();
+
+    let clone_parent = dir.path().join("clones");
+    let legacy_repo_root = legacy_owner_dir(&clone_parent, &owner).join("demo");
+    let repo_root = init_git_repo_named(legacy_repo_root.parent().unwrap(), "demo");
+    let repo = CodeRepo {
+        id: RepoId::new(),
+        owner: owner.clone(),
+        root_path: repo_root.canonicalize().unwrap().display().to_string(),
+        display_name: "demo".to_owned(),
+        default_base_ref: "main".to_owned(),
+        branch_prefix: "thet/".to_owned(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: chrono::Utc::now(),
+        removed_at: None,
+        cloned_from: Some("https://example.com/acme/demo.git".to_owned()),
+        origin_host: None,
+        origin_owner: None,
+        origin_name: None,
+    };
+    tidebreak_core::db::code::insert_repo(&db, &repo)
+        .await
+        .unwrap();
+    assert!(registered_legacy_clone_target(&db, &owner, &repo_root)
+        .await
+        .unwrap());
+    let colliding_owner = tidebreak_core::OwnerId::new("user:alice_example").unwrap();
+    assert_eq!(
+        legacy_owner_dir(&clone_parent, &colliding_owner),
+        legacy_repo_root.parent().unwrap()
+    );
+    assert!(
+        !registered_legacy_clone_target(&db, &colliding_owner, &repo_root)
+            .await
+            .unwrap()
+    );
+
+    let legacy_worktree_root = legacy_owner_dir(&runtime.default_worktree_root(), &owner);
+    let workspace_id = WorkspaceId::new();
+    let worktree_path =
+        legacy_worktree_root.join(format!("demo-{}", &workspace_id.to_string()[..8]));
+    create_worktree(&repo_root, &worktree_path, "thet/legacy-owner-path", "main")
+        .await
+        .unwrap();
+    let workspace = CodeWorkspace {
+        id: workspace_id,
+        owner: owner.clone(),
+        repo_id: repo.id,
+        title: "Legacy owner path".to_owned(),
+        worktree_path: worktree_path.display().to_string(),
+        branch_name: "thet/legacy-owner-path".to_owned(),
+        base_ref: "main".to_owned(),
+        status: CodeWorkspaceStatus::Active,
+        pr: None,
+        created_at: chrono::Utc::now(),
+        archived_at: None,
+        released_at: None,
+        released_tip: None,
+        bundle_bytes: None,
+    };
+    tidebreak_core::db::code::insert_workspace(&db, &workspace)
+        .await
+        .unwrap();
+
+    assert_ne!(
+        owner_dir(&clone_parent, &owner),
+        legacy_repo_root.parent().unwrap()
+    );
+    let new_worktree_root = runtime.owner_worktree_root(&owner).await.unwrap();
+    assert_ne!(new_worktree_root, legacy_worktree_root);
+    let reread_repo = runtime.get_repo(&owner, repo.id).await.unwrap();
+    assert_eq!(reread_repo.root_path, repo.root_path);
+    let next_workspace = runtime
+        .create_workspace(
+            &owner,
+            repo.id,
+            Some("New owner namespace".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(std::path::Path::new(&next_workspace.worktree_path).starts_with(new_worktree_root));
+    let reread_workspace = runtime.get_workspace(&owner, workspace_id).await.unwrap();
+    assert_eq!(reread_workspace.worktree_path, workspace.worktree_path);
+    let (paths, truncated) = runtime
+        .workspace_tree(&owner, workspace_id, "README", Some(10))
+        .await
+        .unwrap();
+    assert_eq!(paths, vec!["README.md"]);
+    assert!(!truncated);
 }
 
 /// The `/code/*` routes reach the store only through the owner-scoped view.

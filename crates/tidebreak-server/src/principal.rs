@@ -22,13 +22,16 @@
 //! [`crate::auth::require_admin`] over the role resolved here — see
 //! `docs/decisions/0006-self-host-deployment-plane-authorization.md`.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use sha2::{Digest as _, Sha256};
 use tidebreak_core::{AgentError, OwnerId, Result};
+
+const OWNER_PATH_SEGMENT_PREFIX: &str = "owner-v2-";
 
 /// What a principal is permitted to reach.
 ///
@@ -96,6 +99,56 @@ impl Principal {
             Self::User { role, .. } => *role == Role::Admin,
         }
     }
+}
+
+/// Stable filesystem identity for a non-local owner's exact durable key.
+///
+/// The segment is lowercase hexadecimal so a case-insensitive filesystem
+/// cannot fold two generated representations together. Hashing the exact key
+/// also keeps punctuation significant without placing path syntax in the
+/// segment. The version prefix leaves room for an explicit migration if this
+/// encoding ever changes.
+#[must_use]
+pub(crate) fn owner_path_segment(owner: &OwnerId) -> Option<String> {
+    if owner.is_local() {
+        return None;
+    }
+    let digest = Sha256::digest(owner.as_str().as_bytes());
+    let mut segment = String::with_capacity(OWNER_PATH_SEGMENT_PREFIX.len() + digest.len() * 2);
+    segment.push_str(OWNER_PATH_SEGMENT_PREFIX);
+    for byte in digest {
+        write!(&mut segment, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    Some(segment)
+}
+
+/// Filesystem segment used before [`owner_path_segment`].
+///
+/// Keep this only for finding a same-owner managed checkout that predates the
+/// collision-resistant encoding. New repositories and worktrees must never
+/// use it because distinct owner keys can map to the same segment.
+#[must_use]
+pub(crate) fn legacy_owner_path_segment(owner: &OwnerId) -> Option<String> {
+    if owner.is_local() {
+        return None;
+    }
+    let segment: String = owner
+        .as_str()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let segment = segment.trim_matches('.');
+    Some(if segment.is_empty() {
+        "owner".to_owned()
+    } else {
+        segment.to_owned()
+    })
 }
 
 /// The operator-assigned identifier of a named user on a shared deployment.
@@ -186,6 +239,54 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use tower::ServiceExt;
+
+    #[test]
+    fn owner_path_segments_are_stable_and_case_fold_safe() {
+        let exact = OwnerId::new("user:alice@example").unwrap();
+        let punctuation_peer = OwnerId::new("user:alice_example").unwrap();
+        let upper = OwnerId::new("user:Alice").unwrap();
+        let lower = OwnerId::new("user:alice").unwrap();
+
+        assert_eq!(
+            owner_path_segment(&exact).as_deref(),
+            Some("owner-v2-40538e821f0efa90f443e3e237769498a96716b377c40394d23f1f455cc24576")
+        );
+        assert_ne!(
+            owner_path_segment(&exact),
+            owner_path_segment(&punctuation_peer)
+        );
+        assert_ne!(owner_path_segment(&upper), owner_path_segment(&lower));
+        assert!(owner_path_segment(&exact)
+            .unwrap()
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'));
+        assert_eq!(owner_path_segment(&OwnerId::local()), None);
+    }
+
+    #[test]
+    fn legacy_owner_path_segments_pin_the_compatibility_lookup() {
+        let punctuation_left = OwnerId::new("user:alice@example").unwrap();
+        let punctuation_right = OwnerId::new("user:alice_example").unwrap();
+        let case_left = OwnerId::new("user:Alice").unwrap();
+        let case_right = OwnerId::new("user:alice").unwrap();
+
+        assert_eq!(
+            legacy_owner_path_segment(&punctuation_left).as_deref(),
+            Some("user_alice_example")
+        );
+        assert_eq!(
+            legacy_owner_path_segment(&punctuation_left),
+            legacy_owner_path_segment(&punctuation_right)
+        );
+        assert!(legacy_owner_path_segment(&case_left)
+            .unwrap()
+            .eq_ignore_ascii_case(&legacy_owner_path_segment(&case_right).unwrap()));
+        assert_eq!(
+            legacy_owner_path_segment(&OwnerId::new("..").unwrap()).as_deref(),
+            Some("owner")
+        );
+        assert_eq!(legacy_owner_path_segment(&OwnerId::local()), None);
+    }
 
     /// The boundary contract: a route the auth middleware does not cover
     /// cannot observe an identity — the extractors fail closed instead of
