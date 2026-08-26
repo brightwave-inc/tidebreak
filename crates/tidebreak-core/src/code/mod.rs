@@ -1020,6 +1020,12 @@ pub struct CodeSession {
     pub fence_reason: Option<FenceReason>,
     /// Child pid recorded at spawn, when a child is live.
     pub child_pid: Option<i64>,
+    /// Opaque operating-system creation identity for the recorded child.
+    ///
+    /// A pid can be reused after the original process exits. Recovery must
+    /// match this value before it signals the numeric pid.
+    #[serde(default)]
+    pub child_process_identity: Option<String>,
     /// Incremented on every spawn so a superseded worker cannot write.
     pub spawn_epoch: i64,
     /// Current attention.

@@ -96,6 +96,7 @@ async fn seed_owner(
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
+            child_process_identity: None,
             spawn_epoch: 0,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,

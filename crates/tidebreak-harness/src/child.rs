@@ -5,17 +5,104 @@
 //! window a crash can orphan a child in), and how the child ended once it is
 //! gone (an EOF on stdout is not a completed turn).
 
+use std::collections::HashMap;
 use std::io;
 use std::process::{ExitStatus, Output};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 #[cfg(unix)]
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 
 use crate::TurnOutcome;
+
+static SPAWNED_PROCESS_IDENTITIES: LazyLock<Mutex<HashMap<i64, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Result of terminating and waiting for one recorded process identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedProcessReap {
+    /// The recorded process exited, or the pid now belongs to another process.
+    Exited,
+    /// The recorded process still had the same identity when the wait expired.
+    TimedOut,
+}
+
+/// Return the creation identity captured when this process spawned `pid`.
+///
+/// The registry is process-local and only covers children created through
+/// [`spawn_process_tree`]. Recovery after a host restart uses the durable copy
+/// stored beside the pid instead.
+#[must_use]
+pub fn spawned_process_identity(pid: i64) -> Option<String> {
+    SPAWNED_PROCESS_IDENTITIES
+        .lock()
+        .expect("spawned process identities")
+        .get(&pid)
+        .cloned()
+}
+
+/// Read the operating system's non-reusable creation identity for `pid`.
+///
+/// `Ok(None)` means that no process owns the pid. An error is ambiguous and
+/// must keep a recovery fence in place.
+pub fn current_process_identity(pid: i64) -> io::Result<Option<String>> {
+    if pid <= 0 {
+        return Ok(None);
+    }
+    platform_process_identity(pid)
+}
+
+/// Terminate the process only when `pid` still has `expected_identity`, then
+/// wait until that exact identity no longer exists.
+///
+/// A reused pid is treated as proof that the recorded process exited. The
+/// replacement process is never signaled.
+pub async fn terminate_recorded_process(
+    pid: i64,
+    expected_identity: &str,
+    timeout: Duration,
+) -> io::Result<RecordedProcessReap> {
+    if expected_identity.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "recorded process identity is empty",
+        ));
+    }
+    terminate_recorded_process_platform(pid, expected_identity, timeout).await
+}
+
+fn register_spawned_process(pid: u32) -> io::Result<String> {
+    let pid = i64::from(pid);
+    let identity = current_process_identity(pid)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "spawned child exited before its process identity was recorded",
+        )
+    })?;
+    let mut identities = SPAWNED_PROCESS_IDENTITIES
+        .lock()
+        .expect("spawned process identities");
+    identities.remove(&pid);
+    identities.insert(pid, identity.clone());
+    Ok(identity)
+}
+
+fn unregister_spawned_process(pid: u32, identity: &str) {
+    let pid = i64::from(pid);
+    let mut identities = SPAWNED_PROCESS_IDENTITIES
+        .lock()
+        .expect("spawned process identities");
+    if identities
+        .get(&pid)
+        .is_some_and(|stored| stored == identity)
+    {
+        identities.remove(&pid);
+    }
+}
 
 /// Live pid of the child backing the current turn.
 ///
@@ -80,6 +167,8 @@ impl ChildPid {
 /// period; dropping an unreaped value kills the group.
 pub struct ProcessTreeChild {
     child: Option<Child>,
+    process_id: u32,
+    process_identity: String,
     #[cfg(unix)]
     process_group: Option<libc::pid_t>,
     #[cfg(windows)]
@@ -102,8 +191,21 @@ pub fn spawn_process_tree(command: &mut Command) -> io::Result<ProcessTreeChild>
             let _ = child.start_kill();
             return Err(err);
         }
+        let process_id = child
+            .id()
+            .ok_or_else(|| io::Error::other("spawned child has no process id"))?;
+        let process_identity = match register_spawned_process(process_id) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = job.terminate();
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        };
         return Ok(ProcessTreeChild {
             child: Some(child),
+            process_id,
+            process_identity,
             job,
         });
     }
@@ -114,22 +216,52 @@ pub fn spawn_process_tree(command: &mut Command) -> io::Result<ProcessTreeChild>
         // where a wrapper can create descendants outside the owned group.
         command.process_group(0);
         let mut child = command.spawn()?;
-        let process_group = match child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
-            Some(process_group) => process_group,
+        let process_id = match child.id() {
+            Some(process_id) => process_id,
             None => {
                 let _ = child.start_kill();
                 return Err(io::Error::other("spawned child has no valid process id"));
             }
         };
+        let process_group = match libc::pid_t::try_from(process_id) {
+            Ok(process_group) => process_group,
+            Err(_) => {
+                let _ = child.start_kill();
+                return Err(io::Error::other("spawned child has no valid process id"));
+            }
+        };
+        let process_identity = match register_spawned_process(process_id) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = kill_process_group(process_group);
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        };
         Ok(ProcessTreeChild {
             child: Some(child),
+            process_id,
+            process_identity,
             process_group: Some(process_group),
         })
     }
     #[cfg(all(not(unix), not(windows)))]
     {
+        let mut child = command.spawn()?;
+        let process_id = child
+            .id()
+            .ok_or_else(|| io::Error::other("spawned child has no process id"))?;
+        let process_identity = match register_spawned_process(process_id) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        };
         Ok(ProcessTreeChild {
-            child: Some(command.spawn()?),
+            child: Some(child),
+            process_id,
+            process_identity,
         })
     }
 }
@@ -147,6 +279,12 @@ impl ProcessTreeChild {
     #[must_use]
     pub fn id(&self) -> Option<u32> {
         self.child().id()
+    }
+
+    /// Non-reusable creation identity captured before the child was exposed.
+    #[must_use]
+    pub fn process_identity(&self) -> &str {
+        &self.process_identity
     }
 
     /// Take the child's piped stdin, when configured.
@@ -167,6 +305,9 @@ impl ProcessTreeChild {
     /// Wait for the root child to exit, ending Unix group ownership.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
         let status = self.child_mut().wait().await;
+        if status.is_ok() {
+            unregister_spawned_process(self.process_id, &self.process_identity);
+        }
         #[cfg(unix)]
         if status.is_ok() {
             // Once the leader is reaped its numeric pid/pgid may be reused.
@@ -179,6 +320,9 @@ impl ProcessTreeChild {
     /// Read a completed root child's exit status, ending Unix group ownership.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         let status = self.child_mut().try_wait();
+        if matches!(status, Ok(Some(_))) {
+            unregister_spawned_process(self.process_id, &self.process_identity);
+        }
         #[cfg(unix)]
         if matches!(status, Ok(Some(_))) {
             // See `wait`: a reaped leader no longer pins the numeric pgid.
@@ -239,6 +383,7 @@ impl ProcessTreeChild {
             guard.kill()?;
             let status = self.child_mut().wait().await;
             if status.is_ok() {
+                unregister_spawned_process(self.process_id, &self.process_identity);
                 guard.disarm();
             }
             status
@@ -258,6 +403,7 @@ impl ProcessTreeChild {
             guard.kill()?;
             let status = self.child_mut().wait().await;
             if status.is_ok() {
+                unregister_spawned_process(self.process_id, &self.process_identity);
                 guard.disarm();
             }
             status
@@ -300,7 +446,219 @@ impl Drop for ProcessTreeChild {
         if self.child.is_some() {
             let _ = self.terminate_tree();
         }
+        unregister_spawned_process(self.process_id, &self.process_identity);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_process_identity(pid: i64) -> io::Result<Option<String>> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(command_end) = stat.rfind(')') else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process stat has no command terminator",
+        ));
+    };
+    let start_ticks = stat[command_end + 1..]
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "process stat is truncated"))?
+        .parse::<u64>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    Ok(Some(format!("linux:{}:{start_ticks}", boot_id.trim())))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_process_identity(pid: i64) -> io::Result<Option<String>> {
+    let raw_pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid is out of range"))?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .expect("proc_bsdinfo fits in c_int");
+    // SAFETY: `info` points to `size` writable bytes, and the pid is only
+    // queried. `proc_pidinfo` initializes the full structure on success.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            raw_pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read == size {
+        // SAFETY: the full structure was initialized when `read == size`.
+        let info = unsafe { info.assume_init() };
+        return Ok(Some(format!(
+            "macos:{}:{}",
+            info.pbi_start_tvsec, info.pbi_start_tvusec
+        )));
+    }
+    // SAFETY: signal 0 only checks whether the pid exists and is signalable.
+    if unsafe { libc::kill(raw_pid, 0) } != 0
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+        return Ok(None);
+    }
+    Err(io::Error::last_os_error())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn platform_process_identity(_pid: i64) -> io::Result<Option<String>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process creation identity is unavailable on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn platform_process_identity(pid: i64) -> io::Result<Option<String>> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, HANDLE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let pid = u32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid is out of range"))?;
+    // SAFETY: this opens a query-only handle for a numeric pid.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error().map(|code| code as u32) == Some(ERROR_INVALID_PARAMETER) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    // SAFETY: successful `OpenProcess` returns one owned handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    windows_process_identity(process.as_raw_handle() as HANDLE).map(Some)
+}
+
+#[cfg(windows)]
+fn windows_process_identity(process: windows_sys::Win32::Foundation::HANDLE) -> io::Result<String> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: `process` is a live process handle and every FILETIME pointer is
+    // writable for the duration of the call.
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ticks = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+    Ok(format!("windows:{ticks}"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_process_identity(_pid: i64) -> io::Result<Option<String>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process creation identity is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+async fn terminate_recorded_process_platform(
+    pid: i64,
+    expected_identity: &str,
+    timeout: Duration,
+) -> io::Result<RecordedProcessReap> {
+    match current_process_identity(pid)? {
+        None => return Ok(RecordedProcessReap::Exited),
+        Some(observed) if observed != expected_identity => {
+            return Ok(RecordedProcessReap::Exited);
+        }
+        Some(_) => {}
+    }
+    let process_group = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid is out of range"))?;
+    kill_process_group(process_group)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match current_process_identity(pid)? {
+            None => return Ok(RecordedProcessReap::Exited),
+            Some(observed) if observed != expected_identity => {
+                return Ok(RecordedProcessReap::Exited);
+            }
+            Some(_) => {}
+        }
+        if Instant::now() >= deadline {
+            return Ok(RecordedProcessReap::TimedOut);
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(windows)]
+async fn terminate_recorded_process_platform(
+    pid: i64,
+    expected_identity: &str,
+    timeout: Duration,
+) -> io::Result<RecordedProcessReap> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    let pid = u32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid is out of range"))?;
+    // SAFETY: the requested rights are limited to identity query, termination,
+    // and waiting for the exact process object behind this pid.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error().map(|code| code as u32) == Some(ERROR_INVALID_PARAMETER) {
+            return Ok(RecordedProcessReap::Exited);
+        }
+        return Err(error);
+    }
+    // SAFETY: successful `OpenProcess` returns one owned handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let handle = process.as_raw_handle() as HANDLE;
+    if windows_process_identity(handle)? != expected_identity {
+        return Ok(RecordedProcessReap::Exited);
+    }
+    // SAFETY: the handle carries PROCESS_TERMINATE for this exact process.
+    if unsafe { TerminateProcess(handle, 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let millis = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
+    // SAFETY: the handle carries synchronization rights and stays owned for
+    // the whole bounded wait.
+    match unsafe { WaitForSingleObject(handle, millis) } {
+        WAIT_OBJECT_0 => Ok(RecordedProcessReap::Exited),
+        WAIT_TIMEOUT => Ok(RecordedProcessReap::TimedOut),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn terminate_recorded_process_platform(
+    _pid: i64,
+    _expected_identity: &str,
+    _timeout: Duration,
+) -> io::Result<RecordedProcessReap> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process termination is unavailable on this platform",
+    ))
 }
 
 /// How many times a group kill re-walks the group before giving up.
@@ -658,10 +1016,37 @@ mod unix_process_tree_tests {
     use tokio::process::{ChildStdout, Command};
     use tokio::time::{sleep, timeout, Instant};
 
-    use super::{spawn_process_tree, ProcessTreeChild};
+    use super::{
+        spawn_process_tree, terminate_recorded_process, ProcessTreeChild, RecordedProcessReap,
+    };
 
     const ASSERTION_TIMEOUT: Duration = Duration::from_secs(5);
     const INTERRUPT_GRACE: Duration = Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn a_reused_pid_identity_does_not_signal_the_replacement_process() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "while :; do sleep 60; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = spawn_process_tree(&mut command).unwrap();
+        let pid = i64::from(child.id().expect("root child has a pid"));
+        let reused_identity = format!("{}:reused", child.process_identity());
+
+        assert_eq!(
+            terminate_recorded_process(pid, &reused_identity, Duration::from_millis(50))
+                .await
+                .unwrap(),
+            RecordedProcessReap::Exited
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the replacement process must not be signaled"
+        );
+        child.terminate().await.unwrap();
+    }
 
     #[tokio::test]
     async fn interrupting_after_the_tree_already_exited_is_not_an_error() {
