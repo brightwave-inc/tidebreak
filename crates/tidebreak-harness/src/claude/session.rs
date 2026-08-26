@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use tracing::warn;
 
 use crate::browser_channel::apply_child_env_tokio;
@@ -713,6 +713,97 @@ impl ClaudeSession {
         stdin.flush().await
     }
 
+    fn permission_mode_acknowledgement(
+        line: &str,
+        request_id: &str,
+    ) -> Option<Result<(), HarnessError>> {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return None;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("control_response") {
+            return None;
+        }
+        let response = value.get("response")?;
+        let response_request_id = response
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)?;
+        if response_request_id != request_id {
+            return None;
+        }
+        match response.get("subtype").and_then(serde_json::Value::as_str) {
+            Some("success") => Some(Ok(())),
+            Some("error") => {
+                let detail = response
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("the engine rejected the request");
+                Some(Err(HarnessError::PermissionModeSwitchFailed(detail.into())))
+            }
+            _ => Some(Err(HarnessError::PermissionModeSwitchFailed(
+                "the engine returned a malformed acknowledgement".into(),
+            ))),
+        }
+    }
+
+    /// Read until the engine confirms this exact mode request.
+    ///
+    /// Permission-mode changes only reach the worker between turns, so this
+    /// method is the sole stdout reader while it waits. Any unrelated frames
+    /// still pass through the normal parser instead of disappearing.
+    async fn wait_for_permission_mode_acknowledgement(
+        &self,
+        channel: &EngineChannel,
+        request_id: &str,
+    ) -> Result<(), HarnessError> {
+        let mut guard = channel.reader.lock().await;
+        let reader = &mut *guard;
+        let budget = StreamBudget::default();
+        let mut chunk = vec![0_u8; budget.chunk_size];
+        let deadline = Instant::now() + CONTROL_RESPONSE_TIMEOUT;
+
+        loop {
+            let read = timeout_at(deadline, reader.stdout.read(&mut chunk)).await;
+            let count = match read {
+                Ok(Ok(0)) => {
+                    return Err(HarnessError::PermissionModeSwitchFailed(
+                        "the engine exited before acknowledging the request".into(),
+                    ));
+                }
+                Ok(Ok(count)) => count,
+                Ok(Err(error)) => {
+                    return Err(HarnessError::PermissionModeSwitchFailed(format!(
+                        "could not read the engine acknowledgement: {error}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(HarnessError::PermissionModeSwitchFailed(
+                        "timed out waiting for the engine acknowledgement".into(),
+                    ));
+                }
+            };
+
+            let tick = reader.lines.push(&chunk[..count], budget);
+            if tick.overflow_chunks > 0 {
+                warn!(
+                    overflow_chunks = tick.overflow_chunks,
+                    "engine stdout exceeded the parse budget while awaiting a mode change"
+                );
+            }
+            let mut acknowledgement = None;
+            for line in tick.lines {
+                if let Some(result) = Self::permission_mode_acknowledgement(&line, request_id) {
+                    acknowledgement.get_or_insert(result);
+                    continue;
+                }
+                emit_parsed(self, &mut reader.parser, &self.resume_ref, &line).await;
+            }
+            if let Some(result) = acknowledgement {
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     fn register_interrupt(
         &self,
         request_id: String,
@@ -1060,7 +1151,7 @@ impl HarnessSession for ClaudeSession {
     /// Cheap where it works: the child keeps its context, so the next turn
     /// starts as fast as any other. It does not work for `Allow` — see
     /// [`live_mode_token`] — and with no child up there is nothing to tell, so
-    /// both cases record the mode and let the next launch compose it.
+    /// the next launch composes the recorded mode.
     async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {
         let current = self.permission_mode();
         if current == mode {
@@ -1086,16 +1177,27 @@ impl HarnessSession for ClaudeSession {
         }))
         .map_err(|err| HarnessError::Other(format!("encode set_permission_mode: {err}")))?;
         line.push(b'\n');
-        // A child that will not take the request is a child the caller should
-        // replace, so report the refusal rather than record a mode the engine
-        // is not running under.
-        self.write_line(&channel, &line)
+        if let Err(error) = self.write_line(&channel, &line).await {
+            self.retire_channel().await;
+            return Err(HarnessError::PermissionModeSwitchFailed(format!(
+                "could not write the engine request: {error}"
+            )));
+        }
+        if let Err(error) = self
+            .wait_for_permission_mode_acknowledgement(&channel, &request_id)
             .await
-            .map_err(|_| HarnessError::PermissionModeSwitchUnsupported)?;
+        {
+            // A lost or malformed acknowledgement cannot prove whether the
+            // engine applied the request. Retire the child so the next turn
+            // launches under the prior mode that Tidebreak still reports.
+            self.retire_channel().await;
+            return Err(error);
+        }
         *self.permission_mode.lock().expect("claude permission mode") = mode;
-        // The child took the request, so it is no longer running the mode its
-        // argv named. Without this the next turn would read the disagreement
-        // as a stale child and respawn the one thing the switch just avoided.
+        // The engine confirmed the request, so it is no longer running the
+        // mode its argv named. Without this the next turn would read the
+        // disagreement as a stale child and respawn the one thing the switch
+        // just avoided.
         *channel.mode.lock().expect("claude child mode") = mode;
         Ok(())
     }
@@ -1798,7 +1900,11 @@ done
 while IFS= read -r line; do
   printf '%s\n' "$line" >> {inbox}
   case "$line" in
-    *control_request*) continue ;;
+    *control_request*)
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"wrong-id","response":{{}}}}}}\n'
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"tb-set-mode-1","response":{{}}}}}}\n'
+      continue
+      ;;
   esac
   printf '{{"type":"system","subtype":"init","session_id":"sess-1","claude_code_version":"2.1.238"}}\n'
   printf '{{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-1","usage":{{"input_tokens":1,"output_tokens":1}}}}\n'
@@ -1832,6 +1938,83 @@ done
         assert_eq!(modes.len(), 1, "one switch, one control request: {sent:?}");
         assert_eq!(modes[0]["request"]["subtype"], "set_permission_mode");
         assert_eq!(modes[0]["request"]["mode"], "acceptEdits");
+    }
+
+    /// A write is not acceptance. Every failed acknowledgement path keeps
+    /// the old mode and retires the child, so the next launch cannot inherit
+    /// an unconfirmed posture.
+    #[tokio::test]
+    async fn a_live_mode_switch_keeps_the_prior_mode_without_a_positive_acknowledgement() {
+        for (behavior, expected) in [
+            ("error", "permission changes are locked"),
+            ("malformed", "malformed acknowledgement"),
+            ("none", "timed out"),
+            ("exit", "exited before acknowledging"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let binary = write_engine(
+                dir.path(),
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *control_request*)
+      case "$FAKE_CLAUDE_MODE_ACK" in
+        error)
+          printf '{"type":"control_response","response":{"subtype":"error","request_id":"tb-set-mode-1","error":"permission changes are locked"}}\n'
+          ;;
+        malformed)
+          printf '{"type":"control_response","response":{"request_id":"tb-set-mode-1"}}\n'
+          ;;
+        none)
+          :
+          ;;
+        exit)
+          exit 0
+          ;;
+      esac
+      ;;
+    *)
+      printf '{"type":"system","subtype":"init","session_id":"sess-1","claude_code_version":"2.1.238"}\n'
+      printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"sess-1","usage":{"input_tokens":1,"output_tokens":1}}\n'
+      ;;
+  esac
+done
+"#,
+            );
+            let mut session = session_with(binary, dir.path(), Arc::new(Discard));
+            session
+                .spec
+                .extra_env
+                .push(("FAKE_CLAUDE_MODE_ACK".into(), behavior.into()));
+
+            session.run_turn(turn("first")).await.unwrap();
+            let result = session.set_permission_mode(PermissionMode::Auto).await;
+            let Err(HarnessError::PermissionModeSwitchFailed(detail)) = result else {
+                panic!("{behavior} must return a typed mode-switch failure: {result:?}");
+            };
+            assert!(detail.contains(expected), "{behavior}: {detail}");
+            assert_eq!(
+                session.permission_mode(),
+                PermissionMode::Plan,
+                "{behavior} must keep the prior session mode"
+            );
+            assert_eq!(
+                session.child_pid(),
+                None,
+                "{behavior} must retire an ambiguous child"
+            );
+            let plan = session.compose_plan_for(None, None).unwrap();
+            let mode = plan
+                .argv
+                .windows(2)
+                .find(|pair| pair[0] == "--permission-mode")
+                .map(|pair| pair[1].as_str());
+            assert_eq!(
+                mode,
+                Some("plan"),
+                "{behavior} must compose the next child under the prior mode"
+            );
+        }
     }
 
     /// A failing engine is indistinguishable from a finished one on stdout
