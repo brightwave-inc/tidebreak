@@ -373,7 +373,9 @@ pub(crate) struct NewSessionSettings {
 
 struct SelectedModelCapabilities {
     reasoning_efforts: Vec<ReasoningEffort>,
+    reasoning_known: bool,
     fast_mode: bool,
+    fast_mode_known: bool,
 }
 
 impl SelectedModelCapabilities {
@@ -382,13 +384,14 @@ impl SelectedModelCapabilities {
     }
 
     fn deactivate_unsupported(&self, settings: &mut CodeSessionExecutionSettings) {
-        if settings
-            .reasoning_effort
-            .is_some_and(|effort| !self.supports_reasoning(effort))
+        if self.reasoning_known
+            && settings
+                .reasoning_effort
+                .is_some_and(|effort| !self.supports_reasoning(effort))
         {
             settings.reasoning_effort = None;
         }
-        if settings.fast_mode && !self.fast_mode {
+        if self.fast_mode_known && settings.fast_mode && !self.fast_mode {
             settings.fast_mode = false;
         }
     }
@@ -4279,13 +4282,16 @@ impl CodeRuntime {
     ) -> SelectedModelCapabilities {
         let caps = adapter.capabilities(probe);
         let listed = adapter.list_models(probe).await;
+        // Empty is inconclusive: adapters also return it when model listing
+        // fails. Only catalog evidence may disable an already stored setting.
+        let catalog_known = !listed.is_empty();
         let model = listed.iter().find(|model| match selected {
             Some(selected) => model.id == selected,
             None => model.default,
         });
-        let reasoning_efforts = if caps.reasoning_levels == CapLevel::Supported {
+        let (reasoning_efforts, reasoning_known) = if caps.reasoning_levels == CapLevel::Supported {
             match (selected, model) {
-                (_, Some(model)) => model.reasoning_efforts.clone(),
+                (_, Some(model)) => (model.reasoning_efforts.clone(), true),
                 (None, None) => {
                     let mut levels = adapter.reasoning_efforts(probe);
                     if levels.is_empty() {
@@ -4296,16 +4302,18 @@ impl CodeRuntime {
                             .into_iter()
                             .collect();
                     }
-                    levels
+                    (levels, catalog_known || !levels.is_empty())
                 }
-                (Some(_), None) => Vec::new(),
+                (Some(_), None) => (Vec::new(), catalog_known),
             }
         } else {
-            Vec::new()
+            (Vec::new(), true)
         };
         SelectedModelCapabilities {
             reasoning_efforts,
+            reasoning_known,
             fast_mode: model.is_some_and(|model| model.fast_mode),
+            fast_mode_known: model.is_some() || catalog_known,
         }
     }
 
@@ -5901,6 +5909,59 @@ mod delivery_nudge_tests {
         tokio::time::advance(DELIVERY_NUDGE_DEBOUNCE).await;
         tokio::task::yield_now().await;
         assert!(matches!(updates.try_recv(), Err(TryRecvError::Empty)));
+    }
+}
+
+#[cfg(test)]
+mod selected_model_capabilities_tests {
+    use super::*;
+    use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
+
+    #[tokio::test]
+    async fn an_unavailable_catalog_does_not_clear_committed_settings() {
+        let adapter =
+            ScriptedAdapter::new(plain_text_script()).with_reasoning_levels(CapLevel::Supported);
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: Some(PathBuf::from("/scripted")),
+            version: Some("1.0.0".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        };
+        let capabilities =
+            CodeRuntime::selected_model_capabilities(&adapter, &probe, Some("configured")).await;
+        let mut settings = CodeSessionExecutionSettings {
+            model: Some("configured".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: true,
+        };
+
+        capabilities.deactivate_unsupported(&mut settings);
+
+        assert_eq!(settings.reasoning_effort, Some(ReasoningEffort::High));
+        assert!(settings.fast_mode);
+    }
+
+    #[test]
+    fn an_authoritative_catalog_clears_unsupported_settings() {
+        let capabilities = SelectedModelCapabilities {
+            reasoning_efforts: vec![ReasoningEffort::Low],
+            reasoning_known: true,
+            fast_mode: false,
+            fast_mode_known: true,
+        };
+        let mut settings = CodeSessionExecutionSettings {
+            model: Some("steady".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: true,
+        };
+
+        capabilities.deactivate_unsupported(&mut settings);
+
+        assert_eq!(settings.reasoning_effort, None);
+        assert!(!settings.fast_mode);
     }
 }
 
