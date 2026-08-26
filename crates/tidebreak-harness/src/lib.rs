@@ -675,6 +675,13 @@ pub enum HarnessError {
     /// against the new mode instead of giving up.
     #[error("this engine sets its permission mode at launch")]
     PermissionModeSwitchUnsupported,
+    /// The engine exposes a live switch, but did not confirm this request.
+    ///
+    /// The adapter keeps the prior mode and retires an ambiguous child before
+    /// returning this error, so a later turn cannot run under an unconfirmed
+    /// posture.
+    #[error("the engine did not confirm the permission mode change: {0}")]
+    PermissionModeSwitchFailed(String),
     /// A Plan-mode engine changed its default plan storage outside the
     /// worktree after Tidebreak redirected plan files to private storage.
     #[error("plan mode wrote outside the worktree: {0}")]

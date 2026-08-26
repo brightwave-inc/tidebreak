@@ -997,6 +997,7 @@ async fn set_permission_mode(
         Err(HarnessError::PermissionModeUnsupported(mode)) => Err(WorkerError::Conflict(format!(
             "this engine cannot honor {mode}"
         ))),
+        Err(HarnessError::PermissionModeSwitchFailed(detail)) => Err(WorkerError::Conflict(detail)),
         Err(other) => Err(WorkerError::Failed(other.to_string())),
     }
 }
