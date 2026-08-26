@@ -1,4 +1,4 @@
-# 71. Supervision-first mobile client
+# 72. Supervision-first mobile client
 
 - Status: Proposed
 - Date: 2026-08-26

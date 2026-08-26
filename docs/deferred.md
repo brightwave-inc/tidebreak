@@ -265,7 +265,7 @@ purpose:
   permission modes that need none, under the same visible-capability rules
   as any other limitation.
 - **A supervision-first mobile client.** Recorded in
-  [decision 71](decisions/0071-mobile-client.md) and tracked as epic
+  [decision 72](decisions/0072-mobile-client.md) and tracked as epic
   [#2644](https://github.com/brightwave-inc/tidebreak/issues/2644). The
   in-repo Expo client at `mobile/` pairs with Model Gateway and attaches to
   a hosted machine. What remains deferred is the supervision UI itself
