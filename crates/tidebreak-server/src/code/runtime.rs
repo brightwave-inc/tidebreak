@@ -167,6 +167,10 @@ pub(crate) struct CodeRuntime {
     /// machine (decision 63). `None` everywhere else: a machine with its own
     /// `git`/`gh` configuration authenticates however the operator says.
     git_credentials: Option<Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+    /// Per-session engine inference relay on a gateway-authenticated hosted
+    /// machine (decision 71). `None` everywhere else: a machine whose engines
+    /// carry their own provider credentials keeps using them.
+    harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -344,6 +348,7 @@ impl CodeRuntime {
         browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
         browser_bridge_command: Option<PathBuf>,
         git_credentials: Option<Arc<dyn crate::obo_gateway::GitCredentialLender>>,
+        harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
     ) -> Self {
         let browser_tokens = BrowserTokenRegistry::new(&data_dir)
             // Panic on construction failure: the data dir is trusted/absolute
@@ -371,6 +376,7 @@ impl CodeRuntime {
             },
             host_tool_broker,
             git_credentials,
+            harness_llm,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -414,6 +420,11 @@ impl CodeRuntime {
         &self,
     ) -> Option<&Arc<dyn crate::obo_gateway::GitCredentialLender>> {
         self.git_credentials.as_ref()
+    }
+
+    /// The engine inference relay, on a machine that has one.
+    pub(crate) fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
+        self.harness_llm.clone()
     }
 
     /// Boot: publish the bound loopback base now, and hand back the recovery
@@ -589,6 +600,9 @@ impl CodeRuntime {
     fn revoke_browser_session(&self, session: &CodeSession) {
         self.browser_tokens.revoke(session.id);
         self.approvals.revoke_session(session.id);
+        if let Some(relay) = &self.harness_llm {
+            relay.revoke(session.id);
+        }
         if let Some(runtime) = &self.browser_runtime {
             let scope = crate::code::browser_runtime::BrowserRuntimeScope {
                 owner: session.owner.clone(),
@@ -609,6 +623,9 @@ impl CodeRuntime {
     fn revoke_worker_channels(&self, session_id: CodeSessionId) {
         self.browser_tokens.revoke(session_id);
         self.approvals.revoke_session(session_id);
+        if let Some(relay) = &self.harness_llm {
+            relay.revoke(session_id);
+        }
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -4089,6 +4106,29 @@ impl CodeRuntime {
             super::scratch::workspace_root(&self.data_dir, workspace.id).map_err(|err| {
                 ServerError::internal(format!("could not open private storage: {err}"))
             })?;
+
+        // On a gateway-authenticated machine, point the engine's own
+        // inference at this server's relay (decision 71): a per-session key
+        // stands in for provider credentials the hosted image does not have.
+        let (extra_argv, extra_env) = match self.harness_llm.as_ref() {
+            Some(relay) => {
+                let base = self
+                    .loopback_base
+                    .lock()
+                    .expect("loopback base")
+                    .clone()
+                    .ok_or_else(|| {
+                        ServerError::internal("harness LLM relay: loopback base not set")
+                    })?;
+                let key = relay.issue(super::harness_llm::HarnessLlmSubject {
+                    owner: session.owner.clone(),
+                    session: session.id,
+                });
+                super::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+
         let spec = SessionSpec {
             worktree: PathBuf::from(&workspace.worktree_path),
             allowed_read_roots: vec![private_root.clone()],
@@ -4097,8 +4137,8 @@ impl CodeRuntime {
             reasoning_effort: session.reasoning_effort,
             fast_mode: session.fast_mode,
             resume_ref: session.harness_resume_ref.clone(),
-            extra_argv: Vec::new(),
-            extra_env: Vec::new(),
+            extra_argv,
+            extra_env,
             env: probe.env.clone(),
             approval,
             binary,
@@ -5039,6 +5079,7 @@ mod managed_node_wait_tests {
         let runtime = CodeRuntime::new(
             Arc::new(db),
             data_dir.path().to_path_buf(),
+            None,
             None,
             None,
             None,

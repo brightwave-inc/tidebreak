@@ -5,10 +5,10 @@
 //! pinned harness binaries, and the clone-parent and worktree-root
 //! directories every principal shares — are registered on the
 //! deployment-plane router in `crate::lib` instead, behind `require_admin`.
-//! And the `/code/browser/*` routes in [`browser`] authenticate with the
-//! per-session capability bearer rather than the launch token, so they are
-//! registered outside `require_token` and derive their owner from the
-//! browser token registry.
+//! And the `/code/browser/*` routes in [`browser`] and the `/code/llm/*`
+//! routes in [`llm`] authenticate with a per-session capability bearer
+//! rather than the launch token, so they are registered outside
+//! `require_token` and derive their owner from the session-key registry.
 
 pub(crate) use super::settings::double_option;
 
@@ -18,6 +18,7 @@ mod browser;
 mod delivery;
 mod git;
 mod harnesses;
+mod llm;
 mod repos;
 mod session_events;
 mod sessions;
@@ -49,6 +50,9 @@ pub(crate) use git::{
 };
 pub(crate) use harnesses::{
     install_harness, list_harness_models, list_harnesses, refresh_harnesses,
+};
+pub(crate) use llm::{
+    harness_llm_anthropic_messages, harness_llm_openai_responses, MAX_HARNESS_LLM_BODY_BYTES,
 };
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_github_repositories,

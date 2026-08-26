@@ -558,6 +558,23 @@ pub fn app(state: AppState) -> Router {
         )
         .with_state(state.clone());
 
+    // The engine-facing inference relay (decision 71). Authenticated per
+    // request by the session-scoped relay key, so it stays outside
+    // `require_token` like the browser channel above.
+    let harness_llm_api = Router::new()
+        .route(
+            "/code/llm/anthropic/v1/messages",
+            post(routes::code::harness_llm_anthropic_messages),
+        )
+        .route(
+            "/code/llm/openai/v1/responses",
+            post(routes::code::harness_llm_openai_responses),
+        )
+        .layer(DefaultBodyLimit::max(
+            routes::code::MAX_HARNESS_LLM_BODY_BYTES,
+        ))
+        .with_state(state.clone());
+
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
         .route(
@@ -1056,7 +1073,10 @@ pub fn app(state: AppState) -> Router {
         // launch token, so its routes merge after `route_layer` wrapped the
         // routes above and stay outside `require_token`. They still sit
         // inside `require_app_origin` and CORS with the rest of the API.
-        .merge(browser_api);
+        // The inference relay authenticates the same way with its own
+        // per-session key.
+        .merge(browser_api)
+        .merge(harness_llm_api);
     let frame_state = state.clone();
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
@@ -1864,6 +1884,13 @@ async fn bind_inner(
             .on_behalf_of_gateway
             .clone()
             .map(|gateway| gateway as Arc<dyn obo_gateway::GitCredentialLender>),
+        // And engine inference rides the caller's gateway grant through the
+        // relay, since the hosted image has no provider credentials of its
+        // own (decision 71).
+        state
+            .on_behalf_of_gateway
+            .clone()
+            .map(|gateway| Arc::new(code::harness_llm::HarnessLlmRelay::new(gateway))),
     );
     // A self-host machine owns its filesystem. Clones land under the data
     // directory unless an operator set a destination (decision 70).
