@@ -76,14 +76,50 @@ function setupClient(scenario: SetupScenario): ApiClient {
         ? {
             repositories: [
               {
+                full_name: "brightwave-inc/tidebreak",
+                private: true,
+                description:
+                  "Open-source, local-first desktop for AI coding agents and documents",
+              },
+              {
                 full_name: "mira-chen/notes",
                 private: true,
                 description: "scratch",
               },
               {
-                full_name: "brightwave-inc/tidebreak",
+                full_name: "brightwave-inc/shipright",
                 private: true,
-                description: "the product",
+                description: "Review bots for pull requests",
+              },
+              {
+                full_name: "mira-chen/dotfiles",
+                private: true,
+                description: "machine setup",
+              },
+              {
+                full_name: "brightwave-inc/model-gateway",
+                private: true,
+                description: "Self-hosted LLM and MCP aggregation gateway",
+              },
+              {
+                full_name: "brightwave-inc/clawdbot",
+                private: true,
+                description: "",
+              },
+              {
+                full_name: "brightwave-inc/terraform-main",
+                private: true,
+                description: "All things terraform related",
+              },
+              {
+                full_name: "brightwave-inc/tidebreak-site",
+                private: true,
+                description: "Marketing site",
+              },
+              {
+                full_name: "brightwave-inc/orca",
+                private: true,
+                description: "Internal agent workspace tooling",
               },
             ],
           }
@@ -445,6 +481,11 @@ export const HostedGitHubPicker: Story = {
     await expect(
       await body.findByRole("option", { name: /mira-chen\/notes/ }),
     ).toBeVisible();
+    const last = await body.findByRole("option", {
+      name: /mira-chen\/notes/,
+    });
+    last.scrollIntoView();
+    await expect(last).toBeVisible();
     await expect(body.queryByText("Destination folder")).toBeNull();
   },
 };

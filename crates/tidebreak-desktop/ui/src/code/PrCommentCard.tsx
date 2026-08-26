@@ -1,13 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { CircleCheck } from "lucide-react";
 
 import type { PullRequestComment } from "../api/types";
 import { MessageMarkdown } from "@/MessageMarkdown";
 import { cn } from "@/lib/utils";
-import {
-  expandGithubEmojiShortcodes,
-  githubAvatarUrl,
-} from "./pullRequestPresentation";
+import { GithubAvatar } from "./GithubAvatar";
+import { expandGithubEmojiShortcodes } from "./pullRequestPresentation";
 
 /**
  * One pull-request comment, drawn the way GitHub draws it: avatar, author,
@@ -30,7 +28,6 @@ export function PrCommentCard({
   actions?: ReactNode;
   className?: string;
 }) {
-  const [avatarFailed, setAvatarFailed] = useState(false);
   const when = comment.created_at
     ? new Date(comment.created_at).toLocaleString(undefined, {
         month: "short",
@@ -40,7 +37,6 @@ export function PrCommentCard({
       })
     : null;
   const author = comment.author ?? "Unknown";
-  const avatar = comment.avatar_url ?? githubAvatarUrl(comment.author);
   const anchor =
     comment.kind === "inline" && comment.path
       ? `${comment.path}${comment.line !== undefined ? `:${comment.line}` : ""}`
@@ -55,18 +51,11 @@ export function PrCommentCard({
       )}
     >
       <div className="flex min-w-0 items-start gap-2">
-        <span className="bg-muted text-muted-foreground grid size-7 shrink-0 place-items-center overflow-hidden rounded-full text-2xs font-semibold uppercase">
-          {avatar && !avatarFailed ? (
-            <img
-              src={avatar}
-              alt=""
-              className="size-full object-cover"
-              onError={() => setAvatarFailed(true)}
-            />
-          ) : (
-            author.slice(0, 2)
-          )}
-        </span>
+        <GithubAvatar
+          login={comment.author}
+          url={comment.avatar_url}
+          className="size-7"
+        />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="text-foreground min-w-0 truncate text-xs font-medium">

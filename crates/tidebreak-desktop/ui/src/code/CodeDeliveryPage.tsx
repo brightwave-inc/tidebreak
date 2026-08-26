@@ -86,6 +86,7 @@ import {
 } from "./CodeDeliveryStore";
 import { CodeSidebar } from "./CodeSidebar";
 import { RepositoryTriggerRules } from "./RepositoryTriggerRules";
+import { GithubAvatar } from "./GithubAvatar";
 import {
   CheckTone,
   DetailSheet,
@@ -97,7 +98,6 @@ import {
 import {
   checkCounts,
   checkSummary,
-  githubAvatarUrl,
   pullRequestLifecycle,
   pullRequestListStatus,
   type PullRequestListGroup,
@@ -1952,7 +1952,7 @@ function PullRequestRow({
             // avatars line up as their own strip down the list, and the table
             // keeps the width it has.
             <>
-              <AuthorAvatar
+              <GithubAvatar
                 login={item.author}
                 url={item.author_avatar_url}
                 className="size-4"
@@ -2790,7 +2790,7 @@ function AuthorFilterOptions({
                   toggle(author.login, checked === true)
                 }
               />
-              <AuthorAvatar login={author.login} url={author.avatarUrl} />
+              <GithubAvatar login={author.login} url={author.avatarUrl} />
               <span className="min-w-0 truncate">{author.login}</span>
             </label>
           ))}
@@ -2809,41 +2809,6 @@ function AuthorFilterOptions({
         </button>
       )}
     </div>
-  );
-}
-
-/** A login's face at list scale, with initials when there is no image. */
-function AuthorAvatar({
-  login,
-  url,
-  className,
-}: {
-  login: string;
-  url?: string;
-  className?: string;
-}) {
-  const [failed, setFailed] = useState(false);
-  const source = url ?? githubAvatarUrl(login);
-  if (!source || failed) {
-    return (
-      <span
-        className={cn(
-          "grid size-5 shrink-0 place-items-center rounded-full bg-muted text-2xs font-semibold uppercase text-muted-foreground",
-          className,
-        )}
-        aria-hidden
-      >
-        {login.slice(0, 2)}
-      </span>
-    );
-  }
-  return (
-    <img
-      src={source}
-      alt=""
-      className={cn("size-5 shrink-0 rounded-full object-cover", className)}
-      onError={() => setFailed(true)}
-    />
   );
 }
 

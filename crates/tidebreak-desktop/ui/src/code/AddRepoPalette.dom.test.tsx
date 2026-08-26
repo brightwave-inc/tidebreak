@@ -1111,6 +1111,12 @@ describe("AddRepoPalette on a hosted machine that acts as the person", () => {
     expect(
       await screen.findByRole("option", { name: /mira-chen\/notes/ }),
     ).toBeInTheDocument();
+    const names = screen
+      .getAllByRole("option")
+      .map((option) => option.textContent ?? "");
+    expect(
+      names.findIndex((name) => /brightwave-inc\/tidebreak/.test(name)),
+    ).toBeLessThan(names.findIndex((name) => /mira-chen\/notes/.test(name)));
     await user.click(screen.getByRole("option", { name: /mira-chen\/notes/ }));
     expect(
       screen.getByRole("combobox", { name: "Repository" }),
