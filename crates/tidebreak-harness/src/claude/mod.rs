@@ -71,9 +71,15 @@ pub(crate) fn model_serves_fast_mode(id: &str) -> bool {
         .any(|model| id == *model || id.ends_with(&format!("-{model}")))
 }
 
-fn claude_settings_models() -> Vec<crate::ListedHarnessModel> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let Some(home) = home else {
+fn claude_settings_models(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<crate::ListedHarnessModel> {
+    let home = env
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case("HOME"))
+        .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()));
+    let Some(home) = home.filter(|home| !home.as_os_str().is_empty()) else {
         return Vec::new();
     };
     let path = home.join(".claude").join("settings.json");
@@ -184,8 +190,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     async fn list_models(&self, probe: &HarnessProbe) -> Vec<crate::ListedHarnessModel> {
         // `claude models` is not a catalog command — it starts a session
         // with that prompt. Read the user's Claude settings instead.
-        let _ = probe;
-        claude_settings_models()
+        claude_settings_models(&probe.env)
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
@@ -280,6 +285,53 @@ mod tests {
         );
         assert_eq!(auth_status_from_json(br#"{"authMethod":"oauth"}"#), None);
         assert_eq!(auth_status_from_json(b"not json"), None);
+    }
+
+    #[tokio::test]
+    async fn model_discovery_reads_the_captured_shell_home_without_exposing_secrets() {
+        let shell_home = tempfile::tempdir().unwrap();
+        let desktop_home = std::env::var_os("HOME").map(PathBuf::from);
+        assert_ne!(desktop_home.as_deref(), Some(shell_home.path()));
+
+        let model_id = format!(
+            "captured-shell-{}",
+            shell_home.path().file_name().unwrap().to_string_lossy()
+        );
+        let fallback_id = format!("{model_id}-fallback");
+
+        let settings_dir = shell_home.path().join(".claude");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "model": model_id,
+                "availableModels": [model_id, fallback_id],
+                "env": {"ANTHROPIC_AUTH_TOKEN": "captured-shell-secret"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let probe = HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: None,
+            authenticated: None,
+            stderr: String::new(),
+            env: vec![("HOME".into(), shell_home.path().as_os_str().to_owned())],
+            commands: Vec::new(),
+        };
+        let models = ClaudeCodeAdapter::new().list_models(&probe).await;
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [model_id.as_str(), fallback_id.as_str()]
+        );
+        assert!(models[0].default);
+        assert!(!format!("{models:?}").contains("captured-shell-secret"));
     }
 
     #[test]
