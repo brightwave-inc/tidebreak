@@ -64,6 +64,7 @@ import type {
   CodeDeliveryPullRequestSummary,
   CodeDeliveryPullRequestTarget,
   CodeDeliveryRunDetail,
+  CodeDeliveryRunAction,
   CodeDeliveryRunKind,
   CodeDeliveryRunSummary,
   CodeDeliveryRunTarget,
@@ -2131,7 +2132,7 @@ export function RunDetailSheet({
   );
   const [loading, setLoading] = useState(!initialDetail);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"all" | "failed" | null>(null);
   const generation = useRef(0);
   const activeTarget = useRef(summary.id);
   const mounted = useRef(true);
@@ -2185,10 +2186,13 @@ export function RunDetailSheet({
     };
   }, [client, initialDetail, summary.id]);
 
-  const rerun = async () => {
+  const rerun = async (kind: "all" | "failed") => {
     if (busy) return;
     const targetId = summary.id;
-    setBusy(true);
+    setBusy(kind);
+    const action: CodeDeliveryRunAction = {
+      type: kind === "all" ? "rerun" : "rerun_failed",
+    };
     try {
       const result = await client.runCodeDeliveryRunAction({
         target: {
@@ -2196,7 +2200,7 @@ export function RunDetailSheet({
           kind: summary.kind,
           id: summary.github_id,
         },
-        action: { type: "rerun_failed" },
+        action,
       });
       if (!targetIsActive(targetId)) return;
       if (result.success) {
@@ -2208,9 +2212,16 @@ export function RunDetailSheet({
       await load();
     } catch (caught) {
       if (!targetIsActive(targetId)) return;
-      toast.error(friendlyErrorMessage(caught, "Could not rerun failed jobs."));
+      toast.error(
+        friendlyErrorMessage(
+          caught,
+          kind === "all"
+            ? "Could not rerun this workflow."
+            : "Could not rerun failed jobs.",
+        ),
+      );
     } finally {
-      if (targetIsActive(targetId)) setBusy(false);
+      if (targetIsActive(targetId)) setBusy(null);
     }
   };
 
@@ -2256,14 +2267,31 @@ export function RunDetailSheet({
                 <ExternalLink />
                 Open on GitHub
               </Button>
+              {detail.summary.kind === "workflow_run" &&
+                detail.summary.status === "completed" && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={Boolean(busy)}
+                    onClick={() => void rerun("all")}
+                  >
+                    {busy === "all" ? (
+                      <LoaderCircle className="animate-spin" />
+                    ) : (
+                      <RefreshCw />
+                    )}
+                    Rerun all
+                  </Button>
+                )}
               {detail.can_rerun_failed && (
                 <Button
                   type="button"
                   size="sm"
-                  disabled={busy}
-                  onClick={() => void rerun()}
+                  disabled={Boolean(busy)}
+                  onClick={() => void rerun("failed")}
                 >
-                  {busy ? (
+                  {busy === "failed" ? (
                     <LoaderCircle className="animate-spin" />
                   ) : (
                     <RefreshCw />

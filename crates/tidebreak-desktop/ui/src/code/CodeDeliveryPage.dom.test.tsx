@@ -685,7 +685,37 @@ describe("delivery run list", () => {
       await screen.findByText("Strict Mode rerun refresh completed."),
     ).toBeInTheDocument();
     expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(rerun).toHaveBeenCalledWith(
+      expect.objectContaining({ action: { type: "rerun_failed" } }),
+    );
     expect(toast.success).toHaveBeenCalledWith("Rerun queued.");
+  });
+
+  it("reruns every job in a completed workflow run", async () => {
+    const rerun = vi.fn(async () => ({
+      success: true,
+      message: "Workflow queued again.",
+    }));
+    const client = deliveryClient({ runCodeDeliveryRunAction: rerun });
+    render(
+      <AppContextProvider value={appContext(client)}>
+        <RunDetailSheet
+          summary={deliveryRuns.find((item) => item.github_id === 4401)!}
+          initialDetail={deliveryRunDetails[4401]!}
+          onClose={vi.fn()}
+          onChanged={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+        />
+      </AppContextProvider>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Rerun all" }));
+
+    await waitFor(() =>
+      expect(rerun).toHaveBeenCalledWith(
+        expect.objectContaining({ action: { type: "rerun" } }),
+      ),
+    );
   });
 
   it("loads a changed run target within the same repository", async () => {
