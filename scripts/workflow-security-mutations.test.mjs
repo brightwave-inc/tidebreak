@@ -462,7 +462,7 @@ const mutations = [
   {
     name: "signing job pnpm pin",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
         job.replace(/version: 10(?:\.18\.3)?\n/, "version: latest\n"),
@@ -471,7 +471,7 @@ const mutations = [
   {
     name: "signing job lockfile install",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) => {
         const install = signingInstallStep(job);
@@ -481,7 +481,7 @@ const mutations = [
   {
     name: "signing job rust-cache writer",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
         mutateSigningRustCache(job, "true"),
@@ -490,7 +490,7 @@ const mutations = [
   {
     name: "signing job floating pnpm",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
         job.replace(/version: 10\.18\.3\n/, "version: 10\n"),
@@ -499,7 +499,7 @@ const mutations = [
   {
     name: "signing job lifecycle scripts",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
         job.replace(
@@ -511,7 +511,7 @@ const mutations = [
   {
     name: "signing job installer order",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) => {
         const install = signingInstallStep(job);
@@ -524,7 +524,7 @@ const mutations = [
   {
     name: "production signing rust-cache save-if",
     file: ".github/workflows/release.yml",
-    expected: "signing jobs do not run untrusted installers",
+    expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
         mutateSigningRustCache(job, "${{ matrix.arch == 'aarch64' }}"),
