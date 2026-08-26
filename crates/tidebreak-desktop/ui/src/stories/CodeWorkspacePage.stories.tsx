@@ -13,6 +13,7 @@ import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type {
   CodeRepoSnapshot,
+  CodeForkTranscript,
   CodeSessionDigest,
   CodeSessionSnapshot,
   CodeSubagentStatus,
@@ -60,6 +61,9 @@ type WorkspaceScenario =
   | "active"
   | "nested"
   | "start"
+  | "session-create-failure"
+  | "first-turn-failure"
+  | "fork-first-turn-failure"
   | "loading"
   | "failure"
   | SubagentScenario;
@@ -191,6 +195,22 @@ const session: CodeSessionSnapshot = {
   lifecycle: "idle",
   attention: { state: { type: "done_unreviewed" }, source: "lifecycle" },
   model: "claude-opus-5",
+};
+
+const recoverySession: CodeSessionSnapshot = {
+  ...session,
+  id: "sess-first-turn-recovery",
+  lifecycle: "idle",
+  attention: attentionNeedsYou,
+};
+
+const forkSource: CodeForkTranscript = {
+  path: "/Users/sam/tidebreak/private/forks/sess-pane-redesign/turn-drag/transcript.md",
+  dir: "/Users/sam/tidebreak/private/forks/sess-pane-redesign/turn-drag",
+  byte_len: 3_842,
+  turns: 2,
+  total_turns: 2,
+  truncated: false,
 };
 
 const usage = {
@@ -547,9 +567,16 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
 
 function storyClient(scenario: WorkspaceScenario): ApiClient {
   const sessions =
-    scenario === "start" || scenario === "loading" || scenario === "failure"
+    scenario === "start" ||
+    scenario === "session-create-failure" ||
+    scenario === "first-turn-failure" ||
+    scenario === "loading" ||
+    scenario === "failure"
       ? []
       : [session];
+  const firstTurnFails =
+    scenario === "first-turn-failure" || scenario === "fork-first-turn-failure";
+  const sessionCreateFails = scenario === "session-create-failure";
   const loadWorkspace =
     scenario === "loading"
       ? () => pending<CodeWorkspaceSnapshot>()
@@ -560,14 +587,16 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
   return {
     getCodeWorkspace: loadWorkspace,
     listCodeWorkspaceSessions: async () => sessions,
-    listCodeSessionTurns: async () => turns,
+    listCodeSessionTurns: async (sessionId: string) =>
+      sessionId === recoverySession.id ? [] : turns,
     listCodeApprovals: async () => [],
     openCodeEvents: (
-      _sessionId: string,
+      sessionId: string,
       _after: number,
       onFrame: (frame: SequencedCodeEventFrame) => void,
     ) =>
       socketAfterOpen(() => {
+        if (sessionId === recoverySession.id) return;
         for (const frame of transcriptFrames(scenario)) onFrame(frame);
       }),
     getCodeRepo: async () => repo,
@@ -642,11 +671,24 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       gh_authenticated: true,
       gh_remediation: "",
     }),
-    createCodeSession: async () => session,
-    submitCodeTurn: async (_sessionId: string, message: string) => ({
-      kind: "ran",
-      turn: { ...turns[1], id: "turn-story", user_input: message },
-    }),
+    createCodeSession: async () => {
+      if (sessionCreateFails) {
+        throw new Error(
+          "Claude Code sign-in expired before the session could start.",
+        );
+      }
+      return firstTurnFails ? recoverySession : session;
+    },
+    forkCodeSession: async () => forkSource,
+    submitCodeTurn: async (_sessionId: string, message: string) => {
+      if (firstTurnFails) {
+        throw new Error("The harness stopped before it accepted the message.");
+      }
+      return {
+        kind: "ran",
+        turn: { ...turns[1], id: "turn-story", user_input: message },
+      };
+    },
     decideCodeApproval: async () => ({}) as never,
     setCodeAttention: async () => session,
     reapCodeSession: async () => session,
@@ -1082,6 +1124,80 @@ export const EmptySubagentTranscript: Story = {
 /** A workspace with no session keeps the first prompt calm and centered. */
 export const StartSession: Story = {
   args: { scenario: "start", reviewOpen: false },
+};
+
+/** A creation failure leaves the start surface mounted and restores its draft. */
+export const FailedSessionCreation: Story = {
+  args: { scenario: "session-create-failure", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const message = await canvas.findByRole("textbox", { name: "Message" });
+    await userEvent.type(
+      message,
+      "Keep this draft when the session cannot be created.",
+    );
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Send message" }),
+    );
+    await expect(
+      await canvas.findByText(
+        "Claude Code sign-in expired before the session could start.",
+      ),
+    ).toBeVisible();
+    await expect(
+      canvas.getByText("Start a session on this workspace."),
+    ).toBeVisible();
+    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "Keep this draft when the session cannot be created.",
+    );
+  },
+};
+
+/** A failed first turn keeps the created session and restores the exact draft. */
+export const FailedFirstMessage: Story = {
+  args: { scenario: "first-turn-failure", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const message = await canvas.findByRole("textbox", { name: "Message" });
+    await userEvent.type(
+      message,
+      "Fix the retry path without changing this exact request.",
+    );
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Send message" }),
+    );
+    await expect(
+      await canvas.findByText(/The first message was not sent/),
+    ).toBeVisible();
+    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "Fix the retry path without changing this exact request.",
+    );
+  },
+};
+
+/** A failed fork keeps both its editable framing and transcript source. */
+export const FailedForkFirstMessage: Story = {
+  args: { scenario: "fork-first-turn-failure", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Workspace actions" }),
+    );
+    await userEvent.click(
+      await within(document.body).findByRole("menuitem", {
+        name: "Fork this agent",
+      }),
+    );
+    await userEvent.click(
+      await canvas.findByRole("button", { name: "Send message" }),
+    );
+    await expect(
+      await canvas.findByText(/The first message was not sent/),
+    ).toBeVisible();
+    await expect(
+      canvas.getByLabelText("Attached workspace files"),
+    ).toHaveTextContent("transcript.md");
+  },
 };
 
 export const Loading: Story = {

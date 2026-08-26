@@ -19,6 +19,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -203,8 +204,83 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
  */
 const EMPTY_EFFORTS: readonly ReasoningEffort[] = [];
 
+type FirstTurnRecovery = {
+  id: string;
+  sessionId: string;
+  draft: string;
+  forkSource: CodeForkTranscript | null;
+  message: string;
+  status: "sending" | "failed";
+};
+
+const firstTurnRecoveryByClient = new WeakMap<
+  ApiClient,
+  Map<string, FirstTurnRecovery>
+>();
+const firstTurnRecoveryListeners = new Set<() => void>();
+
+function readFirstTurnRecovery(
+  client: ApiClient,
+  sessionId: string,
+): FirstTurnRecovery | null {
+  return firstTurnRecoveryByClient.get(client)?.get(sessionId) ?? null;
+}
+
+function writeFirstTurnRecovery(
+  client: ApiClient,
+  recovery: FirstTurnRecovery,
+): void {
+  let recoveries = firstTurnRecoveryByClient.get(client);
+  if (!recoveries) {
+    recoveries = new Map();
+    firstTurnRecoveryByClient.set(client, recoveries);
+  }
+  recoveries.set(recovery.sessionId, recovery);
+  for (const listener of firstTurnRecoveryListeners) listener();
+}
+
+function clearFirstTurnRecovery(
+  client: ApiClient,
+  sessionId: string,
+  recoveryId: string,
+): void {
+  const recoveries = firstTurnRecoveryByClient.get(client);
+  if (recoveries?.get(sessionId)?.id !== recoveryId) return;
+  recoveries.delete(sessionId);
+  for (const listener of firstTurnRecoveryListeners) listener();
+}
+
+function updateFirstTurnRecovery(
+  client: ApiClient,
+  sessionId: string,
+  recoveryId: string,
+  update: (current: FirstTurnRecovery) => FirstTurnRecovery,
+): void {
+  const current = readFirstTurnRecovery(client, sessionId);
+  if (!current || current.id !== recoveryId) return;
+  writeFirstTurnRecovery(client, update(current));
+}
+
+function useFirstTurnRecovery(
+  client: ApiClient,
+  sessionId: string,
+): FirstTurnRecovery | null {
+  return useSyncExternalStore(
+    (listener) => {
+      firstTurnRecoveryListeners.add(listener);
+      return () => {
+        firstTurnRecoveryListeners.delete(listener);
+      };
+    },
+    () => readFirstTurnRecovery(client, sessionId),
+    () => null,
+  );
+}
+
 function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const { client, models, defaultModelKey } = useApp();
+  const clientRef = useRef(client);
+  clientRef.current = client;
   const catalog = useCodeCatalogStore();
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
@@ -218,6 +294,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     region: CodeEditorRegion;
     index: number;
   } | null>(null);
+  const mountedRef = useRef(true);
+  const selectionRevisionRef = useRef(0);
+  const startRequestRef = useRef(0);
   const workspaceBrowserIdsRef = useRef(new Set<string>());
   const chrome = splitCodeChromeLayout(layout);
   const workspaceOverlayOpen = usePortalOverlayOpen();
@@ -353,6 +432,19 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
 
   layoutRef.current = layout;
+
+  useEffect(() => {
+    startRequestRef.current += 1;
+    setStarting(false);
+  }, [client]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      startRequestRef.current += 1;
+    };
+  }, []);
 
   const closeBrowserPanels = useCallback(
     (browserIds: readonly string[]) => {
@@ -525,35 +617,101 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     permissionMode: PermissionMode,
     message: string,
     model?: string,
+    draft = message,
   ) {
+    const request = startRequestRef.current + 1;
+    startRequestRef.current = request;
+    const startedWithClient = client;
+    const startedAtSelection = selectionRevisionRef.current;
+    const startedWithFork = forkSource;
+    const isCurrent = () =>
+      mountedRef.current &&
+      startRequestRef.current === request &&
+      clientRef.current === startedWithClient;
     setStarting(true);
     try {
-      const gateway = gatewayCodeModels(models, harness, defaultModelKey);
-      const native =
-        requiresHarnessModelIds(harness) || gateway.length === 0
-          ? await catalog.ensureHarnessModels(client, harness)
-          : [];
-      const listed = preferredCodeModels(harness, native, gateway);
-      const posted =
-        model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
-      const created = await client.createCodeSession(workspaceId, {
-        harness,
-        permission_mode: permissionMode,
-        model: posted,
-      });
+      let created: CodeSessionSnapshot;
+      try {
+        const gateway = gatewayCodeModels(models, harness, defaultModelKey);
+        const native =
+          requiresHarnessModelIds(harness) || gateway.length === 0
+            ? await catalog.ensureHarnessModels(startedWithClient, harness)
+            : [];
+        if (!isCurrent()) {
+          throw new Error(
+            "The Code connection changed before the session started. Send the message again.",
+          );
+        }
+        const listed = preferredCodeModels(harness, native, gateway);
+        const posted =
+          model ?? listed.find((option) => option.default)?.id ?? listed[0]?.id;
+        created = await startedWithClient.createCodeSession(workspaceId, {
+          harness,
+          permission_mode: permissionMode,
+          model: posted,
+        });
+      } catch (err) {
+        if (isCurrent()) {
+          toast.error(friendlyErrorMessage(err, "Could not start a session"));
+        }
+        throw err;
+      }
+
+      const recovery: FirstTurnRecovery = {
+        id: `${created.id}:${request}`,
+        sessionId: created.id,
+        draft,
+        forkSource: startedWithFork,
+        message: "Sending your first message…",
+        status: "sending",
+      };
+      if (!isCurrent()) {
+        const message =
+          "The Code connection changed after the session was created. Send the message again.";
+        writeFirstTurnRecovery(startedWithClient, {
+          ...recovery,
+          message,
+          status: "failed",
+        });
+        throw new Error(message);
+      }
+      writeFirstTurnRecovery(startedWithClient, recovery);
+
       if (conversations.length === 0) catalog.rememberSession(created);
-      setSessions((current) => [...current, created]);
-      setActiveSessionId(created.id);
-      setDraftAgent(false);
-      setForkSource(null);
-      // The first agent stays at a clean URL; a sibling names itself so a
-      // reload comes back to the tab the reader was on.
-      if (conversations.length > 0) openWorkspaceTask(created.id);
-      await client.submitCodeTurn(created.id, message);
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not start a session"));
+      setSessions((current) =>
+        current.some((entry) => entry.id === created.id)
+          ? current
+          : [...current, created],
+      );
+      setForkSource((current) =>
+        current === startedWithFork ? null : current,
+      );
+      if (selectionRevisionRef.current === startedAtSelection) {
+        setActiveSessionId(created.id);
+        setDraftAgent(false);
+        // The first agent stays at a clean URL; a sibling names itself so a
+        // reload comes back to the tab the reader was on.
+        if (conversations.length > 0) openWorkspaceTask(created.id);
+      }
+
+      try {
+        await startedWithClient.submitCodeTurn(created.id, message);
+        clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
+      } catch (err) {
+        const detail = friendlyErrorMessage(err, "Try sending it again.");
+        writeFirstTurnRecovery(startedWithClient, {
+          ...recovery,
+          message: `The first message was not sent. Review it, then choose Send to try again. ${detail}`,
+          status: "failed",
+        });
+        if (isCurrent()) {
+          toast.error(
+            `Session started, but the first message was not sent. ${detail}`,
+          );
+        }
+      }
     } finally {
-      setStarting(false);
+      if (isCurrent()) setStarting(false);
     }
   }
 
@@ -773,6 +931,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
    * same agent. The first one is the workspace's default, so it stays unnamed.
    */
   function selectConversation(sessionId: string | null) {
+    selectionRevisionRef.current += 1;
     setWorkspaceLayout(focusConversation(layout));
     if (sessionId === null) {
       setDraftAgent(true);
@@ -1144,8 +1303,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   client={client}
                   catalogModels={models}
                   defaultModelKey={defaultModelKey}
-                  onStart={(harness, mode, message, model) =>
-                    startSession(harness, mode, message, model)
+                  onStart={(harness, mode, message, model, draft) =>
+                    startSession(harness, mode, message, model, draft)
                   }
                   workspaceFiles={
                     forkSource
@@ -1720,6 +1879,7 @@ function CodeSessionPane({
 }) {
   const follow = useTranscriptFollow();
   const store = useRegisteredCodeSession(session.id, client);
+  const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
   const items = store((state) => state.items);
   const busy = store((state) => state.busy);
   const hydrated = store((state) => state.hydrated);
@@ -1959,6 +2119,7 @@ function CodeSessionPane({
     attachments?: readonly { blob_id: string; media_type: string }[],
   ) {
     const pendingReasoningEffort = pendingReasoningEffortRef.current;
+    const recoveryAtSend = firstTurnRecovery;
     // Sending is a deliberate return to the tail: whatever the reader was
     // reading, they now want to watch their own turn run.
     follow.armFollow();
@@ -1985,6 +2146,9 @@ function CodeSessionPane({
     ).then((outcome) => {
       if (pendingReasoningEffortRef.current === pendingReasoningEffort) {
         pendingReasoningEffortRef.current = null;
+      }
+      if (recoveryAtSend?.status === "failed") {
+        clearFirstTurnRecovery(client, session.id, recoveryAtSend.id);
       }
       return outcome;
     });
@@ -2142,7 +2306,7 @@ function CodeSessionPane({
           </div>
           <CodeComposer
             running={turnRunning}
-            disabled={disabled}
+            disabled={disabled || firstTurnRecovery?.status === "sending"}
             permissionMode={settings.permissionMode}
             availableModes={availableModes}
             reasoningEffort={settings.reasoningEffort}
@@ -2163,6 +2327,28 @@ function CodeSessionPane({
               client
                 .listCodeWorkspaceTree(workspaceId, { query })
                 .then((tree) => tree.paths)
+            }
+            workspaceFiles={
+              firstTurnRecovery?.forkSource
+                ? {
+                    items: [forkTranscriptFile(firstTurnRecovery.forkSource)],
+                    onRemove: () =>
+                      updateFirstTurnRecovery(
+                        client,
+                        session.id,
+                        firstTurnRecovery.id,
+                        (current) => ({ ...current, forkSource: null }),
+                      ),
+                  }
+                : undefined
+            }
+            recovery={
+              firstTurnRecovery
+                ? {
+                    id: firstTurnRecovery.id,
+                    draft: firstTurnRecovery.draft,
+                  }
+                : undefined
             }
             onModelChange={setModel}
             onModeChange={changePermissionMode}
@@ -2201,6 +2387,19 @@ function CodeSessionPane({
             onSteer={steeringSupported ? steer : undefined}
             onInterrupt={interrupt}
           />
+          {firstTurnRecovery && (
+            <p
+              role={firstTurnRecovery.status === "failed" ? "alert" : "status"}
+              className={cn(
+                "mx-auto w-full max-w-3xl px-2 pt-1 text-xs",
+                firstTurnRecovery.status === "failed"
+                  ? "text-critical-foreground"
+                  : "text-muted-foreground",
+              )}
+            >
+              {firstTurnRecovery.message}
+            </p>
+          )}
         </>
       )}
     </div>

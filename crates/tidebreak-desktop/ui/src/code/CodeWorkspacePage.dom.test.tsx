@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   act,
   cleanup,
@@ -25,6 +25,7 @@ import type {
   CodeSessionSnapshot,
   CodeWorkspacePrSnapshot,
   CodeWorkspaceSnapshot,
+  HarnessDoctorEntry,
   PullRequestDigest,
   SequencedCodeEventFrame,
 } from "@/api/types";
@@ -35,6 +36,11 @@ import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
+import {
+  forkFraming,
+  forkTranscriptFile,
+  messageWithWorkspaceFiles,
+} from "./fork";
 import {
   readStoredBrowserSession,
   seedBrowserSession,
@@ -164,6 +170,56 @@ const SESSION: CodeSessionSnapshot = {
   created_at: "2026-08-15T00:00:00.000Z",
 };
 
+const CREATED_SESSION: CodeSessionSnapshot = {
+  ...SESSION,
+  id: "sess-created",
+  permission_mode: "allow",
+  attention: { state: { type: "working" }, source: "lifecycle" },
+};
+
+const FORK_SOURCE = {
+  path: "/private/forks/sess-1/turn-1/transcript.md",
+  dir: "/private/forks/sess-1/turn-1",
+  byte_len: 2_048,
+  turns: 1,
+  total_turns: 1,
+  truncated: false,
+};
+
+const START_HARNESS: HarnessDoctorEntry = {
+  kind: "claude_code",
+  found: true,
+  installable: true,
+  tier: "reference",
+  caps: {
+    resume: "supported",
+    streaming_deltas: "supported",
+    mid_turn_steering: "unsupported",
+    plan_mode: "supported",
+    structured_approvals: "supported",
+    auto_mode: "supported",
+    allow_mode: "supported",
+    reasoning_levels: "unknown",
+    native_file_change_events: "unsupported",
+    native_interrupt: "supported",
+    image_input: "unknown",
+    slash_commands: "unknown",
+  },
+  commands: [],
+  remediation: "",
+  stderr: "",
+  unrecognized_event_count: 0,
+};
+
+function enableStartHarness(client: ReturnType<typeof makeClient>) {
+  useCodeCatalogStore.setState({
+    doctor: { harnesses: [START_HARNESS] },
+  });
+  client.getHarnessDoctor.mockResolvedValue({
+    harnesses: [START_HARNESS],
+  });
+}
+
 const TURN = {
   id: "turn-1",
   session_id: "sess-1",
@@ -244,6 +300,8 @@ function makeClient() {
       ) => codeEventSocket(onFrame),
     ),
     getCodeRepo: vi.fn(async () => REPO),
+    createCodeSession: vi.fn(async () => CREATED_SESSION),
+    forkCodeSession: vi.fn(async () => FORK_SOURCE),
     archiveCodeWorkspace: vi.fn(async () => ({
       ...WORKSPACE,
       status: "archived" as const,
@@ -342,7 +400,11 @@ function makeClient() {
     })),
     listCodeRepos: vi.fn(async () => [REPO]),
     listCodeWorkspaces: vi.fn(async () => [WORKSPACE]),
-    getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+    getHarnessDoctor: vi.fn(
+      async (): Promise<{ harnesses: HarnessDoctorEntry[] }> => ({
+        harnesses: [],
+      }),
+    ),
     listCodeHarnessModels: vi.fn(async () => ({
       kind: "claude_code" as const,
       models: [],
@@ -522,6 +584,37 @@ async function mountWorkspace(
   return { ...result, router };
 }
 
+async function mountWorkspaceWithClientSwap(
+  first: ReturnType<typeof makeClient>,
+  second: ReturnType<typeof makeClient>,
+) {
+  const rootRoute = createRootRoute();
+  const codeWorkspaceRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/w/$workspaceId",
+    validateSearch: (search: Record<string, unknown>): PanelSearch =>
+      panelSearchFrom(search),
+    component: function WorkspaceRoute() {
+      const { workspaceId } = codeWorkspaceRoute.useParams();
+      const [client, setClient] = useState(first);
+      return (
+        <AppContextProvider value={appContext(client)}>
+          <button type="button" onClick={() => setClient(second)}>
+            Switch client
+          </button>
+          <CodeWorkspacePage workspaceId={workspaceId} />
+        </AppContextProvider>
+      );
+    },
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([codeWorkspaceRoute]),
+    history: createMemoryHistory({ initialEntries: ["/code/w/ws-1"] }),
+  });
+  await router.load();
+  return render(<RouterProvider router={router as never} />);
+}
+
 afterEach(() => {
   cleanup();
   resetCodeSessionRegistry();
@@ -593,6 +686,165 @@ describe("CodeWorkspacePage", () => {
     // The start prompt is a flex child of the pane so `mt-auto` on the
     // composer can consume the empty region under the header.
     expect(pane?.firstElementChild?.className).toMatch(/flex-1/);
+  });
+
+  it("restores the start draft when session creation fails", async () => {
+    const client = makeClient();
+    enableStartHarness(client);
+    client.createCodeSession.mockRejectedValue(
+      new Error("Claude Code sign-in expired"),
+    );
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const message = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(message, "Fix the exact failing test.");
+    const send = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(send).toBeEnabled());
+    await user.click(send);
+
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledOnce(),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+    expect(message).toHaveValue("Fix the exact failing test.");
+    expect(
+      screen.getByText("Start a session on this workspace."),
+    ).toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalledWith("Claude Code sign-in expired");
+  });
+
+  it("keeps the created session and restores the exact first prompt after the start composer unmounts", async () => {
+    const client = makeClient();
+    enableStartHarness(client);
+    client.listCodeSessionTurns.mockResolvedValue([]);
+    client.submitCodeTurn
+      .mockRejectedValueOnce(new Error("The harness stopped before admission"))
+      .mockResolvedValueOnce({
+        kind: "ran",
+        turn: { ...TURN, session_id: CREATED_SESSION.id },
+      });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const message = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(message, "Fix the exact failing test.");
+    const send = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(send).toBeEnabled());
+    await user.click(send);
+
+    expect(
+      await screen.findByText(/The first message was not sent/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start a session on this workspace."),
+    ).not.toBeInTheDocument();
+    const recovered = screen.getByRole("textbox", { name: "Message" });
+    expect(recovered).toHaveValue("Fix the exact failing test.");
+    expect(client.createCodeSession).toHaveBeenCalledOnce();
+    expect(client.submitCodeTurn).toHaveBeenNthCalledWith(
+      1,
+      CREATED_SESSION.id,
+      "Fix the exact failing test.",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(client.submitCodeTurn).toHaveBeenCalledTimes(2));
+    expect(client.submitCodeTurn).toHaveBeenNthCalledWith(
+      2,
+      CREATED_SESSION.id,
+      "Fix the exact failing test.",
+      undefined,
+      undefined,
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/The first message was not sent/),
+      ).not.toBeInTheDocument(),
+    );
+    expect(recovered).toHaveValue("");
+    expect(client.createCodeSession).toHaveBeenCalledOnce();
+  });
+
+  it("binds a failed fork prompt to its created session when selection changes", async () => {
+    const client = makeClient();
+    enableStartHarness(client);
+    const firstTurn =
+      deferred<Awaited<ReturnType<typeof client.submitCodeTurn>>>();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.listCodeSessionTurns.mockImplementation(async (sessionId) =>
+      sessionId === SESSION.id ? [TURN] : [],
+    );
+    client.submitCodeTurn.mockReturnValueOnce(firstTurn.promise);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    await screen.findByRole("heading", { name: /Fix login/ });
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Fork this agent" }),
+    );
+    const draft = forkFraming(FORK_SOURCE);
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      draft,
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await screen.findByRole("tab", { name: "Claude Code" });
+    await user.click(screen.getByRole("tab", { name: "Main agent" }));
+    await act(async () => {
+      firstTurn.reject(new Error("The first turn was refused"));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(
+      screen.queryByText(/The first message was not sent/),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    expect(
+      await screen.findByText(/The first message was not sent/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(draft);
+    expect(screen.getByLabelText("Attached workspace files")).toHaveTextContent(
+      "transcript.md",
+    );
+    expect(client.submitCodeTurn).toHaveBeenCalledWith(
+      CREATED_SESSION.id,
+      messageWithWorkspaceFiles(draft, [forkTranscriptFile(FORK_SOURCE)]),
+    );
+  });
+
+  it("rejects a stale client start before it can select or submit the created session", async () => {
+    const first = makeClient();
+    const second = makeClient();
+    enableStartHarness(first);
+    enableStartHarness(second);
+    const create = deferred<CodeSessionSnapshot>();
+    first.createCodeSession.mockReturnValue(create.promise);
+    const user = userEvent.setup();
+    await mountWorkspaceWithClientSwap(first, second);
+
+    const message = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(message, "Keep this prompt on the active client.");
+    const send = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(send).toBeEnabled());
+    await user.click(send);
+    await waitFor(() => expect(first.createCodeSession).toHaveBeenCalledOnce());
+
+    await user.click(screen.getByRole("button", { name: "Switch client" }));
+    await act(async () => create.resolve(CREATED_SESSION));
+
+    expect(first.submitCodeTurn).not.toHaveBeenCalled();
+    expect(second.createCodeSession).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "Keep this prompt on the active client.",
+    );
+    expect(
+      screen.getByText("Start a session on this workspace."),
+    ).toBeInTheDocument();
   });
 
   it("shows header skeleton bars instead of Workspace and a repo UUID", async () => {
