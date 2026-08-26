@@ -678,6 +678,17 @@ pub(crate) fn spawn_session_worker(
     }
 }
 
+fn record_child_process(session: &mut CodeSession, pid: Option<i64>) {
+    session.child_pid = pid;
+    session.child_process_identity = pid.and_then(|pid| {
+        tidebreak_harness::spawned_process_identity(pid).or_else(|| {
+            tidebreak_harness::current_process_identity(pid)
+                .ok()
+                .flatten()
+        })
+    });
+}
+
 /// Tell the worker the durable queue changed: a row landed, the pause
 /// cleared, or send-now reordered the head. The worker re-reads the queue at
 /// its next drain.
@@ -693,8 +704,8 @@ async fn run_worker(
     store: AttachmentStore,
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
-    if let Some(pid) = engine.child_pid() {
-        session.child_pid = Some(pid);
+    if engine.child_pid().is_some() {
+        record_child_process(&mut session, engine.child_pid());
         let _ = save_session(&sink.db, &session).await;
     }
 
@@ -814,6 +825,7 @@ async fn park_idle_engine(session: &mut CodeSession, engine: &dyn HarnessSession
     }
     tracing::debug!(session = %session.id, "parked the idle engine child");
     if session.child_pid.take().is_some() {
+        session.child_process_identity = None;
         let _ = save_session(&sink.db, session).await;
     }
 }
@@ -1355,9 +1367,7 @@ async fn drive_turn_inner(
         Attention::working(AttentionSource::Lifecycle),
         false,
     );
-    if let Some(pid) = engine.child_pid() {
-        session.child_pid = Some(pid);
-    }
+    record_child_process(session, engine.child_pid());
     super::attention::persist_session(db, bus, session)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
@@ -1444,7 +1454,7 @@ async fn drive_turn_inner(
             },
             pid = next_child_pid(pid_changes.as_mut()) => {
                 if session.child_pid != pid {
-                    session.child_pid = pid;
+                    record_child_process(session, pid);
                     let _ = save_session(db, session).await;
                 }
             }
@@ -1478,11 +1488,7 @@ async fn drive_turn_inner(
         None
     };
 
-    if let Some(pid) = engine.child_pid() {
-        session.child_pid = Some(pid);
-    } else {
-        session.child_pid = None;
-    }
+    record_child_process(session, engine.child_pid());
     if let Some(resume) = engine.resume_ref() {
         session.harness_resume_ref = Some(resume);
     }
@@ -1946,6 +1952,7 @@ pub(crate) async fn attach_engine(
         .ok_or_else(|| WorkerError::Failed(format!("session {session_id} not found")))?;
     session.spawn_epoch = epoch;
     session.child_pid = child_pid;
+    session.child_process_identity = None;
     session.harness_version = version.or(session.harness_version);
     session.lifecycle = CodeSessionLifecycle::Idle;
     super::attention::replace_attention(
@@ -2585,6 +2592,7 @@ mod tests {
                 lifecycle: CodeSessionLifecycle::Running,
                 fence_reason: None,
                 child_pid: None,
+                child_process_identity: None,
                 spawn_epoch: 1,
                 attention: Attention::working(AttentionSource::Lifecycle),
                 unrecognized_event_count: 0,

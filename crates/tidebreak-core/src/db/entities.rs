@@ -1803,6 +1803,7 @@ pub mod code_session {
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub fence_reason: Option<Json>,
         pub child_pid: Option<i64>,
+        pub child_process_identity: Option<String>,
         pub spawn_epoch: i64,
         #[sea_orm(column_type = "JsonBinary")]
         pub attention_state: Json,

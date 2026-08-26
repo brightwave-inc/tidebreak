@@ -38,6 +38,7 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
             None => None,
         }),
         child_pid: Set(session.child_pid),
+        child_process_identity: Set(session.child_process_identity.clone()),
         spawn_epoch: Set(session.spawn_epoch),
         attention_state: Set(serde_json::to_value(&session.attention.state)?),
         attention_source: Set(session.attention.source.as_str().to_owned()),
@@ -126,6 +127,10 @@ pub async fn bump_spawn_epoch(
         .col_expr(
             entities::code_session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(child_pid),
+        )
+        .col_expr(
+            entities::code_session::Column::ChildProcessIdentity,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .filter(entities::code_session::Column::Id.eq(id.0))
         .filter(entities::code_session::Column::SpawnEpoch.eq(session.spawn_epoch))
@@ -270,6 +275,10 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
         .col_expr(
             entities::code_session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(session.child_pid),
+        )
+        .col_expr(
+            entities::code_session::Column::ChildProcessIdentity,
+            sea_orm::sea_query::Expr::value(session.child_process_identity.clone()),
         )
         .col_expr(
             entities::code_session::Column::SpawnEpoch,
@@ -533,6 +542,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         lifecycle,
         fence_reason,
         child_pid: row.child_pid,
+        child_process_identity: row.child_process_identity,
         spawn_epoch: row.spawn_epoch,
         attention: Attention::new(state, source),
         unrecognized_event_count: row.unrecognized_event_count,

@@ -6,7 +6,7 @@ use crate::code::{
     CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, SequencedCodeEvent,
 };
 use crate::error::{AgentError, Result};
-use crate::{Attention, AttentionSource, OwnerId};
+use crate::{Attention, AttentionSource, AttentionState, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::{acquire_code_session_write_lock, append_event_on_locked};
@@ -30,6 +30,71 @@ pub async fn recover_interrupted_session(
     session_id: CodeSessionId,
     expected_spawn_epoch: i64,
 ) -> Result<Option<InterruptedSessionRecovery>> {
+    settle_interrupted_session(
+        store,
+        owner,
+        session_id,
+        expected_spawn_epoch,
+        RecoveryExpectation::Running,
+    )
+    .await
+}
+
+/// Settle a fenced session after its exact recorded process has exited.
+///
+/// The expected pid and creation identity keep this transition bound to the
+/// process the caller just waited for. The epoch advances in the same
+/// transaction after the running turn and pending approvals settle, so no
+/// stale worker can write once the fence clears.
+pub async fn reap_fenced_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    expected_spawn_epoch: i64,
+    expected_child_pid: Option<i64>,
+    expected_child_process_identity: Option<&str>,
+) -> Result<Option<InterruptedSessionRecovery>> {
+    settle_interrupted_session(
+        store,
+        owner,
+        session_id,
+        expected_spawn_epoch,
+        RecoveryExpectation::Fenced {
+            child_pid: expected_child_pid,
+            child_process_identity: expected_child_process_identity,
+        },
+    )
+    .await
+}
+
+enum RecoveryExpectation<'a> {
+    Running,
+    Fenced {
+        child_pid: Option<i64>,
+        child_process_identity: Option<&'a str>,
+    },
+}
+
+impl RecoveryExpectation<'_> {
+    fn lifecycle(&self) -> CodeSessionLifecycle {
+        match self {
+            Self::Running => CodeSessionLifecycle::Running,
+            Self::Fenced { .. } => CodeSessionLifecycle::Fenced,
+        }
+    }
+
+    fn advances_epoch(&self) -> bool {
+        matches!(self, Self::Fenced { .. })
+    }
+}
+
+async fn settle_interrupted_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    expected_spawn_epoch: i64,
+    expectation: RecoveryExpectation<'_>,
+) -> Result<Option<InterruptedSessionRecovery>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         return Ok(None);
@@ -42,10 +107,20 @@ pub async fn recover_interrupted_session(
     else {
         return Ok(None);
     };
-    if row.spawn_epoch != expected_spawn_epoch
-        || row.lifecycle != CodeSessionLifecycle::Running.as_str()
+    if row.spawn_epoch != expected_spawn_epoch || row.lifecycle != expectation.lifecycle().as_str()
     {
         return Ok(None);
+    }
+    if let RecoveryExpectation::Fenced {
+        child_pid,
+        child_process_identity,
+    } = &expectation
+    {
+        if row.child_pid != *child_pid
+            || row.child_process_identity.as_deref() != *child_process_identity
+        {
+            return Ok(None);
+        }
     }
     let mut session = super::session::session_from_row(row)?;
     let now = Utc::now();
@@ -140,11 +215,24 @@ pub async fn recover_interrupted_session(
     }
     session.lifecycle = CodeSessionLifecycle::Idle;
     session.child_pid = None;
+    session.child_process_identity = None;
     session.fence_reason = None;
-    let recovered_attention = Attention::needs_you(
-        "session recovered after the engine process exited",
-        AttentionSource::Lifecycle,
-    );
+    if expectation.advances_epoch() {
+        session.spawn_epoch = session.spawn_epoch.checked_add(1).ok_or_else(|| {
+            AgentError::Store(format!(
+                "code session {session_id} spawn epoch overflow during reap"
+            ))
+        })?;
+    }
+    let recovered_attention = match &expectation {
+        RecoveryExpectation::Running => Attention::needs_you(
+            "session recovered after the engine process exited",
+            AttentionSource::Lifecycle,
+        ),
+        RecoveryExpectation::Fenced { .. } => {
+            Attention::new(AttentionState::Idle, AttentionSource::Lifecycle)
+        }
+    };
     if crate::attention::should_replace(&session.attention, &recovered_attention) {
         session.attention = recovered_attention;
     }
@@ -156,6 +244,14 @@ pub async fn recover_interrupted_session(
         .col_expr(
             entities::code_session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::ChildProcessIdentity,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session::Column::SpawnEpoch,
+            sea_orm::sea_query::Expr::value(session.spawn_epoch),
         )
         .col_expr(
             entities::code_session::Column::FenceReason,
@@ -180,9 +276,7 @@ pub async fn recover_interrupted_session(
         .filter(entities::code_session::Column::Id.eq(session_id.0))
         .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_session::Column::SpawnEpoch.eq(expected_spawn_epoch))
-        .filter(
-            entities::code_session::Column::Lifecycle.eq(CodeSessionLifecycle::Running.as_str()),
-        )
+        .filter(entities::code_session::Column::Lifecycle.eq(expectation.lifecycle().as_str()))
         .exec(&transaction)
         .await
         .map_err(store_err)?;

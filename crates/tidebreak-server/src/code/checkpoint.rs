@@ -1986,6 +1986,7 @@ mod tests {
             lifecycle: CodeSessionLifecycle::Running,
             fence_reason: None,
             child_pid: None,
+            child_process_identity: None,
             spawn_epoch: 1,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,

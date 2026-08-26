@@ -294,6 +294,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
         lifecycle: lc,
         fence_reason: None,
         child_pid: None,
+        child_process_identity: None,
         spawn_epoch: 0,
         attention: Attention::new(AttentionState::Working, AttentionSource::Lifecycle),
         unrecognized_event_count: 0,

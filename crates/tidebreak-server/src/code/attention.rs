@@ -603,6 +603,7 @@ mod tests {
             lifecycle: CodeSessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
+            child_process_identity: None,
             spawn_epoch: 1,
             attention,
             unrecognized_event_count: 0,

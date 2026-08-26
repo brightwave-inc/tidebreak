@@ -33,7 +33,10 @@ pub mod probe;
 mod text;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
-pub use child::{spawn_process_tree, ChildPid, ProcessTreeChild};
+pub use child::{
+    current_process_identity, spawn_process_tree, spawned_process_identity,
+    terminate_recorded_process, ChildPid, ProcessTreeChild, RecordedProcessReap,
+};
 pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
 };

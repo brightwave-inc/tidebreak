@@ -897,6 +897,7 @@ pub(crate) enum CodeSession {
     Lifecycle,
     FenceReason,
     ChildPid,
+    ChildProcessIdentity,
     SpawnEpoch,
     AttentionState,
     AttentionSource,

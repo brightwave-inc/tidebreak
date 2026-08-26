@@ -9,7 +9,7 @@
 use std::io::ErrorKind;
 
 use tidebreak_core::db::code::{
-    clear_session_harness_resume_ref, list_sessions_by_lifecycle_all_owners,
+    clear_session_harness_resume_ref, list_sessions_by_lifecycle_all_owners, reap_fenced_session,
     recover_interrupted_session, replace_session_attention, save_session, set_session_subagents,
 };
 use tidebreak_core::{
@@ -17,7 +17,7 @@ use tidebreak_core::{
     CodeSubagentStatus, DbStore, FenceReason,
 };
 
-use super::attention::{emit_digest, persist_session, replace_attention};
+use super::attention::{emit_digest, replace_attention};
 use super::bus::CodeEventBus;
 use super::session_worker::settle_running_subagents;
 
@@ -40,13 +40,13 @@ pub(crate) async fn recover_running_sessions(
     store: &DbStore,
     bus: &CodeEventBus,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
-    recover_running_sessions_with(store, bus, probe_recorded_pid).await
+    recover_running_sessions_with(store, bus, probe_recorded_process).await
 }
 
 pub(crate) async fn recover_running_sessions_with(
     store: &DbStore,
     bus: &CodeEventBus,
-    probe: impl Fn(i64) -> PidLiveness,
+    probe: impl Fn(i64, Option<&str>) -> PidLiveness,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
     let running =
         list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Running).await?;
@@ -84,7 +84,6 @@ pub(crate) async fn fence_session(
     session.lifecycle = CodeSessionLifecycle::Fenced;
     settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
     session.fence_reason = Some(reason.clone());
-    session.child_pid = None;
     replace_attention(
         session,
         Attention::new(
@@ -130,32 +129,118 @@ async fn persist_recovery_session(
     Ok(true)
 }
 
-/// Resolve a fenced session after an explicit user reap. Never signals.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReapSessionError {
+    #[error(transparent)]
+    Store(#[from] tidebreak_core::AgentError),
+    #[error("the fenced session has a pid without a recorded process identity")]
+    MissingProcessIdentity,
+    #[error("the recorded engine process did not exit before the reap timeout")]
+    ProcessStillAlive,
+    #[error("the recorded engine process could not be terminated: {0}")]
+    ProcessTermination(String),
+    #[error("the fenced session changed while its process was being reaped")]
+    SessionChanged,
+}
+
+#[async_trait::async_trait]
+trait ProcessReaper {
+    async fn terminate(
+        &self,
+        pid: i64,
+        identity: &str,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<tidebreak_harness::RecordedProcessReap>;
+}
+
+struct SystemProcessReaper;
+
+#[async_trait::async_trait]
+impl ProcessReaper for SystemProcessReaper {
+    async fn terminate(
+        &self,
+        pid: i64,
+        identity: &str,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<tidebreak_harness::RecordedProcessReap> {
+        tidebreak_harness::terminate_recorded_process(pid, identity, timeout).await
+    }
+}
+
+/// Resolve a fenced session only after its exact recorded process exits.
 pub(crate) async fn reap_session(
     store: &DbStore,
     bus: &CodeEventBus,
-    mut session: CodeSession,
-) -> Result<CodeSession, tidebreak_core::AgentError> {
-    session.lifecycle = CodeSessionLifecycle::Idle;
-    session.fence_reason = None;
-    session.child_pid = None;
-    // A reap resolves the fence and leaves the session idle. It does not start
-    // an engine, so the attention that follows is the resting state, not
-    // `Working` — which is what this said while `Idle` did not exist.
-    replace_attention(
-        &mut session,
-        Attention::new(AttentionState::Idle, AttentionSource::Lifecycle),
-        false,
-    );
-    persist_session(store, bus, &session).await?;
-    Ok(session)
+    session: CodeSession,
+) -> Result<CodeSession, ReapSessionError> {
+    reap_session_with(
+        store,
+        bus,
+        session,
+        &SystemProcessReaper,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+}
+
+async fn reap_session_with(
+    store: &DbStore,
+    bus: &CodeEventBus,
+    session: CodeSession,
+    reaper: &(impl ProcessReaper + Sync),
+    timeout: std::time::Duration,
+) -> Result<CodeSession, ReapSessionError> {
+    match (session.child_pid, session.child_process_identity.as_deref()) {
+        (Some(pid), Some(identity)) => match reaper.terminate(pid, identity, timeout).await {
+            Ok(tidebreak_harness::RecordedProcessReap::Exited) => {}
+            Ok(tidebreak_harness::RecordedProcessReap::TimedOut) => {
+                return Err(ReapSessionError::ProcessStillAlive);
+            }
+            Err(error) => {
+                return Err(ReapSessionError::ProcessTermination(error.to_string()));
+            }
+        },
+        (Some(pid), None) => match tidebreak_harness::current_process_identity(pid) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Err(ReapSessionError::MissingProcessIdentity),
+            Err(error) => {
+                return Err(ReapSessionError::ProcessTermination(error.to_string()));
+            }
+        },
+        (None, Some(_)) => {
+            return Err(ReapSessionError::MissingProcessIdentity);
+        }
+        (None, None) => {
+            if matches!(session.fence_reason, Some(FenceReason::OrphanAlive)) {
+                return Err(ReapSessionError::MissingProcessIdentity);
+            }
+        }
+    }
+
+    let Some(recovered) = reap_fenced_session(
+        store,
+        &session.owner,
+        session.id,
+        session.spawn_epoch,
+        session.child_pid,
+        session.child_process_identity.as_deref(),
+    )
+    .await?
+    else {
+        return Err(ReapSessionError::SessionChanged);
+    };
+    for event in recovered.events {
+        bus.publish(session.id, event);
+    }
+    emit_digest(store, bus, &recovered.session).await;
+    Ok(recovered.session)
 }
 
 async fn recover_one(
     store: &DbStore,
     bus: &CodeEventBus,
     mut session: CodeSession,
-    probe: &impl Fn(i64) -> PidLiveness,
+    probe: &impl Fn(i64, Option<&str>) -> PidLiveness,
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
     let Some(pid) = session.child_pid else {
         // No recorded pid: treat as dead. Never invent a pid to probe.
@@ -166,7 +251,7 @@ async fn recover_one(
             session: session.id.to_string(),
         }));
     };
-    match probe(pid) {
+    match probe(pid, session.child_process_identity.as_deref()) {
         PidLiveness::Dead => {
             let Some(session) = recover_dead_worker(store, bus, &session).await? else {
                 return Ok(None);
@@ -294,11 +379,32 @@ pub(crate) fn probe_recorded_pid(pid: i64) -> PidLiveness {
     }
 }
 
+/// Identity-aware liveness probe for a process recorded by a session worker.
+///
+/// A different creation identity proves the recorded process exited without
+/// treating the replacement process as the orphan. Missing or unreadable
+/// identities fail closed while the numeric pid remains live.
+pub(crate) fn probe_recorded_process(pid: i64, expected_identity: Option<&str>) -> PidLiveness {
+    let numeric = probe_recorded_pid(pid);
+    if numeric == PidLiveness::Dead {
+        return PidLiveness::Dead;
+    }
+    let Some(expected_identity) = expected_identity else {
+        return PidLiveness::Alive;
+    };
+    match tidebreak_harness::current_process_identity(pid) {
+        Ok(None) => PidLiveness::Dead,
+        Ok(Some(observed)) if observed == expected_identity => PidLiveness::Alive,
+        Ok(Some(_)) => PidLiveness::Dead,
+        Err(_) => PidLiveness::Alive,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tidebreak_core::db::code::{
         get_approval, get_session, get_turn, insert_approval, insert_repo, insert_session,
@@ -337,6 +443,87 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(session.subagents[0].status, CodeSubagentStatus::Failed);
+    }
+
+    async fn seed_pending_approval(
+        store: &DbStore,
+        session_id: CodeSessionId,
+        turn_id: CodeTurnId,
+    ) -> CodeApprovalId {
+        let approval_id = CodeApprovalId::new();
+        insert_approval(
+            store,
+            &tidebreak_core::OwnerId::local(),
+            &CodeApproval {
+                id: approval_id,
+                session_id,
+                turn_id,
+                kind: CodeApprovalKind::Other {
+                    summary: "run command".into(),
+                },
+                harness_raw: serde_json::json!({"call_id":"toolu_recovery"}),
+                native_call_id: Some("toolu_recovery".into()),
+                server_capability: Some("cap_recovery".into()),
+                request_sha256: Some("sha_recovery".into()),
+                worker_epoch: Some(1),
+                decision_claim: Some(uuid::Uuid::new_v4()),
+                claimed_at: Some(now()),
+                state: CodeApprovalState::Pending,
+                feedback: None,
+                requested_at: now(),
+                decided_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        approval_id
+    }
+
+    #[derive(Clone, Copy)]
+    enum StubReap {
+        Exited,
+        TimedOut,
+        Refused,
+    }
+
+    struct StubReaper {
+        expected_pid: i64,
+        expected_identity: String,
+        result: StubReap,
+        calls: AtomicUsize,
+    }
+
+    impl StubReaper {
+        fn new(expected_pid: i64, expected_identity: impl Into<String>, result: StubReap) -> Self {
+            Self {
+                expected_pid,
+                expected_identity: expected_identity.into(),
+                result,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessReaper for StubReaper {
+        async fn terminate(
+            &self,
+            pid: i64,
+            identity: &str,
+            _timeout: std::time::Duration,
+        ) -> std::io::Result<tidebreak_harness::RecordedProcessReap> {
+            assert_eq!(pid, self.expected_pid);
+            assert_eq!(identity, self.expected_identity.as_str());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.result {
+                StubReap::Exited => Ok(tidebreak_harness::RecordedProcessReap::Exited),
+                StubReap::TimedOut => Ok(tidebreak_harness::RecordedProcessReap::TimedOut),
+                StubReap::Refused => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "termination refused",
+                )),
+            }
+        }
     }
 
     async fn seeded_running(
@@ -445,6 +632,7 @@ mod tests {
                 lifecycle,
                 fence_reason: None,
                 child_pid: pid,
+                child_process_identity: pid.map(|pid| format!("test:{pid}")),
                 spawn_epoch: 1,
                 attention: Attention::working(AttentionSource::Lifecycle),
                 unrecognized_event_count: 0,
@@ -457,38 +645,70 @@ mod tests {
         (directory, store, session_id)
     }
 
+    async fn seeded_fenced_orphan(
+        pid: i64,
+    ) -> (
+        tempfile::TempDir,
+        DbStore,
+        crate::code::bus::CodeEventBus,
+        CodeSession,
+        CodeTurnId,
+        CodeApprovalId,
+    ) {
+        let (directory, store, session_id, turn_id) = seeded_running(Some(pid)).await;
+        let approval_id = seed_pending_approval(&store, session_id, turn_id).await;
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Alive)
+            .await
+            .unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::Fenced { .. }]
+        ));
+        let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (directory, store, bus, session, turn_id, approval_id)
+    }
+
+    async fn assert_fenced_orphan_unchanged(
+        store: &DbStore,
+        pid: i64,
+        identity: &str,
+        epoch: i64,
+        turn_id: CodeTurnId,
+        approval_id: CodeApprovalId,
+    ) {
+        let owner = tidebreak_core::OwnerId::local();
+        let turn = get_turn(store, &owner, turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Running);
+        let session = get_session(store, &owner, turn.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+        assert_eq!(session.fence_reason, Some(FenceReason::OrphanAlive));
+        assert_eq!(session.child_pid, Some(pid));
+        assert_eq!(session.child_process_identity.as_deref(), Some(identity));
+        assert_eq!(session.spawn_epoch, epoch);
+        assert_eq!(
+            get_approval(store, &owner, approval_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            CodeApprovalState::Pending
+        );
+    }
+
     #[tokio::test]
     async fn dead_pid_closes_the_open_turn_as_interrupted() {
         let (_dir, store, session_id, turn_id) = seeded_running(Some(9_999_991)).await;
         seed_running_subagent(&store, session_id).await;
-        let approval_id = CodeApprovalId::new();
-        insert_approval(
-            &store,
-            &tidebreak_core::OwnerId::local(),
-            &CodeApproval {
-                id: approval_id,
-                session_id,
-                turn_id,
-                kind: CodeApprovalKind::Other {
-                    summary: "run command".into(),
-                },
-                harness_raw: serde_json::json!({"call_id":"toolu_recovery"}),
-                native_call_id: Some("toolu_recovery".into()),
-                server_capability: Some("cap_recovery".into()),
-                request_sha256: Some("sha_recovery".into()),
-                worker_epoch: Some(1),
-                decision_claim: Some(uuid::Uuid::new_v4()),
-                claimed_at: Some(now()),
-                state: CodeApprovalState::Pending,
-                feedback: None,
-                requested_at: now(),
-                decided_at: None,
-            },
-        )
-        .await
-        .unwrap();
+        let approval_id = seed_pending_approval(&store, session_id, turn_id).await;
         let bus = crate::code::bus::CodeEventBus::default();
-        let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Dead)
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Dead)
             .await
             .unwrap();
         assert!(matches!(
@@ -545,7 +765,7 @@ mod tests {
         let (_dir, store, session_id, turn_id) = seeded_running(None).await;
         seed_running_subagent(&store, session_id).await;
         let bus = crate::code::bus::CodeEventBus::default();
-        let actions = recover_running_sessions_with(&store, &bus, |_| {
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| {
             panic!("a missing pid must not be probed")
         })
         .await
@@ -573,14 +793,16 @@ mod tests {
             .spawn()
             .expect("spawn decoy");
         let decoy_pid = i64::from(decoy.id());
+        let decoy_identity = format!("test:{decoy_pid}");
         let (_dir, store, session_id, turn_id) = seeded_running(Some(decoy_pid)).await;
         seed_running_subagent(&store, session_id).await;
         let flag = signaled.clone();
         let bus = crate::code::bus::CodeEventBus::default();
-        let actions = recover_running_sessions_with(&store, &bus, move |pid| {
+        let actions = recover_running_sessions_with(&store, &bus, move |pid, identity| {
             // Recovery must probe only the recorded pid, and only via the
             // injected probe — never by signaling the decoy itself.
             assert_eq!(pid, decoy_pid);
+            assert_eq!(identity, Some(decoy_identity.as_str()));
             flag.store(true, Ordering::SeqCst);
             PidLiveness::Alive
         })
@@ -612,9 +834,99 @@ mod tests {
             decoy.try_wait().ok().flatten().is_none(),
             "decoy must still be alive — recovery must not signal it"
         );
-        let _ = signaled;
+        assert!(signaled.load(Ordering::SeqCst));
         let _ = decoy.kill();
         let _ = decoy.wait();
+    }
+
+    #[tokio::test]
+    async fn successful_reap_settles_the_fence_before_advancing_the_epoch() {
+        let pid = 4_242;
+        let identity = format!("test:{pid}");
+        let (_dir, store, bus, session, turn_id, approval_id) = seeded_fenced_orphan(pid).await;
+        let old_epoch = session.spawn_epoch;
+        let reaper = StubReaper::new(pid, &identity, StubReap::Exited);
+
+        let reaped = reap_session_with(
+            &store,
+            &bus,
+            session,
+            &reaper,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reaper.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reaped.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(reaped.spawn_epoch, old_epoch + 1);
+        assert_eq!(reaped.child_pid, None);
+        assert_eq!(reaped.child_process_identity, None);
+        assert_eq!(reaped.fence_reason, None);
+        assert_eq!(
+            get_turn(&store, &tidebreak_core::OwnerId::local(), turn_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            CodeTurnStatus::Interrupted
+        );
+        assert_eq!(
+            get_approval(&store, &tidebreak_core::OwnerId::local(), approval_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            CodeApprovalState::Abandoned
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_timeout_preserves_the_live_orphan_fence() {
+        let pid = 4_243;
+        let identity = format!("test:{pid}");
+        let (_dir, store, bus, session, turn_id, approval_id) = seeded_fenced_orphan(pid).await;
+        let old_epoch = session.spawn_epoch;
+        let reaper = StubReaper::new(pid, &identity, StubReap::TimedOut);
+
+        let error = reap_session_with(
+            &store,
+            &bus,
+            session,
+            &reaper,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ReapSessionError::ProcessStillAlive));
+        assert_eq!(reaper.calls.load(Ordering::SeqCst), 1);
+        assert_fenced_orphan_unchanged(&store, pid, &identity, old_epoch, turn_id, approval_id)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn reap_refusal_preserves_the_live_orphan_fence() {
+        let pid = 4_244;
+        let identity = format!("test:{pid}");
+        let (_dir, store, bus, session, turn_id, approval_id) = seeded_fenced_orphan(pid).await;
+        let old_epoch = session.spawn_epoch;
+        let reaper = StubReaper::new(pid, &identity, StubReap::Refused);
+
+        let error = reap_session_with(
+            &store,
+            &bus,
+            session,
+            &reaper,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ReapSessionError::ProcessTermination(_)));
+        assert_eq!(reaper.calls.load(Ordering::SeqCst), 1);
+        assert_fenced_orphan_unchanged(&store, pid, &identity, old_epoch, turn_id, approval_id)
+            .await;
     }
 
     #[tokio::test]
@@ -749,8 +1061,12 @@ mod tests {
 
         let probed = Arc::new(AtomicBool::new(false));
         let flag = probed.clone();
-        let actions = recover_running_sessions_with(&store, &bus, move |pid| {
+        let actions = recover_running_sessions_with(&store, &bus, move |pid, identity| {
             assert_eq!(pid, child_pid);
+            assert!(
+                identity.is_some(),
+                "the worker must record process identity"
+            );
             flag.store(true, Ordering::SeqCst);
             PidLiveness::Alive
         })
@@ -781,7 +1097,7 @@ mod tests {
         .unwrap();
         assert_eq!(changed, Some(pinned));
         let bus = crate::code::bus::CodeEventBus::default();
-        let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Alive)
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Alive)
             .await
             .unwrap();
         assert!(matches!(
@@ -804,7 +1120,7 @@ mod tests {
     async fn eperm_probe_counts_as_alive() {
         let (_dir, store, session_id, _) = seeded_running(Some(1)).await;
         let bus = crate::code::bus::CodeEventBus::default();
-        let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Alive)
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Alive)
             .await
             .unwrap();
         assert!(matches!(

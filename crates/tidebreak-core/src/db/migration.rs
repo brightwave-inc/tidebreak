@@ -54,7 +54,42 @@ impl MigratorTrait for Migrator {
             Box::new(CodeTurnModelSnapshot),
             Box::new(PrePinCodeLifecycleRepair),
             Box::new(CodeApprovalBinding),
+            Box::new(CodeSessionProcessIdentity),
         ]
+    }
+}
+
+/// Record a non-reusable creation identity beside each live child pid.
+struct CodeSessionProcessIdentity;
+
+impl MigrationName for CodeSessionProcessIdentity {
+    fn name(&self) -> &str {
+        "m20260826_000017_code_session_process_identity"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeSessionProcessIdentity {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager
+            .has_column("code_session", "child_process_identity")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeSession::Table)
+                        .add_column(ColumnDef::new(idens::CodeSession::ChildProcessIdentity).text())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Removing the identity would make a recorded pid unsafe to reap.
+        Ok(())
     }
 }
 
@@ -2040,6 +2075,7 @@ mod tests {
                 "m20260824_000014_code_turn_model_snapshot",
                 "m20260825_000015_pre_pin_code_lifecycle_repair",
                 "m20260825_000016_code_approval_binding",
+                "m20260826_000017_code_session_process_identity",
             ]
         );
         assert!(db

@@ -2669,6 +2669,7 @@ impl CodeRuntime {
             lifecycle: CodeSessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
+            child_process_identity: None,
             spawn_epoch: 0,
             attention: Attention::working(AttentionSource::Lifecycle),
             unrecognized_event_count: 0,
@@ -3324,17 +3325,12 @@ impl CodeRuntime {
             }
             None => session,
         };
-        super::approval_sweep::abandon_for_restart(
-            &self.db,
-            &self.bus,
-            owner,
-            session.id,
-            session.spawn_epoch,
-        )
-        .await;
         let session = recovery::reap_session(&self.db, &self.bus, session)
             .await
-            .map_err(ServerError::from)?;
+            .map_err(|error| match error {
+                recovery::ReapSessionError::Store(error) => ServerError::from(error),
+                other => ServerError::conflict_kind("session_not_reaped", other.to_string()),
+            })?;
         self.attach_and_spawn_worker(session).await
     }
 
@@ -3783,6 +3779,7 @@ impl CodeRuntime {
         self.revoke_browser_session(&session);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
+        session.child_process_identity = None;
         session.fence_reason = None;
         super::attention::persist_session(&self.db, &self.bus, &session).await?;
         let stopped = match handle {
@@ -3792,6 +3789,7 @@ impl CodeRuntime {
         let mut current = self.get_session(owner, session.id).await?;
         current.lifecycle = CodeSessionLifecycle::Ended;
         current.child_pid = None;
+        current.child_process_identity = None;
         current.fence_reason = None;
         if !super::attention::persist_session(&self.db, &self.bus, &current).await? {
             return Err(ServerError::conflict_kind(
@@ -4110,6 +4108,7 @@ impl CodeRuntime {
             // `Shutdown` is enough however busy it was.
             session.lifecycle = CodeSessionLifecycle::Ended;
             session.child_pid = None;
+            session.child_process_identity = None;
             session.fence_reason = None;
             super::attention::persist_session(&self.db, &self.bus, &session).await?;
             let stopped = match handle {
@@ -4122,6 +4121,7 @@ impl CodeRuntime {
             let mut current = self.get_session(owner, session.id).await?;
             current.lifecycle = CodeSessionLifecycle::Ended;
             current.child_pid = None;
+            current.child_process_identity = None;
             current.fence_reason = None;
             if !super::attention::persist_session(&self.db, &self.bus, &current).await? {
                 return Err(ServerError::conflict_kind(
@@ -4332,6 +4332,13 @@ impl CodeRuntime {
             }
         };
         attached.child_pid = engine.child_pid();
+        attached.child_process_identity = attached.child_pid.and_then(|pid| {
+            tidebreak_harness::spawned_process_identity(pid).or_else(|| {
+                tidebreak_harness::current_process_identity(pid)
+                    .ok()
+                    .flatten()
+            })
+        });
         if let Some(resume) = engine.resume_ref().or(session.harness_resume_ref.clone()) {
             attached.harness_resume_ref = Some(resume);
         }
