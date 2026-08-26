@@ -698,7 +698,14 @@ pub(crate) async fn discover_repositories(
     let access = delivery_access(runtime, owner, refresh).await;
     let capability = access.capability.clone();
     let catalog = owner_repository_catalog(runtime, owner, refresh).await?;
-    let mut errors = catalog.errors;
+    // Local-only Tidebreak checkouts are not Delivery sources. Keep them off
+    // the snapshot so the page does not treat a skipped origin as a refresh
+    // failure.
+    let mut errors = catalog
+        .errors
+        .into_iter()
+        .filter(|error| error.kind != "not_github")
+        .collect::<Vec<_>>();
 
     let resolved = if let Some(reader) = access.reader.clone() {
         stream::iter(catalog.entries)

@@ -457,10 +457,12 @@ function CodeDeliveryBody({
 
   const discovered = repositorySnapshot?.repositories ?? [];
   const capability = repositorySnapshot?.capability ?? null;
-  const repositoryErrors = [
+  // Local-only Tidebreak checkouts are skipped on purpose. They are not
+  // GitHub sources, so they must not look like a failed refresh.
+  const repositoryErrors = deliveryRefreshErrors([
     ...(repositorySnapshot?.errors ?? []),
     ...resolutionErrors,
-  ];
+  ]);
   const repositoriesLoading = repositoryLoading && !repositorySnapshot;
   const routeRepository = useMemo<CodeGitHubRepositoryTarget | undefined>(
     () =>
@@ -3307,6 +3309,27 @@ function FreshnessBar({
   );
 }
 
+function deliveryRefreshErrors(
+  errors: readonly CodeDeliverySourceError[],
+): CodeDeliverySourceError[] {
+  return errors.filter((error) => error.kind !== "not_github");
+}
+
+function refreshErrorSummary(
+  errors: readonly CodeDeliverySourceError[],
+): string {
+  if (errors.length === 1) return errors[0]!.message;
+  const names = errors.flatMap((error) =>
+    error.repository
+      ? [`${error.repository.owner}/${error.repository.name}`]
+      : [],
+  );
+  if (names.length === errors.length) {
+    return `${errors.length} repositories could not be refreshed (${names.join(", ")}). Available results are still shown.`;
+  }
+  return `${errors.length} repositories could not be refreshed. Available results are still shown.`;
+}
+
 function PartialErrorBanner({
   errors,
   compact = false,
@@ -3314,6 +3337,8 @@ function PartialErrorBanner({
   errors: CodeDeliverySourceError[];
   compact?: boolean;
 }) {
+  const visible = deliveryRefreshErrors(errors);
+  if (visible.length === 0) return null;
   return (
     <div
       role="status"
@@ -3323,11 +3348,7 @@ function PartialErrorBanner({
       )}
     >
       <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-      <span>
-        {errors.length === 1
-          ? errors[0]!.message
-          : `${errors.length} repositories could not be refreshed. Available results are still shown.`}
-      </span>
+      <span>{refreshErrorSummary(visible)}</span>
     </div>
   );
 }

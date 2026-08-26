@@ -183,6 +183,62 @@ describe("delivery pull request list", () => {
     );
   });
 
+  it("does not warn when only local-only repositories were skipped", async () => {
+    renderList({
+      ...storyClient(),
+      getCodeDeliveryRepositories: async () => ({
+        ...deliveryRepositoriesSnapshot,
+        errors: [
+          {
+            kind: "not_github",
+            message:
+              "code-mode-audit-IWF86H: could not read origin remote: error: No such remote 'origin'",
+          },
+          {
+            kind: "not_github",
+            message:
+              "code-mode-audit-fixture: use owner/repo, host/owner/repo, or a GitHub URL",
+          },
+        ],
+      }),
+    } as unknown as ApiClient);
+
+    expect(
+      await screen.findByText("Build the delivery center"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not be refreshed/)).toBeNull();
+    expect(screen.queryByText(/code-mode-audit/)).toBeNull();
+  });
+
+  it("still names GitHub repositories that failed to refresh", async () => {
+    renderList({
+      ...storyClient(),
+      getCodeDeliveryRepositories: async () => ({
+        ...deliveryRepositoriesSnapshot,
+        errors: [
+          {
+            kind: "not_github",
+            message: "code-mode-audit-fixture: not a GitHub remote",
+          },
+          {
+            repository: {
+              host: "github.com",
+              owner: "brightwave-inc",
+              name: "docs",
+            },
+            kind: "transient",
+            message: "brightwave-inc/docs did not answer in time.",
+          },
+        ],
+      }),
+    } as unknown as ApiClient);
+
+    expect(
+      await screen.findByText("brightwave-inc/docs did not answer in time."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/code-mode-audit/)).toBeNull();
+  });
+
   it("opens on your own open pull requests, drafts included", async () => {
     const query = vi.fn(async (_body: unknown) => ({
       capability: deliveryRepositoriesSnapshot.capability,
