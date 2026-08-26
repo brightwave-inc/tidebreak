@@ -38,6 +38,7 @@ import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
   stackedDeliveryPullRequests,
+  unregisteredDeliveryPullRequests,
   deliveryRepositoriesSnapshot,
   deliveryRunDetails,
   deliveryRuns,
@@ -50,6 +51,7 @@ type DeliveryScenario =
   | "pull-requests-loading"
   | "pull-requests-empty"
   | "pull-requests-stacked"
+  | "pull-requests-unregistered"
   | "pull-requests-partial"
   | "pull-requests-no-viewer"
   | "github-unavailable"
@@ -96,6 +98,8 @@ function prActionMessage(action: CodeDeliveryPullRequestAction): string {
       return "Comment posted.";
     case "merge":
       return action.auto ? "Auto-merge enabled." : "Pull request merged.";
+    case "create_stack":
+      return "Stack registered on GitHub.";
   }
 }
 
@@ -182,7 +186,9 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
             ? []
             : scenario === "pull-requests-stacked"
               ? stackedDeliveryPullRequests
-              : deliveryPullRequests,
+              : scenario === "pull-requests-unregistered"
+                ? unregisteredDeliveryPullRequests
+                : deliveryPullRequests,
         errors:
           scenario === "pull-requests-partial"
             ? [
@@ -633,6 +639,35 @@ export const PullRequestDetail: Story = {
       await body.findByRole("heading", {
         name: "Make workspace deep links durable",
       }),
+    ).toBeVisible();
+  },
+};
+
+/**
+ * A stack-shaped chain the host has no stack for: every row carries the
+ * unregistered marker, and the detail sheet offers to register the chain
+ * so GitHub owns the ordering — instead of the reader merging a layer into
+ * the branch below it by accident.
+ */
+export const PullRequestUnregisteredStack: Story = {
+  args: { scenario: "pull-requests-unregistered" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await expect(await canvas.findAllByText("Unregistered stack")).toHaveLength(
+      3,
+    );
+    await userEvent.click(
+      await canvas.findByText("Unregistered middle: the queries"),
+    );
+    await expect(
+      await body.findByRole("button", { name: /Create stack \(3 layers\)/ }),
+    ).toBeVisible();
+    await userEvent.click(
+      await body.findByRole("button", { name: /Create stack \(3 layers\)/ }),
+    );
+    await expect(
+      await body.findByText(/Registers #2310, #2311, #2312/),
     ).toBeVisible();
   },
 };

@@ -863,9 +863,18 @@ function PullRequestsSurface({
     });
     if (!action || !item.head_sha || busyId) return;
     if (action.kind === "merge") {
+      // A layer of an unregistered stack merges into the branch below it,
+      // not the default branch — the exact accident the stack exists to
+      // prevent. Name the target and point at the registration offer.
+      const unregisteredStack = item.unregistered_stack_numbers !== undefined;
+      const description = unregisteredStack
+        ? `The pull request is squash-merged into ${item.base_branch} — not ${
+            item.repository.default_branch ?? "the default branch"
+          } — because this stack is not registered on GitHub. Open the pull request and create the stack to land the whole chain instead.`
+        : `The pull request is squash-merged into ${item.base_branch} on GitHub.`;
       const ok = await confirm({
         title: `Merge #${item.number}?`,
-        description: `The pull request is squash-merged into ${item.base_branch} on GitHub.`,
+        description,
         confirmLabel: "Merge",
       });
       if (!ok) return;
@@ -1976,6 +1985,14 @@ function PullRequestRow({
           {stackedOn !== undefined && (
             <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-2xs tabular-nums">
               Stacked on #{stackedOn}
+            </span>
+          )}
+          {item.unregistered_stack_numbers !== undefined && (
+            <span
+              className="text-info-foreground-muted shrink-0 rounded bg-info-background px-1.5 py-0.5 text-2xs"
+              title="This chain is not registered as a GitHub stack. Create the stack on the pull request page so GitHub owns the ordering and the whole-chain merge."
+            >
+              Unregistered stack
             </span>
           )}
           {item.workspace_links.length > 0 && (

@@ -979,7 +979,12 @@ export type CodeDeliveryPrAttentionReason = "changes_requested" | "checks_failed
  * User-initiated global PR action. Code-changing actions deliberately do not
  * exist here; they remain workspace-scoped agent prompts.
  */
-export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
+export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | 
+/**
+ * The chain to register, bottom to top. Every pull request's base
+ * ref must match the previous one's head ref.
+ */
+{ "type": "create_stack", numbers: Array<number>, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
 
 export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullRequestTarget, action: CodeDeliveryPullRequestAction, };
 
@@ -1060,7 +1065,16 @@ stack_size?: number,
  * or filter still resolves. Absent when the base is the default branch
  * or nothing tracked owns it.
  */
-stack_parent_number?: number, labels: Array<string>, created_at: string, updated_at: string, 
+stack_parent_number?: number, 
+/**
+ * A stack-shaped chain of inferred edges the host has no stack for,
+ * bottom to top, when one resolves gaplessly around this pull request
+ * and no member is host-registered. Creating the stack on GitHub makes
+ * the host own the ordering, the retargeting, and the whole-chain merge
+ * — without it, merging a layer lands it into the branch below rather
+ * than the default branch, which is easy to do by accident.
+ */
+unregistered_stack_numbers?: Array<number>, labels: Array<string>, created_at: string, updated_at: string, 
 /**
  * Set only once the pull request merged. `state` alone cannot separate a
  * merged pull request from a closed one on every host response, and the

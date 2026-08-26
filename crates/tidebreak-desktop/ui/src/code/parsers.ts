@@ -620,6 +620,7 @@ function parseCodeDeliveryPullRequestSummary(
       "stack_parent_number",
       "stack_number",
       "stack_size",
+      "unregistered_stack_numbers",
       "labels",
       "created_at",
       "updated_at",
@@ -655,6 +656,9 @@ function parseCodeDeliveryPullRequestSummary(
       !isFiniteNumber(value.stack_parent_number)) ||
     (value.stack_number !== undefined && !isFiniteNumber(value.stack_number)) ||
     (value.stack_size !== undefined && !isFiniteNumber(value.stack_size)) ||
+    (value.unregistered_stack_numbers !== undefined &&
+      (!Array.isArray(value.unregistered_stack_numbers) ||
+        !value.unregistered_stack_numbers.every(isFiniteNumber))) ||
     !Array.isArray(value.workspace_links) ||
     !isStringList(value.labels) ||
     !nonEmpty(value.created_at) ||
@@ -664,6 +668,13 @@ function parseCodeDeliveryPullRequestSummary(
   ) {
     return null;
   }
+  const unregisteredStackNumbers = Array.isArray(
+    value.unregistered_stack_numbers,
+  )
+    ? value.unregistered_stack_numbers.filter(
+        (entry): entry is number => typeof entry === "number",
+      )
+    : undefined;
   const repository = parseCodeGitHubRepositoryRef(value.repository);
   if (!repository) return null;
   const checks: CodeDeliveryCheck[] = [];
@@ -706,6 +717,9 @@ function parseCodeDeliveryPullRequestSummary(
       ? { stack_number: value.stack_number }
       : {}),
     ...(value.stack_size !== undefined ? { stack_size: value.stack_size } : {}),
+    ...(unregisteredStackNumbers !== undefined
+      ? { unregistered_stack_numbers: unregisteredStackNumbers }
+      : {}),
     labels: [...value.labels],
     created_at: value.created_at,
     updated_at: value.updated_at,

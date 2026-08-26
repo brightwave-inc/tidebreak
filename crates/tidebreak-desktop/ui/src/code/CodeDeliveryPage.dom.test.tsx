@@ -24,6 +24,7 @@ import {
   deliveryPullRequestDetails,
   deliveryPullRequests,
   stackedDeliveryPullRequests,
+  unregisteredDeliveryPullRequests,
   deliveryRepositoriesSnapshot,
   deliveryRunDetails,
   deliveryRuns,
@@ -981,5 +982,22 @@ describe("stack lanes", () => {
     );
     expect(depths).toEqual(["0", "1", "2", "0"]);
     expect(screen.getByText("Stacked on #2288")).toBeTruthy();
+  });
+
+  it("marks every member of a chain the host has no stack for", async () => {
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: async () => ({
+        capability: deliveryRepositoriesSnapshot.capability,
+        items: unregisteredDeliveryPullRequests,
+        errors: [],
+        fetched_at: "2026-08-21T15:00:00.000Z",
+      }),
+    } as unknown as ApiClient);
+
+    await screen.findByText("Unregistered base: land the schema");
+    // All three members carry the marker, and the host-registered fixtures
+    // above never do.
+    expect(screen.getAllByText("Unregistered stack")).toHaveLength(3);
   });
 });

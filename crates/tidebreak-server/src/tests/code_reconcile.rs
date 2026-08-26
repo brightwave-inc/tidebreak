@@ -218,6 +218,96 @@ const HOST_STACKS_JSON: &str = r#"[
   }
 ]"#;
 
+
+/// A host stack that registers the 412 → 413 chain exactly.
+const REGISTERED_STACK_JSON: &str = r#"[
+  {
+    "id": 903,
+    "number": 10,
+    "node_id": "S_10",
+    "url": "https://github.com/acme/tools/stacks/10",
+    "base": {"ref": "main"},
+    "open": true,
+    "created_at": "2026-08-22T12:00:00Z",
+    "pull_requests": [
+      {"number": 412, "state": "open", "draft": false, "merged_at": null,
+       "head": {"ref": "tidebreak/tracked", "sha": "aaa111"}},
+      {"number": 413, "state": "open", "draft": false, "merged_at": null,
+       "head": {"ref": "tidebreak/tracked-child", "sha": "ccc333"}}
+    ]
+  }
+]"#;
+
+/// Two pull requests on the same base branch: a fork, not a stack.
+const FORKED_LIST_JSON: &str = r#"[
+  {
+    "number": 412,
+    "url": "https://github.com/acme/tools/pull/412",
+    "state": "OPEN",
+    "title": "Stack root",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/tracked",
+    "headRefOid": "aaa111",
+    "baseRefName": "main",
+    "updatedAt": "2026-08-22T12:00:00Z",
+    "createdAt": "2026-08-22T10:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 413,
+    "url": "https://github.com/acme/tools/pull/413",
+    "state": "OPEN",
+    "title": "First fork arm",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/tracked-child",
+    "headRefOid": "ccc333",
+    "baseRefName": "tidebreak/tracked",
+    "updatedAt": "2026-08-22T12:30:00Z",
+    "createdAt": "2026-08-22T12:00:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  },
+  {
+    "number": 417,
+    "url": "https://github.com/acme/tools/pull/417",
+    "state": "OPEN",
+    "title": "Second fork arm",
+    "isDraft": false,
+    "author": {"login": "octocat"},
+    "reviewDecision": null,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "autoMergeRequest": null,
+    "headRepository": {"name": "tools", "nameWithOwner": "acme/tools"},
+    "headRepositoryOwner": {"login": "acme"},
+    "headRefName": "tidebreak/tracked-second-child",
+    "headRefOid": "ggg777",
+    "baseRefName": "tidebreak/tracked",
+    "updatedAt": "2026-08-22T12:45:00Z",
+    "createdAt": "2026-08-22T12:15:00Z",
+    "mergedAt": null,
+    "closedAt": null,
+    "labels": []
+  }
+]"#;
+
 fn write_executable(path: &std::path::Path, body: &str) {
     std::fs::write(path, body).unwrap();
     let mut perms = std::fs::metadata(path).unwrap().permissions();
@@ -643,4 +733,70 @@ async fn a_failed_stacks_read_leaves_the_list_clean() {
         .find(|item| item.number == 413)
         .expect("the stacked child is on the page");
     assert_eq!(child.stack_parent_number, Some(412));
+    // No host stack is exactly the unregistered case: the chain the host
+    // does not know about is the one worth offering to register.
+    assert_eq!(
+        child.unregistered_stack_numbers.as_deref(),
+        Some(&[412, 413][..])
+    );
+    let root = page
+        .items
+        .iter()
+        .find(|item| item.number == 412)
+        .expect("the stack root is on the page");
+    assert_eq!(
+        root.unregistered_stack_numbers.as_deref(),
+        Some(&[412, 413][..])
+    );
+    let stranger = page
+        .items
+        .iter()
+        .find(|item| item.number == 500)
+        .expect("the unrelated pull request is on the page");
+    assert_eq!(stranger.unregistered_stack_numbers, None);
 }
+
+#[tokio::test]
+async fn a_host_registered_chain_offers_no_registration() {
+    let (dir, runtime, _db, _repo_id, _tracked, _fuzzy) = seeded_runtime().await;
+    write_gh_shim_responding(
+        &dir.path().join("bin"),
+        LIST_JSON,
+        Some(REGISTERED_STACK_JSON),
+    );
+    let page = delivery_list_read(&runtime).await;
+
+    for number in [412, 413] {
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.number == number)
+            .unwrap_or_else(|| panic!("#{number} is on the page"));
+        assert_eq!(item.stack_number, Some(10), "the host stack registers it");
+        assert_eq!(
+            item.unregistered_stack_numbers, None,
+            "the host already owns this chain"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_forked_base_is_not_a_stack_and_offers_nothing() {
+    let (dir, runtime, _db, _repo_id, _tracked, _fuzzy) = seeded_runtime().await;
+    write_gh_shim_responding(&dir.path().join("bin"), FORKED_LIST_JSON, None);
+    let page = delivery_list_read(&runtime).await;
+
+    assert!(page.errors.is_empty());
+    for number in [412, 413, 417] {
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.number == number)
+            .unwrap_or_else(|| panic!("#{number} is on the page"));
+        assert_eq!(
+            item.unregistered_stack_numbers, None,
+            "two children on one base branch cannot serialize as a stack"
+        );
+    }
+}
+

@@ -8,6 +8,7 @@ import {
   ExternalLink,
   GitBranch,
   GitMerge,
+  Layers,
   GitPullRequest,
   GitPullRequestClosed,
   GitPullRequestDraft,
@@ -897,6 +898,7 @@ function PrActions({
   onMergeStack: (members: readonly CodeDeliveryStackMember[]) => void;
 }) {
   const [confirmingStackMerge, setConfirmingStackMerge] = useState(false);
+  const [confirmingCreateStack, setConfirmingCreateStack] = useState(false);
   const blockers = mergeBlockedReasons(summary);
   const mergeAction =
     detail.can_merge && summary.head_sha
@@ -932,10 +934,19 @@ function PrActions({
     stackRunReachesThis &&
     mergeableStackLayers.length >= 2;
   const showSingleMerge = !canMergeStack && mergeAction !== null;
+  // A chain this page inferred but the host has no stack for. Registering it
+  // moves the ordering, the retargeting, and the whole-chain merge to
+  // GitHub; leaving it unregistered keeps the accident open, where merging a
+  // layer lands it into the branch below instead of the default branch.
+  const unregisteredStack =
+    detail.can_merge && summary.unregistered_stack_numbers !== undefined
+      ? summary.unregistered_stack_numbers
+      : null;
   const anyAction =
     detail.can_mark_ready ||
     mergeAction !== null ||
     canMergeStack ||
+    unregisteredStack !== null ||
     canAdminMerge ||
     detail.can_close ||
     detail.can_reopen ||
@@ -1059,6 +1070,56 @@ function PrActions({
                     size="xs"
                     variant="ghost"
                     onClick={() => setConfirmingStackMerge(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        {unregisteredStack !== null && (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={Boolean(busy)}
+              onClick={() => setConfirmingCreateStack(true)}
+            >
+              <Layers />
+              Create stack ({unregisteredStack.length} layers)
+            </Button>
+            {confirmingCreateStack && (
+              <div className="mt-2.5 flex w-full flex-col gap-2 rounded-md border border-border-subtle bg-background p-2.5">
+                <p className="text-muted-foreground text-xs">
+                  Registers{" "}
+                  {unregisteredStack.map((number) => `#${number}`).join(", ")}{" "}
+                  as a GitHub stack, bottom to top. GitHub then owns the
+                  ordering: merging a layer lands everything below it on{" "}
+                  {summary.repository.default_branch ?? "the default branch"},
+                  and the layers above rebase and retarget on their own.
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    disabled={Boolean(busy)}
+                    onClick={() => {
+                      setConfirmingCreateStack(false);
+                      onRun("create-stack", {
+                        type: "create_stack",
+                        numbers: [...unregisteredStack],
+                      });
+                    }}
+                  >
+                    Create stack
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => setConfirmingCreateStack(false)}
                   >
                     Cancel
                   </Button>
