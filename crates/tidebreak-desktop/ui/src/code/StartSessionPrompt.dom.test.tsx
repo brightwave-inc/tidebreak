@@ -86,6 +86,7 @@ function entry(
     kind,
     found: true,
     installable: true,
+    authenticated: true,
     tier: "reference",
     caps: { ...CAPS, structured_approvals: "supported", ...caps },
     commands: [],

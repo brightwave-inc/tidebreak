@@ -9,6 +9,73 @@ import { DoctorList } from "./DoctorList";
 afterEach(cleanup);
 
 describe("DoctorList", () => {
+  it("labels authenticated, signed-out, and unverified engines distinctly", () => {
+    render(
+      <DoctorList
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              authenticated: true,
+            },
+            {
+              ...notDownloaded,
+              kind: "codex",
+              found: true,
+              authenticated: false,
+              remediation: "Sign in to Codex CLI, then re-check.",
+            },
+            {
+              ...notDownloaded,
+              kind: "opencode",
+              found: true,
+              remediation: "Sign in via your terminal, then re-check.",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Signed out")).toBeInTheDocument();
+    expect(screen.getByText("Unverified")).toBeInTheDocument();
+    expect(
+      screen.getByText("Sign in via your terminal, then re-check."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 of 3 engines ready.")).toBeInTheDocument();
+  });
+
+  it("directs an all-installed blocked set to sign in instead of download", () => {
+    render(
+      <DoctorList
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              remediation: "Sign in via your terminal, then re-check.",
+            },
+            {
+              ...notDownloaded,
+              kind: "codex",
+              found: true,
+              authenticated: false,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "No engine is ready yet. Sign in to one below, then re-check.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("states that protocol-gap counts include saved session history", async () => {
     const report: HarnessDoctorReport = {
       harnesses: [

@@ -12,6 +12,7 @@ import {
   harnessCanStartNow,
   harnessNeedsDownload,
   harnessUnusableReason,
+  isHarnessReady,
   preferredCodeModels,
   sessionLifecycleTooltip,
 } from "./labels";
@@ -105,6 +106,12 @@ describe("create-time permission mode", () => {
 });
 
 describe("harnessUnusableReason", () => {
+  it("requires a positive authentication observation before an engine is ready", () => {
+    expect(isHarnessReady({ found: true, authenticated: true })).toBe(true);
+    expect(isHarnessReady({ found: true, authenticated: false })).toBe(false);
+    expect(isHarnessReady({ found: true })).toBe(false);
+  });
+
   it("names the one reason a picker row cannot be chosen", () => {
     expect(
       harnessUnusableReason({
@@ -125,6 +132,14 @@ describe("harnessUnusableReason", () => {
       harnessUnusableReason({
         found: true,
         installable: true,
+        caps: caps("supported", "supported", "supported"),
+      }),
+    ).toBe("Unverified — sign in via your terminal");
+    expect(
+      harnessUnusableReason({
+        found: true,
+        installable: true,
+        authenticated: true,
         caps: caps("unsupported", "unsupported", "unsupported"),
       }),
     ).toBe("Not available yet");
@@ -132,6 +147,7 @@ describe("harnessUnusableReason", () => {
       harnessUnusableReason({
         found: true,
         installable: true,
+        authenticated: true,
         caps: caps("supported", "unsupported", "unsupported"),
       }),
     ).toBeNull();
@@ -140,6 +156,7 @@ describe("harnessUnusableReason", () => {
       harnessUnusableReason({
         found: true,
         installable: true,
+        authenticated: true,
         caps: caps("unsupported", "unsupported", "supported"),
       }),
     ).toBeNull();

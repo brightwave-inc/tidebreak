@@ -67,6 +67,7 @@ function harness(kind: HarnessKind): HarnessDoctorEntry {
     kind,
     found: true,
     installable: true,
+    authenticated: true,
     tier: "reference",
     caps: { ...CAPS },
     commands: [],
