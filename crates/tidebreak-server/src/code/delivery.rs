@@ -22,12 +22,16 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestId,
-    CodePullRequestRelation, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId,
-    PullRequestCheck, PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind,
+    CodePullRequestRelation, CodePullRequestState, CodeRepo, CodeWorkspace, CodeWorkspaceStatus,
+    OwnerId, PullRequestCheck, PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind,
     PullRequestDigest, RepoId, WorkspaceId,
 };
 
 use super::gh::{self, GhObservation};
+use super::reconcile::{
+    StackParentCandidate, StackParentEdge, StackParentIndex, StackParentResolution,
+    StackPullRequestIdentity, StackRepositoryIdentity,
+};
 use super::runtime::CodeRuntime;
 use crate::error::ServerError;
 use crate::routes::code::types::{
@@ -60,8 +64,8 @@ const GITHUB_DETAIL_PAGE_SIZE: usize = 100;
 /// unlucky repository would otherwise blank a whole column.
 const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(700);
 
-const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments";
-const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments,statusCheckRollup";
+const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRepository,headRepositoryOwner,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments";
+const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRepository,headRepositoryOwner,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments,statusCheckRollup";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PullRequestRemotePlan {
@@ -90,6 +94,36 @@ impl PullRequestRemotePlan {
             },
             self.author.as_deref().unwrap_or("*")
         )
+    }
+}
+
+/// One host pull-request observation plus identity kept off the public wire.
+///
+/// `stack_parent_number` stays wire-compatible. The fork-qualified head
+/// repository remains available until stack resolution has selected one
+/// immutable base-repository-and-number identity.
+#[derive(Debug, Clone)]
+struct PullRequestObservation {
+    summary: CodeDeliveryPullRequestSummary,
+    head_repository: Option<StackRepositoryIdentity>,
+}
+
+impl PullRequestObservation {
+    fn pull_request_identity(&self) -> StackPullRequestIdentity {
+        StackPullRequestIdentity {
+            base_repository: stack_repository_identity(&self.summary.repository),
+            number: self.summary.number,
+        }
+    }
+
+    fn stack_parent_candidate(&self) -> StackParentCandidate {
+        StackParentCandidate {
+            pull_request: self.pull_request_identity(),
+            open: self.summary.state == "open",
+            head_repository: self.head_repository.clone(),
+            head_branch: (!self.summary.head_branch.is_empty())
+                .then(|| self.summary.head_branch.clone()),
+        }
     }
 }
 
@@ -473,9 +507,10 @@ pub(crate) async fn query_pull_requests_by_number(
     }
     items.sort_by(|left, right| {
         right
+            .summary
             .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| left.id.cmp(&right.id))
+            .cmp(&left.summary.updated_at)
+            .then_with(|| left.summary.id.cmp(&right.summary.id))
     });
     // The trigger sweep reads through here, and its stacked-child suppression
     // keys on `stack_parent_number` (decision 62) — so this path persists and
@@ -486,6 +521,7 @@ pub(crate) async fn query_pull_requests_by_number(
         super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
             .await;
     }
+    let items = items.into_iter().map(|item| item.summary).collect();
     Ok(CodeDeliveryPullRequestsPage {
         capability,
         items,
@@ -723,9 +759,10 @@ pub(crate) async fn query_pull_requests(
             }
             items.sort_by(|left, right| {
                 right
+                    .summary
                     .updated_at
-                    .cmp(&left.updated_at)
-                    .then_with(|| left.id.cmp(&right.id))
+                    .cmp(&left.summary.updated_at)
+                    .then_with(|| left.summary.id.cmp(&right.summary.id))
             });
             let workspaces_gaining_links = persist_and_augment_pull_request_facts(
                 runtime,
@@ -734,6 +771,10 @@ pub(crate) async fn query_pull_requests(
                 &mut items,
             )
             .await;
+            let items = items
+                .into_iter()
+                .map(|item| item.summary)
+                .collect::<Vec<_>>();
             runtime.delivery_cache.put_pull_requests(
                 cache_key.clone(),
                 items.clone(),
@@ -800,21 +841,21 @@ pub(crate) async fn pull_request_detail(
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let workspace_index = workspace_index(runtime, owner, false).await?;
-    let mut summary = fetch_pull_request(binary, &repository, target.number, &workspace_index)
+    let mut observation = fetch_pull_request(binary, &repository, target.number, &workspace_index)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let minted = persist_and_augment_pull_request_facts(
         runtime,
         owner,
         &workspace_index,
-        std::slice::from_mut(&mut summary),
+        std::slice::from_mut(&mut observation),
     )
     .await;
     for workspace_id in minted {
         super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
             .await;
     }
-    let summary = summary;
+    let summary = observation.summary;
 
     let pull_endpoint = api_endpoint(&target.repository, &format!("pulls/{}", target.number));
     let issue_comments_endpoint = api_endpoint(
@@ -1943,7 +1984,7 @@ async fn fetch_pull_requests(
     workspaces: &[WorkspaceIndexEntry],
     plan: &PullRequestRemotePlan,
     force_refresh: bool,
-) -> Result<Vec<CodeDeliveryPullRequestSummary>, String> {
+) -> Result<Vec<PullRequestObservation>, String> {
     let repository =
         resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
     let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
@@ -2014,7 +2055,7 @@ async fn fetch_pull_request(
     repository: &CodeGitHubRepositoryRef,
     number: u64,
     workspaces: &[WorkspaceIndexEntry],
-) -> Result<CodeDeliveryPullRequestSummary, String> {
+) -> Result<PullRequestObservation, String> {
     let cli_repository = gh::cli_repository(&repository.host, &repository.owner, &repository.name);
     let number = number.to_string();
     let raw = gh::run_gh(
@@ -2042,7 +2083,7 @@ fn parse_pull_request(
     repository: &CodeGitHubRepositoryRef,
     value: &Value,
     workspaces: &[WorkspaceIndexEntry],
-) -> Option<CodeDeliveryPullRequestSummary> {
+) -> Option<PullRequestObservation> {
     let number = u64_field(value, "number")?;
     let title = text_field(value, "title")?;
     let state = text_field(value, "state")?.to_ascii_lowercase();
@@ -2114,36 +2155,87 @@ fn parse_pull_request(
         &head_branch,
         workspaces,
     );
-    Some(CodeDeliveryPullRequestSummary {
-        id: format!("{}#{number}", repository_key_ref(repository)),
-        repository: repository.clone(),
-        number,
-        url,
-        title,
-        state,
-        draft,
-        author,
-        author_avatar_url,
-        head_branch,
-        base_branch,
-        head_sha,
-        review_decision,
-        mergeable,
-        merge_state_status,
-        auto_merge_enabled,
-        in_merge_queue,
-        comment_count,
-        checks,
-        attention_reasons,
-        ready_to_merge,
-        workspace_links,
-        stack_parent_number: None,
-        labels,
-        created_at: datetime_field(value, "createdAt").unwrap_or_else(Utc::now),
-        updated_at: datetime_field(value, "updatedAt").unwrap_or_else(Utc::now),
-        merged_at,
-        closed_at,
+    Some(PullRequestObservation {
+        summary: CodeDeliveryPullRequestSummary {
+            id: format!("{}#{number}", repository_key_ref(repository)),
+            repository: repository.clone(),
+            number,
+            url,
+            title,
+            state,
+            draft,
+            author,
+            author_avatar_url,
+            head_branch,
+            base_branch,
+            head_sha,
+            review_decision,
+            mergeable,
+            merge_state_status,
+            auto_merge_enabled,
+            in_merge_queue,
+            comment_count,
+            checks,
+            attention_reasons,
+            ready_to_merge,
+            workspace_links,
+            stack_parent_number: None,
+            labels,
+            created_at: datetime_field(value, "createdAt").unwrap_or_else(Utc::now),
+            updated_at: datetime_field(value, "updatedAt").unwrap_or_else(Utc::now),
+            merged_at,
+            closed_at,
+        },
+        head_repository: parse_head_repository(repository, value),
     })
+}
+
+fn parse_head_repository(
+    base_repository: &CodeGitHubRepositoryRef,
+    value: &Value,
+) -> Option<StackRepositoryIdentity> {
+    let repository = value.get("headRepository")?;
+    if repository.is_null() {
+        return None;
+    }
+    let name_with_owner = repository.get("nameWithOwner").and_then(Value::as_str);
+    let from_name_with_owner = name_with_owner.and_then(|name_with_owner| {
+        let (owner, name) = name_with_owner.split_once('/')?;
+        if name.contains('/') {
+            return None;
+        }
+        StackRepositoryIdentity::new(&base_repository.host, owner, name)
+    });
+    if name_with_owner.is_some() && from_name_with_owner.is_none() {
+        return None;
+    }
+    let owner = value
+        .get("headRepositoryOwner")
+        .and_then(|owner| owner.get("login"))
+        .and_then(Value::as_str);
+    let name = repository.get("name").and_then(Value::as_str);
+    let from_parts = owner
+        .zip(name)
+        .and_then(|(owner, name)| StackRepositoryIdentity::new(&base_repository.host, owner, name));
+    let identity = match (from_name_with_owner, from_parts) {
+        (Some(name_with_owner), Some(parts)) if name_with_owner == parts => parts,
+        (Some(_), Some(_)) => return None,
+        (Some(identity), None) | (None, Some(identity)) => identity,
+        (None, None) => return None,
+    };
+    if owner.is_some_and(|owner| {
+        StackRepositoryIdentity::new(&base_repository.host, owner, &identity.name)
+            .is_none_or(|candidate| candidate.owner != identity.owner)
+    }) {
+        return None;
+    }
+    if name.is_some_and(|name| {
+        StackRepositoryIdentity::new(&base_repository.host, &identity.owner, name)
+            .is_none_or(|candidate| candidate.name != identity.name)
+    }) {
+        return None;
+    }
+    Some(identity)
 }
 
 fn parse_check(value: &Value) -> Option<CodeDeliveryCheck> {
@@ -2581,23 +2673,30 @@ async fn persist_and_augment_pull_request_facts(
     runtime: &CodeRuntime,
     owner: &OwnerId,
     workspaces: &[WorkspaceIndexEntry],
-    items: &mut [CodeDeliveryPullRequestSummary],
+    items: &mut [PullRequestObservation],
 ) -> Vec<WorkspaceId> {
     let db = &runtime.db;
     let mut minted = Vec::new();
     let now = Utc::now();
+    let mut stack_candidates: HashMap<StackPullRequestIdentity, StackParentCandidate> = items
+        .iter()
+        .map(|item| {
+            let candidate = item.stack_parent_candidate();
+            (candidate.pull_request.clone(), candidate)
+        })
+        .collect();
 
     // One fact read per repository identity on the page.
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         groups
-            .entry(repository_key_ref(&item.repository))
+            .entry(repository_key_ref(&item.summary.repository))
             .or_default()
             .push(index);
     }
     let mut fact_ids: HashMap<usize, CodePullRequestId> = HashMap::new();
     for indices in groups.values() {
-        let repository = &items[indices[0]].repository;
+        let repository = &items[indices[0]].summary.repository;
         let mut repo_facts = match list_pull_request_facts_for_repo(
             db,
             owner,
@@ -2613,6 +2712,24 @@ async fn persist_and_augment_pull_request_facts(
                 continue;
             }
         };
+        let base_repository = stack_repository_identity(repository);
+        for fact in &repo_facts {
+            let pull_request = StackPullRequestIdentity {
+                base_repository: base_repository.clone(),
+                number: fact.number,
+            };
+            stack_candidates
+                .entry(pull_request.clone())
+                .or_insert_with(|| StackParentCandidate {
+                    pull_request,
+                    open: fact.state == CodePullRequestState::Open,
+                    // Durable facts predate fork-qualified identity. They can
+                    // prove that a same-named candidate exists, but they must
+                    // not select one fork by branch name alone.
+                    head_repository: None,
+                    head_branch: (!fact.head_branch.is_empty()).then(|| fact.head_branch.clone()),
+                });
+        }
         let known: HashMap<u64, CodePullRequestId> = repo_facts
             .iter()
             .map(|fact| (fact.number, fact.id))
@@ -2627,7 +2744,7 @@ async fn persist_and_augment_pull_request_facts(
             })
             .collect();
         for &index in indices {
-            let item = &mut items[index];
+            let item = &mut items[index].summary;
             if item.in_merge_queue.is_none() {
                 item.in_merge_queue = known_queue.get(&item.number).copied();
             }
@@ -2663,8 +2780,7 @@ async fn persist_and_augment_pull_request_facts(
             runtime
                 .record_pull_request_live_state(owner, None, &digest_from_summary(item))
                 .await;
-            // Keep the local fact set current with what was just written, so
-            // stack derivation below sees this pass's own observations.
+            // Keep this pass's fact set current for later durable reads.
             match repo_facts
                 .iter_mut()
                 .find(|known| known.number == fact.number)
@@ -2695,15 +2811,42 @@ async fn persist_and_augment_pull_request_facts(
                 }
             }
         }
-        // Stack annotation rides the durable set, not the page: a parent
-        // outside the current page or filter still resolves (decision 62).
-        let parents = super::reconcile::stack_parents_by_head(&repo_facts);
-        for &index in indices {
-            let item = &mut items[index];
-            item.stack_parent_number = parents
-                .get(&item.base_branch)
-                .copied()
-                .filter(|parent| *parent != item.number);
+    }
+
+    let stack_index = StackParentIndex::new(stack_candidates.into_values());
+    for item in items.iter_mut() {
+        let child = item.pull_request_identity();
+        let head_repository = item.head_repository.clone();
+        let summary = &mut item.summary;
+        summary.stack_parent_number = None;
+        if summary.base_branch.is_empty()
+            || summary
+                .repository
+                .default_branch
+                .as_deref()
+                .is_some_and(|default| default == summary.base_branch)
+        {
+            continue;
+        }
+        let Some(edge) = StackParentEdge::new(
+            stack_repository_identity(&summary.repository),
+            head_repository,
+            &summary.base_branch,
+        ) else {
+            continue;
+        };
+        match stack_index.resolve(&edge, Some(&child)) {
+            StackParentResolution::Resolved(parent) => {
+                summary.stack_parent_number = Some(parent.number);
+            }
+            StackParentResolution::Unresolved { reason, .. } => {
+                tracing::debug!(
+                    pull_request = summary.number,
+                    base_branch = %summary.base_branch,
+                    ?reason,
+                    "stack edge stayed unresolved"
+                );
+            }
         }
     }
 
@@ -2746,7 +2889,7 @@ async fn persist_and_augment_pull_request_facts(
         let Some(attributions) = by_fact.get(&fact_id) else {
             continue;
         };
-        let item = &mut items[index];
+        let item = &mut items[index].summary;
         for attribution in attributions {
             if let Some(link) = item
                 .workspace_links
@@ -3200,6 +3343,11 @@ fn repository_key_ref(repository: &CodeGitHubRepositoryRef) -> String {
     )
 }
 
+fn stack_repository_identity(repository: &CodeGitHubRepositoryRef) -> StackRepositoryIdentity {
+    StackRepositoryIdentity::new(&repository.host, &repository.owner, &repository.name)
+        .expect("a resolved GitHub repository has a complete identity")
+}
+
 fn api_endpoint(target: &CodeGitHubRepositoryTarget, tail: &str) -> String {
     format!("repos/{}/{}/{}", target.owner, target.name, tail)
 }
@@ -3532,6 +3680,8 @@ mod tests {
         assert_eq!(settled.state, "all");
         assert!(!settled.checks_loaded);
         assert!(!settled.fields.contains("statusCheckRollup"));
+        assert!(settled.fields.contains("headRepository"));
+        assert!(settled.fields.contains("headRepositoryOwner"));
 
         pull_requests.states = vec!["merged".into()];
         assert_eq!(pull_request_remote_plan(&pull_requests).state, "merged");
@@ -3695,13 +3845,13 @@ mod tests {
         )
         .unwrap();
         let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
-        assert_eq!(parsed.state, "merged");
-        assert!(parsed.merged_at.is_some());
-        assert!(parsed.closed_at.is_some());
-        assert_eq!(parsed.labels, vec!["performance", "desktop"]);
+        assert_eq!(parsed.summary.state, "merged");
+        assert!(parsed.summary.merged_at.is_some());
+        assert!(parsed.summary.closed_at.is_some());
+        assert_eq!(parsed.summary.labels, vec!["performance", "desktop"]);
         // A settled pull request never asks for attention and is never ready.
-        assert!(parsed.attention_reasons.is_empty());
-        assert!(!parsed.ready_to_merge);
+        assert!(parsed.summary.attention_reasons.is_empty());
+        assert!(!parsed.summary.ready_to_merge);
     }
 
     #[test]
@@ -3720,7 +3870,7 @@ mod tests {
         )
         .unwrap();
         let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
-        assert_eq!(parsed.state, "merged");
+        assert_eq!(parsed.summary.state, "merged");
     }
 
     #[test]
@@ -3740,9 +3890,49 @@ mod tests {
         )
         .unwrap();
         let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
-        assert_eq!(parsed.state, "open");
-        assert!(parsed.merged_at.is_none());
-        assert!(parsed.closed_at.is_none());
+        assert_eq!(parsed.summary.state, "open");
+        assert!(parsed.summary.merged_at.is_none());
+        assert!(parsed.summary.closed_at.is_none());
+    }
+
+    #[test]
+    fn pull_request_head_repository_requires_consistent_host_identity() {
+        let value = serde_json::json!({
+            "number": 2252,
+            "title": "Qualify stack identity",
+            "state": "OPEN",
+            "url": "https://github.com/brightwave-inc/tidebreak/pull/2252",
+            "headRepository": {
+                "name": "tidebreak",
+                "nameWithOwner": "Thet/Tidebreak"
+            },
+            "headRepositoryOwner": {"login": "thet"},
+            "headRefName": "thet/stack-child",
+            "baseRefName": "thet/stack-parent"
+        });
+        let parsed = parse_pull_request(&repository_ref(), &value, &[]).unwrap();
+        assert_eq!(
+            parsed.head_repository,
+            StackRepositoryIdentity::new("github.com", "thet", "tidebreak")
+        );
+
+        let conflicting = serde_json::json!({
+            "number": 2253,
+            "title": "Reject conflicting identity",
+            "state": "OPEN",
+            "url": "https://github.com/brightwave-inc/tidebreak/pull/2253",
+            "headRepository": {
+                "name": "tidebreak",
+                "nameWithOwner": "alice/tidebreak"
+            },
+            "headRepositoryOwner": {"login": "bob"},
+            "headRefName": "stack-child",
+            "baseRefName": "stack-parent"
+        });
+        assert!(parse_pull_request(&repository_ref(), &conflicting, &[])
+            .unwrap()
+            .head_repository
+            .is_none());
     }
 
     #[test]

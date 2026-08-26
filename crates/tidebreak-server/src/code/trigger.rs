@@ -525,7 +525,6 @@ async fn sweep_pull_requests(
                 continue;
             }
         };
-        let parents = super::reconcile::stack_parents_by_head(&repo_facts);
         let mut stale = Vec::new();
         for number in numbers {
             let fresh = repo_facts.iter().find(|fact| {
@@ -540,12 +539,8 @@ async fn sweep_pull_requests(
                 continue;
             };
             let digest = super::pr_facts::digest_from_fact(fact);
-            let stack_parent = parents
-                .get(&fact.base_branch)
-                .copied()
-                .filter(|parent| *parent != fact.number);
             for work in repository_work {
-                claim_fires_from_row(runtime, owner, work, &digest, stack_parent).await;
+                claim_fires_from_row(runtime, owner, work, &digest).await;
             }
         }
         if !stale.is_empty() {
@@ -617,7 +612,6 @@ async fn claim_fires_from_row(
     owner: &OwnerId,
     work: &RepositoryWork,
     digest: &PullRequestDigest,
-    stack_parent: Option<u64>,
 ) {
     // Without a head SHA the fire cannot be fingerprinted, and a fire that
     // cannot be bounded would repeat every tick.
@@ -627,22 +621,6 @@ async fn claim_fires_from_row(
     let Some(condition) = classify_trigger_condition(digest) else {
         return;
     };
-    // A stacked child is behind or blocked *because of its parent*
-    // (decision 62). Firing Behind or ReviewRequired at it would send an
-    // agent to rebase onto a branch that moves with every parent push.
-    if stack_parent.is_some()
-        && matches!(
-            condition,
-            CodeTriggerCondition::Behind | CodeTriggerCondition::ReviewRequired
-        )
-    {
-        debug!(
-            number = digest.number,
-            parent = stack_parent,
-            "code-mode trigger held a stacked child's fire"
-        );
-        return;
-    }
     let Some(workspaces) = work.workspaces_by_number.get(&digest.number) else {
         return;
     };
