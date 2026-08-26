@@ -5915,7 +5915,8 @@ async fn an_approval_is_abandoned_when_its_tool_call_resolves_undecided() {
 
 #[tokio::test]
 async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
-    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_approvals(CapLevel::Supported);
+    let (router, token, runtime, dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
@@ -5932,10 +5933,9 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
         }))
         .send()
         .await
-        .unwrap()
-        .json::<serde_json::Value>()
-        .await
         .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session = session.json::<serde_json::Value>().await.unwrap();
     let session_id = json_id(&session).parse::<CodeSessionId>().unwrap();
     let turn = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
