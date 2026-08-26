@@ -4302,7 +4302,8 @@ impl CodeRuntime {
                             .into_iter()
                             .collect();
                     }
-                    (levels, catalog_known || !levels.is_empty())
+                    let reasoning_known = catalog_known || !levels.is_empty();
+                    (levels, reasoning_known)
                 }
                 (Some(_), None) => (Vec::new(), catalog_known),
             }
