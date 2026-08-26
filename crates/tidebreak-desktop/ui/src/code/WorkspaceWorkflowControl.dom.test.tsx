@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ApiClient } from "../api/client";
+import { HttpError, type ApiClient } from "../api/client";
 import type {
   CodeCheckLogsSnapshot,
   CodeWorkspacePrSnapshot,
@@ -171,5 +177,120 @@ describe("Fix CI", () => {
     const pending = useCodeUiStore.getState().pendingComposerPrompt;
     expect(pending?.text).toContain("Inspect the latest failing CI logs");
     expect(pending?.text).not.toContain("already downloaded");
+  });
+});
+
+const readyPr: CodeWorkspacePrSnapshot = {
+  ...failingPr,
+  pr: {
+    number: 184,
+    url: "https://github.com/example/app/pull/184",
+    state: "open",
+    title: "Fix login",
+    head_branch: "tidebreak/fix-login",
+    base_branch: "main",
+    head_sha: "abcdef1234567890",
+    mergeable: "mergeable",
+    merge_state_status: "clean",
+    checks: [{ name: "ci", bucket: "pass" }],
+  },
+};
+
+function renderMergeControl(error?: HttpError) {
+  const mergeCodePr = vi.fn(async () => {
+    if (error) throw error;
+    return {
+      ...readyPr,
+      pr: { ...readyPr.pr!, state: "merged", merged: true },
+    };
+  });
+  const refresh = vi.fn(async () => {});
+  const adopt = vi.fn();
+  const setMutationError = vi.fn();
+  const mergeResource: CodeWorkspacePrResource = {
+    data: readyPr,
+    error: null,
+    refreshing: false,
+    refresh,
+    adopt,
+    busy: null,
+    mutationError: null,
+    setMutationError,
+    refreshFromHost: async () => undefined,
+    runMutation: async (_mutation, operation) => operation(),
+  };
+  render(
+    <WorkspaceWorkflowControl
+      client={
+        {
+          pushCodeWorkspace: vi.fn(),
+          createCodePullRequest: vi.fn(),
+          markCodePrReady: vi.fn(),
+          mergeCodePr,
+          startCodeWatch: vi.fn(),
+          stopCodeWatch: vi.fn(),
+          writeCodeCheckLogs: vi.fn(),
+        } as unknown as ApiClient
+      }
+      workspaceId="ws-1"
+      branchName="tidebreak/fix-login"
+      baseRef="main"
+      resource={mergeResource}
+      onOpenSourceControl={vi.fn()}
+    />,
+  );
+  return { mergeCodePr, refresh, adopt, setMutationError };
+}
+
+describe("Merge", () => {
+  it("submits the pull request and head shown in the confirmation", async () => {
+    const { mergeCodePr, adopt } = renderMergeControl();
+    await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Merge" }),
+    );
+
+    await waitFor(() =>
+      expect(mergeCodePr).toHaveBeenCalledWith("ws-1", {
+        target: {
+          repository: {
+            host: "github.com",
+            owner: "example",
+            name: "app",
+          },
+          number: 184,
+        },
+        expected_head_sha: "abcdef1234567890",
+        method: "squash",
+        auto: false,
+      }),
+    );
+    expect(adopt).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "workspace_dirty",
+    "workspace_unpushed",
+    "pr_head_changed",
+    "pr_target_changed",
+  ])("keeps refresh available after %s", async (kind) => {
+    const { refresh, setMutationError } = renderMergeControl(
+      new HttpError(409, `409: ${kind}`, kind),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Merge" }),
+    );
+
+    const refreshButton = await screen.findByRole("button", {
+      name: "Refresh workspace status",
+    });
+    expect(setMutationError).toHaveBeenCalledWith(
+      expect.stringContaining("Refresh workspace status"),
+    );
+    await userEvent.click(refreshButton);
+    expect(refresh).toHaveBeenCalledOnce();
   });
 });

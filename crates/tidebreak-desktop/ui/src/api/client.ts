@@ -97,6 +97,7 @@ import {
   type CodeWorkspaceTree,
   type CodeWorkspacePrSnapshot,
   type CodeWorkspacePullRequests,
+  type PullRequestDigest,
   type CodeTriggerAction,
   type CodeTriggerCondition,
   type CodeTriggerSnapshot,
@@ -206,6 +207,19 @@ export type DeliveryRequestOptions = {
   refreshAuth?: boolean;
 };
 
+export type CodeWorkspaceMergeRequest = {
+  target: CodeDeliveryPullRequestTarget;
+  expected_head_sha: string;
+  method: CodePrMergeMethod;
+  auto?: boolean;
+};
+
+type CodeWorkspaceMergeResult = {
+  target: CodeDeliveryPullRequestTarget;
+  accepted_head_sha: string;
+  status: CodeWorkspacePrSnapshot;
+};
+
 /**
  * The size below which a transfer is not worth reporting on.
  *
@@ -289,6 +303,10 @@ async function throwIfNotOk(response: Response): Promise<void> {
 
 export class ApiClient {
   private accessToken: string;
+  private readonly workspaceMergeTargets = new Map<
+    string,
+    Pick<CodeWorkspaceMergeRequest, "target" | "expected_head_sha">
+  >();
 
   constructor(
     readonly baseUrl: string,
@@ -2728,7 +2746,7 @@ export class ApiClient {
     workspaceId: string,
     body: { title?: string; body?: string } = {},
   ): Promise<CodeWorkspacePrSnapshot> {
-    return requireParsed(
+    const snapshot = requireParsed(
       parseCodeWorkspacePr(
         await this.json(
           `/code/workspaces/${encodeURIComponent(workspaceId)}/git/pr`,
@@ -2741,12 +2759,14 @@ export class ApiClient {
       ),
       "code pull request",
     );
+    this.rememberWorkspaceMergeTarget(workspaceId, snapshot);
+    return snapshot;
   }
 
   async getCodeWorkspacePr(
     workspaceId: string,
   ): Promise<CodeWorkspacePrSnapshot> {
-    return requireParsed(
+    const snapshot = requireParsed(
       parseCodeWorkspacePr(
         await this.json(
           `/code/workspaces/${encodeURIComponent(workspaceId)}/pr`,
@@ -2757,6 +2777,8 @@ export class ApiClient {
       ),
       "code pull request",
     );
+    this.rememberWorkspaceMergeTarget(workspaceId, snapshot);
+    return snapshot;
   }
 
   /** Every pull request attributed to the workspace (decision 62). */
@@ -2780,7 +2802,7 @@ export class ApiClient {
   async refreshCodeWorkspacePr(
     workspaceId: string,
   ): Promise<CodeWorkspacePrSnapshot> {
-    return requireParsed(
+    const snapshot = requireParsed(
       parseCodeWorkspacePr(
         await this.json(
           `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/refresh`,
@@ -2789,6 +2811,8 @@ export class ApiClient {
       ),
       "code pull request",
     );
+    this.rememberWorkspaceMergeTarget(workspaceId, snapshot);
+    return snapshot;
   }
 
   /**
@@ -2922,7 +2946,7 @@ export class ApiClient {
    * prompt. Returns the post-change snapshot.
    */
   async markCodePrReady(workspaceId: string): Promise<CodeWorkspacePrSnapshot> {
-    return requireParsed(
+    const snapshot = requireParsed(
       parseCodeWorkspacePr(
         await this.json(
           `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/ready`,
@@ -2931,6 +2955,8 @@ export class ApiClient {
       ),
       "code pull request",
     );
+    this.rememberWorkspaceMergeTarget(workspaceId, snapshot);
+    return snapshot;
   }
 
   /**
@@ -2939,24 +2965,51 @@ export class ApiClient {
    */
   async mergeCodePr(
     workspaceId: string,
-    body: { method: CodePrMergeMethod; auto?: boolean },
+    body:
+      | CodeWorkspaceMergeRequest
+      | { method: CodePrMergeMethod; auto?: boolean },
   ): Promise<CodeWorkspacePrSnapshot> {
-    return requireParsed(
-      parseCodeWorkspacePr(
-        await this.json(
-          `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/merge`,
-          {
-            method: "POST",
-            headers: this.headers(true),
-            body: JSON.stringify({
-              method: body.method,
-              auto: body.auto ?? false,
-            }),
-          },
-        ),
+    const exact =
+      "target" in body && "expected_head_sha" in body
+        ? {
+            target: body.target,
+            expected_head_sha: body.expected_head_sha,
+          }
+        : this.workspaceMergeTargets.get(workspaceId);
+    if (!exact) {
+      throw new HttpError(
+        409,
+        "409: Refresh the pull request before merging it.",
+        "pr_identity_missing",
+      );
+    }
+    const request: CodeWorkspaceMergeRequest = {
+      ...exact,
+      method: body.method,
+      auto: body.auto ?? false,
+    };
+    const result = parseCodeWorkspaceMergeResult(
+      await this.json(
+        `/code/workspaces/${encodeURIComponent(workspaceId)}/pr/merge`,
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(request),
+        },
       ),
-      "code pull request",
+      request,
     );
+    this.rememberWorkspaceMergeTarget(workspaceId, result.status);
+    return result.status;
+  }
+
+  private rememberWorkspaceMergeTarget(
+    workspaceId: string,
+    snapshot: CodeWorkspacePrSnapshot,
+  ): void {
+    const exact = snapshot.pr ? mergeTargetFromDigest(snapshot.pr) : null;
+    if (exact) this.workspaceMergeTargets.set(workspaceId, exact);
+    else this.workspaceMergeTargets.delete(workspaceId);
   }
 
   async runCodeWorkspaceAction(
@@ -3218,6 +3271,94 @@ export class ApiClient {
 function requireParsed<T>(value: T | null, label: string): T {
   if (!value) throw new Error(`${label} response contains invalid data`);
   return value;
+}
+
+function mergeTargetFromDigest(
+  pr: PullRequestDigest,
+): Pick<CodeWorkspaceMergeRequest, "target" | "expected_head_sha"> | null {
+  if (!pr.url || !pr.head_sha) return null;
+  let url: URL;
+  try {
+    url = new URL(pr.url);
+  } catch {
+    return null;
+  }
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (
+    parts.length !== 4 ||
+    parts[2] !== "pull" ||
+    Number(parts[3]) !== pr.number ||
+    !url.hostname
+  ) {
+    return null;
+  }
+  return {
+    target: {
+      repository: {
+        host: url.hostname,
+        owner: parts[0],
+        name: parts[1],
+      },
+      number: pr.number,
+    },
+    expected_head_sha: pr.head_sha,
+  };
+}
+
+function parseCodeWorkspaceMergeResult(
+  value: unknown,
+  expected: CodeWorkspaceMergeRequest,
+): CodeWorkspaceMergeResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("code pull request merge response contains invalid data");
+  }
+  const record = value as Record<string, unknown>;
+  const target = record.target as
+    | {
+        repository?: { host?: unknown; owner?: unknown; name?: unknown };
+        number?: unknown;
+      }
+    | undefined;
+  const repository = target?.repository;
+  const acceptedHead = record.accepted_head_sha;
+  const status = parseCodeWorkspacePr(record.status);
+  if (
+    !repository ||
+    typeof repository.host !== "string" ||
+    typeof repository.owner !== "string" ||
+    typeof repository.name !== "string" ||
+    typeof target.number !== "number" ||
+    typeof acceptedHead !== "string" ||
+    !status ||
+    !sameRepository(repository, expected.target.repository) ||
+    target.number !== expected.target.number ||
+    acceptedHead !== expected.expected_head_sha
+  ) {
+    throw new Error("code pull request merge response contains invalid data");
+  }
+  return {
+    target: {
+      repository: {
+        host: repository.host,
+        owner: repository.owner,
+        name: repository.name,
+      },
+      number: target.number,
+    },
+    accepted_head_sha: acceptedHead,
+    status,
+  };
+}
+
+function sameRepository(
+  left: { host: string; owner: string; name: string },
+  right: { host: string; owner: string; name: string },
+): boolean {
+  return (
+    left.host.toLowerCase() === right.host.toLowerCase() &&
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.name.toLowerCase() === right.name.toLowerCase()
+  );
 }
 
 function encodeUtf8Base64(text: string): string {

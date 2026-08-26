@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { HttpError } from "../api/client";
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
 import {
   composePrPrompt,
   resolveWorkflowShortcut,
+  workspaceMergeConflictMessage,
+  workspaceMergeIdentity,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkflowShortcut,
@@ -21,7 +24,13 @@ const CLEAN: CodeWorkspacePrSnapshot = {
 };
 
 function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
-  return { number: 41, state: "open", ...partial };
+  return {
+    number: 41,
+    state: "open",
+    url: "https://github.com/acme/app/pull/41",
+    head_sha: "abc123456789",
+    ...partial,
+  };
 }
 
 describe("workspaceWorkflowModel", () => {
@@ -172,7 +181,10 @@ describe("workspaceWorkflowModel", () => {
   });
 
   it("does not call an incomplete PR ready", () => {
-    const model = workspaceWorkflowModel({ ...CLEAN, pr: pr({}) });
+    const model = workspaceWorkflowModel({
+      ...CLEAN,
+      pr: pr({ url: undefined, head_sha: undefined }),
+    });
     expect(model.summary).toBe("#41 · Checking");
     expect(model.stage).toBe("checking");
     expect(model.secondary).not.toContain("merge");
@@ -419,5 +431,40 @@ describe("composePrPrompt", () => {
     expect(prompt).toContain("Do not merge.");
     // A workspace without a recorded base still gets a sendable request.
     expect(composePrPrompt(" ")).toContain("the default branch");
+  });
+});
+
+describe("workspace merge identity", () => {
+  it("binds the request to the repository, number, and displayed head", () => {
+    expect(workspaceMergeIdentity(pr({}))).toEqual({
+      target: {
+        repository: { host: "github.com", owner: "acme", name: "app" },
+        number: 41,
+      },
+      expected_head_sha: "abc123456789",
+    });
+    expect(
+      workspaceMergeIdentity(
+        pr({ url: "https://github.com/acme/other/pull/42" }),
+      ),
+    ).toBeNull();
+    expect(workspaceMergeIdentity(pr({ head_sha: undefined }))).toBeNull();
+  });
+
+  it("marks mutable precondition failures as refreshable", () => {
+    const changedHead = workspaceMergeConflictMessage(
+      new HttpError(
+        409,
+        "409: pull request head changed from abc12345 to def67890",
+        "pr_head_changed",
+      ),
+    );
+    expect(changedHead).toContain("Refresh workspace status");
+    expect(changedHead).not.toContain("409:");
+    expect(
+      workspaceMergeConflictMessage(
+        new HttpError(409, "409: branch protection", "pr_not_mergeable"),
+      ),
+    ).toBeNull();
   });
 });

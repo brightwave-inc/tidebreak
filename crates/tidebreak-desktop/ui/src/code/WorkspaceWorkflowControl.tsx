@@ -44,6 +44,8 @@ import {
   checkSummary,
   composePrPrompt,
   resolveWorkflowShortcut,
+  workspaceMergeConflictMessage,
+  workspaceMergeIdentity,
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
@@ -120,6 +122,10 @@ export function WorkspaceWorkflowControl({
   const statusLabel = model.pr
     ? model.summary.replace(/^#\d+\s*·\s*/, "")
     : model.summary;
+  const detailsTitle =
+    model.pr && resource.mutationError?.includes("Refresh workspace status")
+      ? `Pull request #${model.pr.number} changed`
+      : model.title;
   const activeChecks =
     model.pr?.checks?.filter(
       (check) => check.bucket === "fail" || check.bucket === "pending",
@@ -261,6 +267,14 @@ export function WorkspaceWorkflowControl({
   async function mergePr(auto = false, method: CodePrMergeMethod = "squash") {
     const pr = model.pr;
     if (!pr) return;
+    const exact = workspaceMergeIdentity(pr);
+    if (!exact) {
+      setDetailsOpen(true);
+      resource.setMutationError(
+        "Refresh workspace status before merging. The pull request identity or head commit is incomplete.",
+      );
+      return;
+    }
     setDetailsOpen(false);
     const base = pr.base_branch ?? "its base branch";
     // Two forms of the same verb: the immediate merge reads as something done
@@ -292,17 +306,17 @@ export function WorkspaceWorkflowControl({
             : `Merge #${pr.number}?`,
       description:
         kind === "merge"
-          ? `The pull request is ${landed} into ${base} on GitHub.`
+          ? `The pull request is ${landed} into ${base} on GitHub. Tidebreak checks the workspace and pull request again before it sends the merge.`
           : kind === "merge_when_ready"
-            ? `GitHub adds the pull request to the merge queue and ${lands} it into ${base} once the remaining requirements pass.`
-            : `GitHub ${lands} the pull request into ${base} once the remaining requirements pass.`,
+            ? `GitHub adds the pull request to the merge queue and ${lands} it into ${base} once the remaining requirements pass. Tidebreak checks the workspace and pull request again first.`
+            : `GitHub ${lands} the pull request into ${base} once the remaining requirements pass. Tidebreak checks the workspace and pull request again first.`,
       confirmLabel,
     });
     if (!ok) return;
     try {
       const next = await resource.runMutation(
         auto ? "auto_merge" : "merge",
-        () => client.mergeCodePr(workspaceId, { method, auto }),
+        () => client.mergeCodePr(workspaceId, { ...exact, method, auto }),
       );
       if (!next) return;
       resource.adopt(next);
@@ -314,10 +328,13 @@ export function WorkspaceWorkflowControl({
             : "Merged",
       );
     } catch (err) {
-      // The host's own refusal is the useful sentence here, so it goes to the
-      // status line rather than being flattened into a generic failure.
-      const message =
-        err instanceof HttpError && err.kind === "pr_not_mergeable"
+      const refreshable = workspaceMergeConflictMessage(err);
+      // Keep the pull request context and refresh control visible when local
+      // or host state changed after confirmation.
+      if (refreshable) setDetailsOpen(true);
+      const message = refreshable
+        ? refreshable
+        : err instanceof HttpError && err.kind === "pr_not_mergeable"
           ? err.message
           : friendlyErrorMessage(err, "Could not merge");
       resource.setMutationError(message);
@@ -514,7 +531,7 @@ export function WorkspaceWorkflowControl({
                   id={popoverTitleId}
                   className="text-md font-semibold leading-5"
                 >
-                  {model.title}
+                  {detailsTitle}
                 </h2>
                 <p className="text-foreground-subtle mt-0.5 text-xs leading-4">
                   {resource.mutationError ?? resource.error ?? model.detail}

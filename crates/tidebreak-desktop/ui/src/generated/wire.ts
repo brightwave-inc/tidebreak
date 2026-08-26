@@ -2908,7 +2908,15 @@ export type McpViewSession = { frame_path: string, };
 /**
  * Body of `POST /code/workspaces/{id}/pr/merge`.
  */
-export type MergeCodePrBody = { method: CodePrMergeMethod, 
+export type MergeCodePrBody = {
+/**
+ * The repository and pull request shown in the confirmation.
+ */
+target: CodeDeliveryPullRequestTarget,
+/**
+ * The pull request head shown in the confirmation.
+ */
+expected_head_sha: string, method: CodePrMergeMethod,
 /**
  * True arms host auto-merge instead of merging immediately.
  */

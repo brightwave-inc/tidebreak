@@ -1,4 +1,9 @@
-import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
+import { HttpError } from "../api/client";
+import type {
+  CodeDeliveryPullRequestTarget,
+  CodeWorkspacePrSnapshot,
+  PullRequestDigest,
+} from "../api/types";
 import {
   prDirectMergeAction,
   prMergeControls,
@@ -53,6 +58,68 @@ export type WorkspaceWorkflowModel = {
   pr?: PullRequestDigest;
   checks?: PrCheckCounts;
 };
+
+export type WorkspaceMergeIdentity = {
+  target: CodeDeliveryPullRequestTarget;
+  expected_head_sha: string;
+};
+
+const REFRESHABLE_MERGE_CONFLICTS = new Set([
+  "pr_head_changed",
+  "pr_identity_missing",
+  "pr_target_changed",
+  "workspace_branch_changed",
+  "workspace_dirty",
+  "workspace_repository_changed",
+  "workspace_unpushed",
+  "workspace_upstream_missing",
+]);
+
+/** Exact pull request identity shown by the workspace UI. */
+export function workspaceMergeIdentity(
+  pr: PullRequestDigest,
+): WorkspaceMergeIdentity | null {
+  if (!pr.url || !pr.head_sha) return null;
+  let url: URL;
+  try {
+    url = new URL(pr.url);
+  } catch {
+    return null;
+  }
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (
+    parts.length !== 4 ||
+    parts[2] !== "pull" ||
+    Number(parts[3]) !== pr.number ||
+    !url.hostname
+  ) {
+    return null;
+  }
+  return {
+    target: {
+      repository: {
+        host: url.hostname,
+        owner: parts[0],
+        name: parts[1],
+      },
+      number: pr.number,
+    },
+    expected_head_sha: pr.head_sha,
+  };
+}
+
+/** A server merge rejection that needs a fresh local and host snapshot. */
+export function workspaceMergeConflictMessage(error: unknown): string | null {
+  if (
+    !(error instanceof HttpError) ||
+    !error.kind ||
+    !REFRESHABLE_MERGE_CONFLICTS.has(error.kind)
+  ) {
+    return null;
+  }
+  const message = error.message.replace(/^\d{3}:\s*/, "");
+  return `${message} Refresh workspace status, then review the merge again.`;
+}
 
 /** One compact model for the local Git path and the hosted PR path. */
 export function workspaceWorkflowModel(
@@ -278,14 +345,17 @@ function pullRequestWorkflow(pr: PullRequestDigest): WorkspaceWorkflowModel {
         secondary: withOpenPr(pr, []),
       };
     case "ready":
+      const exact = workspaceMergeIdentity(pr);
       return {
         ...common,
         stage: "ready",
         tone: "ready",
         summary: `#${pr.number} · Ready`,
         title: `Pull request #${pr.number} is ready`,
-        detail: checkSummary(status.checks) || "No blockers reported.",
-        primary: "merge",
+        detail: exact
+          ? checkSummary(status.checks) || "No blockers reported."
+          : "Refresh the pull request before merging it.",
+        primary: exact ? "merge" : pr.url ? "open_pr" : "watch_and_fix",
         secondary: withOpenPr(pr, ["watch_and_fix"]),
       };
     case "merged":
@@ -446,6 +516,12 @@ function mergeIfGreen(
   }
   const pr = model.pr;
   if (!pr) return { blocked: "No pull request yet" };
+  if (!workspaceMergeIdentity(pr)) {
+    return {
+      blocked:
+        "Refresh the pull request before merging it. Its repository or head commit is incomplete.",
+    };
+  }
   const action = prDirectMergeAction(pr);
   if (action?.kind === "merge") return { run: "merge" };
   if (action) return { autoMerge: true };

@@ -506,11 +506,13 @@ impl ScopedCode {
     pub(crate) async fn merge_workspace_pr(
         &self,
         id: WorkspaceId,
+        target: CodeDeliveryPullRequestTarget,
+        expected_head_sha: String,
         method: gh::MergeMethod,
         auto: bool,
-    ) -> Result<WorkspaceGitStatus, ServerError> {
+    ) -> Result<super::runtime::WorkspaceMergeOutcome, ServerError> {
         self.runtime
-            .merge_workspace_pr(&self.owner, id, method, auto)
+            .merge_workspace_pr(&self.owner, id, target, expected_head_sha, method, auto)
             .await
     }
 
