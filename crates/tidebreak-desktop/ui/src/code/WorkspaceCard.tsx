@@ -1,13 +1,15 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Archive,
   Bot,
   CheckCircle2,
   CircleAlert,
+  Copy,
   CornerDownRight,
   ExternalLink,
   Eye,
   FileCode2,
+  FolderOpen,
   GitBranch,
   GitPullRequest,
   LoaderCircle,
@@ -131,6 +133,7 @@ export function WorkspaceCard({
   const creating = workspace.status === "creating";
   const attentionMark = attentionMarkForDigest(digest);
   const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
+  const compactDetail = useCompactWorkspaceDetail();
   const watchActive = childSessions.some(
     (child) =>
       child.watch_state === "watching" ||
@@ -236,7 +239,7 @@ export function WorkspaceCard({
           </ContextMenuTrigger>
 
           <HoverCardContent
-            side="right"
+            side={compactDetail ? "bottom" : "right"}
             align="start"
             sideOffset={10}
             className="w-[22rem] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-[0_18px_48px_color-mix(in_oklch,var(--foreground)_16%,transparent)]"
@@ -251,6 +254,7 @@ export function WorkspaceCard({
               archived={archived}
               watchActive={watchActive}
               terminalOpen={terminalOpen}
+              commands={commands}
               onCommand={onCommand}
               onWorkflowAction={onWorkflowAction}
             />
@@ -316,6 +320,32 @@ export function WorkspaceCard({
   );
 }
 
+function useCompactWorkspaceDetail(): boolean {
+  const query = "(max-width: 639px)";
+  const [compact, setCompact] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(query).matches,
+  );
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const update = () => setCompact(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return compact;
+}
+
 const SUBAGENT_STATUS_LABELS: Record<CodeSubagentStatus, string> = {
   running: "Running",
   done: "Done",
@@ -338,6 +368,7 @@ function WorkspaceDetailPanel({
   archived,
   watchActive,
   terminalOpen,
+  commands,
   onCommand,
   onWorkflowAction,
 }: {
@@ -350,6 +381,7 @@ function WorkspaceDetailPanel({
   archived: boolean;
   watchActive: boolean;
   terminalOpen: boolean;
+  commands: readonly WorkspaceCommand[];
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
@@ -391,6 +423,10 @@ function WorkspaceDetailPanel({
   const putAwayLabel =
     workspace.status === "released" ? "Released" : "Archived";
   const prCountLabel = workspacePrChipSummary(digest?.pr_count);
+  const worktreeCommand = commands.find(
+    (command) =>
+      command.id === "open-worktree" || command.id === "copy-worktree",
+  );
 
   return (
     <div data-testid="workspace-hover-card">
@@ -541,6 +577,24 @@ function WorkspaceDetailPanel({
       </div>
 
       <div className="flex items-center gap-2 border-t border-border-subtle bg-muted/25 px-3 py-2">
+        {worktreeCommand && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs"
+            onClick={() => onCommand(worktreeCommand.id)}
+          >
+            {worktreeCommand.id === "open-worktree" ? (
+              <FolderOpen className="size-3" aria-hidden />
+            ) : (
+              <Copy className="size-3" aria-hidden />
+            )}
+            {worktreeCommand.id === "open-worktree"
+              ? "Open folder"
+              : "Copy path"}
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"

@@ -32,6 +32,7 @@ import {
 } from "./CodeUpdatesStore";
 import { FOCUS_RING, HOVER_TINT, RAIL_ICON_BUTTON } from "./interactive";
 import { findCodeTerminalTab } from "./codeChrome";
+import { canOpenLocalCodeWorktree } from "./codeWorktreeHost";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { RailSettingsMenu } from "./RailSettingsMenu";
 import {
@@ -109,6 +110,7 @@ export function CodeSidebar() {
   useEffect(() => connectCodeUpdates(client), [client]);
 
   const groups = arrangeWorkspaces(prefs.sortMode, repos, workspaces, digests);
+  const canOpenWorktree = canOpenLocalCodeWorktree();
 
   return (
     <SidebarFrame
@@ -201,6 +203,7 @@ export function CodeSidebar() {
                               digest?.attention ??
                               sessions[workspace.id]?.attention
                             )?.state.type === "manual",
+                          canOpenWorktree,
                         })
                   }
                   childSessions={watchChildren(

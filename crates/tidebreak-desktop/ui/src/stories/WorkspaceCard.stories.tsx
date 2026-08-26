@@ -1,8 +1,13 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
+import { toast } from "sonner";
 
-import { workspaceCommands } from "@/code/workspaceActions";
+import {
+  workspaceCommands,
+  worktreeOpenFailureNotice,
+} from "@/code/workspaceActions";
 import { WorkspaceCard } from "@/code/WorkspaceCard";
+import { Toaster } from "@/components/ui/sonner";
 import {
   archivedWorkspace,
   releasedWorkspace,
@@ -628,4 +633,81 @@ export const Rail: Story = {
       />
     </div>
   ),
+};
+
+/** A local workspace leads with the file manager action in its hover detail. */
+export const LocalWorktreeAction: Story = {
+  args: {
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      canOpenWorktree: true,
+    }),
+    detailDefaultOpen: true,
+  },
+};
+
+/** A remote or unsupported client keeps the path-copy fallback in the same place. */
+export const RemoteWorktreeFallback: Story = {
+  args: {
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      canOpenWorktree: false,
+    }),
+    detailDefaultOpen: true,
+  },
+};
+
+function RecoverableWorktreeFailure() {
+  const notice = worktreeOpenFailureNotice({
+    reason: "code_worktree_path_not_found",
+    detail: "/private/native/detail",
+  });
+  return (
+    <>
+      <WorkspaceCard
+        workspace={codeWorkspace}
+        digest={undefined}
+        session={undefined}
+        repoName="tidebreak"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          canOpenWorktree: true,
+        })}
+        detailDefaultOpen
+        onOpen={fn()}
+        onCommand={(command) => {
+          if (command !== "open-worktree") return;
+          toast.error(notice.title, {
+            description: notice.description,
+            action: { label: notice.actionLabel, onClick: fn() },
+          });
+        }}
+      />
+      <Toaster richColors duration={Number.POSITIVE_INFINITY} />
+    </>
+  );
+}
+
+/** A failed native open leaves a clear recovery action instead of disappearing. */
+export const WorktreeOpenFailure: Story = {
+  render: () => <RecoverableWorktreeFailure />,
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await body.findByRole("button", { name: "Open folder" }),
+    );
+    await waitFor(() =>
+      expect(body.getByText("Could not open worktree folder")).toBeVisible(),
+    );
+    await waitFor(() =>
+      expect(body.getByRole("button", { name: "Copy path" })).toBeVisible(),
+    );
+  },
 };
