@@ -564,7 +564,7 @@ pub(crate) async fn restore_worktree(
     branch: &str,
 ) -> Result<WorktreeOperation, WorktreeError> {
     let expected_tip = branch_tip(repo_root, branch).await?;
-    let mut operation =
+    let operation =
         reserve_worktree_target(repo_root, worktree_path, branch, &expected_tip).await?;
     if let Err(err) = require_branch_tip(repo_root, branch, &expected_tip).await {
         operation.rollback().await;
