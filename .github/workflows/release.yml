@@ -1262,6 +1262,18 @@ jobs:
             windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             windows-release-target-v1-${{ matrix.arch }}-
 
+      # The release version is a compile-time input. Keep dependency outputs
+      # from the warm cache, but rebuild every product that the release ships.
+      - name: Discard restored product binaries
+        run: |
+          rm -rf \
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe \
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe \
+            target/${{ matrix.target }}/release/tidebreak.exe \
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe \
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
