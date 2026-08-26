@@ -72,13 +72,13 @@ import {
   prWorkflowPrompt,
   type PrPromptAction,
 } from "./prActions";
+import { GithubAvatar } from "./GithubAvatar";
 import { PrCommentCard } from "./PrCommentCard";
 import {
   checkCounts,
   expandGithubEmojiShortcodes,
   fileStatusLabel,
   fileStatusTone,
-  githubAvatarUrl,
   mergeBlockedReason,
   orderPullRequestComments,
   pullRequestLifecycle,
@@ -579,7 +579,7 @@ function PrDetailHeader({
       </div>
 
       <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
-        <Avatar
+        <GithubAvatar
           login={summary.author}
           url={summary.author_avatar_url}
           className="size-4"
@@ -621,7 +621,7 @@ function PrDetailHeader({
               key={`assignee:${login}`}
               className="flex items-center gap-1 text-xs text-muted-foreground"
             >
-              <Avatar login={login} className="size-4" />
+              <GithubAvatar login={login} className="size-4" />
               {login}
             </span>
           ))}
@@ -631,7 +631,7 @@ function PrDetailHeader({
               className="flex items-center gap-1 text-xs text-muted-foreground"
               title={`Review requested from ${login}`}
             >
-              <Avatar login={login} className="size-4" />
+              <GithubAvatar login={login} className="size-4" />
               {login}
               <span className="text-2xs">(review requested)</span>
             </span>
@@ -1320,40 +1320,6 @@ export function CheckTone({
     return <Play className={cn("size-3.5 shrink-0", STATUS_MARK.pending)} />;
   }
   return <CircleDot className={cn("size-3.5 shrink-0", STATUS_MARK.neutral)} />;
-}
-
-function Avatar({
-  login,
-  url,
-  className,
-}: {
-  login: string | undefined;
-  url?: string;
-  className?: string;
-}) {
-  const [failed, setFailed] = useState(false);
-  const source = url ?? githubAvatarUrl(login);
-  if (!source || failed) {
-    return (
-      <span
-        className={cn(
-          "grid shrink-0 place-items-center rounded-full bg-muted text-2xs font-semibold uppercase text-muted-foreground",
-          className,
-        )}
-        aria-hidden
-      >
-        {(login ?? "?").slice(0, 2)}
-      </span>
-    );
-  }
-  return (
-    <img
-      src={source}
-      alt=""
-      className={cn("shrink-0 rounded-full object-cover", className)}
-      onError={() => setFailed(true)}
-    />
-  );
 }
 
 function InlineDetailError({

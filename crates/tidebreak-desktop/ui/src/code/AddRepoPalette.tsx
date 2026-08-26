@@ -49,6 +49,7 @@ import {
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { GithubAvatar } from "./GithubAvatar";
 import { useCodeUiStore } from "./CodeUiStore";
 import { STATUS_TEXT } from "./statusTone";
 import {
@@ -1342,13 +1343,15 @@ function GithubRepoField({
   const emptySuccess =
     !listFailed && listed.length === 0 && repositories !== null;
   const needle = query.trim().toLowerCase();
-  const matches = listed.filter((repository) => {
-    if (!needle) return true;
-    return (
-      repository.full_name.toLowerCase().includes(needle) ||
-      (repository.description ?? "").toLowerCase().includes(needle)
-    );
-  });
+  const matches = listed
+    .filter((repository) => {
+      if (!needle) return true;
+      return (
+        repository.full_name.toLowerCase().includes(needle) ||
+        (repository.description ?? "").toLowerCase().includes(needle)
+      );
+    })
+    .sort(compareGithubRepositories);
   const typed = query.trim();
   const typedIsNew =
     typed.includes("/") &&
@@ -1370,6 +1373,7 @@ function GithubRepoField({
         />
       ) : (
         <Popover
+          modal
           open={open}
           onOpenChange={(next) => {
             setOpen(next);
@@ -1389,22 +1393,38 @@ function GithubRepoField({
                 !value && "text-muted-foreground",
               )}
             >
-              <span className="truncate">{value || "Select a repository"}</span>
+              <span className="flex min-w-0 items-center gap-2">
+                {value && <GithubAvatar login={githubRepoOwner(value)} />}
+                <span className="truncate">
+                  {value || "Select a repository"}
+                </span>
+              </span>
               <ChevronDown className="size-4 shrink-0 opacity-50" />
             </Button>
           </PopoverTrigger>
           <PopoverContent
             align="start"
-            className="w-[var(--radix-popover-trigger-width)] p-0"
+            collisionPadding={12}
+            className="w-[var(--radix-popover-trigger-width)] overflow-hidden p-0"
           >
-            <Command shouldFilter={false} label="Repositories">
+            <Command
+              shouldFilter={false}
+              label="Repositories"
+              className="h-auto"
+            >
               <CommandInput
                 value={query}
                 onValueChange={setQuery}
                 placeholder="Search or type owner/repo"
                 aria-label="Search repositories"
               />
-              <CommandList className="max-h-56">
+              <CommandList
+                className="max-h-64 overflow-y-auto overscroll-contain"
+                style={{
+                  maxHeight:
+                    "min(16rem, calc(var(--radix-popover-content-available-height, 100vh) - 3.25rem))",
+                }}
+              >
                 <CommandEmpty className="px-3 py-2 text-xs text-muted-foreground">
                   {listFailed
                     ? "Suggestions did not load. Type owner/repo to clone."
@@ -1421,6 +1441,7 @@ function GithubRepoField({
                         setOpen(false);
                       }}
                     >
+                      <GithubAvatar login={githubRepoOwner(typed)} />
                       <span className="truncate">{typed}</span>
                     </CommandItem>
                   </CommandGroup>
@@ -1436,6 +1457,9 @@ function GithubRepoField({
                           setOpen(false);
                         }}
                       >
+                        <GithubAvatar
+                          login={githubRepoOwner(repository.full_name)}
+                        />
                         <span className="flex min-w-0 flex-col">
                           <span className="truncate">
                             {repository.full_name}
@@ -1698,6 +1722,28 @@ function ProbeFailure({
         {busy ? "Retrying…" : action}
       </Button>
     </div>
+  );
+}
+
+function githubRepoOwner(fullName: string): string | undefined {
+  const owner = fullName.split("/")[0]?.trim();
+  return owner || undefined;
+}
+
+function compareGithubRepositories(
+  left: CodeGithubRepository,
+  right: CodeGithubRepository,
+): number {
+  const [leftOwner = "", leftName = ""] = left.full_name
+    .toLowerCase()
+    .split("/");
+  const [rightOwner = "", rightName = ""] = right.full_name
+    .toLowerCase()
+    .split("/");
+  return (
+    leftOwner.localeCompare(rightOwner) ||
+    leftName.localeCompare(rightName) ||
+    left.full_name.localeCompare(right.full_name)
   );
 }
 
