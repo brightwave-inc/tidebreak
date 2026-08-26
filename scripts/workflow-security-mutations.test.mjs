@@ -535,8 +535,14 @@ const mutations = [
     file: ".github/workflows/release.yml",
     expected: "restored product binaries are discarded before the packaging build",
     mutate: (source) =>
-      editWorkflowJob(source, "build_linux", (job) =>
-        job.replace(
+      editWorkflowJob(source, "build_linux", (job) => {
+        if (/      - name: Discard restored product binaries\n/.test(job)) {
+          return job.replace(
+            /\n\s+target\/\$\{\{ matrix\.target \}\}\/release\/tidebreak \\\n/,
+            "\n",
+          );
+        }
+        return job.replace(
           "      - name: Install Linux packaging dependencies\n",
           `      - name: Restore unsigned Rust build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -554,8 +560,8 @@ const mutations = [
 
       - name: Install Linux packaging dependencies
 `,
-        ),
-      ),
+        );
+      }),
   },
   {
     name: "README macOS download matches an uploaded asset",
