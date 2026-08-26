@@ -69,6 +69,7 @@ export function StartSessionPrompt({
     mode: PermissionMode,
     message: string,
     model?: string,
+    draft?: string,
   ) => Promise<void> | void;
   client?: Pick<ApiClient, "listCodeHarnessModels"> &
     Partial<Pick<ApiClient, "startHarnessInstall" | "getHarnessDoctor">>;
@@ -87,6 +88,7 @@ export function StartSessionPrompt({
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const submittedDraft = useRef<string | null>(null);
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
@@ -229,9 +231,21 @@ export function StartSessionPrompt({
             }));
           }}
           onModeChange={onSelectMode}
+          onSubmitStart={(draft) => {
+            submittedDraft.current = draft;
+          }}
           onSend={async (message) => {
             if (!selected) return;
-            await onStart(selected.kind, mode, message, model);
+            const draft = submittedDraft.current ?? message;
+            try {
+              if (draft === message) {
+                await onStart(selected.kind, mode, message, model);
+              } else {
+                await onStart(selected.kind, mode, message, model, draft);
+              }
+            } finally {
+              submittedDraft.current = null;
+            }
           }}
           onInterrupt={() => undefined}
         />

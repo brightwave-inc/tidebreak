@@ -505,6 +505,38 @@ describe("CodeComposer", () => {
     expect(box).toHaveValue("list the files");
   });
 
+  it("admits one send while the first request is pending", async () => {
+    let resolveSend!: () => void;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "send this once" } });
+    const send = screen.getByRole("button", { name: "Send message" });
+
+    fireEvent.click(send);
+    fireEvent.click(send);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(send).toBeDisabled();
+
+    resolveSend();
+    await act(async () => Promise.resolve());
+    fireEvent.change(box, { target: { value: "send another message" } });
+    expect(send).toBeEnabled();
+  });
+
   it("changes the selected harness model", async () => {
     const user = userEvent.setup();
     const onModelChange = vi.fn();

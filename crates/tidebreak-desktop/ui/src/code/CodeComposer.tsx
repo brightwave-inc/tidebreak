@@ -95,6 +95,14 @@ function appendComposerPrompt(current: string, prompt: string): string {
   return `${existing}\n\n${offered}`;
 }
 
+function appendRecoveredDraft(current: string, recovered: string): string {
+  if (!current) return recovered;
+  if (current === recovered || current.endsWith(`\n\n${recovered}`)) {
+    return current;
+  }
+  return `${current.trimEnd()}\n\n${recovered}`;
+}
+
 export function PermissionModePicker({
   value,
   availableModes = MODES,
@@ -641,6 +649,8 @@ export function CodeComposer({
   slashCommands,
   searchPaths,
   workspaceFiles,
+  recovery,
+  onSubmitStart,
   onSend,
   onSteer,
   onInterrupt,
@@ -692,6 +702,13 @@ export function CodeComposer({
    * message. A fork's transcript arrives this way.
    */
   workspaceFiles?: ComposerWorkspaceFiles;
+  /** A refused first turn restored after the start composer has unmounted. */
+  recovery?: {
+    id: string;
+    draft: string;
+  };
+  /** Capture the exact editable draft before workspace-file paths are added. */
+  onSubmitStart?: (draft: string) => void;
   onSend: (
     message: string,
     attachments?: readonly { blob_id: string; media_type: string }[],
@@ -717,11 +734,18 @@ export function CodeComposer({
   );
   const [selectedFastMode, setSelectedFastMode] = useState(fastMode);
   const [notice, setNotice] = useState<{ text: string } | null>(null);
+  const [submitPending, setSubmitPending] = useState(false);
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
   const draftRef = useRef("");
   const pastedTextsRef = useRef<PastedTextAttachment[]>([]);
+  const appliedRecoveryRef = useRef<{
+    id: string;
+    draft: string;
+  } | null>(null);
+  const mountedRef = useRef(true);
+  const submitPendingRef = useRef(false);
   const steerRequestRef = useRef(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const images = useImageAttachments(
@@ -773,10 +797,44 @@ export function CodeComposer({
       : undefined;
 
   const pendingPrompt = useCodeUiStore((state) => state.pendingComposerPrompt);
+  const recoveryId = recovery?.id;
+  const recoveryDraft = recovery?.draft;
 
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const applied = appliedRecoveryRef.current;
+    if (!recoveryId || recoveryDraft === undefined) {
+      if (!applied) return;
+      appliedRecoveryRef.current = null;
+      setDraft((current) => {
+        if (current !== applied.draft) return current;
+        draftRef.current = "";
+        return "";
+      });
+      return;
+    }
+    setDraft((current) => {
+      const next = appendRecoveredDraft(current, recoveryDraft);
+      draftRef.current = next;
+      return next;
+    });
+    appliedRecoveryRef.current = { id: recoveryId, draft: recoveryDraft };
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLTextAreaElement>("[data-composer-input]")
+        ?.focus();
+    });
+  }, [recoveryDraft, recoveryId]);
 
   function updatePastedTexts(
     update: (
@@ -830,6 +888,7 @@ export function CodeComposer({
   }, [fastMode, sessionId]);
 
   async function submit() {
+    if (submitPendingRef.current) return;
     const submittedDraft = draft;
     const submittedPastedTexts = pastedTextsRef.current;
     const typed = messageWithPastedText(submittedDraft, submittedPastedTexts);
@@ -863,6 +922,9 @@ export function CodeComposer({
       },
     );
     const held = images.attachments;
+    submitPendingRef.current = true;
+    setSubmitPending(true);
+    onSubmitStart?.(submittedDraft);
     draftRef.current = "";
     setDraft("");
     pastedTextsRef.current = [];
@@ -901,6 +963,9 @@ export function CodeComposer({
         draftRef.current = submittedDraft;
         return submittedDraft;
       });
+    } finally {
+      submitPendingRef.current = false;
+      if (mountedRef.current) setSubmitPending(false);
     }
   }
 
@@ -988,7 +1053,7 @@ export function CodeComposer({
         busy={running}
         cancelError={null}
         cancelPending={false}
-        disabled={Boolean(disabled)}
+        disabled={Boolean(disabled || submitPending)}
         draft={draft}
         history={history}
         harnessMenu={harnessMenu}
