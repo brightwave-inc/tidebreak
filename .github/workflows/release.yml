@@ -925,16 +925,6 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare App Store Connect key
-        env:
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: |
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
-          chmod 600 "$key_path"
-          echo "APPLE_API_KEY=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
-
       - name: Import Developer ID certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -993,7 +983,11 @@ jobs:
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify(config));
           '
 
-      - name: Bundle, sign, and notarize the prepared Tauri app
+      # The App Store Connect key is deliberately not in the environment yet:
+      # without notary credentials, Tauri signs the app and DMG but skips its
+      # own notarization submission. One submission of the DMG below covers
+      # the nested app too, halving the Apple round trips.
+      - name: Bundle and sign the prepared Tauri app
         working-directory: crates/tidebreak-desktop
         run: |
           tauri bundle \
@@ -1002,7 +996,19 @@ jobs:
             --bundles app,dmg \
             --ci
 
-      - name: Notarize and staple the DMG
+      - name: Prepare App Store Connect key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY=$APPLE_API_KEY_ID" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      # Notarizing the DMG registers tickets for the DMG and the identically
+      # signed app inside it, so both staples come from this one submission.
+      - name: Notarize the DMG, then staple the DMG and app
         env:
           RELEASE_TARGET: universal-apple-darwin
         run: |
@@ -1013,6 +1019,12 @@ jobs:
             exit 1
           }
           dmg_path="${dmg_paths[0]}"
+          app_paths=("$target_dir/$RELEASE_TARGET/release/bundle/macos/"*.app)
+          (( ${#app_paths[@]} == 1 )) && [[ -d "${app_paths[0]}" ]] || {
+            echo "Expected exactly one app bundle to staple for $RELEASE_TARGET" >&2
+            exit 1
+          }
+          app_path="${app_paths[0]}"
 
           submission_output="$(xcrun notarytool submit "$dmg_path" \
             --key "$APPLE_API_KEY_PATH" \
@@ -1036,6 +1048,8 @@ jobs:
 
           xcrun stapler staple "$dmg_path"
           xcrun stapler validate "$dmg_path"
+          xcrun stapler staple "$app_path"
+          xcrun stapler validate "$app_path"
 
       - name: Verify and collect signed artifacts
         env:
@@ -1244,6 +1258,9 @@ jobs:
           key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
             windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            windows-release-target-v1-${{ matrix.arch }}-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -1258,8 +1275,10 @@ jobs:
           add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
-          # No cache-warming workflow exists for Windows, so this
-          # credential-free prerequisite is the registry cache's single writer.
+          # The Warm Windows release cache workflow writes this registry cache
+          # on pushes to main. This credential-free prerequisite stays a
+          # fallback writer for releases cut before the warm run finishes;
+          # a duplicate save against an existing key is skipped harmlessly.
           save-if: true
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -1644,6 +1663,45 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.validate.outputs.sha }}
+
+      # This credentialed job never saves a cache (a default-branch cache
+      # writer must not run code from a manually dispatched release), but it
+      # restores the archive the Warm Linux release cache workflow saved from
+      # main so the packaging build recompiles as little as possible.
+      - name: Restore unsigned Rust build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/tidebreak
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
+          key: linux-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+          restore-keys: |
+            linux-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            linux-release-target-v1-${{ matrix.arch }}-
+
+      # The shipped binaries must be produced by this job, not lifted from a
+      # cache archive; only intermediate compiler outputs are worth keeping.
+      - name: Discard restored product binaries
+        run: |
+          rm -rf \
+            target/${{ matrix.target }}/release/tidebreak-desktop \
+            target/${{ matrix.target }}/release/tidebreak-host-broker \
+            target/${{ matrix.target }}/release/tidebreak \
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }} \
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
 
       - name: Install Linux packaging dependencies
         timeout-minutes: 8
@@ -2111,7 +2169,7 @@ jobs:
         if: ${{ needs.inspect_hosted.outputs.exists != 'true' }}
         run: |
           release_prefix="tidebreak/releases/v$TIDEBREAK_VERSION"
-          head_error="$RUNNER_TEMP/release-head-error"
+          export release_prefix
 
           content_type() {
             case "$1" in
@@ -2128,9 +2186,11 @@ jobs:
           }
 
           upload_immutable() {
+            set -euo pipefail
             local file="$1"
             local key="$2"
-            local digest remote_digest error
+            local head_error digest remote_digest error
+            head_error="$(mktemp)"
             digest="$(sha256sum "$file" | cut -d ' ' -f 1)"
             if remote_digest="$(aws s3api head-object \
               --bucket "$DOWNLOADS_S3_BUCKET" \
@@ -2154,11 +2214,14 @@ jobs:
               --cache-control 'public,max-age=31536000,immutable' \
               --metadata "sha256=$digest"
           }
+          export -f content_type upload_immutable
 
-          while IFS= read -r -d '' file; do
-            relative="${file#dist/}"
-            upload_immutable "$file" "$release_prefix/$relative"
-          done < <(find dist -type f ! -name manifest.json ! -name latest.json -print0)
+          # Upload the payload files in parallel; a failure in any child fails
+          # this step through xargs. The versioned manifest.json still uploads
+          # last and alone, so the resume preflight can only ever see a
+          # complete immutable prefix behind an existing manifest.
+          find dist -type f ! -name manifest.json ! -name latest.json -print0 \
+            | xargs -0 -n 1 -P 8 bash -c 'upload_immutable "$1" "$release_prefix/${1#dist/}"' _
           upload_immutable dist/manifest.json "$release_prefix/manifest.json"
 
       - name: Publish latest release metadata
@@ -2172,6 +2235,9 @@ jobs:
             --content-type application/json \
             --cache-control 'no-cache, max-age=0'
 
+      # Do not wait for the invalidation to complete: propagation takes 5-15
+      # minutes, the smoke test below cache-busts its own reads, and real
+      # clients only ever race a short no-cache TTL on these two objects.
       - name: Invalidate release metadata
         id: invalidate
         run: |
@@ -2181,9 +2247,6 @@ jobs:
             --query Invalidation.Id \
             --output text)"
           echo "id=$invalidation_id" >> "$GITHUB_OUTPUT"
-          aws cloudfront wait invalidation-completed \
-            --distribution-id "$DOWNLOADS_CLOUDFRONT_DISTRIBUTION_ID" \
-            --id "$invalidation_id"
 
       - name: Smoke test hosted release
         run: |

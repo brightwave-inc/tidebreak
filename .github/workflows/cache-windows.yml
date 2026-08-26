@@ -1,0 +1,217 @@
+name: Warm Windows release cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .cargo/**
+      - .github/workflows/cache-windows.yml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
+      - rust-toolchain.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Let the active main-tip compilation finish so a later release can consume
+  # its compiler outputs. GitHub retains at most one newer pending run.
+  group: tidebreak-windows-release-cache
+  cancel-in-progress: false
+
+jobs:
+  cargo-downloads:
+    name: Cargo dependency downloads
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+
+      - name: Fetch Cargo dependency downloads
+        run: |
+          cargo fetch --locked --target x86_64-pc-windows-msvc
+          cargo fetch --locked --target aarch64-pc-windows-msvc
+
+  warm:
+    name: Windows cache · ${{ matrix.arch }}
+    needs: cargo-downloads
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # GitHub throttles sccache's many small writes. Retain its existing
+      # object cache as a read-only fallback and persist build outputs below
+      # with one cache archive per architecture.
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Restore unsigned Rust build cache
+        id: rust-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+          key: windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            windows-release-target-v1-${{ matrix.arch }}-
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: crates/tidebreak-desktop/ui
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # whisper.cpp refuses MSVC on ARM. The cmake crate honors CMAKE_GENERATOR
+      # from the environment but not CMAKE_GENERATOR_TOOLSET, so Ninja plus
+      # clang-cl is the reliable way to keep aarch64-pc-windows-msvc while
+      # compiling the native C/C++ with Clang. This must match the release
+      # workflow exactly so the warmed CMake trees are reusable there.
+      - name: Use clang-cl for Windows ARM native code
+        if: ${{ matrix.arch == 'aarch64' }}
+        run: |
+          clang_cl=""
+          for candidate in \
+            "$(command -v clang-cl || true)" \
+            "/c/Program Files/LLVM/bin/clang-cl.exe" \
+            "/c/Program Files/LLVM/bin/clang-cl"; do
+            if [[ -n "$candidate" && -x "$candidate" ]]; then
+              clang_cl="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$clang_cl" ]]; then
+            echo "clang-cl is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          if ! command -v ninja >/dev/null; then
+            echo "ninja is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          clang_cl="$(cygpath -m "$clang_cl")"
+          {
+            echo "CC=$clang_cl"
+            echo "CXX=$clang_cl"
+            echo "CXXFLAGS=/EHsc"
+            echo "CMAKE_GENERATOR=Ninja"
+            echo "CMAKE_C_COMPILER=$clang_cl"
+            echo "CMAKE_CXX_COMPILER=$clang_cl"
+            echo "CMAKE_ASM_COMPILER=$clang_cl"
+          } >> "$GITHUB_ENV"
+          echo "Using $clang_cl with Ninja for Windows ARM native code"
+
+      - name: Compile without production credentials or bundles
+        id: compile
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: crates/tidebreak-desktop
+          args: --target ${{ matrix.target }} --no-bundle --ci
+
+      - name: Report unsigned Rust build cache size
+        if: ${{ !cancelled() }}
+        run: |
+          du -ch \
+            target/release/{.cargo-lock,.fingerprint,build,deps} \
+            target/${{ matrix.target }}/release/{.cargo-lock,.fingerprint,build,deps} \
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe \
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe \
+            target/${{ matrix.target }}/release/tidebreak.exe \
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe \
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe \
+            2>/dev/null | tail -1 || true
+
+      - name: Save unsigned Rust build cache
+        if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+          key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
+
+      - name: Require a successful cache-warm compilation
+        if: ${{ steps.compile.outcome != 'success' }}
+        run: exit 1
