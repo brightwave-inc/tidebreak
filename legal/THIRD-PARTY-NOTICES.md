@@ -25,9 +25,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 829
+- Rust crates: 845
 - Desktop UI production packages: 515
-- Distinct license texts: 577
+- Distinct license texts: 581
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -78,7 +78,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tkaitchuck/ahash
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-d03325792f3d](#l-d03325792f3d))
 
-### aho-corasick 1.1.4
+### aho-corasick 1.1.5
 
 - License: `Unlicense OR MIT`
 - Repository: https://github.com/BurntSushi/aho-corasick
@@ -114,13 +114,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sunfishcode/ambient-authority
 - License text: `COPYRIGHT` ([L-b6ca90f6c899](#l-b6ca90f6c899)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### android_system_properties 0.1.5
+### android_system_properties 0.1.6
 
-- License: `MIT/Apache-2.0`
+- License: `MIT OR Apache-2.0`
 - Repository: https://github.com/nical/android_system_properties
 - License text: `LICENSE-APACHE` ([L-dd0815108f8e](#l-dd0815108f8e)), `LICENSE-MIT` ([L-af6e2a74133b](#l-af6e2a74133b))
 
-### anyhow 1.0.103
+### anyhow 1.0.104
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/anyhow
@@ -138,71 +138,71 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/bluss/arrayvec
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-92c666480f81](#l-92c666480f81))
 
-### arrow 57.3.1
+### arrow 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
-### arrow-arith 57.3.1
-
-- License: `Apache-2.0`
-- Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
-
-### arrow-array 57.3.1
+### arrow-arith 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
-### arrow-buffer 57.3.1
+### arrow-array 58.4.0
+
+- License: `Apache-2.0 AND MIT`
+- Repository: https://github.com/apache/arrow-rs
+- License text: `LICENSE-MIT` ([L-bddc4356d6da](#l-bddc4356d6da)), `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
+
+### arrow-buffer 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
-### arrow-cast 57.3.1
-
-- License: `Apache-2.0`
-- Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
-
-### arrow-data 57.3.1
+### arrow-cast 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
-### arrow-ord 57.3.1
-
-- License: `Apache-2.0`
-- Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
-
-### arrow-row 57.3.1
+### arrow-data 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
-### arrow-schema 57.3.1
-
-- License: `Apache-2.0`
-- Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
-
-### arrow-select 57.3.1
+### arrow-ord 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
-### arrow-string 57.3.1
+### arrow-row 58.4.0
 
 - License: `Apache-2.0`
 - Repository: https://github.com/apache/arrow-rs
-- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-81399416f00b](#l-81399416f00b))
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
+
+### arrow-schema 58.4.0
+
+- License: `Apache-2.0`
+- Repository: https://github.com/apache/arrow-rs
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
+
+### arrow-select 58.4.0
+
+- License: `Apache-2.0`
+- Repository: https://github.com/apache/arrow-rs
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
+
+### arrow-string 58.4.0
+
+- License: `Apache-2.0`
+- Repository: https://github.com/apache/arrow-rs
+- License text: `LICENSE.txt` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `NOTICE.txt` ([L-5018b4040991](#l-5018b4040991))
 
 ### async-broadcast 0.7.2
 
@@ -372,7 +372,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/bitflags/bitflags
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-14435fbcd271](#l-14435fbcd271))
 
-### bitflags 2.13.0
+### bitflags 2.13.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/bitflags/bitflags
@@ -408,19 +408,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/madsmtm/objc2
 - License text: not distributed with this package
 
-### blocking 1.6.2
+### blocking 1.7.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/smol-rs/blocking
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### bon 3.9.3
+### bon 3.10.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/elastio/bon
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-b319bdb49677](#l-b319bdb49677))
 
-### bon-macros 3.9.3
+### bon-macros 3.10.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/elastio/bon
@@ -468,7 +468,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Nullus157/bs58-rs
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-67047503c71f](#l-67047503c71f))
 
-### bstr 1.13.0
+### bstr 1.13.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/BurntSushi/bstr
@@ -498,7 +498,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/llogiq/bytecount
 - License text: `LICENSE.Apache2` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE.MIT` ([L-3dda214a46ef](#l-3dda214a46ef))
 
-### bytemuck 1.25.0
+### bytemuck 1.25.2
 
 - License: `Zlib OR Apache-2.0 OR MIT`
 - Repository: https://github.com/Lokathor/bytemuck
@@ -552,7 +552,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/gtk-rs/gtk-rs-core
 - License text: `LICENSE` ([L-21a2121221d2](#l-21a2121221d2))
 
-### camino 1.2.4
+### camino 1.2.5
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/camino-rs/camino
@@ -600,7 +600,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/RustCrypto/block-modes
 - License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-f3bd9e2e7745](#l-f3bd9e2e7745))
 
-### cc 1.2.66
+### cc 1.4.4
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/cc-rs
@@ -642,7 +642,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/katharostech/cfg_aliases
 - License text: `LICENSE` ([L-48513346d335](#l-48513346d335))
 
-### cfg_aliases 0.2.1
+### cfg_aliases 0.2.2
 
 - License: `MIT`
 - Repository: https://github.com/katharostech/cfg_aliases
@@ -690,7 +690,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/image-rs/color_quant.git
 - License text: `LICENSE` ([L-a24abca538cd](#l-a24abca538cd))
 
-### combine 4.6.7
+### combine 4.6.8
 
 - License: `MIT`
 - Repository: https://github.com/Marwes/combine
@@ -726,7 +726,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tkaitchuck/constrandom
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-ae9791f02f2b](#l-ae9791f02f2b))
 
-### cookie 0.18.1
+### cookie 0.18.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SergioBenitez/cookie-rs
@@ -768,11 +768,11 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/RustCrypto/utils
 - License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-6334e52844d6](#l-6334e52844d6))
 
-### cpufeatures 0.3.0
+### cpufeatures 0.3.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/RustCrypto/utils
-- License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-6334e52844d6](#l-6334e52844d6))
+- License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-ea753cf1e3ec](#l-ea753cf1e3ec))
 
 ### crc 3.4.0
 
@@ -786,7 +786,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/akhilles/crc-catalog.git
 - License text: not distributed with this package
 
-### crc32fast 1.5.0
+### crc32fast 1.5.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/srijs/rust-crc32fast
@@ -882,6 +882,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/TedDriggs/darling
 - License text: `LICENSE` ([L-cc8f3c8ab396](#l-cc8f3c8ab396))
 
+### darling 0.24.1
+
+- License: `MIT`
+- Repository: https://github.com/TedDriggs/darling
+- License text: `LICENSE` ([L-cc8f3c8ab396](#l-cc8f3c8ab396))
+
 ### darling_core 0.20.11
 
 - License: `MIT`
@@ -889,6 +895,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-cc8f3c8ab396](#l-cc8f3c8ab396))
 
 ### darling_core 0.23.0
+
+- License: `MIT`
+- Repository: https://github.com/TedDriggs/darling
+- License text: `LICENSE` ([L-cc8f3c8ab396](#l-cc8f3c8ab396))
+
+### darling_core 0.24.1
 
 - License: `MIT`
 - Repository: https://github.com/TedDriggs/darling
@@ -906,7 +918,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/TedDriggs/darling
 - License text: `LICENSE` ([L-cc8f3c8ab396](#l-cc8f3c8ab396))
 
-### data-encoding 2.11.0
+### darling_macro 0.24.1
+
+- License: `MIT`
+- Repository: https://github.com/TedDriggs/darling
+- License text: `LICENSE` ([L-cc8f3c8ab396](#l-cc8f3c8ab396))
+
+### data-encoding 2.11.1
 
 - License: `MIT`
 - Repository: https://github.com/ia0/data-encoding
@@ -923,6 +941,24 @@ License identifiers named across all declared expressions:
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/brotskydotcom/dbus-secret-service.git
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-cef8c2ddacb4](#l-cef8c2ddacb4))
+
+### defmt 1.1.1
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/knurling-rs/defmt
+- License text: `LICENSE-APACHE` ([L-c144680885b2](#l-c144680885b2)), `LICENSE-MIT` ([L-2710a622a896](#l-2710a622a896))
+
+### defmt-macros 1.1.1
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/knurling-rs/defmt
+- License text: `LICENSE-APACHE` ([L-c144680885b2](#l-c144680885b2)), `LICENSE-MIT` ([L-2710a622a896](#l-2710a622a896))
+
+### defmt-parser 1.0.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/knurling-rs/defmt
+- License text: not distributed with this package
 
 ### deranged 0.5.8
 
@@ -984,7 +1020,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/madsmtm/objc2
 - License text: not distributed with this package
 
-### displaydoc 0.2.6
+### displaydoc 0.2.7
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/yaahc/displaydoc
@@ -1080,7 +1116,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/dyn-clone
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### either 1.16.0
+### either 1.18.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rayon-rs/either
@@ -1158,7 +1194,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/lunacookies/etcetera
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### event-listener 5.4.1
+### event-listener 5.4.2
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/smol-rs/event-listener
@@ -1176,7 +1212,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/fancy-regex/fancy-regex
 - License text: `LICENSE` ([L-ffaf97e3da9e](#l-ffaf97e3da9e))
 
-### fastrand 2.4.1
+### fastrand 2.5.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/smol-rs/fastrand
@@ -1206,7 +1242,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/alexcrichton/filetime
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### find-msvc-tools 0.1.9
+### find-msvc-tools 0.1.11
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/cc-rs
@@ -1254,7 +1290,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sfackler/foreign-types
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-c9067b1cc20b](#l-c9067b1cc20b))
 
-### foreign-types-macros 0.2.3
+### foreign-types-macros 0.2.4
 
 - License: `MIT/Apache-2.0`
 - Repository: https://github.com/sfackler/foreign-types
@@ -1476,7 +1512,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/gtk-rs/gtk-rs-core
 - License text: `LICENSE` ([L-21a2121221d2](#l-21a2121221d2))
 
-### glob 0.3.3
+### glob 0.3.4
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/glob
@@ -1590,7 +1626,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/RustCrypto/MACs
 - License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-9c5127ab88e8](#l-9c5127ab88e8))
 
-### html-escape 0.2.14
+### html-escape 0.2.15
 
 - License: `MIT`
 - Repository: https://github.com/magiclen/html-escape
@@ -1608,23 +1644,23 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/servo/html5ever
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-35af0fd88338](#l-35af0fd88338))
 
-### http 1.4.2
+### http 1.5.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/hyperium/http
 - License text: `LICENSE-APACHE` ([L-a7e117f398da](#l-a7e117f398da)), `LICENSE-MIT` ([L-f47894ff9c86](#l-f47894ff9c86))
 
-### http-body 1.0.1
+### http-body 1.1.0
 
 - License: `MIT`
 - Repository: https://github.com/hyperium/http-body
-- License text: `LICENSE` ([L-ae61683b7dd6](#l-ae61683b7dd6))
+- License text: `LICENSE` ([L-57f841bc9767](#l-57f841bc9767))
 
-### http-body-util 0.1.3
+### http-body-util 0.1.5
 
 - License: `MIT`
 - Repository: https://github.com/hyperium/http-body
-- License text: `LICENSE` ([L-4bddfb319e32](#l-4bddfb319e32))
+- License text: `LICENSE` ([L-57f841bc9767](#l-57f841bc9767))
 
 ### httparse 1.10.1
 
@@ -1638,13 +1674,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/pyfisch/httpdate
 - License text: `LICENSE-APACHE` ([L-793b7448f5be](#l-793b7448f5be)), `LICENSE-MIT` ([L-8ee77b53f701](#l-8ee77b53f701))
 
-### hybrid-array 0.4.13
+### hybrid-array 0.4.14
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/RustCrypto/hybrid-array
 - License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-a1aa15c3898d](#l-a1aa15c3898d))
 
-### hyper 1.10.1
+### hyper 1.11.0
 
 - License: `MIT`
 - Repository: https://github.com/hyperium/hyper
@@ -1680,43 +1716,43 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/mdsteele/rust-ico
 - License text: `LICENSE` ([L-95573f040b56](#l-95573f040b56))
 
-### icu_collections 2.2.0
+### icu_collections 2.3.0
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### icu_locale_core 2.2.0
+### icu_locale_core 2.3.0
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### icu_normalizer 2.2.0
+### icu_normalizer 2.3.0
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### icu_normalizer_data 2.2.0
+### icu_normalizer_data 2.3.0
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### icu_properties 2.2.0
+### icu_properties 2.3.0
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### icu_properties_data 2.2.0
+### icu_properties_data 2.3.0
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### icu_provider 2.2.0
+### icu_provider 2.3.1
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
@@ -1818,7 +1854,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sunfishcode/io-lifetimes
 - License text: `COPYRIGHT` ([L-ced9d1e3612f](#l-ced9d1e3612f)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### ipnet 2.12.0
+### ipnet 2.12.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/krisprice/ipnet
@@ -1866,6 +1902,36 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/javascriptcore-rs
 - License text: `LICENSE` ([L-4603441e4a5a](#l-4603441e4a5a))
 
+### jiff 0.2.35
+
+- License: `Unlicense OR MIT`
+- Repository: https://github.com/BurntSushi/jiff
+- License text: `COPYING` ([L-65314a6c9668](#l-65314a6c9668)), `LICENSE-MIT` ([L-154c1af2b38e](#l-154c1af2b38e)), `UNLICENSE` ([L-ca2abdf69588](#l-ca2abdf69588))
+
+### jiff-core 0.1.0
+
+- License: `Unlicense OR MIT`
+- Repository: https://github.com/BurntSushi/jiff
+- License text: `COPYING` ([L-65314a6c9668](#l-65314a6c9668)), `LICENSE-MIT` ([L-154c1af2b38e](#l-154c1af2b38e)), `UNLICENSE` ([L-ca2abdf69588](#l-ca2abdf69588))
+
+### jiff-static 0.2.35
+
+- License: `Unlicense OR MIT`
+- Repository: https://github.com/BurntSushi/jiff
+- License text: `COPYING` ([L-65314a6c9668](#l-65314a6c9668)), `LICENSE-MIT` ([L-154c1af2b38e](#l-154c1af2b38e)), `UNLICENSE` ([L-ca2abdf69588](#l-ca2abdf69588))
+
+### jiff-tzdb 0.1.8
+
+- License: `Unlicense OR MIT`
+- Repository: https://github.com/BurntSushi/jiff
+- License text: `COPYING` ([L-65314a6c9668](#l-65314a6c9668)), `LICENSE-MIT` ([L-154c1af2b38e](#l-154c1af2b38e)), `UNLICENSE` ([L-ca2abdf69588](#l-ca2abdf69588))
+
+### jiff-tzdb-platform 0.1.3
+
+- License: `Unlicense OR MIT`
+- Repository: https://github.com/BurntSushi/jiff
+- License text: `COPYING` ([L-65314a6c9668](#l-65314a6c9668)), `LICENSE-MIT` ([L-154c1af2b38e](#l-154c1af2b38e)), `UNLICENSE` ([L-ca2abdf69588](#l-ca2abdf69588))
+
 ### jni 0.21.1
 
 - License: `MIT/Apache-2.0`
@@ -1902,7 +1968,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/jni-rs/jni-sys
 - License text: not distributed with this package
 
-### js-sys 0.3.103
+### js-sys 0.3.104
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
@@ -2032,17 +2098,17 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rust-lang/compiler-builtins
 - License text: `LICENSE.txt` ([L-5f5535fee8ec](#l-5f5535fee8ec))
 
-### libredox 0.1.18
+### libredox 0.1.20
 
 - License: `MIT`
 - Repository: https://gitlab.redox-os.org/redox-os/libredox.git
 - License text: `LICENSE` ([L-7dbbefcddfaa](#l-7dbbefcddfaa))
 
-### libsqlite3-sys 0.30.1
+### libsqlite3-sys 0.37.0
 
 - License: `MIT`
 - Repository: https://github.com/rusqlite/rusqlite
-- License text: `LICENSE` ([L-1b22c7467645](#l-1b22c7467645))
+- License text: `LICENSE` ([L-6061b8ea5b16](#l-6061b8ea5b16))
 
 ### linux-raw-sys 0.12.1
 
@@ -2050,7 +2116,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sunfishcode/linux-raw-sys
 - License text: `COPYRIGHT` ([L-7813bacdaa2b](#l-7813bacdaa2b)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### litemap 0.8.2
+### litemap 0.8.3
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
@@ -2062,7 +2128,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Amanieu/parking_lot
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-8d1f81ea4e87](#l-8d1f81ea4e87))
 
-### log 0.4.33
+### log 0.4.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/log
@@ -2164,7 +2230,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
 - License text: `LICENSE` ([L-7427abc63036](#l-7427abc63036)), `LICENSE-APACHE.md` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT.md` ([L-ac9859ce4e9a](#l-ac9859ce4e9a)), `LICENSE-ZLIB.md` ([L-eac3911cc3d4](#l-eac3911cc3d4))
 
-### mio 1.2.1
+### mio 1.2.2
 
 - License: `MIT`
 - Repository: https://github.com/tokio-rs/mio
@@ -2254,7 +2320,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/jhpratt/num-conv
 - License text: `LICENSE-Apache` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT` ([L-4d83b119f786](#l-4d83b119f786))
 
-### num-integer 0.1.46
+### num-integer 0.1.47
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-num/num-integer
@@ -2404,7 +2470,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/matklad/once_cell
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### open 5.4.0
+### open 5.4.2
 
 - License: `MIT`
 - Repository: https://github.com/Byron/open-rs
@@ -2530,25 +2596,25 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/servo/rust-url/
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-7a8093fb4a93](#l-7a8093fb4a93))
 
-### pest 2.8.8
+### pest 2.9.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/pest-parser/pest
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### pest_derive 2.8.8
+### pest_derive 2.9.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/pest-parser/pest
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### pest_generator 2.8.8
+### pest_generator 2.9.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/pest-parser/pest
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### pest_meta 2.8.8
+### pest_meta 2.9.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/pest-parser/pest
@@ -2602,7 +2668,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/smol-rs/piper
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### pkg-config 0.3.33
+### pkg-config 0.3.34
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/pkg-config-rs
@@ -2638,13 +2704,25 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/smol-rs/polling
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
+### portable-atomic 1.15.0
+
+- License: `Apache-2.0 OR MIT`
+- Repository: https://github.com/taiki-e/portable-atomic
+- License text: `LICENSE-APACHE` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
+
+### portable-atomic-util 0.2.7
+
+- License: `Apache-2.0 OR MIT`
+- Repository: https://github.com/taiki-e/portable-atomic-util
+- License text: `LICENSE-APACHE` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
+
 ### portable-pty 0.9.0
 
 - License: `MIT`
 - Repository: https://github.com/wezterm/wezterm
 - License text: `LICENSE.md` ([L-0f5e2ba844a4](#l-0f5e2ba844a4))
 
-### potential_utf 0.1.5
+### potential_utf 0.1.6
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
@@ -2669,6 +2747,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-695de7436b47](#l-695de7436b47))
 
 ### prettyplease 0.2.37
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/dtolnay/prettyplease
+- License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
+
+### prettyplease 0.3.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/prettyplease
@@ -2704,19 +2788,7 @@ License identifiers named across all declared expressions:
 - Repository: https://gitlab.com/CreepySkeleton/proc-macro-error
 - License text: `LICENSE-APACHE` ([L-ca5105e39772](#l-ca5105e39772)), `LICENSE-MIT` ([L-c7495b7b3a52](#l-c7495b7b3a52))
 
-### proc-macro-error-attr2 2.0.0
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/GnomedDev/proc-macro-error-2
-- License text: `LICENSE-APACHE` ([L-ca5105e39772](#l-ca5105e39772)), `LICENSE-MIT` ([L-c7495b7b3a52](#l-c7495b7b3a52))
-
-### proc-macro-error2 2.0.1
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/GnomedDev/proc-macro-error-2
-- License text: `LICENSE-APACHE` ([L-ca5105e39772](#l-ca5105e39772)), `LICENSE-MIT` ([L-c7495b7b3a52](#l-c7495b7b3a52))
-
-### proc-macro2 1.0.106
+### proc-macro2 1.0.107
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/proc-macro2
@@ -2764,7 +2836,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/quinn-rs/quinn
 - License text: `LICENSE-APACHE` ([L-43070e2d4e53](#l-43070e2d4e53)), `LICENSE-MIT` ([L-05fa1ba3228a](#l-05fa1ba3228a))
 
-### quinn-proto 0.11.16
+### quinn-proto 0.11.17
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/quinn-rs/quinn
@@ -2776,7 +2848,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/quinn-rs/quinn
 - License text: `LICENSE-APACHE` ([L-43070e2d4e53](#l-43070e2d4e53)), `LICENSE-MIT` ([L-05fa1ba3228a](#l-05fa1ba3228a))
 
-### quote 1.0.46
+### quote 1.0.47
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/quote
@@ -2806,13 +2878,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rust-random/rand
 - License text: `COPYRIGHT` ([L-2411d70acb18](#l-2411d70acb18)), `LICENSE-APACHE` ([L-6508cf9942b4](#l-6508cf9942b4)), `LICENSE-MIT` ([L-cc367a7134c2](#l-cc367a7134c2))
 
-### rand 0.8.6
+### rand 0.8.8
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-random/rand
 - License text: `COPYRIGHT` ([L-2411d70acb18](#l-2411d70acb18)), `LICENSE-APACHE` ([L-6508cf9942b4](#l-6508cf9942b4)), `LICENSE-MIT` ([L-cc367a7134c2](#l-cc367a7134c2))
 
-### rand 0.9.4
+### rand 0.9.5
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-random/rand
@@ -2872,13 +2944,13 @@ License identifiers named across all declared expressions:
 - Repository: https://gitlab.redox-os.org/redox-os/users
 - License text: `LICENSE` ([L-157e9bc5ce84](#l-157e9bc5ce84))
 
-### ref-cast 1.0.25
+### ref-cast 1.0.27
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/ref-cast
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### ref-cast-impl 1.0.25
+### ref-cast-impl 1.0.27
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/ref-cast
@@ -2890,13 +2962,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: `LICENSE` ([L-19c8b10a10ca](#l-19c8b10a10ca))
 
-### regex 1.12.4
+### regex 1.13.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/regex
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-14435fbcd271](#l-14435fbcd271))
 
-### regex-automata 0.4.16
+### regex-automata 0.4.18
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/regex
@@ -2992,7 +3064,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/sunfishcode/rustix-linux-procfs
 - License text: `COPYRIGHT` ([L-adda0c416b03](#l-adda0c416b03)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### rustls 0.23.41
+### rustls 0.23.43
 
 - License: `Apache-2.0 OR ISC OR MIT`
 - Repository: https://github.com/rustls/rustls
@@ -3004,7 +3076,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rustls/rustls-native-certs
 - License text: `LICENSE` ([L-29fbc81a3f88](#l-29fbc81a3f88)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-ISC` ([L-af6da3f3f6b4](#l-af6da3f3f6b4)), `LICENSE-MIT` ([L-a3320aa8d192](#l-a3320aa8d192))
 
-### rustls-pki-types 1.15.0
+### rustls-pki-types 1.15.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rustls/pki-types
@@ -3022,7 +3094,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rustls/rustls-platform-verifier
 - License text: not distributed with this package
 
-### rustls-webpki 0.103.13
+### rustls-webpki 0.103.15
 
 - License: `ISC`
 - Repository: https://github.com/rustls/webpki
@@ -3088,7 +3160,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/bluss/scopeguard
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-1a6aa2616e74](#l-1a6aa2616e74))
 
-### sea-bae 0.2.1
+### sea-bae 0.2.2
 
 - License: `MIT`
 - Repository: https://github.com/SeaQL/sea-bae.git
@@ -3100,7 +3172,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-b937e4dc7e27](#l-b937e4dc7e27))
 
-### sea-orm-arrow 2.0.0-rc.3
+### sea-orm-arrow 2.0.0-rc.4
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-orm
@@ -3124,7 +3196,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/SeaQL/sea-orm
 - License text: not distributed with this package
 
-### sea-query 1.0.1
+### sea-query 1.0.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/SeaQL/sea-query
@@ -3250,7 +3322,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/path-to-error
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### serde_repr 0.1.20
+### serde_repr 0.1.21
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/serde-repr
@@ -3274,13 +3346,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/nox/serde_urlencoded
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-b5dae9532426](#l-b5dae9532426))
 
-### serde_with 3.21.0
+### serde_with 3.22.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/jonasbb/serde_with/
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-fdd1c2117bcf](#l-fdd1c2117bcf))
 
-### serde_with_macros 3.21.0
+### serde_with_macros 3.22.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/jonasbb/serde_with/
@@ -3310,7 +3382,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/servo/stylo
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### sha1 0.10.6
+### sha1 0.10.7
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/RustCrypto/hashes
@@ -3394,7 +3466,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/vorner/signal-hook
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-aaac889d0a4a](#l-aaac889d0a4a))
 
-### simd-adler32 0.3.9
+### simd-adler32 0.3.10
 
 - License: `MIT`
 - Repository: https://github.com/mcountryman/simd-adler32
@@ -3442,7 +3514,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/servo/rust-smallvec
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-7f194ae45c25](#l-7f194ae45c25))
 
-### socket2 0.6.4
+### socket2 0.6.5
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/socket2
@@ -3466,7 +3538,7 @@ License identifiers named across all declared expressions:
 - Repository: https://gitlab.gnome.org/World/Rust/soup3-rs
 - License text: `LICENSE` ([L-4603441e4a5a](#l-4603441e4a5a))
 
-### spin 0.9.8
+### spin 0.9.9
 
 - License: `MIT`
 - Repository: https://github.com/mvdnes/spin-rs.git
@@ -3568,7 +3640,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dalek-cryptography/subtle
 - License text: `LICENSE` ([L-24fa06d8eae3](#l-24fa06d8eae3))
 
-### swift-rs 1.0.7
+### swift-rs 1.0.8
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/Brendonovich/swift-rs
@@ -3628,13 +3700,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/syn
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### syn 2.0.118
+### syn 2.0.119
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/syn
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### syn 3.0.2
+### syn 3.0.4
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/dtolnay/syn
@@ -3664,11 +3736,11 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/tao
 - License text: `LICENSE` ([L-6dc0e068dcf3](#l-6dc0e068dcf3)), `LICENSE.spdx` ([L-28694f36acab](#l-28694f36acab))
 
-### tao-macros 0.1.3
+### tao-macros 0.1.4
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/tauri-apps/tao
-- License text: not distributed with this package
+- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-26e6f69cf1f6](#l-26e6f69cf1f6)), `LICENSE.spdx` ([L-1d5680a70055](#l-1d5680a70055))
 
 ### tap 1.0.1
 
@@ -3820,25 +3892,25 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dtolnay/thiserror
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### thread_local 1.1.9
+### thread_local 1.1.10
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/Amanieu/thread_local-rs
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-8d1f81ea4e87](#l-8d1f81ea4e87))
 
-### time 0.3.47
+### time 0.3.55
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/time-rs/time
 - License text: `LICENSE-Apache` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT` ([L-7fdbca77dec6](#l-7fdbca77dec6))
 
-### time-core 0.1.8
+### time-core 0.1.9
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/time-rs/time
 - License text: `LICENSE-Apache` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT` ([L-7fdbca77dec6](#l-7fdbca77dec6))
 
-### time-macros 0.2.27
+### time-macros 0.2.32
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/time-rs/time
@@ -3849,13 +3921,13 @@ License identifiers named across all declared expressions:
 - License: `CC0-1.0`
 - License text: `LICENSE` ([L-6d489af62926](#l-6d489af62926))
 
-### tinystr 0.8.3
+### tinystr 0.8.4
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### tinyvec 1.11.0
+### tinyvec 1.12.0
 
 - License: `Zlib OR Apache-2.0 OR MIT`
 - Repository: https://github.com/Lokathor/tinyvec
@@ -3873,7 +3945,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/tokio
 - License text: `LICENSE` ([L-3e1bef82aa0d](#l-3e1bef82aa0d))
 
-### tokio-macros 2.7.0
+### tokio-macros 2.7.2
 
 - License: `MIT`
 - Repository: https://github.com/tokio-rs/tokio
@@ -3885,7 +3957,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rustls/tokio-rustls
 - License text: `LICENSE-APACHE` ([L-720304e6515d](#l-720304e6515d)), `LICENSE-MIT` ([L-1b0258c48739](#l-1b0258c48739))
 
-### tokio-stream 0.1.18
+### tokio-stream 0.1.19
 
 - License: `MIT`
 - Repository: https://github.com/tokio-rs/tokio
@@ -3921,7 +3993,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml 1.1.2+spec-1.1.0
+### toml 1.1.4+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
@@ -3957,19 +4029,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml_edit 0.25.12+spec-1.1.0
+### toml_edit 0.25.13+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml_parser 1.1.2+spec-1.1.0
+### toml_parser 1.1.3+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
 - License text: `LICENSE-APACHE` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-4498464c2864](#l-4498464c2864))
 
-### toml_writer 1.1.1+spec-1.1.0
+### toml_writer 1.1.2+spec-1.1.0
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/toml-rs/toml
@@ -4041,7 +4113,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/ArturKovacs/trash
 - License text: `LICENSE.txt` ([L-2e5096718c28](#l-2e5096718c28))
 
-### tray-icon 0.24.1
+### tray-icon 0.24.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/tauri-apps/tray-icon
@@ -4299,31 +4371,31 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/bytecodealliance/wasi-rs
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### wasm-bindgen 0.2.126
+### wasm-bindgen 0.2.127
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### wasm-bindgen-futures 0.4.76
+### wasm-bindgen-futures 0.4.77
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### wasm-bindgen-macro 0.2.126
+### wasm-bindgen-macro 0.2.127
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### wasm-bindgen-macro-support 0.2.126
+### wasm-bindgen-macro-support 0.2.127
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
-### wasm-bindgen-shared 0.2.126
+### wasm-bindgen-shared 0.2.127
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
@@ -4341,7 +4413,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/MattiasBuelens/wasm-streams/
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### web-sys 0.3.103
+### web-sys 0.3.104
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
@@ -4353,7 +4425,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/daxpedda/web-time
 - License text: `LICENSE-APACHE` ([L-ca028ef321c3](#l-ca028ef321c3)), `LICENSE-MIT` ([L-32ae0b6c9e4c](#l-32ae0b6c9e4c))
 
-### web_atoms 0.2.5
+### web_atoms 0.2.6
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/servo/html5ever
@@ -4383,7 +4455,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rustls/webpki-roots
 - License text: `LICENSE` ([L-d30183ec6610](#l-d30183ec6610))
 
-### webpki-roots 1.0.8
+### webpki-roots 1.0.9
 
 - License: `CDLA-Permissive-2.0`
 - Repository: https://github.com/rustls/webpki-roots
@@ -4425,7 +4497,7 @@ License identifiers named across all declared expressions:
 - Repository: https://codeberg.org/tazz4843/whisper-rs
 - License text: not distributed with this package
 
-### whoami 2.1.2
+### whoami 2.1.3
 
 - License: `Apache-2.0 OR BSL-1.0 OR MIT`
 - Repository: https://github.com/ardaku/whoami
@@ -4486,6 +4558,12 @@ License identifiers named across all declared expressions:
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
 ### windows-core 0.61.2
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/microsoft/windows-rs
+- License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
+
+### windows-core 0.62.2
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
@@ -4557,7 +4635,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/microsoft/windows-rs
 - License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
+### windows-result 0.4.1
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/microsoft/windows-rs
+- License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
+
 ### windows-strings 0.4.2
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/microsoft/windows-rs
+- License text: `license-apache-2.0` ([L-72de958052e4](#l-72de958052e4)), `license-mit` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
+
+### windows-strings 0.5.1
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/microsoft/windows-rs
@@ -4773,7 +4863,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/winnow-rs/winnow
 - License text: `LICENSE-MIT` ([L-8793aa4141de](#l-8793aa4141de))
 
-### winnow 1.0.3
+### winnow 1.0.4
 
 - License: `MIT`
 - Repository: https://github.com/winnow-rs/winnow
@@ -4809,7 +4899,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/bytecodealliance/wit-bindgen
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-Apache-2.0_WITH_LLVM-exception` ([L-23823edf2631](#l-23823edf2631)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### writeable 0.6.3
+### writeable 0.6.4
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
@@ -4875,7 +4965,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dbus2/zbus/
 - License text: `LICENSE` ([L-a0e7d0739e03](#l-a0e7d0739e03))
 
-### zbus 5.17.0
+### zbus 5.19.0
 
 - License: `MIT`
 - Repository: https://github.com/z-galaxy/zbus/
@@ -4887,7 +4977,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dbus2/zbus/
 - License text: `LICENSE` ([L-a0e7d0739e03](#l-a0e7d0739e03))
 
-### zbus_macros 5.17.0
+### zbus_macros 5.19.0
 
 - License: `MIT`
 - Repository: https://github.com/z-galaxy/zbus/
@@ -4899,19 +4989,25 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dbus2/zbus/
 - License text: `LICENSE` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### zbus_names 4.3.3
+### zbus_names 4.3.4
 
 - License: `MIT`
 - Repository: https://github.com/z-galaxy/zbus/
 - License text: `LICENSE` ([L-a0e7d0739e03](#l-a0e7d0739e03))
 
-### zerocopy 0.8.53
+### zcheapstr 1.1.0
+
+- License: `MIT`
+- Repository: https://github.com/z-galaxy/zcheapstr/
+- License text: `LICENSE` ([L-36c68b249eb6](#l-36c68b249eb6))
+
+### zerocopy 0.8.56
 
 - License: `BSD-2-Clause OR Apache-2.0 OR MIT`
 - Repository: https://github.com/google/zerocopy
 - License text: `LICENSE-APACHE` ([L-75a373c5dfcd](#l-75a373c5dfcd)), `LICENSE-BSD` ([L-47248d1ec833](#l-47248d1ec833)), `LICENSE-MIT` ([L-a03d4daa4f46](#l-a03d4daa4f46))
 
-### zerocopy-derive 0.8.53
+### zerocopy-derive 0.8.56
 
 - License: `BSD-2-Clause OR Apache-2.0 OR MIT`
 - Repository: https://github.com/google/zerocopy
@@ -4941,19 +5037,19 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/RustCrypto/utils
 - License text: `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-1038b7737a0a](#l-1038b7737a0a))
 
-### zerotrie 0.2.4
+### zerotrie 0.2.5
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### zerovec 0.11.6
+### zerovec 0.11.8
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
 - License text: `LICENSE` ([L-cde87abe221f](#l-cde87abe221f))
 
-### zerovec-derive 0.11.3
+### zerovec-derive 0.11.6
 
 - License: `Unicode-3.0`
 - Repository: https://github.com/unicode-org/icu4x
@@ -4971,13 +5067,13 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/zip-rs/zip2
 - License text: `LICENSE` ([L-6ac8711fb340](#l-6ac8711fb340))
 
-### zmij 1.0.21
+### zmij 1.0.23
 
 - License: `MIT`
 - Repository: https://github.com/dtolnay/zmij
 - License text: `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### zune-core 0.5.1
+### zune-core 0.5.3
 
 - License: `MIT OR Apache-2.0 OR Zlib`
 - Repository: https://github.com/etemesi254/zune-image
@@ -4995,7 +5091,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dbus2/zbus/
 - License text: `LICENSE` ([L-a0e7d0739e03](#l-a0e7d0739e03))
 
-### zvariant 5.13.0
+### zvariant 5.15.0
 
 - License: `MIT`
 - Repository: https://github.com/z-galaxy/zbus/
@@ -5007,7 +5103,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dbus2/zbus/
 - License text: `LICENSE` ([L-a0e7d0739e03](#l-a0e7d0739e03))
 
-### zvariant_derive 5.13.0
+### zvariant_derive 5.15.0
 
 - License: `MIT`
 - Repository: https://github.com/z-galaxy/zbus/
@@ -5019,7 +5115,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/dbus2/zbus/
 - License text: `LICENSE` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
-### zvariant_utils 3.5.0
+### zvariant_utils 4.2.0
 
 - License: `MIT`
 - Repository: https://github.com/z-galaxy/zbus/
@@ -10305,30 +10401,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### L-1b22c7467645
-
-```
-Copyright (c) 2014-2021 The rusqlite developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
-
 ### L-1b66e3be6894
 
 ```
@@ -10463,6 +10535,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-1d5680a70055
+
+```
+SPDXVersion: SPDX-2.1
+DataLicense: CC0-1.0
+PackageName: tao-macros
+DataFormat: SPDXRef-1
+PackageSupplier: Organization: The Tauri Programme in the Commons Conservancy
+PackageHomePage: https://tauri.app
+PackageLicenseDeclared: Apache-2.0
+PackageLicenseDeclared: MIT
+PackageCopyrightText: 2020-2023, The Tauri Programme in the Commons Conservancy
+PackageSummary: <text>tao-macros is part of Tao, the official, rust-based window manager for Wry.
+                </text>
+PackageComment: <text>The package includes the following libraries; see
+Relationship information.
+                </text>
+Created: 2020-05-20T09:00:00Z
+PackageDownloadLocation: git://github.com/tauri-apps/tao
+PackageDownloadLocation: git+https://github.com/tauri-apps/tao.git
+PackageDownloadLocation: git+ssh://github.com/tauri-apps/tao.git
+Creator: Person: Daniel Thompson-Yvetot
 ```
 
 ### L-1ddb39b2b497
@@ -11446,6 +11542,62 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-26e6f69cf1f6
+
+```
+MIT License
+
+Copyright (c) 2022 - Present Tauri Apps Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### L-2710a622a896
+
+```
+Copyright (c) Ferrous Systems
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### L-277d2a8e4597
@@ -12759,6 +12911,36 @@ Except as contained in this notice, the name of a copyright holder shall
 not be used in advertising or otherwise to promote the sale, use or other
 dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
+```
+
+### L-36c68b249eb6
+
+```
+Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### L-37412fff76e3
@@ -14873,36 +15055,6 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   defined by the Mozilla Public License, v. 2.0.
 ```
 
-### L-4bddfb319e32
-
-```
-Copyright (c) 2019-2025 Sean McArthur & Hyper Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-```
-
 ### L-4be46afa7981
 
 ```
@@ -15414,6 +15566,24 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 """
+```
+
+### L-5018b4040991
+
+```
+Apache Arrow
+Copyright 2016-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+This product includes software from the chronoutil crate (MIT)
+ * Copyright (c) 2020-2022 Oliver Margetts
+ * https://github.com/olliemath/chronoutil
+
+This product includes software from the compact-thrift project (Apache 2.0)
+ * Copyright Jörn Horstmann
+ * https://github.com/jhorstmann/compact-thrift
 ```
 
 ### L-516b24e051bf
@@ -16070,6 +16240,36 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### L-57f841bc9767
+
+```
+Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### L-583e9c5fd9a9
@@ -18453,6 +18653,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### L-6061b8ea5b16
+
+```
+Copyright (c) 2014 The rusqlite developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### L-60fd4b5e1281
@@ -24156,95 +24380,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### L-81399416f00b
-
-```
-Apache Arrow
-Copyright 2016-2019 The Apache Software Foundation
-
-This product includes software developed at
-The Apache Software Foundation (http://www.apache.org/).
-
-This product includes software from the SFrame project (BSD, 3-clause).
-* Copyright (C) 2015 Dato, Inc.
-* Copyright (c) 2009 Carnegie Mellon University.
-
-This product includes software from the Feather project (Apache 2.0)
-https://github.com/wesm/feather
-
-This product includes software from the DyND project (BSD 2-clause)
-https://github.com/libdynd
-
-This product includes software from the LLVM project
- * distributed under the University of Illinois Open Source
-
-This product includes software from the google-lint project
- * Copyright (c) 2009 Google Inc. All rights reserved.
-
-This product includes software from the mman-win32 project
- * Copyright https://code.google.com/p/mman-win32/
- * Licensed under the MIT License;
-
-This product includes software from the LevelDB project
- * Copyright (c) 2011 The LevelDB Authors. All rights reserved.
- * Use of this source code is governed by a BSD-style license that can be
- * Moved from Kudu http://github.com/cloudera/kudu
-
-This product includes software from the CMake project
- * Copyright 2001-2009 Kitware, Inc.
- * Copyright 2012-2014 Continuum Analytics, Inc.
- * All rights reserved.
-
-This product includes software from https://github.com/matthew-brett/multibuild (BSD 2-clause)
- * Copyright (c) 2013-2016, Matt Terry and Matthew Brett; all rights reserved.
-
-This product includes software from the Ibis project (Apache 2.0)
- * Copyright (c) 2015 Cloudera, Inc.
- * https://github.com/cloudera/ibis
-
-This product includes software from Dremio (Apache 2.0)
-  * Copyright (C) 2017-2018 Dremio Corporation
-  * https://github.com/dremio/dremio-oss
-
-This product includes software from Google Guava (Apache 2.0)
-  * Copyright (C) 2007 The Guava Authors
-  * https://github.com/google/guava
-
-This product include software from CMake (BSD 3-Clause)
-  * CMake - Cross Platform Makefile Generator
-  * Copyright 2000-2019 Kitware, Inc. and Contributors
-
-The web site includes files generated by Jekyll.
-
---------------------------------------------------------------------------------
-
-This product includes code from Apache Kudu, which includes the following in
-its NOTICE file:
-
-  Apache Kudu
-  Copyright 2016 The Apache Software Foundation
-
-  This product includes software developed at
-  The Apache Software Foundation (http://www.apache.org/).
-
-  Portions of this software were developed at
-  Cloudera, Inc (http://www.cloudera.com/).
-
---------------------------------------------------------------------------------
-
-This product includes code from Apache ORC, which includes the following in
-its NOTICE file:
-
-  Apache ORC
-  Copyright 2013-2019 The Apache Software Foundation
-
-  This product includes software developed by The Apache Software
-  Foundation (http://www.apache.org/).
-
-  This product includes software developed by Hewlett-Packard:
-  (c) Copyright [2014-2015] Hewlett-Packard Development Company, L.P
-```
-
 ### L-81976b4834c3
 
 ```
@@ -29452,36 +29587,6 @@ is licensed under:
 at your option.
 ```
 
-### L-ae61683b7dd6
-
-```
-Copyright (c) 2019-2024 Sean McArthur & Hyper Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-```
-
 ### L-ae8de7e1b783
 
 ```
@@ -31178,6 +31283,32 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### L-bddc4356d6da
+
+```
+MIT License
+
+Copyright (c) 2020-2022 Oliver Margetts
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-bde59a7e336f

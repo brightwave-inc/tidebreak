@@ -1,0 +1,283 @@
+name: Publish whisper helper
+
+# Builds and publishes the tidebreak-whisper transcription helper the desktop
+# app downloads on demand (see crates/tidebreak-desktop/src/whisper_install.rs).
+# Run this manually after bumping the version in crates/tidebreak-whisper:
+# the hosted files are immutable, so republishing different bytes under an
+# already-published version fails instead of silently swapping them. Move the
+# desktop's pinned HELPER_VERSION only after this workflow succeeds.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tidebreak-publish-whisper-helper
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: resolve helper version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read the helper crate version
+        id: version
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -er '.packages[] | select(.name == "tidebreak-whisper") | .version')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Unexpected tidebreak-whisper version: $version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build · ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+          # The x86_64 Linux baseline matches the app's: Ubuntu 22.04 keeps
+          # the glibc requirement no newer than the packaged desktop's.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      # whisper.cpp refuses MSVC on ARM. The cmake crate honors CMAKE_GENERATOR
+      # from the environment but not CMAKE_GENERATOR_TOOLSET, so Ninja plus
+      # clang-cl is the reliable way to keep aarch64-pc-windows-msvc while
+      # compiling the native C/C++ with Clang.
+      - name: Use clang-cl for Windows ARM native code
+        if: ${{ matrix.target == 'aarch64-pc-windows-msvc' }}
+        run: |
+          clang_cl=""
+          for candidate in \
+            "$(command -v clang-cl || true)" \
+            "/c/Program Files/LLVM/bin/clang-cl.exe" \
+            "/c/Program Files/LLVM/bin/clang-cl"; do
+            if [[ -n "$candidate" && -x "$candidate" ]]; then
+              clang_cl="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$clang_cl" ]]; then
+            echo "clang-cl is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          if ! command -v ninja >/dev/null; then
+            echo "ninja is required to compile whisper.cpp on Windows ARM" >&2
+            exit 1
+          fi
+          clang_cl="$(cygpath -m "$clang_cl")"
+          {
+            echo "CC=$clang_cl"
+            echo "CXX=$clang_cl"
+            echo "CXXFLAGS=/EHsc"
+            echo "CMAKE_GENERATOR=Ninja"
+            echo "CMAKE_C_COMPILER=$clang_cl"
+            echo "CMAKE_CXX_COMPILER=$clang_cl"
+            echo "CMAKE_ASM_COMPILER=$clang_cl"
+          } >> "$GITHUB_ENV"
+          echo "Using $clang_cl with Ninja for Windows ARM native code"
+
+      - name: Build the helper
+        run: cargo build --release --locked -p tidebreak-whisper --target "${{ matrix.target }}"
+
+      - name: Collect the artifact under its published name
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          extension=""
+          [[ "$RELEASE_TARGET" != *windows* ]] || extension=".exe"
+          built="target/$RELEASE_TARGET/release/tidebreak-whisper$extension"
+          [[ -s "$built" ]] || {
+            echo "Built helper is missing or empty: $built" >&2
+            exit 1
+          }
+          mkdir -p dist
+          cp "$built" "dist/tidebreak-whisper-$RELEASE_TARGET$extension"
+
+      - name: Upload the built helper
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-whisper-${{ matrix.target }}-${{ github.run_id }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: sign and publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: desktop-production
+      url: https://downloads.brightwave.io/tidebreak/manifest.json
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HELPER_VERSION: ${{ needs.version.outputs.version }}
+      AWS_REGION: ${{ vars.DOWNLOADS_AWS_REGION || 'us-east-1' }}
+      AWS_RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+      DOWNLOADS_S3_BUCKET: ${{ vars.DOWNLOADS_S3_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate publishing configuration
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in \
+            AWS_RELEASE_ROLE_ARN \
+            DOWNLOADS_S3_BUCKET \
+            TAURI_SIGNING_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing whisper-helper publishing configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Download the built helpers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: tidebreak-whisper-*-${{ github.run_id }}
+          merge-multiple: true
+          path: dist
+
+      - name: Require every published target
+        run: |
+          expected="$(printf '%s\n' \
+            dist/tidebreak-whisper-aarch64-apple-darwin \
+            dist/tidebreak-whisper-x86_64-apple-darwin \
+            dist/tidebreak-whisper-x86_64-pc-windows-msvc.exe \
+            dist/tidebreak-whisper-aarch64-pc-windows-msvc.exe \
+            dist/tidebreak-whisper-x86_64-unknown-linux-gnu \
+            dist/tidebreak-whisper-aarch64-unknown-linux-gnu \
+            | LC_ALL=C sort)"
+          actual="$(find dist -type f | LC_ALL=C sort)"
+          [[ "$actual" = "$expected" ]] || {
+            echo "Published helper set is incomplete or unexpected:" >&2
+            printf '%s\n' "$actual" >&2
+            exit 1
+          }
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: .github/tauri-cli/pnpm-lock.yaml
+      - name: Install pinned Tauri bundler
+        run: |
+          pnpm --dir .github/tauri-cli install --frozen-lockfile --ignore-scripts
+          echo "$GITHUB_WORKSPACE/.github/tauri-cli/node_modules/.bin" >> "$GITHUB_PATH"
+
+      # The desktop verifies the helper with the committed updater public key
+      # before it can run, so these signatures are what make the download
+      # trustworthy — the same authenticity bar as an app update.
+      - name: Sign every helper with the updater key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          while IFS= read -r -d '' file; do
+            rm -f "$file.sig"
+            tauri signer sign "$file"
+            [[ -s "$file.sig" ]] || {
+              echo "Tauri updater signature is empty: $file.sig" >&2
+              exit 1
+            }
+          done < <(find dist -type f ! -name '*.sig' -print0)
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          role-session-name: tidebreak-whisper-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload immutable helper files
+        run: |
+          prefix="tidebreak/tools/whisper-helper/v$HELPER_VERSION"
+          head_error="$RUNNER_TEMP/helper-head-error"
+
+          upload_immutable() {
+            local file="$1"
+            local key="$2"
+            local content_type="$3"
+            local digest remote_digest error
+            digest="$(sha256sum "$file" | cut -d ' ' -f 1)"
+            if remote_digest="$(aws s3api head-object \
+              --bucket "$DOWNLOADS_S3_BUCKET" \
+              --key "$key" \
+              --query Metadata.sha256 \
+              --output text 2>"$head_error")"; then
+              [[ "$remote_digest" = "$digest" ]] || {
+                echo "Refusing to overwrite immutable s3://$DOWNLOADS_S3_BUCKET/$key — bump the tidebreak-whisper version instead" >&2
+                exit 1
+              }
+              echo "Already uploaded with matching digest: $key"
+              return
+            fi
+            error="$(<"$head_error")"
+            case "$error" in
+              *404*|*Not\ Found*) ;;
+              *) printf '%s\n' "$error" >&2; exit 1 ;;
+            esac
+            aws s3 cp "$file" "s3://$DOWNLOADS_S3_BUCKET/$key" \
+              --content-type "$content_type" \
+              --cache-control 'public,max-age=31536000,immutable' \
+              --metadata "sha256=$digest"
+          }
+
+          while IFS= read -r -d '' file; do
+            upload_immutable "$file" "$prefix/${file#dist/}" application/octet-stream
+            upload_immutable "$file.sig" "$prefix/${file#dist/}.sig" text/plain
+          done < <(find dist -type f ! -name '*.sig' -print0)
+
+      - name: Smoke test the hosted helpers
+        run: |
+          base="https://downloads.brightwave.io/tidebreak/tools/whisper-helper/v$HELPER_VERSION"
+          while IFS= read -r -d '' file; do
+            name="${file#dist/}"
+            curl --fail --silent --show-error --head "$base/$name" >/dev/null
+            curl --fail --silent --show-error "$base/$name.sig" \
+              --output "$RUNNER_TEMP/hosted.sig"
+            cmp "$file.sig" "$RUNNER_TEMP/hosted.sig"
+          done < <(find dist -type f ! -name '*.sig' -print0)

@@ -13,7 +13,10 @@ changes.
 
 ## Development
 
-Desktop builds require CMake to compile the pinned whisper.cpp local voice engine (`brew install cmake` on macOS; install the `cmake` package on Linux).
+Local voice transcription runs in a separately published `tidebreak-whisper`
+helper the desktop downloads on demand, so building the desktop app itself no
+longer requires CMake. Building the helper (`cargo build -p tidebreak-whisper`)
+does, and so does the `Publish whisper helper` workflow.
 
 ```sh
 # Run the desktop app: installs the UI dependencies, then opens the window.
