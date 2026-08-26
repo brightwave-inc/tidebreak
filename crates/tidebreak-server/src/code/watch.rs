@@ -740,14 +740,20 @@ async fn reconcile_watch_submission(
     if accepted {
         let accepted_at = Utc::now();
         let detail = format!("fixing {}", reservation.reason);
-        let changed =
-            accept_watch_submission(&runtime.db, &claim, reservation.head, &detail, accepted_at)
-                .await?;
+        let reservation_head = reservation.head.map(str::to_owned);
+        let changed = accept_watch_submission(
+            &runtime.db,
+            &claim,
+            reservation_head.as_deref(),
+            &detail,
+            accepted_at,
+        )
+        .await?;
         if !changed {
             return Ok(true);
         }
         watch.detail = Some(detail);
-        watch.last_fix_head = reservation.head.map(str::to_owned);
+        watch.last_fix_head = reservation_head;
         watch.cycles = watch.cycles.saturating_add(1);
         watch.updated_at = accepted_at;
         emit_workspace_digests(&runtime.db, &runtime.bus, &watch.owner, watch.workspace_id).await;
