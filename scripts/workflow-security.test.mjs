@@ -1580,26 +1580,33 @@ test("restored product binaries are discarded before the packaging build", () =>
     const restoreIdx = names.findIndex((n) => /Restore.*cache/i.test(n));
     const discardIdx = names.findIndex((n) => /Discard.*product/i.test(n));
     const buildIdx = names.findIndex((n) => /Build.*Tauri|Bundle.*Tauri/i.test(n));
-    if (restoreIdx !== -1 && discardIdx !== -1) {
-      assert.ok(restoreIdx < discardIdx, `${name}: cache restore must come before discard`);
-      assert.ok(discardIdx < buildIdx, `${name}: discard must come before the build`);
-      // The discard step must remove every final product binary the warm
-      // cache can restore, including the bare CLI (not just -desktop and
-      // -host-broker). A restored CLI binary that survives discard could
-      // ship from a different SHA via restore-keys fallback.
-      const discardStep = job.match(
-        new RegExp(`- name: ${names[discardIdx].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\\n\\s+- name:)`),
-      )?.[0];
-      assert.ok(discardStep, `${name}: discard step content not found`);
-      for (const product of [
-        /release\/tidebreak-desktop/,
-        /release\/tidebreak-host-broker/,
-        /release\/tidebreak\b/,
-        /binaries\/tidebreak-host-broker/,
-        /binaries\/tidebreak\b/,
-      ]) {
-        assert.match(discardStep, product, `${name}: discard must remove ${product}`);
-      }
+    if (restoreIdx === -1) {
+      assert.equal(discardIdx, -1, `${name}: discard without a cache restore is stale`);
+      continue;
+    }
+    assert.notEqual(discardIdx, -1, `${name}: restored products must be discarded`);
+    assert.ok(restoreIdx < discardIdx, `${name}: cache restore must come before discard`);
+    assert.ok(discardIdx < buildIdx, `${name}: discard must come before the build`);
+    // The discard step must remove every final product binary the warm cache
+    // can restore. The Linux CLI patterns are exact because `\b` also matches
+    // before the hyphen in `tidebreak-desktop` and `tidebreak-host-broker`.
+    const discardStep = job.match(
+      new RegExp(`- name: ${names[discardIdx].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\\n\\s+- name:)`),
+    )?.[0];
+    assert.ok(discardStep, `${name}: discard step content not found`);
+    const products = [
+      /release\/tidebreak-desktop/,
+      /release\/tidebreak-host-broker/,
+      name === "build_linux"
+        ? /release\/tidebreak(?:\s|$)/m
+        : /release\/tidebreak\b/,
+      /binaries\/tidebreak-host-broker/,
+      name === "build_linux"
+        ? /binaries\/tidebreak-\$\{\{ matrix\.target \}\}(?:\s|$)/m
+        : /binaries\/tidebreak\b/,
+    ];
+    for (const product of products) {
+      assert.match(discardStep, product, `${name}: discard must remove ${product}`);
     }
   }
 });

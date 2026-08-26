@@ -531,6 +531,33 @@ const mutations = [
       ),
   },
   {
+    name: "Linux restored CLI discard",
+    file: ".github/workflows/release.yml",
+    expected: "restored product binaries are discarded before the packaging build",
+    mutate: (source) =>
+      editWorkflowJob(source, "build_linux", (job) =>
+        job.replace(
+          "      - name: Install Linux packaging dependencies\n",
+          `      - name: Restore unsigned Rust build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/\${{ matrix.target }}/release
+          key: linux-release-target-v1-\${{ matrix.arch }}
+
+      - name: Discard restored product binaries
+        run: |
+          rm -rf \\
+            target/\${{ matrix.target }}/release/tidebreak-desktop \\
+            target/\${{ matrix.target }}/release/tidebreak-host-broker \\
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-\${{ matrix.target }} \\
+            crates/tidebreak-desktop/binaries/tidebreak-\${{ matrix.target }}
+
+      - name: Install Linux packaging dependencies
+`,
+        ),
+      ),
+  },
+  {
     name: "README macOS download matches an uploaded asset",
     file: "README.md",
     expected: "GitHub release assets are attached before immutable publication",
