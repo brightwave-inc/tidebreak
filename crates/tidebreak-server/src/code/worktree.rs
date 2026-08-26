@@ -1230,7 +1230,14 @@ mod tests {
             .await
             .unwrap();
 
-        let error = run_setup_script(&path, Some("while :; do printf '0123456789abcdef'; done"))
+        // Windows runs workspace scripts through PowerShell, which cannot
+        // parse the POSIX loop, so each platform floods from its own syntax.
+        let noisy_script = if cfg!(windows) {
+            "while ($true) { Write-Output '0123456789abcdef' }"
+        } else {
+            "while :; do printf '0123456789abcdef'; done"
+        };
+        let error = run_setup_script(&path, Some(noisy_script))
             .await
             .unwrap_err();
 
