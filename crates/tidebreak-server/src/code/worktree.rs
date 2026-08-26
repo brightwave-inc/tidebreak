@@ -686,7 +686,7 @@ impl WorktreeOperation {
                             "worktree",
                             "remove",
                             "--force",
-                            &worktree_path.to_string_lossy(),
+                            &registered.path.to_string_lossy(),
                         ],
                         GIT_WORKTREE_TIMEOUT,
                     )
@@ -846,6 +846,7 @@ impl WorktreeOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegisteredWorktree {
+    path: PathBuf,
     head: String,
     branch: Option<String>,
 }
@@ -1115,14 +1116,21 @@ async fn registered_worktree(
     .await
     .map_err(|error| WorktreeError::internal(format!("git worktree list failed: {error}")))?;
     let mut matches_path = false;
+    let mut registered_path = None;
     let mut head = None;
     let mut branch = None;
     for field in fields {
         if let Some(path) = field.strip_prefix("worktree ") {
             if matches_path {
-                return Ok(head.map(|head| RegisteredWorktree { head, branch }));
+                return Ok(head.map(|head| RegisteredWorktree {
+                    path: registered_path.expect("a matched worktree has a path"),
+                    head,
+                    branch,
+                }));
             }
-            matches_path = repo_paths_equivalent(Path::new(path), worktree_path);
+            let path = PathBuf::from(path);
+            matches_path = existing_paths_equivalent(&path, worktree_path);
+            registered_path = matches_path.then_some(path);
             head = None;
             branch = None;
         } else if matches_path {
@@ -1134,9 +1142,23 @@ async fn registered_worktree(
         }
     }
     if matches_path {
-        Ok(head.map(|head| RegisteredWorktree { head, branch }))
+        Ok(head.map(|head| RegisteredWorktree {
+            path: registered_path.expect("a matched worktree has a path"),
+            head,
+            branch,
+        }))
     } else {
         Ok(None)
+    }
+}
+
+fn existing_paths_equivalent(left: &Path, right: &Path) -> bool {
+    if repo_paths_equivalent(left, right) {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => repo_paths_equivalent(&left, &right),
+        _ => false,
     }
 }
 
