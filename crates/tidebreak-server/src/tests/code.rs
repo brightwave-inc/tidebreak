@@ -21,7 +21,7 @@ use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BlobStore, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
     BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CapLevel, CodeEvent, CodeRepo,
-    CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+    CodeSession, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeWorkspace,
     CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, PermissionMode, ReasoningEffort,
     RepoId, Store, WorkspaceId,
 };
@@ -202,6 +202,21 @@ fn browser_token_for_session(runtime: &CodeRuntime, session_id: CodeSessionId) -
         }
     }
     panic!("browser token for session {session_id} was not found")
+}
+
+fn mark_as_exited_orphan(session: &mut CodeSession) {
+    session.lifecycle = CodeSessionLifecycle::Fenced;
+    session.fence_reason = Some(FenceReason::OrphanAlive);
+    // A stale identity on a live PID models PID reuse. Reap treats that as
+    // proof that the recorded process exited and never signals the new owner.
+    session.child_pid = Some(i64::from(std::process::id()));
+    session.child_process_identity = Some("test:exited-orphan".into());
+    session.attention = Attention::new(
+        AttentionState::Fenced {
+            reason: FenceReason::OrphanAlive,
+        },
+        AttentionSource::Lifecycle,
+    );
 }
 
 fn approval_script() -> Vec<HarnessEvent> {
@@ -1168,14 +1183,7 @@ async fn reap_replaces_browser_authority_without_tombstoning_the_session() {
         .await
         .unwrap()
         .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Fenced;
-    row.fence_reason = Some(FenceReason::OrphanAlive);
-    row.attention = Attention::new(
-        AttentionState::Fenced {
-            reason: FenceReason::OrphanAlive,
-        },
-        AttentionSource::Lifecycle,
-    );
+    mark_as_exited_orphan(&mut row);
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();
@@ -1186,7 +1194,9 @@ async fn reap_replaces_browser_authority_without_tombstoning_the_session() {
         .send()
         .await
         .unwrap();
-    assert_eq!(reaped.status(), reqwest::StatusCode::OK);
+    let status = reaped.status();
+    let body = reaped.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "reap failed: {body}");
 
     let old_list = client
         .get(format!("http://{addr}/code/browser/list"))
@@ -2587,14 +2597,7 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
         .await
         .unwrap()
         .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Fenced;
-    row.fence_reason = Some(FenceReason::OrphanAlive);
-    row.attention = Attention::new(
-        AttentionState::Fenced {
-            reason: FenceReason::OrphanAlive,
-        },
-        AttentionSource::Lifecycle,
-    );
+    mark_as_exited_orphan(&mut row);
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();
@@ -2617,7 +2620,9 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
         .send()
         .await
         .unwrap();
-    assert_eq!(reaped.status(), reqwest::StatusCode::OK);
+    let status = reaped.status();
+    let body = reaped.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "reap failed: {body}");
     let accepted = client
         .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
         .bearer_auth(&token)
@@ -3434,14 +3439,7 @@ async fn a_recovered_session_accepts_a_turn() {
     .await
     .unwrap()
     .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Fenced;
-    row.fence_reason = Some(FenceReason::OrphanAlive);
-    row.attention = Attention::new(
-        AttentionState::Fenced {
-            reason: FenceReason::OrphanAlive,
-        },
-        AttentionSource::Lifecycle,
-    );
+    mark_as_exited_orphan(&mut row);
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();
@@ -3485,8 +3483,10 @@ async fn a_recovered_session_accepts_a_turn() {
         .send()
         .await
         .unwrap();
-    assert_eq!(reaped.status(), reqwest::StatusCode::OK);
-    let after_reap: serde_json::Value = reaped.json().await.unwrap();
+    let status = reaped.status();
+    let body = reaped.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "reap failed: {body}");
+    let after_reap: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(after_reap["lifecycle"], "idle");
 
     let after = client3
