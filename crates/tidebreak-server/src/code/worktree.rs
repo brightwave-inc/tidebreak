@@ -525,11 +525,7 @@ pub(crate) async fn create_worktree(
         return Err(err);
     }
     operation.branch_created = true;
-    if let Err(err) = operation.add_existing_branch().await {
-        operation.rollback().await;
-        return Err(err);
-    }
-    Ok(operation)
+    operation.add_existing_branch_or_rollback().await
 }
 
 /// True when `refs/heads/<branch>` exists in the repository.
@@ -574,11 +570,7 @@ pub(crate) async fn restore_worktree(
         operation.rollback().await;
         return Err(err);
     }
-    if let Err(err) = operation.add_existing_branch().await {
-        operation.rollback().await;
-        return Err(err);
-    }
-    Ok(operation)
+    operation.add_existing_branch_or_rollback().await
 }
 
 /// Re-create a released branch from its bundle and check out its exact tip.
@@ -599,14 +591,18 @@ pub(crate) async fn restore_released_worktree(
         }
     };
     operation.branch_created = restored == RestoredBranch::Created;
-    if let Err(err) = operation.add_existing_branch().await {
-        operation.rollback().await;
-        return Err(err);
-    }
-    Ok(operation)
+    operation.add_existing_branch_or_rollback().await
 }
 
 impl WorktreeOperation {
+    async fn add_existing_branch_or_rollback(mut self) -> Result<Self, WorktreeError> {
+        if let Err(err) = self.add_existing_branch().await {
+            self.rollback().await;
+            return Err(err);
+        }
+        Ok(self)
+    }
+
     async fn add_existing_branch(&mut self) -> Result<(), WorktreeError> {
         let repo_root = &self.repo_root;
         let worktree_path = Path::new(&self.marker.worktree_path);
@@ -2200,8 +2196,7 @@ mod tests {
             ],
         );
 
-        assert!(losing.add_existing_branch().await.is_err());
-        losing.rollback().await;
+        assert!(losing.add_existing_branch_or_rollback().await.is_err());
 
         verify_inside_worktree(&path).await.unwrap();
         assert_eq!(resolve_ref(&path, "HEAD").await.unwrap(), winner_tip);
