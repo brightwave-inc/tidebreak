@@ -2225,13 +2225,13 @@ fn parse_head_repository(
     };
     if owner.is_some_and(|owner| {
         StackRepositoryIdentity::new(&base_repository.host, owner, &identity.name)
-            .map_or(true, |candidate| candidate.owner != identity.owner)
+            .is_none_or(|candidate| candidate.owner != identity.owner)
     }) {
         return None;
     }
     if name.is_some_and(|name| {
         StackRepositoryIdentity::new(&base_repository.host, &identity.owner, name)
-            .map_or(true, |candidate| candidate.name != identity.name)
+            .is_none_or(|candidate| candidate.name != identity.name)
     }) {
         return None;
     }

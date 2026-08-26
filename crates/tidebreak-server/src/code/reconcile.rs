@@ -409,29 +409,6 @@ impl StackParentIndex {
     }
 }
 
-/// Compatibility view for durable-only watch and trigger lookups.
-///
-/// Durable facts do not carry the head repository, so they cannot form a
-/// fork-qualified [`StackParentEdge`]. Keep the established unique-branch
-/// lookup for those callers, but refuse duplicate branch candidates instead
-/// of letting iteration order choose one.
-pub(crate) fn stack_parents_by_head(facts: &[CodePullRequestFact]) -> HashMap<String, u64> {
-    let mut candidates: HashMap<String, Option<u64>> = HashMap::new();
-    for fact in facts
-        .iter()
-        .filter(|fact| fact.state == CodePullRequestState::Open && !fact.head_branch.is_empty())
-    {
-        candidates
-            .entry(fact.head_branch.clone())
-            .and_modify(|number| *number = None)
-            .or_insert(Some(fact.number));
-    }
-    candidates
-        .into_iter()
-        .filter_map(|(branch, number)| number.map(|number| (branch, number)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,20 +578,6 @@ mod tests {
                 reason: StackParentUnresolvedReason::IncompleteHostIdentity,
             }
         );
-    }
-
-    #[test]
-    fn durable_branch_compatibility_drops_ambiguous_heads() {
-        let parents = stack_parents_by_head(&[
-            fact(1, "stack/base", CodePullRequestState::Open),
-            fact(2, "stack/base", CodePullRequestState::Open),
-            fact(3, "stack/unique", CodePullRequestState::Open),
-            fact(4, "stack/closed", CodePullRequestState::Closed),
-        ]);
-
-        assert!(!parents.contains_key("stack/base"));
-        assert_eq!(parents.get("stack/unique"), Some(&3));
-        assert!(!parents.contains_key("stack/closed"));
     }
 
     #[test]

@@ -2,9 +2,9 @@
 //!
 //! These drive the real sweeps against a shimmed `gh`: the reconcile sweep
 //! seeds durable facts, then the trigger sweep fires `pr_opened` and
-//! `pr_updated` from the local store — no host read — and holds a stacked
-//! child's `behind` fire. Deliveries stay pending throughout because the
-//! fixture runs no sessions; the rows are the assertions.
+//! `pr_updated` from the local store with no host read. Durable facts do not
+//! guess stack parents because they do not record the head repository.
+//! Deliveries stay pending because the fixture runs no sessions.
 
 use super::*;
 
@@ -329,7 +329,7 @@ async fn pr_updated_baselines_then_fires_on_a_new_head() {
 }
 
 #[tokio::test]
-async fn a_stacked_child_holds_behind_fires_and_parks_the_watch_lookup() {
+async fn durable_facts_do_not_guess_stack_parents_from_branch_names() {
     let (_dir, runtime, db, repo_id, _tracked, child) = seeded_runtime().await;
     let owner = OwnerId::local();
     let trigger = armed(&db, &owner, repo_id, CodeTriggerCondition::Behind).await;
@@ -337,27 +337,10 @@ async fn a_stacked_child_holds_behind_fires_and_parks_the_watch_lookup() {
     crate::code::reconcile::sweep_reconcile(&runtime).await;
     crate::code::trigger::sweep_triggers(&runtime).await;
 
-    // PR 413 is BEHIND, but its base is PR 412's head: the fire is held.
+    // PR 413 uses PR 412's branch as its base. The durable rows do not record
+    // either head repository, so the sweep must not infer that relationship.
     let heads = trigger_fire_heads_for_pr(&db, &owner, trigger, child, 413)
         .await
         .unwrap();
-    assert!(heads.is_empty(), "a stacked child must not fire behind");
-
-    // The watch-side lookup resolves the same parent from the fact set.
-    let digest = PullRequestDigest {
-        base_branch: Some("tidebreak/tracked".into()),
-        ..open_pr_digest(413)
-    };
-    assert_eq!(
-        crate::code::watch::stacked_parent_number(&runtime, &owner, child, &digest).await,
-        Some(412)
-    );
-    let rooted = PullRequestDigest {
-        base_branch: Some("main".into()),
-        ..open_pr_digest(413)
-    };
-    assert_eq!(
-        crate::code::watch::stacked_parent_number(&runtime, &owner, child, &rooted).await,
-        None
-    );
+    assert_eq!(heads, vec!["ccc333".to_owned()]);
 }
