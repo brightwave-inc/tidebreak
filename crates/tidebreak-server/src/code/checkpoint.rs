@@ -26,16 +26,18 @@
 //! marked on the payload. The renderer never runs git.
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use tidebreak_harness::{spawn_process_tree, BoundedProcessOutput, OutputBudget};
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use tracing::warn;
 
 use tidebreak_core::db::code::{
@@ -188,6 +190,68 @@ impl CheckpointError {
 
     fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum GitCommandError {
+    #[error("git {description} timed out")]
+    TimedOut { description: String },
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl GitCommandError {
+    fn timed_out(description: impl Into<String>) -> Self {
+        Self::TimedOut {
+            description: description.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReusableIndexFailure {
+    Locked,
+    Corrupt,
+}
+
+#[async_trait]
+trait SnapshotGit: Send + Sync {
+    async fn checkpoint_index_path(
+        &self,
+        worktree: &Path,
+        deadline: Instant,
+    ) -> Result<Option<PathBuf>, GitCommandError>;
+
+    async fn snapshot_tree_with_index(
+        &self,
+        worktree: &Path,
+        index_path: &Path,
+        reset_from_head: bool,
+        deadline: Instant,
+    ) -> Result<String, GitCommandError>;
+}
+
+struct ProcessSnapshotGit;
+
+#[async_trait]
+impl SnapshotGit for ProcessSnapshotGit {
+    async fn checkpoint_index_path(
+        &self,
+        worktree: &Path,
+        deadline: Instant,
+    ) -> Result<Option<PathBuf>, GitCommandError> {
+        checkpoint_index_path_before(worktree, deadline).await
+    }
+
+    async fn snapshot_tree_with_index(
+        &self,
+        worktree: &Path,
+        index_path: &Path,
+        reset_from_head: bool,
+        deadline: Instant,
+    ) -> Result<String, GitCommandError> {
+        snapshot_tree_with_index_before(worktree, index_path, reset_from_head, deadline).await
     }
 }
 
@@ -484,22 +548,50 @@ pub(crate) async fn produce_diff(
 /// The user's index is never opened. A temporary index file is used and
 /// deleted before this returns.
 pub(crate) async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointError> {
+    snapshot_tree_with_git(worktree, GIT_SNAPSHOT_TIMEOUT, &ProcessSnapshotGit).await
+}
+
+async fn snapshot_tree_with_git(
+    worktree: &Path,
+    limit: Duration,
+    git: &impl SnapshotGit,
+) -> Result<String, CheckpointError> {
+    let deadline = Instant::now() + limit;
     // Reuse one index per worktree so git's stat cache survives between turns
     // and `add -A` re-hashes only what changed. A cold index re-hashes the
     // whole worktree every time: ~0.85s versus ~0.20s on a 20k-file tree.
-    if let Some(index_path) = checkpoint_index_path(worktree).await {
+    let reusable = before_checkpoint_deadline(
+        deadline,
+        "rev-parse --git-path tidebreak-checkpoint-index",
+        git.checkpoint_index_path(worktree, deadline),
+    )
+    .await
+    .map_err(|err| CheckpointError::internal(err.to_string()))?;
+    if let Some(index_path) = reusable {
         let reset_from_head = !index_path.exists();
-        match snapshot_tree_with_index(worktree, &index_path, reset_from_head).await {
+        match before_checkpoint_deadline(
+            deadline,
+            "checkpoint snapshot",
+            git.snapshot_tree_with_index(worktree, &index_path, reset_from_head, deadline),
+        )
+        .await
+        {
             Ok(tree) => return Ok(tree),
-            Err(err) => {
-                // A concurrent snapshot holding `<index>.lock`, or an index
-                // this git refuses to read, must not fail the turn. Fall back
-                // to a private index that nothing else can contend for.
-                warn!(
-                    error = %err,
-                    "reusable checkpoint index unusable; falling back to a temporary one"
-                );
-            }
+            Err(err) => match reusable_index_failure(&err, &index_path) {
+                Some(failure) => {
+                    if failure == ReusableIndexFailure::Corrupt {
+                        let _ = tokio::fs::remove_file(&index_path).await;
+                    }
+                    // A concurrent snapshot holding `<index>.lock`, or a
+                    // corrupt reusable index, can use a private cold index.
+                    // Every other failure returns without repeating `add -A`.
+                    warn!(
+                        error = %err,
+                        "reusable checkpoint index unusable; falling back to a temporary one"
+                    );
+                }
+                None => return Err(CheckpointError::internal(err.to_string())),
+            },
         }
     }
 
@@ -511,34 +603,110 @@ pub(crate) async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointE
     drop(temp);
     let _ = tokio::fs::remove_file(&index_path).await;
 
-    let result = snapshot_tree_with_index(worktree, &index_path, true).await;
+    let result = before_checkpoint_deadline(
+        deadline,
+        "checkpoint snapshot",
+        git.snapshot_tree_with_index(worktree, &index_path, true, deadline),
+    )
+    .await;
     let _ = tokio::fs::remove_file(&index_path).await;
-    result
+    result.map_err(|err| CheckpointError::internal(err.to_string()))
+}
+
+async fn before_checkpoint_deadline<T>(
+    deadline: Instant,
+    description: &str,
+    future: impl Future<Output = Result<T, GitCommandError>>,
+) -> Result<T, GitCommandError> {
+    timeout_at(deadline, future)
+        .await
+        .map_err(|_| GitCommandError::timed_out(description))?
+}
+
+fn reusable_index_failure(
+    error: &GitCommandError,
+    index_path: &Path,
+) -> Option<ReusableIndexFailure> {
+    let GitCommandError::Failed(message) = error else {
+        return None;
+    };
+    let message = message.to_ascii_lowercase();
+    let index_name = index_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let lock_name = format!("{index_name}.lock");
+    if !index_name.is_empty()
+        && message.contains(&lock_name)
+        && (message.contains("file exists")
+            || message.contains("already exists")
+            || message.contains("another git process"))
+    {
+        return Some(ReusableIndexFailure::Locked);
+    }
+
+    const CORRUPTION_MARKERS: &[&str] = &[
+        "index file corrupt",
+        "index file smaller than expected",
+        "index file is too small",
+        "bad signature 0x",
+        "unknown index entry format",
+        "unsupported index version",
+        "index version is not supported",
+        "invalid index",
+        "malformed index",
+    ];
+    CORRUPTION_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+        .then_some(ReusableIndexFailure::Corrupt)
 }
 
 /// Path of this worktree's reusable checkpoint index.
 ///
 /// `--git-path` resolves into the worktree's own git dir, so linked worktrees
 /// each get their own file and none of them is the user's `index`. Returns
-/// `None` outside a repository, where the caller falls back to a temp index.
+/// `None` outside a repository, where the caller starts with a temp index.
+#[cfg(test)]
 async fn checkpoint_index_path(worktree: &Path) -> Option<PathBuf> {
-    let raw = git_text(
+    checkpoint_index_path_before(worktree, Instant::now() + GIT_TIMEOUT)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn checkpoint_index_path_before(
+    worktree: &Path,
+    deadline: Instant,
+) -> Result<Option<PathBuf>, GitCommandError> {
+    let raw = match git_text_env_before(
         worktree,
         &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
-        GIT_TIMEOUT,
+        &[],
+        deadline.min(Instant::now() + GIT_TIMEOUT),
     )
     .await
-    .ok()?;
+    {
+        Ok(raw) => raw,
+        Err(GitCommandError::Failed(message))
+            if message
+                .to_ascii_lowercase()
+                .contains("not a git repository") =>
+        {
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
     let path = PathBuf::from(trimmed);
-    Some(if path.is_absolute() {
+    Ok(Some(if path.is_absolute() {
         path
     } else {
         worktree.join(path)
-    })
+    }))
 }
 
 /// Snapshot the worktree through `index_path`.
@@ -549,38 +717,52 @@ async fn checkpoint_index_path(worktree: &Path) -> Option<PathBuf> {
 /// reconciles whatever the index already holds against the worktree — adding,
 /// updating, and staging deletions — so the resulting tree is the same either
 /// way, and it stays the same after `HEAD` moves.
+#[cfg(test)]
 async fn snapshot_tree_with_index(
     worktree: &Path,
     index_path: &Path,
     reset_from_head: bool,
 ) -> Result<String, CheckpointError> {
+    snapshot_tree_with_index_before(
+        worktree,
+        index_path,
+        reset_from_head,
+        Instant::now() + GIT_SNAPSHOT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| CheckpointError::internal(err.to_string()))
+}
+
+async fn snapshot_tree_with_index_before(
+    worktree: &Path,
+    index_path: &Path,
+    reset_from_head: bool,
+    deadline: Instant,
+) -> Result<String, GitCommandError> {
     let index = index_path.to_string_lossy();
     if reset_from_head {
-        git_text_env(
+        git_text_env_before(
             worktree,
             &["read-tree", "HEAD"],
             &[("GIT_INDEX_FILE", index.as_ref())],
-            GIT_TIMEOUT,
+            deadline.min(Instant::now() + GIT_TIMEOUT),
         )
-        .await
-        .map_err(CheckpointError::internal)?;
+        .await?;
     }
-    git_text_env(
+    git_text_env_before(
         worktree,
         &["add", "-A"],
         &[("GIT_INDEX_FILE", index.as_ref())],
-        GIT_SNAPSHOT_TIMEOUT,
+        deadline,
     )
-    .await
-    .map_err(CheckpointError::internal)?;
-    git_text_env(
+    .await?;
+    git_text_env_before(
         worktree,
         &["write-tree"],
         &[("GIT_INDEX_FILE", index.as_ref())],
-        GIT_TIMEOUT,
+        deadline.min(Instant::now() + GIT_TIMEOUT),
     )
     .await
-    .map_err(CheckpointError::internal)
 }
 
 /// Resolve `merge-base(base_ref, HEAD)`, falling back to `base_ref`.
@@ -1043,6 +1225,16 @@ async fn git_text_env(
     Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
 }
 
+async fn git_text_env_before(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    deadline: Instant,
+) -> Result<String, GitCommandError> {
+    let bytes = git_bytes_env_before(cwd, args, env, deadline).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
+}
+
 async fn git_bytes(cwd: &Path, args: &[&str], limit: Duration) -> Result<Vec<u8>, String> {
     git_bytes_env(cwd, args, &[], limit).await
 }
@@ -1059,6 +1251,39 @@ async fn git_bytes_env(
         command.env(key, value);
     }
     run_git_command(command, args.join(" "), limit).await
+}
+
+async fn git_bytes_env_before(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    deadline: Instant,
+) -> Result<Vec<u8>, GitCommandError> {
+    let description = args.join(" ");
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| GitCommandError::timed_out(&description))?;
+    let mut command = git_command(cwd);
+    command.args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let (stdout, truncated) = run_git_command_bounded_typed(
+        command,
+        description.clone(),
+        remaining,
+        OutputBudget::head(GIT_OUTPUT_BYTES, GIT_OUTPUT_LINES),
+        false,
+    )
+    .await?;
+    if truncated {
+        Err(GitCommandError::Failed(format!(
+            "git {description} output exceeded its limit"
+        )))
+    } else {
+        Ok(stdout)
+    }
 }
 
 async fn git_bytes_with_literal_paths(
@@ -1147,14 +1372,32 @@ async fn run_git_command(
 }
 
 async fn run_git_command_bounded(
-    mut command: Command,
+    command: Command,
     description: String,
     limit: Duration,
     stdout_budget: OutputBudget,
     accept_truncated_stdout: bool,
 ) -> Result<(Vec<u8>, bool), String> {
-    let child =
-        spawn_process_tree(&mut command).map_err(|err| format!("failed to spawn git: {err}"))?;
+    run_git_command_bounded_typed(
+        command,
+        description,
+        limit,
+        stdout_budget,
+        accept_truncated_stdout,
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+async fn run_git_command_bounded_typed(
+    mut command: Command,
+    description: String,
+    limit: Duration,
+    stdout_budget: OutputBudget,
+    accept_truncated_stdout: bool,
+) -> Result<(Vec<u8>, bool), GitCommandError> {
+    let child = spawn_process_tree(&mut command)
+        .map_err(|err| GitCommandError::Failed(format!("failed to spawn git: {err}")))?;
     let output = timeout(
         limit,
         child.wait_with_bounded_output(
@@ -1164,9 +1407,10 @@ async fn run_git_command_bounded(
         ),
     )
     .await
-    .map_err(|_| format!("git {description} timed out"))?
-    .map_err(|err| format!("git {description} failed: {err}"))?;
+    .map_err(|_| GitCommandError::timed_out(&description))?
+    .map_err(|err| GitCommandError::Failed(format!("git {description} failed: {err}")))?;
     finish_git_output(output, &description, accept_truncated_stdout)
+        .map_err(GitCommandError::Failed)
 }
 
 fn finish_git_output(
