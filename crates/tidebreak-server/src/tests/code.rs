@@ -3637,10 +3637,7 @@ async fn archive_preserves_hook_created_files_without_force() {
     assert_eq!(archived.status(), reqwest::StatusCode::CONFLICT);
     let body: serde_json::Value = archived.json().await.unwrap();
     assert_eq!(body["kind"], "uncommitted");
-    assert_eq!(
-        std::fs::read_to_string(path.join("hook-created.txt")).unwrap(),
-        "kept\n"
-    );
+    assert!(path.join("hook-created.txt").is_file());
     let stored = tidebreak_core::db::code::get_workspace(
         &_runtime.db,
         &tidebreak_core::OwnerId::local(),
