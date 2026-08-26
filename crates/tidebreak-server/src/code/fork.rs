@@ -5,10 +5,11 @@
 //! is the condensed conversation — tool calls as one-line entries, subagent
 //! work summarized by its `Task` call — and stays deliberately small so the
 //! child spends its context on the work rather than on history. Next to it,
-//! one full record per turn (`turn-0007.md` for turn 7) holds what the
-//! summary leaves out: complete tool output previews, subagent activity, and
-//! the engine's reasoning. The child reads the summary first and opens a
-//! record only when the summary is not enough.
+//! one record per turn (`turn-0007.md` for turn 7) holds what the summary
+//! leaves out: complete tool output previews, subagent activity, and the
+//! engine's reasoning when bounded replay retained that whole turn. An
+//! omitted turn keeps its request and an explicit marker. The child reads the
+//! summary first and opens a record only when the summary is not enough.
 //!
 //! Pure serialization of what the journal already holds. No model call and no
 //! generated summary — that would be a second thing to be wrong; the point of
@@ -167,7 +168,7 @@ pub(crate) fn cut_at(turns: &[CodeTurn], at_turn: Option<CodeTurnId>) -> Option<
 /// queued work behind because the reader selected that earlier seam.
 pub(crate) fn cut_at_settled_boundary<'a>(
     turns: &'a [CodeTurn],
-    events: &[SequencedCodeEvent],
+    boundary_status: Option<CodeTurnStatus>,
     pending_approval_turns: &HashSet<CodeTurnId>,
     has_queued_follow_up: bool,
     at_turn: Option<CodeTurnId>,
@@ -195,80 +196,15 @@ pub(crate) fn cut_at_settled_boundary<'a>(
     if at_turn.is_none() && has_queued_follow_up {
         return Err(ForkBoundaryError::QueuedFollowUp);
     }
-    // A later turn row proves that the selected earlier turn crossed its
-    // terminal boundary. The newest turn needs its matching journal event:
-    // the worker writes the terminal row before that event, and accepting the
-    // short gap would preserve an incomplete immutable transcript.
-    let boundary_status = match turn_boundary_evidence(events, boundary.id) {
-        TurnBoundaryEvidence::Settled(status) => Some(status),
-        TurnBoundaryEvidence::Open => None,
-        TurnBoundaryEvidence::StartNotVisible => latest_turn_boundary(events),
-    };
-    if cut.excluded == 0 && boundary_status != Some(boundary.status) {
+    // The worker writes the terminal row before its final journal event. The
+    // fork-specific replay scan reports that exact event even when the turn
+    // itself is too large to retain in the transcript window.
+    if boundary_status != Some(boundary.status) {
         return Err(ForkBoundaryError::Settling {
             ordinal: boundary.ordinal,
         });
     }
     Ok(cut)
-}
-
-/// What the bounded journal proves about one turn's final boundary.
-enum TurnBoundaryEvidence {
-    /// The turn start fell before the replay window.
-    StartNotVisible,
-    /// The start is visible without its terminal event.
-    Open,
-    /// The matching terminal event is visible.
-    Settled(CodeTurnStatus),
-}
-
-fn turn_boundary_evidence(
-    events: &[SequencedCodeEvent],
-    turn_id: CodeTurnId,
-) -> TurnBoundaryEvidence {
-    let mut inside = false;
-    let mut found = false;
-    for entry in events {
-        match &entry.event {
-            CodeEvent::TurnStarted { turn_id: started } => {
-                if inside {
-                    return TurnBoundaryEvidence::Open;
-                }
-                inside = *started == turn_id;
-                found |= inside;
-            }
-            CodeEvent::TurnCompleted { .. } if inside => {
-                return TurnBoundaryEvidence::Settled(CodeTurnStatus::Completed);
-            }
-            CodeEvent::TurnFailed { .. } if inside => {
-                return TurnBoundaryEvidence::Settled(CodeTurnStatus::Failed);
-            }
-            CodeEvent::TurnInterrupted if inside => {
-                return TurnBoundaryEvidence::Settled(CodeTurnStatus::Interrupted);
-            }
-            _ => {}
-        }
-    }
-    if found {
-        TurnBoundaryEvidence::Open
-    } else {
-        TurnBoundaryEvidence::StartNotVisible
-    }
-}
-
-/// Terminal status of the newest turn whose boundary is visible in `events`.
-///
-/// Looking at boundary events in reverse also works when a long turn pushed
-/// its `TurnStarted` event out of the bounded replay window. If the newest
-/// visible boundary is a start, the turn is still running.
-fn latest_turn_boundary(events: &[SequencedCodeEvent]) -> Option<CodeTurnStatus> {
-    events.iter().rev().find_map(|entry| match &entry.event {
-        CodeEvent::TurnCompleted { .. } => Some(Some(CodeTurnStatus::Completed)),
-        CodeEvent::TurnFailed { .. } => Some(Some(CodeTurnStatus::Failed)),
-        CodeEvent::TurnInterrupted => Some(Some(CodeTurnStatus::Interrupted)),
-        CodeEvent::TurnStarted { .. } => Some(None),
-        _ => None,
-    })?
 }
 
 /// A written fork, as the route reports it.
@@ -281,15 +217,14 @@ pub(crate) struct WrittenTranscript {
     pub(crate) dir: String,
     /// Bytes of the condensed transcript on disk.
     pub(crate) byte_len: u64,
-    /// Turns the condensed transcript renders in full.
+    /// Complete turn histories the condensed transcript renders in full.
     pub(crate) turns: u32,
     /// Turns the fork covers, up to and including the fork point.
     pub(crate) total_turns: u32,
     /// The fork point's ordinal, when the conversation continued past it.
     pub(crate) at_turn_ordinal: Option<i64>,
-    /// True when anything was left out of the condensed transcript to fit
-    /// [`MAX_TRANSCRIPT_BYTES`]: turns reduced to stubs or dropped, or the
-    /// end of a turn too large on its own.
+    /// True when bounded replay omitted whole turn histories or the condensed
+    /// transcript reduced content to fit [`MAX_TRANSCRIPT_BYTES`].
     pub(crate) truncated: bool,
 }
 
@@ -307,6 +242,7 @@ pub(crate) async fn write_transcript(
     session: &CodeSession,
     cut: ForkCut<'_>,
     events: &[SequencedCodeEvent],
+    complete_turns: &HashSet<CodeTurnId>,
 ) -> std::io::Result<WrittenTranscript> {
     let private_path = private_root.path();
     let write_lock = fork_lock(private_path, session.id);
@@ -328,6 +264,7 @@ pub(crate) async fn write_transcript(
         engine,
         generation,
         &retained_images,
+        complete_turns,
     );
     for (ordinal, markdown) in &records.files {
         scope
@@ -347,6 +284,7 @@ pub(crate) async fn write_transcript(
         generation,
         &records.ordinals,
         &retained_images,
+        complete_turns,
     );
     scope
         .publish(
@@ -402,6 +340,7 @@ fn render_transcript_with_generation(
     generation: uuid::Uuid,
     record_ordinals: &HashSet<i64>,
     retained_images: &HashSet<CodeTurnId>,
+    complete_turns: &HashSet<CodeTurnId>,
 ) -> RenderedTranscript {
     let engine = harness_label(session.harness_kind);
     let mut sections: Vec<String> = Vec::with_capacity(turns.len());
@@ -414,6 +353,7 @@ fn render_transcript_with_generation(
             engine,
             generation,
             retained_images.contains(&turn.id),
+            complete_turns.contains(&turn.id),
         ));
     }
 
@@ -427,6 +367,7 @@ fn render_transcript_with_generation(
         turns.len(),
         record_ordinals,
         engine,
+        complete_turns,
     )
     .len();
     let budget = MAX_TRANSCRIPT_BYTES.saturating_sub(reserved);
@@ -455,7 +396,13 @@ fn render_transcript_with_generation(
     // asked, and where the full record is — newest first, while they fit.
     let stubs: Vec<String> = turns[..dropped]
         .iter()
-        .map(|turn| render_stub(turn, record_ordinals.contains(&turn.ordinal)))
+        .map(|turn| {
+            render_stub(
+                turn,
+                record_ordinals.contains(&turn.ordinal),
+                complete_turns.contains(&turn.id),
+            )
+        })
         .collect();
     let mut stub_from = dropped;
     for (at, stub) in stubs.iter().enumerate().rev() {
@@ -474,6 +421,7 @@ fn render_transcript_with_generation(
         dropped,
         record_ordinals,
         engine,
+        complete_turns,
     ));
     for stub in &stubs[stub_from..] {
         out.push('\n');
@@ -484,10 +432,17 @@ fn render_transcript_with_generation(
         out.push_str(section);
     }
 
+    let complete = turns
+        .iter()
+        .filter(|turn| complete_turns.contains(&turn.id))
+        .count();
     RenderedTranscript {
         markdown: out,
-        turns: kept as u32,
-        truncated: dropped > 0 || clipped,
+        turns: turns[dropped..]
+            .iter()
+            .filter(|turn| complete_turns.contains(&turn.id))
+            .count() as u32,
+        truncated: dropped > 0 || clipped || complete < turns.len(),
     }
 }
 
@@ -601,6 +556,7 @@ fn header(
     reduced: usize,
     record_ordinals: &HashSet<i64>,
     engine: &str,
+    complete_turns: &HashSet<CodeTurnId>,
 ) -> String {
     let total = turns.len();
     let mut out = String::new();
@@ -633,6 +589,17 @@ fn header(
             if reduced == 1 { "s" } else { "" },
         );
     }
+    let omitted = turns
+        .iter()
+        .filter(|turn| !complete_turns.contains(&turn.id))
+        .count();
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "The bounded journal replay omitted the engine events for {omitted} turn{} as a whole because it could not retain every framing record required to reconstruct them.",
+            if omitted == 1 { "" } else { "s" },
+        );
+    }
     out.push('\n');
     out.push_str(
         "Messages and tool calls are as the engine reported them, condensed: a \
@@ -642,10 +609,11 @@ fn header(
     if !record_ordinals.is_empty() {
         out.push('\n');
         out.push_str(
-            "Each turn also has a full record in this file's directory — \
-             `turn-0007.md` for turn 7 — holding complete tool output and \
-             subagent activity. Read a full record only when this summary is \
-             not enough.\n",
+            "Each retained turn record sits in this file's directory — \
+             `turn-0007.md` for turn 7. A complete record holds tool output \
+             and subagent activity; a turn omitted from bounded replay keeps \
+             its request and an explicit omission marker. Read a record only \
+             when this summary is not enough.\n",
         );
         let missing = turns
             .iter()
@@ -687,7 +655,7 @@ fn clip(section: &mut String, budget: usize) {
 ///
 /// The heading deliberately differs from a full section's `— you`, so the
 /// child can tell a stub from a turn it can read here.
-fn render_stub(turn: &CodeTurn, has_record: bool) -> String {
+fn render_stub(turn: &CodeTurn, has_record: bool, events_complete: bool) -> String {
     let asked = turn.user_input.trim();
     let asked = if asked.is_empty() {
         "_(empty)_".to_owned()
@@ -697,11 +665,16 @@ fn render_stub(turn: &CodeTurn, has_record: bool) -> String {
     };
     let mut out = String::new();
     let _ = writeln!(out, "## Turn {} (condensed)\n", turn.ordinal);
+    if !events_complete {
+        out.push_str(
+            "The engine events for this turn were omitted as a whole from bounded replay. ",
+        );
+    }
     let _ = writeln!(
         out,
         "Asked: {asked}. {}",
         if has_record {
-            format!("Full record: `{}`.", record_name(turn.ordinal))
+            format!("Turn record: `{}`.", record_name(turn.ordinal))
         } else {
             "No record file was retained for this turn.".to_owned()
         }
@@ -710,6 +683,7 @@ fn render_stub(turn: &CodeTurn, has_record: bool) -> String {
 }
 
 /// One turn: what the reader asked, then what the engine said and did.
+#[allow(clippy::too_many_arguments)]
 fn render_turn(
     private_root: &Path,
     session_id: tidebreak_core::CodeSessionId,
@@ -718,6 +692,7 @@ fn render_turn(
     engine: &str,
     generation: uuid::Uuid,
     images_retained: bool,
+    events_complete: bool,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "## Turn {} — you\n", turn.ordinal);
@@ -735,6 +710,14 @@ fn render_turn(
         "{}\n",
         if asked.is_empty() { "_(empty)_" } else { asked }
     );
+
+    if !events_complete {
+        let _ = writeln!(out, "## Turn {} — {engine}\n", turn.ordinal);
+        out.push_str(
+            "_This turn's engine events were omitted as a whole because the bounded journal replay could not retain every framing record required to reconstruct them._\n",
+        );
+        return out;
+    }
 
     let lines = turn_lines(turn.id, events);
     if lines.is_empty() {
@@ -872,6 +855,7 @@ struct RenderedRecords {
 
 /// Render every turn's full record, kept from the newest back within
 /// [`MAX_RECORD_TOTAL_BYTES`], each clipped to [`MAX_RECORD_FILE_BYTES`].
+#[allow(clippy::too_many_arguments)]
 fn render_turn_records(
     private_root: &Path,
     session: &CodeSession,
@@ -880,15 +864,8 @@ fn render_turn_records(
     engine: &str,
     generation: uuid::Uuid,
     retained_images: &HashSet<CodeTurnId>,
+    complete_turns: &HashSet<CodeTurnId>,
 ) -> RenderedRecords {
-    let started: HashSet<CodeTurnId> = events
-        .iter()
-        .filter_map(|entry| match &entry.event {
-            CodeEvent::TurnStarted { turn_id } => Some(*turn_id),
-            _ => None,
-        })
-        .collect();
-
     let mut files: Vec<(i64, String)> = Vec::with_capacity(turns.len());
     let mut total = 0usize;
     for turn in turns.iter().rev() {
@@ -900,7 +877,7 @@ fn render_turn_records(
             engine,
             generation,
             retained_images.contains(&turn.id),
-            started.contains(&turn.id),
+            complete_turns.contains(&turn.id),
         );
         clip(&mut record, MAX_RECORD_FILE_BYTES);
         if total + record.len() > MAX_RECORD_TOTAL_BYTES {
@@ -926,10 +903,15 @@ fn render_turn_record(
     engine: &str,
     generation: uuid::Uuid,
     images_retained: bool,
-    events_in_window: bool,
+    events_complete: bool,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# Turn {} — full record\n", turn.ordinal);
+    let _ = writeln!(
+        out,
+        "# Turn {} — {} record\n",
+        turn.ordinal,
+        if events_complete { "full" } else { "request" }
+    );
     let _ = writeln!(out, "## Turn {} — you\n", turn.ordinal);
     render_attachment_list(
         &mut out,
@@ -946,11 +928,10 @@ fn render_turn_record(
         if asked.is_empty() { "_(empty)_" } else { asked }
     );
 
-    if !events_in_window {
+    if !events_complete {
         let _ = writeln!(
             out,
-            "_The journal's replay window no longer holds this turn's events; \
-             only the request above survives._",
+            "_The bounded journal replay omitted this turn's engine events as a whole because it could not retain every framing record required to reconstruct them; only the request above survives._",
         );
         return out;
     }
@@ -1243,14 +1224,8 @@ mod tests {
             .collect()
     }
 
-    fn completed_events(turn_id: CodeTurnId) -> Vec<SequencedCodeEvent> {
-        seq(vec![
-            CodeEvent::TurnStarted { turn_id },
-            CodeEvent::TurnCompleted {
-                usage: Default::default(),
-                checkpoint: None,
-            },
-        ])
+    fn all_turn_ids(turns: &[CodeTurn]) -> HashSet<CodeTurnId> {
+        turns.iter().map(|turn| turn.id).collect()
     }
 
     fn test_root(directory: &tempfile::TempDir) -> super::super::scratch::ScratchRoot {
@@ -1274,6 +1249,7 @@ mod tests {
             events,
             uuid::Uuid::nil(),
             &records,
+            &retained,
             &retained,
         )
     }
@@ -1416,30 +1392,23 @@ mod tests {
         let completed = turn(session.id, 1, "first");
         let mut running = turn(session.id, 2, "keep working");
         running.status = CodeTurnStatus::Running;
-        let events = seq(vec![
-            CodeEvent::TurnStarted {
-                turn_id: completed.id,
-            },
-            CodeEvent::TurnCompleted {
-                usage: Default::default(),
-                checkpoint: None,
-            },
-            CodeEvent::TurnStarted {
-                turn_id: running.id,
-            },
-        ]);
         let turns = [completed.clone(), running];
 
-        let result = cut_at_settled_boundary(&turns, &events, &HashSet::new(), false, None);
+        let result = cut_at_settled_boundary(&turns, None, &HashSet::new(), false, None);
 
         assert!(matches!(
             result,
             Err(ForkBoundaryError::Running { ordinal: 2 })
         ));
 
-        let earlier =
-            cut_at_settled_boundary(&turns, &events, &HashSet::new(), false, Some(completed.id))
-                .expect("earlier completed boundary");
+        let earlier = cut_at_settled_boundary(
+            &turns,
+            Some(CodeTurnStatus::Completed),
+            &HashSet::new(),
+            false,
+            Some(completed.id),
+        )
+        .expect("earlier completed boundary");
         assert_eq!(earlier.turns.len(), 1);
         assert_eq!(earlier.excluded, 1);
     }
@@ -1451,10 +1420,15 @@ mod tests {
         let session = session();
         let completed = turn(session.id, 1, "run the command");
         let pending = HashSet::from([completed.id]);
-        let events = completed_events(completed.id);
         let turns = [completed];
 
-        let result = cut_at_settled_boundary(&turns, &events, &pending, false, None);
+        let result = cut_at_settled_boundary(
+            &turns,
+            Some(CodeTurnStatus::Completed),
+            &pending,
+            false,
+            None,
+        );
 
         assert!(matches!(
             result,
@@ -1469,11 +1443,9 @@ mod tests {
     fn queued_follow_up_requires_an_explicit_turn_boundary() {
         let session = session();
         let completed = turn(session.id, 1, "first");
-        let events = completed_events(completed.id);
-
         let ordinary = cut_at_settled_boundary(
             std::slice::from_ref(&completed),
-            &events,
+            Some(CodeTurnStatus::Completed),
             &HashSet::new(),
             true,
             None,
@@ -1482,7 +1454,7 @@ mod tests {
 
         let explicit = cut_at_settled_boundary(
             std::slice::from_ref(&completed),
-            &events,
+            Some(CodeTurnStatus::Completed),
             &HashSet::new(),
             true,
             Some(completed.id),
@@ -1499,12 +1471,9 @@ mod tests {
         let session = session();
         let mut stale = turn(session.id, 1, "finish while forking");
         stale.status = CodeTurnStatus::Running;
-        let started = seq(vec![CodeEvent::TurnStarted { turn_id: stale.id }]);
-        let completed = completed_events(stale.id);
-
         let mixed = cut_at_settled_boundary(
             std::slice::from_ref(&stale),
-            &completed,
+            Some(CodeTurnStatus::Completed),
             &HashSet::new(),
             false,
             None,
@@ -1517,16 +1486,20 @@ mod tests {
         let mut settled = stale;
         settled.status = CodeTurnStatus::Completed;
         let settled_turns = [settled];
-        let row_ahead =
-            cut_at_settled_boundary(&settled_turns, &started, &HashSet::new(), false, None);
+        let row_ahead = cut_at_settled_boundary(&settled_turns, None, &HashSet::new(), false, None);
         assert!(matches!(
             row_ahead,
             Err(ForkBoundaryError::Settling { ordinal: 1 })
         ));
 
-        let retry =
-            cut_at_settled_boundary(&settled_turns, &completed, &HashSet::new(), false, None)
-                .expect("fresh settled snapshot");
+        let retry = cut_at_settled_boundary(
+            &settled_turns,
+            Some(CodeTurnStatus::Completed),
+            &HashSet::new(),
+            false,
+            None,
+        )
+        .expect("fresh settled snapshot");
         assert_eq!(retry.turns.len(), 1);
     }
 
@@ -1540,6 +1513,7 @@ mod tests {
             .map(|ordinal| turn(session.id, ordinal, "work"))
             .collect();
         let records: HashSet<i64> = turns.iter().map(|turn| turn.ordinal).collect();
+        let complete = all_turn_ids(&turns);
 
         let markdown = render_transcript_with_generation(
             Path::new("/private"),
@@ -1550,6 +1524,7 @@ mod tests {
             uuid::Uuid::nil(),
             &records,
             &HashSet::new(),
+            &complete,
         )
         .markdown;
 
@@ -1590,6 +1565,7 @@ mod tests {
             .map(|ordinal| turn(session.id, ordinal, &bulk))
             .collect();
         let records: HashSet<i64> = [3].into_iter().collect();
+        let complete = all_turn_ids(&turns);
 
         let markdown = render_transcript_with_generation(
             Path::new("/private"),
@@ -1600,6 +1576,7 @@ mod tests {
             uuid::Uuid::nil(),
             &records,
             &HashSet::new(),
+            &complete,
         )
         .markdown;
 
@@ -1785,10 +1762,10 @@ mod tests {
         assert_eq!(opens, 2, "the wrapping fence must outgrow the content");
     }
 
-    /// A turn whose events fell out of the bounded replay window still gets a
-    /// record for its ask, and the record says why the rest is missing.
+    /// A turn omitted from bounded replay still gets a request record that
+    /// says why its engine events are missing.
     #[test]
-    fn a_record_says_when_the_journal_window_dropped_its_events() {
+    fn an_omitted_turn_record_says_why_its_events_are_missing() {
         let session = session();
         let old = turn(session.id, 1, "the first ask");
         let record = render_turn_record(
@@ -1803,7 +1780,37 @@ mod tests {
         );
 
         assert!(record.contains("the first ask"));
-        assert!(record.contains("replay window no longer holds"));
+        assert!(record.contains("# Turn 1 — request record"));
+        assert!(record.contains("omitted this turn's engine events as a whole"));
+    }
+
+    /// The condensed transcript must not make an omitted newest turn look as
+    /// though the engine produced no work.
+    #[test]
+    fn marks_a_whole_turn_omitted_from_bounded_replay() {
+        let session = session();
+        let only = turn(session.id, 1, "inspect the failing run");
+
+        let rendered = render_transcript_with_generation(
+            Path::new("/private"),
+            &session,
+            std::slice::from_ref(&only),
+            0,
+            &[],
+            uuid::Uuid::nil(),
+            &HashSet::from([only.ordinal]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(rendered.turns, 0);
+        assert!(rendered.truncated);
+        assert!(rendered
+            .markdown
+            .contains("omitted the engine events for 1 turn as a whole"));
+        assert!(rendered
+            .markdown
+            .contains("This turn's engine events were omitted as a whole"));
     }
 
     /// Records are kept from the newest turn back within the total budget, so
@@ -1815,6 +1822,7 @@ mod tests {
         let turns: Vec<CodeTurn> = (1..=40)
             .map(|ordinal| turn(session.id, ordinal, &bulk))
             .collect();
+        let complete = all_turn_ids(&turns);
 
         let records = render_turn_records(
             Path::new("/private"),
@@ -1824,6 +1832,7 @@ mod tests {
             "Claude Code",
             uuid::Uuid::nil(),
             &HashSet::new(),
+            &complete,
         );
 
         assert!(records.files.len() < turns.len());
@@ -1848,6 +1857,7 @@ mod tests {
             turn(session.id, 1, "hello"),
             turn(session.id, 2, "and again"),
         ];
+        let complete = all_turn_ids(&turns);
         let private_root = test_root(&private);
 
         let written = write_transcript(
@@ -1859,6 +1869,7 @@ mod tests {
                 excluded: 0,
             },
             &[],
+            &complete,
         )
         .await
         .expect("write");
@@ -1889,9 +1900,10 @@ mod tests {
             .map(|ordinal| turn(session.id, ordinal, "work"))
             .collect();
         let cut = cut_at(&turns, Some(turns[0].id)).expect("known turn");
+        let complete = all_turn_ids(cut.turns);
         let private_root = test_root(&private);
 
-        let written = write_transcript(&private_root, &blobs, &session, cut, &[])
+        let written = write_transcript(&private_root, &blobs, &session, cut, &[], &complete)
             .await
             .expect("write");
 
@@ -1919,6 +1931,8 @@ mod tests {
             turn(session.id, 1, "hello"),
             turn(session.id, 2, "more work"),
         ];
+        let first_complete = all_turn_ids(&first_turns);
+        let second_complete = all_turn_ids(&second_turns);
         let private_root = test_root(&private);
 
         let first = write_transcript(
@@ -1930,6 +1944,7 @@ mod tests {
                 excluded: 0,
             },
             &[],
+            &first_complete,
         )
         .await
         .expect("first write");
@@ -1942,6 +1957,7 @@ mod tests {
                 excluded: 0,
             },
             &[],
+            &second_complete,
         )
         .await
         .expect("second write");
@@ -1988,6 +2004,7 @@ mod tests {
             .unwrap();
         only.attachments = vec![first, second];
         let turns = vec![only];
+        let complete = all_turn_ids(&turns);
         let private_root = test_root(&private);
 
         let written = write_transcript(
@@ -1999,6 +2016,7 @@ mod tests {
                 excluded: 0,
             },
             &[],
+            &complete,
         )
         .await
         .unwrap();
@@ -2048,6 +2066,7 @@ mod tests {
         let mut new = turn(session.id, 2, "and this");
         new.attachments = vec![real];
         let turns = vec![old, new];
+        let complete = all_turn_ids(&turns);
         let private_root = test_root(&private);
 
         let written = write_transcript(
@@ -2059,6 +2078,7 @@ mod tests {
                 excluded: 0,
             },
             &[],
+            &complete,
         )
         .await
         .unwrap();

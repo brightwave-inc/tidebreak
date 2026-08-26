@@ -542,7 +542,7 @@ pub struct CodeForkTranscript {
     pub path: String,
     pub dir: String,
     pub byte_len: u64,
-    /// Turns the condensed transcript renders in full.
+    /// Complete turn histories the condensed transcript renders in full.
     pub turns: u32,
     /// Turns the fork covers, up to and including the fork point.
     pub total_turns: u32,
@@ -551,8 +551,8 @@ pub struct CodeForkTranscript {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub at_turn_ordinal: Option<i64>,
-    /// True when anything was left out to fit the size cap: the oldest
-    /// turns, or the end of a turn too large on its own.
+    /// True when bounded replay omitted whole turn histories or the file size
+    /// cap reduced the oldest turns or the end of one oversized turn.
     pub truncated: bool,
 }
 

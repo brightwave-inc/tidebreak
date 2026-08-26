@@ -1295,7 +1295,7 @@ at_turn?: CodeTurnId, };
  */
 export type CodeForkTranscript = { path: string, dir: string, byte_len: number, 
 /**
- * Turns the condensed transcript renders in full.
+ * Complete turn histories the condensed transcript renders in full.
  */
 turns: number, 
 /**
@@ -1308,8 +1308,8 @@ total_turns: number,
  */
 at_turn_ordinal?: number, 
 /**
- * True when anything was left out to fit the size cap: the oldest
- * turns, or the end of a turn too large on its own.
+ * True when bounded replay omitted whole turn histories or the file size
+ * cap reduced the oldest turns or the end of one oversized turn.
  */
 truncated: boolean, };
 

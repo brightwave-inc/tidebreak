@@ -13,11 +13,11 @@ use tokio::time::Instant as TokioInstant;
 use tidebreak_core::db::code::{
     abandon_pending_approval, arm_trigger, claim_approval, delete_trigger, delete_workspace,
     get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_workspace,
-    insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_repos,
-    list_sessions, list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo,
-    list_turns, list_workspaces, mark_repo_removed, queued_turn_head, save_repo, save_session,
-    save_workspace, settle_approval_claim, update_trigger_enabled, ClaimedApprovalSettlement,
-    MAX_REPLAY_EVENTS,
+    insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_fork_events,
+    list_repos, list_sessions, list_sessions_all_owners, list_sessions_for_workspace,
+    list_triggers_for_repo, list_turns, list_workspaces, mark_repo_removed, queued_turn_head,
+    save_repo, save_session, save_workspace, settle_approval_claim, update_trigger_enabled,
+    ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -3951,7 +3951,6 @@ impl CodeRuntime {
             .transpose()?;
 
         let turns = list_turns(&self.db, owner, session_id).await?;
-        let events = list_events(&self.db, owner, session_id, 0, MAX_REPLAY_EVENTS).await?;
         let pending_approval_turns: HashSet<CodeTurnId> = list_approvals(
             &self.db,
             owner,
@@ -3966,9 +3965,20 @@ impl CodeRuntime {
             && queued_turn_head(&self.db, owner, session_id)
                 .await?
                 .is_some();
+        let Some(prepared_cut) = fork::cut_at(&turns, at_turn) else {
+            return Err(ServerError::bad_request(
+                "that turn is not part of this session",
+            ));
+        };
+        let Some(boundary) = prepared_cut.turns.last() else {
+            let error = fork::ForkBoundaryError::NoTurns;
+            return Err(ServerError::conflict_kind(error.kind(), error.message()));
+        };
+        let replay =
+            list_fork_events(&self.db, owner, session_id, boundary.id, MAX_REPLAY_EVENTS).await?;
         let cut = fork::cut_at_settled_boundary(
             &turns,
-            &events.events,
+            replay.boundary_status,
             &pending_approval_turns,
             has_queued_follow_up,
             at_turn,
@@ -3984,7 +3994,8 @@ impl CodeRuntime {
             self.blobs.as_ref(),
             &session,
             cut,
-            &events.events,
+            &replay.events,
+            &replay.complete_turns,
         )
         .await
         .map_err(|err| ServerError::internal(format!("could not write the fork transcript: {err}")))
