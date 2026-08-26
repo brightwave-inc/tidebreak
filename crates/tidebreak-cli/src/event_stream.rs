@@ -1,14 +1,16 @@
-//! Shared chat event-socket follow: subscribe, reconnect, durable fallback.
+//! Shared event-socket follow: subscribe, reconnect, durable fallback.
 //!
-//! Print mode and `agent-mcp` both watch one turn over `/chats/{id}/events`.
-//! The reconnect ladder and the durable-transcript fallback live here so those
-//! surfaces stay in lockstep; each caller decides what a frame *means*.
+//! Print mode and `agent-mcp` watch a chat turn over `/chats/{id}/events`.
+//! Code-mode tools watch `/code/sessions/{id}/events`. The reconnect ladder
+//! lives here so those surfaces stay in lockstep; each caller decides what a
+//! frame *means*.
 
 use futures::StreamExt as _;
-use tidebreak_core::{AgentError, ChatId, Result, TurnId};
+use tidebreak_core::{AgentError, ChatId, CodeSessionId, Result, TurnId};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::client::{Client, DurableTurn, EventSocket};
+use crate::api::code::{decode_event_frame, SequencedCodeEventFrame};
 use crate::api::wire::{ChatFrame, ClientEvent};
 
 /// Attempts to re-open the event socket after it closes mid-turn before giving
@@ -123,6 +125,84 @@ impl EventStream {
         }
         Err(AgentError::msg(format!(
             "the event stream closed mid-turn and could not be reopened{}",
+            last.map(|error| format!(": {error}")).unwrap_or_default()
+        )))
+    }
+}
+
+/// The code-mode session event socket plus the cursor a reconnect resumes from.
+pub(crate) struct CodeEventStream {
+    socket: EventSocket,
+    last_seq: i64,
+}
+
+pub(crate) enum CodeStreamNext {
+    Frame(SequencedCodeEventFrame),
+    Ignore,
+}
+
+impl CodeEventStream {
+    pub(crate) async fn open(client: &Client, session: CodeSessionId) -> Result<Self> {
+        Self::open_after(client, session, 0).await
+    }
+
+    pub(crate) async fn open_after(
+        client: &Client,
+        session: CodeSessionId,
+        after: i64,
+    ) -> Result<Self> {
+        Ok(Self {
+            socket: client.open_code_events(session, after).await?,
+            last_seq: after,
+        })
+    }
+
+    pub(crate) fn last_seq(&self) -> i64 {
+        self.last_seq
+    }
+
+    /// The next sequenced frame, or an ignorable payload. A closed socket
+    /// climbs [`RECONNECT_DELAYS`] and resumes from [`Self::last_seq`]. The
+    /// caller reconciles via `list_session_turns` when this returns an error.
+    pub(crate) async fn next(
+        &mut self,
+        client: &mut Client,
+        session: CodeSessionId,
+    ) -> Result<CodeStreamNext> {
+        match self.socket.next().await {
+            Some(Ok(Message::Text(text))) => match decode_event_frame(&text) {
+                Ok(frame) => {
+                    self.last_seq = frame.seq;
+                    Ok(CodeStreamNext::Frame(frame))
+                }
+                Err(_) => Ok(CodeStreamNext::Ignore),
+            },
+            Some(Ok(_)) => Ok(CodeStreamNext::Ignore),
+            Some(Err(_)) | None => {
+                self.reconnect(client, session).await?;
+                Ok(CodeStreamNext::Ignore)
+            }
+        }
+    }
+
+    async fn reconnect(&mut self, client: &mut Client, session: CodeSessionId) -> Result<()> {
+        let mut last = None;
+        for delay in RECONNECT_DELAYS {
+            tokio::time::sleep(delay).await;
+            if let Err(error) = client.refresh_attach_endpoint() {
+                last = Some(error);
+                continue;
+            }
+            match client.open_code_events(session, self.last_seq).await {
+                Ok(socket) => {
+                    self.socket = socket;
+                    return Ok(());
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(AgentError::msg(format!(
+            "the code event stream closed mid-turn and could not be reopened{}",
             last.map(|error| format!(": {error}")).unwrap_or_default()
         )))
     }

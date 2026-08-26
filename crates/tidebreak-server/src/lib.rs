@@ -1894,11 +1894,14 @@ async fn bind_inner(
     );
     // A self-host machine owns its filesystem. Clones land under the data
     // directory unless an operator set a destination (decision 70).
-    let runtime = if state.config.profile == Profile::SelfHost {
+    #[allow(unused_mut)]
+    let mut runtime = if state.config.profile == Profile::SelfHost {
         runtime.with_clone_parent_default(state.config.data_dir.join("code").join("src"))
     } else {
         runtime
     };
+    #[cfg(feature = "scripted-harness")]
+    scripted_harness::install_from_env(&mut runtime.adapters)?;
     let code = Arc::new(runtime);
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.

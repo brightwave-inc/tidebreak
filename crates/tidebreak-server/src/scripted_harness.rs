@@ -2,19 +2,25 @@
 //!
 //! Compiled only under the `scripted-harness` feature or in this crate's
 //! tests, matching [`scripted_provider`]: a released binary never contains it.
+//! Test-only helpers stay compiled under the feature so CLI e2e can load the
+//! adapter; they are unused outside this crate's tests.
+#![cfg_attr(not(test), allow(dead_code))]
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, PermissionMode, ReasoningEffort};
+use serde::Deserialize;
+use tidebreak_core::{
+    AgentError, CapLevel, HarnessCaps, HarnessKind, PermissionMode, ReasoningEffort, Result,
+};
 use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
-    ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef, HarnessError,
-    HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv, SessionSpec, TurnInput,
-    TurnOutcome,
+    AdapterRegistry, ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef,
+    HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv,
+    SessionSpec, TurnInput, TurnOutcome,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -74,9 +80,20 @@ impl ApprovalCompleter for ScriptedApprover {
     }
 }
 
-/// Environment variable carrying a JSON array of [`HarnessEvent`]s.
-#[allow(dead_code)]
+/// Environment variable carrying a scripted-engine script for CLI e2e tests.
 const SCRIPT_VAR: &str = "TIDEBREAK_SCRIPTED_HARNESS";
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn env_is_set() -> bool {
+    std::env::var_os(SCRIPT_VAR).is_some()
+}
+
+/// One file the scripted engine writes into the session worktree.
+#[derive(Clone, Debug, Deserialize)]
+struct ScriptedWrite {
+    path: String,
+    contents: String,
+}
 
 /// One scripted engine session.
 #[derive(Clone)]
@@ -125,6 +142,11 @@ pub(crate) struct ScriptedAdapter {
     /// Approval endpoint each launch was handed, `None` when it was handed no
     /// channel at all. Lets a test see how a session was wired.
     launched_approvals: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    /// Files to materialize in the worktree at the start of each turn.
+    writes: Vec<ScriptedWrite>,
+    /// Sleep once at the start of each turn, so a caller can observe Running
+    /// and queue a follow-up before the script plays.
+    turn_delay: Duration,
 }
 
 impl ScriptedAdapter {
@@ -157,6 +179,8 @@ impl ScriptedAdapter {
             approval_ack_delay: Duration::ZERO,
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
+            writes: Vec::new(),
+            turn_delay: Duration::ZERO,
         }
     }
 
@@ -408,6 +432,9 @@ impl HarnessAdapter for ScriptedAdapter {
             turns: self.turns.clone(),
             modes: self.modes.clone(),
             inputs: self.inputs.clone(),
+            worktree: spec.worktree.clone(),
+            writes: self.writes.clone(),
+            turn_delay: self.turn_delay,
         }))
     }
 }
@@ -440,6 +467,9 @@ struct ScriptedSession {
     turns: Arc<std::sync::Mutex<Vec<Option<ReasoningEffort>>>>,
     modes: Arc<std::sync::Mutex<Vec<PermissionMode>>>,
     inputs: Arc<std::sync::Mutex<Vec<ScriptedTurnInput>>>,
+    worktree: PathBuf,
+    writes: Vec<ScriptedWrite>,
+    turn_delay: Duration,
 }
 
 /// One turn as the engine received it.
@@ -525,6 +555,13 @@ impl HarnessSession for ScriptedSession {
             return Err(HarnessError::ResumeLost(detail.clone()));
         }
         self.interrupt.store(false, Ordering::SeqCst);
+        if !self.turn_delay.is_zero() {
+            tokio::time::sleep(self.turn_delay).await;
+            if self.interrupt.load(Ordering::SeqCst) {
+                return Ok(self.stopped().await);
+            }
+        }
+        apply_scripted_writes(&self.worktree, &self.writes)?;
         self.unrecognized
             .fetch_add(self.unrecognized_per_turn, Ordering::SeqCst);
         // A per-turn child exists only while the turn runs; publish it the way
@@ -613,6 +650,101 @@ impl HarnessSession for ScriptedSession {
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         Ok(())
     }
+}
+
+fn apply_scripted_writes(worktree: &Path, writes: &[ScriptedWrite]) -> Result<(), HarnessError> {
+    for write in writes {
+        let relative = Path::new(&write.path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(HarnessError::Other(format!(
+                "scripted write path must be worktree-relative: {}",
+                write.path
+            )));
+        }
+        let dest = worktree.join(relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                HarnessError::Other(format!("scripted write mkdir failed: {error}"))
+            })?;
+        }
+        std::fs::write(&dest, &write.contents)
+            .map_err(|error| HarnessError::Other(format!("scripted write failed: {error}")))?;
+    }
+    Ok(())
+}
+
+/// Object form of [`SCRIPT_VAR`]: events plus optional delay, writes, and
+/// approval-channel flags. A bare JSON array of [`HarnessEvent`]s is also
+/// accepted so a short successful turn stays one line.
+#[derive(Debug, Deserialize)]
+struct ScriptedHarnessScript {
+    events: Vec<HarnessEvent>,
+    #[serde(default)]
+    delay_ms: u64,
+    #[serde(default)]
+    turn_delay_ms: u64,
+    #[serde(default)]
+    writes: Vec<ScriptedWrite>,
+    #[serde(default)]
+    approvals: bool,
+}
+
+/// The adapter [`SCRIPT_VAR`] asks for, or `None` when it is unset.
+///
+/// A malformed script is an error rather than a silent fall-through to the
+/// real engines: a CLI e2e whose script did not parse would otherwise try to
+/// install pinned harness binaries.
+pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
+    let Ok(script) = std::env::var(SCRIPT_VAR) else {
+        return Ok(None);
+    };
+    let parsed = parse_script(&script).map_err(|error| {
+        AgentError::config(format!("{SCRIPT_VAR} is not a valid script: {error}"))
+    })?;
+    let mut adapter = ScriptedAdapter::new(parsed.events);
+    if parsed.delay_ms > 0 {
+        adapter = adapter.with_delay(Duration::from_millis(parsed.delay_ms));
+    }
+    if parsed.turn_delay_ms > 0 {
+        adapter.turn_delay = Duration::from_millis(parsed.turn_delay_ms);
+    }
+    if parsed.approvals
+        || adapter
+            .events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. }))
+    {
+        adapter = adapter.with_approvals(CapLevel::Supported);
+    }
+    adapter.writes = parsed.writes;
+    Ok(Some(adapter))
+}
+
+/// Install the env-driven scripted engine in place of the matching built-in,
+/// so a spawned `tidebreak serve` can drive code-mode turns without a real
+/// harness binary.
+pub(crate) fn install_from_env(registry: &mut AdapterRegistry) -> Result<()> {
+    if let Some(adapter) = adapter_from_env()? {
+        registry.register(Arc::new(adapter));
+    }
+    Ok(())
+}
+
+fn parse_script(script: &str) -> std::result::Result<ScriptedHarnessScript, serde_json::Error> {
+    if let Ok(events) = serde_json::from_str::<Vec<HarnessEvent>>(script) {
+        return Ok(ScriptedHarnessScript {
+            events,
+            delay_ms: 0,
+            turn_delay_ms: 0,
+            writes: Vec::new(),
+            approvals: false,
+        });
+    }
+    serde_json::from_str(script)
 }
 
 /// A short successful turn: one assistant delta, then completed.

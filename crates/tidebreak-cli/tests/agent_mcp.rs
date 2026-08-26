@@ -111,6 +111,9 @@ impl Mcp {
             "chat_output_read",
             "agent_runs",
             "agent_run_cancel",
+            "code_run_turn",
+            "code_wait",
+            "code_decide",
         ] {
             assert!(
                 names.contains(&expected),

@@ -10,7 +10,7 @@
 //! `request_folder_access` returns `needs_host_consent` with no decision path.
 //! Standing consent comes from `tidebreak folder connect` or the desktop.
 //!
-//! Later PRs add tool modules (settings, code mode) by adding a file and one
+//! Later surfaces add tool modules by adding a file and one
 //! [`register`] call in [`assemble_registry`].
 
 use std::collections::HashMap;
@@ -24,6 +24,8 @@ use crate::api::client::Client;
 use crate::connect;
 
 mod chat;
+mod code;
+mod code_follow;
 pub(crate) mod follow;
 mod profile;
 
@@ -65,11 +67,12 @@ pub(crate) async fn run(server: connect::Server) -> Result<()> {
 }
 
 /// Assemble the MCP registry. Add a module and one `register` call here to
-/// grow the surface (settings, code mode) without touching the entry point.
+/// grow the surface without touching the entry point.
 fn assemble_registry(state: Arc<AgentMcp>) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     chat::register(&mut tools, Arc::clone(&state));
-    profile::register(&mut tools, state);
+    profile::register(&mut tools, Arc::clone(&state));
+    code::register(&mut tools, state);
     tools
 }
 
@@ -92,6 +95,7 @@ pub(crate) enum TurnStatus {
     NeedsAnswer,
     NeedsHostConsent,
     Running,
+    Queued,
     Cancelled,
     Failed,
 }
@@ -105,6 +109,7 @@ impl TurnStatus {
             Self::NeedsAnswer => "needs_answer",
             Self::NeedsHostConsent => "needs_host_consent",
             Self::Running => "running",
+            Self::Queued => "queued",
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
         }
@@ -143,6 +148,27 @@ mod tests {
                 "chat_status",
                 "chat_steer",
                 "chat_wait",
+                "code_approvals",
+                "code_decide",
+                "code_diff",
+                "code_files",
+                "code_git_commit",
+                "code_git_pr",
+                "code_git_push",
+                "code_git_status",
+                "code_harnesses",
+                "code_interrupt",
+                "code_repo_add",
+                "code_repos",
+                "code_run_turn",
+                "code_session_create",
+                "code_session_set_permission_mode",
+                "code_sessions",
+                "code_turns",
+                "code_wait",
+                "code_workspace_archive",
+                "code_workspace_create",
+                "code_workspaces",
                 "exec_select",
                 "model_role_set",
                 "profile_snapshot",
