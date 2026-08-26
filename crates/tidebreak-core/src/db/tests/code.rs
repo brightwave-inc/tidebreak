@@ -324,6 +324,48 @@ async fn stale_session_saves_preserve_resume_refs_until_an_explicit_clear() {
 }
 
 #[tokio::test]
+async fn execution_settings_replace_atomically_and_survive_stale_worker_saves() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let stale = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let next = CodeSessionExecutionSettings {
+        model: Some("claude-opus-5".into()),
+        reasoning_effort: Some(ReasoningEffort::High),
+        fast_mode: true,
+    };
+    let changed = replace_session_execution_settings(&store, &stale, &next)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(CodeSessionExecutionSettings::from(&changed), next);
+
+    let conflicting = CodeSessionExecutionSettings {
+        model: Some("other".into()),
+        reasoning_effort: None,
+        fast_mode: false,
+    };
+    assert!(
+        replace_session_execution_settings(&store, &stale, &conflicting)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut stale_worker = stale;
+    stale_worker.child_pid = Some(4242);
+    assert!(save_session(&store, &stale_worker).await.unwrap());
+    let stored = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(CodeSessionExecutionSettings::from(&stored), next);
+    assert_eq!(stored.child_pid, Some(4242));
+}
+
+#[tokio::test]
 async fn permission_mode_changes_reserve_and_confirm_one_revision_at_a_time() {
     let (_dir, store, session_id, _turn) = seeded_session().await;
     let owner = OwnerId::local();
