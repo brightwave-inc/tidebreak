@@ -54,9 +54,11 @@ const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZX
 /// from consuming the user's disk.
 const MAX_HELPER_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Overrides every resolution step, including verification. Development
-/// builds and the ignored end-to-end tests point this at a locally built
-/// `target/release/tidebreak-whisper`.
+/// Overrides every resolution step in test and debug builds. Local development
+/// and ignored end-to-end tests point this at a locally built helper. Release
+/// builds do not read this variable, so every production helper still passes
+/// signature verification and the at-rest digest check.
+#[cfg(any(test, debug_assertions))]
 pub(crate) const HELPER_PATH_ENV: &str = "TIDEBREAK_WHISPER_HELPER";
 
 fn helper_file_name() -> &'static str {
@@ -129,6 +131,7 @@ struct InstallMarker {
 /// present. Every resolution hashes the binary before returning a path, so a
 /// file replaced after installation never executes behind a stale marker.
 pub(crate) fn managed_helper(data_dir: &Path) -> Option<PathBuf> {
+    #[cfg(any(test, debug_assertions))]
     if let Ok(overridden) = std::env::var(HELPER_PATH_ENV) {
         // The override is authoritative: a wrong path fails at spawn time
         // with the real reason instead of silently downloading the pin.
