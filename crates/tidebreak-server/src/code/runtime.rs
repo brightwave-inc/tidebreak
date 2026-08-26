@@ -565,7 +565,7 @@ impl CodeRuntime {
 
     /// The REST base decision 65's pull-request operations drive: the
     /// forge's own, or a test override.
-    fn forge_api_base_for(&self, host: &str) -> String {
+    pub(crate) fn forge_api_base_for(&self, host: &str) -> String {
         #[cfg(test)]
         {
             if let Some(base) = self.forge_api_base.lock().expect("forge api base").clone() {

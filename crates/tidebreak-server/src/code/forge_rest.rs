@@ -7,14 +7,14 @@
 //! every answer exactly like the `gh --json` payload code mode already
 //! parses — one JSON vocabulary, however the host was asked.
 //!
-//! Deliberately narrow: creation, the PR-card digest, and the fact reads
-//! (decision 62). Merge, ready, close, comments, CI logs, and the
-//! repository-wide delivery panel stay `gh`-only and keep answering exactly
-//! as they do today on machines without it.
+//! Deliberately narrow: creation, the PR-card digest, the fact reads
+//! (decision 62), and the repository-wide Delivery lists. Merge, ready,
+//! close, comments, CI logs, and Delivery detail drawers stay `gh`-only and
+//! keep answering exactly as they do today on machines without it.
 
 use std::time::Duration;
 
-use futures::StreamExt as _;
+use futures::{stream, StreamExt as _};
 use serde_json::Value;
 
 use crate::obo_gateway::GitCredential;
@@ -27,6 +27,9 @@ const REST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cap on one REST response body. PR and check payloads are kilobytes; the
 /// bound exists so a confused origin cannot grow the process.
 const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Bound the check-run fan-out within one repository list read.
+const CHECK_RUN_CONCURRENCY: usize = 4;
 
 /// The REST base for a forge host: `api.github.com` for github.com, the
 /// GHES `/api/v3/` convention for anything else.
@@ -102,6 +105,120 @@ fn forge_message(status: reqwest::StatusCode, value: &Value) -> String {
         }
         bounded
     }
+}
+
+/// Read one repository in the same REST shape that `gh api repos/...`
+/// returns. Delivery turns this into its repository reference.
+pub(crate) async fn repository(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+) -> Result<Value, String> {
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!("{api_base}/repos/{}/{}", target.owner, target.name),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(value)
+}
+
+/// List one repository's pull requests in the `gh pr list --json`
+/// vocabulary that Delivery already parses.
+///
+/// GitHub REST has no `merged` list state. A merged query reads closed pull
+/// requests and lets Delivery's existing `mergedAt` filter select the rows.
+/// When checks are requested, each pull request carries an explicit
+/// `statusCheckRollup`, including an empty array for a head with no runs.
+pub(crate) async fn delivery_pull_requests(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    state: &str,
+    checks_loaded: bool,
+) -> Result<Vec<Value>, String> {
+    let state = if state == "merged" { "closed" } else { state };
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!(
+            "{api_base}/repos/{}/{}/pulls?state={state}&per_page=100",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    let pulls = value.as_array().cloned().unwrap_or_default();
+    stream::iter(pulls)
+        .map(|pull| async move {
+            let mut fact = fact_value(&pull);
+            if checks_loaded {
+                let checks = match pull.pointer("/head/sha").and_then(Value::as_str) {
+                    Some(sha) => check_run_values(api_base, target, credential, sha).await?,
+                    None => Vec::new(),
+                };
+                fact.as_object_mut()
+                    .expect("fact values are objects")
+                    .insert("statusCheckRollup".to_owned(), Value::Array(checks));
+            }
+            Ok(fact)
+        })
+        .buffered(CHECK_RUN_CONCURRENCY)
+        .collect::<Vec<Result<Value, String>>>()
+        .await
+        .into_iter()
+        .collect()
+}
+
+/// Read one repository's GitHub Actions runs.
+pub(crate) async fn workflow_runs(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+) -> Result<Value, String> {
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!(
+            "{api_base}/repos/{}/{}/actions/runs?per_page=100",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(value)
+}
+
+/// Read one repository's deployments.
+pub(crate) async fn deployments(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+) -> Result<Value, String> {
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!(
+            "{api_base}/repos/{}/{}/deployments?per_page=100",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(value)
 }
 
 /// Create a pull request and return it in the fact shape.
@@ -282,6 +399,43 @@ async fn check_runs(
     credential: &GitCredential,
     sha: &str,
 ) -> Result<Vec<PullRequestCheck>, String> {
+    Ok(check_run_values(api_base, target, credential, sha)
+        .await?
+        .iter()
+        .filter_map(|run| {
+            let name = run.get("name").and_then(Value::as_str)?.to_owned();
+            let conclusion = run.get("conclusion").and_then(Value::as_str);
+            let bucket = match conclusion {
+                Some("success") => PullRequestCheckBucket::Pass,
+                Some("neutral" | "cancelled" | "skipped") => PullRequestCheckBucket::Skipped,
+                Some(_) => PullRequestCheckBucket::Fail,
+                None => PullRequestCheckBucket::Pending,
+            };
+            let detail = conclusion
+                .or_else(|| run.get("status").and_then(Value::as_str))
+                .map(ToOwned::to_owned);
+            let url = run
+                .get("detailsUrl")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            Some(PullRequestCheck {
+                name,
+                bucket,
+                detail,
+                url,
+            })
+        })
+        .collect())
+}
+
+/// One head's check runs in the `statusCheckRollup` shape that Delivery
+/// already parses from `gh pr list --json`.
+async fn check_run_values(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    sha: &str,
+) -> Result<Vec<Value>, String> {
     let (status, value) = request(
         reqwest::Method::GET,
         format!(
@@ -303,27 +457,25 @@ async fn check_runs(
     Ok(runs
         .iter()
         .filter_map(|run| {
-            let name = run.get("name").and_then(Value::as_str)?.to_owned();
-            let conclusion = run.get("conclusion").and_then(Value::as_str);
-            let bucket = match conclusion {
-                Some("success") => PullRequestCheckBucket::Pass,
-                Some("neutral" | "cancelled" | "skipped") => PullRequestCheckBucket::Skipped,
-                Some(_) => PullRequestCheckBucket::Fail,
-                None => PullRequestCheckBucket::Pending,
-            };
-            let detail = conclusion
-                .or_else(|| run.get("status").and_then(Value::as_str))
-                .map(ToOwned::to_owned);
-            let url = run
-                .get("html_url")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            Some(PullRequestCheck {
-                name,
-                bucket,
-                detail,
-                url,
-            })
+            let name = run.get("name").and_then(Value::as_str)?;
+            let conclusion = run.get("conclusion").cloned().unwrap_or(Value::Null);
+            let pending_state = conclusion
+                .is_null()
+                .then(|| Value::String("PENDING".to_owned()))
+                .unwrap_or(Value::Null);
+            let details_url = run
+                .get("details_url")
+                .filter(|value| value.as_str().is_some())
+                .or_else(|| run.get("html_url"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            Some(serde_json::json!({
+                "name": name,
+                "status": run.get("status").cloned().unwrap_or(Value::Null),
+                "state": pending_state,
+                "conclusion": conclusion,
+                "detailsUrl": details_url,
+            }))
         })
         .collect())
 }
@@ -365,13 +517,37 @@ async fn merge_queue_state(
 /// however the host was asked. `state` stays REST's own `open`/`closed`;
 /// the parser already reads closed-with-merged-at as merged.
 pub(crate) fn fact_value(pr: &Value) -> Value {
+    let head_repository = pr.pointer("/head/repo").map_or(Value::Null, |repository| {
+        serde_json::json!({
+            "nameWithOwner": repository.get("full_name").cloned().unwrap_or(Value::Null),
+            "name": repository.get("name").cloned().unwrap_or(Value::Null),
+        })
+    });
+    let head_repository_owner = pr
+        .pointer("/head/repo/owner/login")
+        .cloned()
+        .map_or(Value::Null, |login| serde_json::json!({ "login": login }));
+    let mergeable = match pr.get("mergeable") {
+        Some(Value::Bool(true)) => Value::String("MERGEABLE".to_owned()),
+        Some(Value::Bool(false)) => Value::String("CONFLICTING".to_owned()),
+        _ => Value::Null,
+    };
     serde_json::json!({
         "number": pr.get("number").cloned().unwrap_or(Value::Null),
         "url": pr.get("html_url").cloned().unwrap_or(Value::Null),
         "title": pr.get("title").cloned().unwrap_or(Value::Null),
         "state": pr.get("state").cloned().unwrap_or(Value::Null),
         "isDraft": pr.get("draft").cloned().unwrap_or(Value::Null),
-        "author": { "login": pr.pointer("/user/login").cloned().unwrap_or(Value::Null) },
+        "author": {
+            "login": pr.pointer("/user/login").cloned().unwrap_or(Value::Null),
+            "avatarUrl": pr.pointer("/user/avatar_url").cloned().unwrap_or(Value::Null),
+        },
+        "reviewDecision": Value::Null,
+        "mergeable": mergeable,
+        "mergeStateStatus": pr.get("mergeable_state").cloned().unwrap_or(Value::Null),
+        "autoMergeRequest": pr.get("auto_merge").cloned().unwrap_or(Value::Null),
+        "headRepository": head_repository,
+        "headRepositoryOwner": head_repository_owner,
         "headRefName": pr.pointer("/head/ref").cloned().unwrap_or(Value::Null),
         "headRefOid": pr.pointer("/head/sha").cloned().unwrap_or(Value::Null),
         "baseRefName": pr.pointer("/base/ref").cloned().unwrap_or(Value::Null),
@@ -379,6 +555,8 @@ pub(crate) fn fact_value(pr: &Value) -> Value {
         "updatedAt": pr.get("updated_at").cloned().unwrap_or(Value::Null),
         "mergedAt": pr.get("merged_at").cloned().unwrap_or(Value::Null),
         "closedAt": pr.get("closed_at").cloned().unwrap_or(Value::Null),
+        "labels": pr.get("labels").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "comments": pr.get("comments").cloned().unwrap_or(Value::Null),
     })
 }
 
