@@ -278,6 +278,7 @@ export const ARCHIVE_FORCE_KINDS = new Set([
   "uncommitted",
   "unpushed",
   "uncommitted_and_unpushed",
+  "ignored_content",
 ]);
 
 /** The 409 kinds that mean archive needs an explicit force. */

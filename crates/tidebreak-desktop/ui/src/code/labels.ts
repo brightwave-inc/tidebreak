@@ -76,6 +76,7 @@ export const WORKSPACE_STATUS_LABELS: Record<CodeWorkspaceStatus, string> = {
   creating: "Creating",
   setup_failed: "Setup failed",
   active: "Active",
+  archiving: "Archiving",
   archived: "Archived",
   released: "Released",
 };

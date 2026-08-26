@@ -1796,7 +1796,7 @@ bundle_bytes?: number, };
 /**
  * Status of a persisted workspace.
  */
-export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archived" | "released";
+export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archiving" | "archived" | "released";
 
 /**
  * Bounded path listing for `GET /code/workspaces/{id}/tree`.

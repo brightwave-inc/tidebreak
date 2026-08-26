@@ -103,7 +103,6 @@ impl ServerError {
     }
 
     /// The stable machine-readable `kind` clients branch on.
-    #[cfg(test)]
     pub(crate) fn kind(&self) -> &str {
         &self.info.kind
     }

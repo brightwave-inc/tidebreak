@@ -120,7 +120,7 @@ describe the current schema, not the frozen baseline.
   which does. Reclaiming the checkout on disk is a separate, explicit act.
 - **`code_workspace`** — `id`, `repo_id`, `title`, `worktree_path`,
   `branch_name`, `base_ref`, `status`
-  (`Creating | SetupFailed | Active | Archived | Released`), `pr` (JSON digest:
+  (`Creating | SetupFailed | Active | Archiving | Archived | Released`), `pr` (JSON digest:
   number, url, state, checks summary; nullable), `created_at`,
   `archived_at`, `released_at`, `released_tip`, `bundle_bytes`.
 
@@ -131,6 +131,11 @@ describe the current schema, not the frozen baseline.
   build output; a branch's own commits are usually kilobytes, which is what
   makes the deeper tier worth the step. Transcripts are untouched at every
   tier — the row and its journal outlive the bytes.
+
+  Non-force archive also protects ignored files. To exclude a generated
+  directory from that scan, configure its exact repository-relative path with
+  `git config --add tidebreak.archiveDisposablePath <directory>`. Archive
+  fails closed when the scan or its configured paths exceed the safety budget.
 - **`code_session`** — `id`, `workspace_id`, `kind`
   (`Interactive | Watch`, per
   [`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)), `harness_kind`,

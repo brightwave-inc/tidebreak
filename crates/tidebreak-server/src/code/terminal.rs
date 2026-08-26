@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,7 @@ const DEFAULT_ROWS: u16 = 24;
 const MIN_SIZE: u16 = 1;
 const MAX_SIZE: u16 = 512;
 const NOTICE_BUFFER: usize = 64;
+const TERMINAL_EXIT_GRACE: Duration = Duration::from_secs(5);
 
 /// In-memory process-wide registry of live auxiliary terminals.
 pub(crate) struct TerminalHub {
@@ -76,7 +77,13 @@ struct LiveTerminal {
     writer: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn MasterPty + Send>>,
     killer: Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+    exit: Arc<TerminalExit>,
     coalesce: Coalesce,
+}
+
+struct TerminalExit {
+    done: Mutex<bool>,
+    changed: Condvar,
 }
 
 struct Coalesce {
@@ -175,13 +182,19 @@ impl TerminalHub {
             writer: Some(spawned.writer),
             master: Some(spawned.master),
             killer: Some(spawned.killer),
+            exit: Arc::new(TerminalExit::new(false)),
             coalesce: Coalesce::new(),
         };
         let handle = Arc::new(Mutex::new(live));
         self.insert(workspace_id, id, handle.clone());
         let notices = self.notices_sender(owner);
         start_reader(handle.clone(), notices.clone(), spawned.reader);
-        start_reaper(handle.clone(), notices, spawned.child);
+        start_reaper(
+            handle.clone(),
+            notices,
+            spawned.child,
+            handle.lock().expect("terminal").exit.clone(),
+        );
         Ok(lock_snapshot(&handle))
     }
 
@@ -211,6 +224,7 @@ impl TerminalHub {
             writer: None,
             master: None,
             killer: None,
+            exit: Arc::new(TerminalExit::new(true)),
             coalesce: Coalesce::new(),
         };
         let handle = Arc::new(Mutex::new(live));
@@ -367,6 +381,40 @@ impl TerminalHub {
         }
     }
 
+    /// Stop every terminal and prove that each shell process exited.
+    ///
+    /// Archive treats a timeout as uncertainty and preserves the checkout.
+    pub(crate) async fn close_workspace_and_wait(&self, workspace_id: WorkspaceId) -> bool {
+        let handles = {
+            let inner = self.inner.lock().expect("terminal hub");
+            inner
+                .by_workspace
+                .get(&workspace_id)
+                .into_iter()
+                .flatten()
+                .filter_map(|id| inner.by_id.get(id).cloned())
+                .collect::<Vec<_>>()
+        };
+        let exits = handles
+            .iter()
+            .map(|handle| {
+                let mut live = handle.lock().expect("terminal");
+                live.kill_and_end();
+                live.exit.clone()
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            let id = handle.lock().expect("terminal").id;
+            self.remove(workspace_id, id);
+        }
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + TERMINAL_EXIT_GRACE;
+            exits.into_iter().all(|exit| exit.wait_until(deadline))
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Append output as if the PTY had produced it. Tests and the reader thread.
     #[cfg(test)]
     pub(crate) fn push_output(&self, id: CodeTerminalId, bytes: &[u8]) {
@@ -450,6 +498,39 @@ impl LiveTerminal {
         self.master = None;
         self.ended = true;
         self.producing = false;
+    }
+}
+
+impl TerminalExit {
+    fn new(done: bool) -> Self {
+        Self {
+            done: Mutex::new(done),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn mark_done(&self) {
+        *self.done.lock().expect("terminal exit") = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_until(&self, deadline: Instant) -> bool {
+        let mut done = self.done.lock().expect("terminal exit");
+        while !*done {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let waited = self
+                .changed
+                .wait_timeout(done, deadline.saturating_duration_since(now))
+                .expect("terminal exit");
+            done = waited.0;
+            if waited.1.timed_out() && !*done {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -558,11 +639,13 @@ fn start_reaper(
     handle: Arc<Mutex<LiveTerminal>>,
     notices: broadcast::Sender<TerminalNotice>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
+    exit: Arc<TerminalExit>,
 ) {
     thread::Builder::new()
         .name("code-terminal-wait".into())
         .spawn(move || {
             let _ = child.wait();
+            exit.mark_done();
             if let Ok(mut live) = handle.lock() {
                 if !live.ended {
                     // The shell is gone, so nothing can be typed at it. Leave

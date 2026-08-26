@@ -55,6 +55,7 @@ impl MigratorTrait for Migrator {
             Box::new(PrePinCodeLifecycleRepair),
             Box::new(CodeApprovalBinding),
             Box::new(CodeSessionProcessIdentity),
+            Box::new(CodeWorkspaceArchiving),
         ]
     }
 }
@@ -65,6 +66,15 @@ struct CodeSessionProcessIdentity;
 impl MigrationName for CodeSessionProcessIdentity {
     fn name(&self) -> &str {
         "m20260826_000017_code_session_process_identity"
+    }
+}
+
+/// Add the transient workspace state that excludes writers during archive.
+struct CodeWorkspaceArchiving;
+
+impl MigrationName for CodeWorkspaceArchiving {
+    fn name(&self) -> &str {
+        "m20260826_000018_code_workspace_archiving"
     }
 }
 
@@ -90,6 +100,221 @@ impl MigrationTrait for CodeSessionProcessIdentity {
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // Removing the identity would make a recorded pid unsafe to reap.
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeWorkspaceArchiving {
+    fn use_transaction(&self) -> Option<bool> {
+        // SQLite needs a connection-bound transaction that starts only after
+        // foreign-key enforcement is disabled on that exact connection. The
+        // SQLite branch owns that transaction manually. PostgreSQL executes
+        // its ALTER statements atomically on its own.
+        None
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        match manager.get_database_backend() {
+            DbBackend::Postgres => {
+                let transaction = manager.begin().await?;
+                transaction
+                    .get_connection()
+                    .execute_unprepared(
+                        r#"
+DO $repair$
+DECLARE
+    old_constraint text;
+BEGIN
+    FOR old_constraint IN
+        SELECT constraint_row.conname
+        FROM pg_constraint AS constraint_row
+        JOIN pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conrelid = 'code_workspace'::regclass
+          AND constraint_row.contype = 'c'
+          AND attribute_row.attname = 'status'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE "code_workspace" DROP CONSTRAINT %I',
+            old_constraint
+        );
+    END LOOP;
+END
+$repair$;
+ALTER TABLE "code_workspace"
+    ADD CONSTRAINT "code_workspace_status_check"
+    CHECK ("status" IN (
+        'creating', 'setup_failed', 'active', 'archiving', 'archived', 'released'
+    ));
+"#,
+                    )
+                    .await?;
+                transaction.commit().await
+            }
+            DbBackend::Sqlite => rebuild_sqlite_code_workspace_for_archiving(manager).await,
+            backend => Err(DbErr::Custom(format!(
+                "unsupported database backend for workspace archiving migration: {backend:?}"
+            ))),
+        }
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // An interrupted archive can persist this value. Removing it would
+        // make that row unreadable instead of recoverable.
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn rebuild_sqlite_code_workspace_for_archiving(
+    manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    rebuild_sqlite_code_workspace_for_archiving_inner(manager, false).await
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn rebuild_sqlite_code_workspace_for_archiving(
+    _manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    Err(DbErr::Custom(
+        "SQLite workspace migration support is not compiled".to_owned(),
+    ))
+}
+
+#[cfg(feature = "sqlite")]
+async fn rebuild_sqlite_code_workspace_for_archiving_inner(
+    manager: &SchemaManager<'_>,
+    _fail_after_drop_for_test: bool,
+) -> Result<(), DbErr> {
+    use sea_orm::sqlx::Acquire as _;
+    use sea_orm::DatabaseExecutor;
+
+    let DatabaseExecutor::Connection(database) = manager.get_connection() else {
+        return Err(DbErr::Custom(
+            "SQLite workspace rebuild requires the migration connection".to_owned(),
+        ));
+    };
+    let mut connection = database
+        .get_sqlite_connection_pool()
+        .acquire()
+        .await
+        .map_err(|error| DbErr::Custom(format!("acquire SQLite migration connection: {error}")))?;
+    sea_orm::sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| DbErr::Custom(format!("disable SQLite foreign keys: {error}")))?;
+
+    let mut transaction = connection
+        .begin()
+        .await
+        .map_err(|error| DbErr::Custom(format!("begin SQLite workspace rebuild: {error}")))?;
+    let rebuild = async {
+        for statement in [
+            r#"DROP TABLE IF EXISTS "code_workspace_archiving""#,
+            r#"
+CREATE TABLE "code_workspace_archiving" (
+    "id" text NOT NULL PRIMARY KEY,
+    "owner" text NOT NULL DEFAULT 'local',
+    "repo_id" text NOT NULL,
+    "title" text NOT NULL,
+    "worktree_path" text NOT NULL UNIQUE,
+    "branch_name" text NOT NULL,
+    "base_ref" text NOT NULL,
+    "status" text NOT NULL CHECK ("status" IN (
+        'creating', 'setup_failed', 'active', 'archiving', 'archived', 'released'
+    )),
+    "pr" text,
+    "created_at" text NOT NULL,
+    "archived_at" text,
+    "released_at" text,
+    "released_tip" text,
+    "bundle_bytes" integer,
+    FOREIGN KEY ("repo_id") REFERENCES "code_repo" ("id")
+)"#,
+            r#"
+INSERT INTO "code_workspace_archiving" (
+    "id", "owner", "repo_id", "title", "worktree_path", "branch_name",
+    "base_ref", "status", "pr", "created_at", "archived_at",
+    "released_at", "released_tip", "bundle_bytes"
+)
+SELECT
+    "id", "owner", "repo_id", "title", "worktree_path", "branch_name",
+    "base_ref", "status", "pr", "created_at", "archived_at",
+    "released_at", "released_tip", "bundle_bytes"
+FROM "code_workspace""#,
+            r#"DROP TABLE "code_workspace""#,
+        ] {
+            sea_orm::sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        #[cfg(test)]
+        if _fail_after_drop_for_test {
+            sea_orm::sqlx::query("SELECT * FROM missing_workspace_rebuild_table")
+                .execute(&mut *transaction)
+                .await?;
+        }
+        for statement in [
+            r#"ALTER TABLE "code_workspace_archiving" RENAME TO "code_workspace""#,
+            r#"CREATE UNIQUE INDEX "idx_code_workspace_repo_branch"
+                ON "code_workspace" ("repo_id", "branch_name")"#,
+            r#"CREATE INDEX "idx_code_workspace_owner_created"
+                ON "code_workspace" ("owner", "created_at")"#,
+        ] {
+            sea_orm::sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        Ok::<(), sea_orm::sqlx::Error>(())
+    }
+    .await;
+
+    let rebuild = match rebuild {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| DbErr::Custom(format!("commit SQLite workspace rebuild: {error}"))),
+        Err(error) => {
+            let rollback = transaction.rollback().await;
+            match rollback {
+                Ok(()) => Err(DbErr::Custom(format!(
+                    "rebuild SQLite workspace table: {error}"
+                ))),
+                Err(rollback) => Err(DbErr::Custom(format!(
+                    "rebuild SQLite workspace table: {error}; rollback failed: {rollback}"
+                ))),
+            }
+        }
+    };
+
+    let enable = match sea_orm::sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+    {
+        Ok(_) => {
+            sea_orm::sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut *connection)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+    .map_err(|error| DbErr::Custom(format!("restore SQLite foreign keys: {error}")))
+    .and_then(|enabled| {
+        if enabled == 1 {
+            Ok(())
+        } else {
+            Err(DbErr::Custom(
+                "restore SQLite foreign keys: PRAGMA remained disabled".to_owned(),
+            ))
+        }
+    });
+    match (rebuild, enable) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(rebuild), Err(enable)) => {
+            Err(DbErr::Custom(format!("{rebuild}; additionally, {enable}")))
+        }
     }
 }
 
@@ -2015,9 +2240,11 @@ impl MigrationTrait for CodeQueuedTurns {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
-    use sea_orm_migration::prelude::{PostgresQueryBuilder, SqliteQueryBuilder};
+    use sea_orm_migration::prelude::{PostgresQueryBuilder, SchemaManager, SqliteQueryBuilder};
     use sea_orm_migration::MigratorTrait;
 
+    #[cfg(feature = "sqlite")]
+    use super::rebuild_sqlite_code_workspace_for_archiving_inner;
     use super::Migrator;
 
     /// Every `CREATE TABLE` a fresh database runs comes from `sqlite_master`,
@@ -2076,6 +2303,7 @@ mod tests {
                 "m20260825_000015_pre_pin_code_lifecycle_repair",
                 "m20260825_000016_code_approval_binding",
                 "m20260826_000017_code_session_process_identity",
+                "m20260826_000018_code_workspace_archiving",
             ]
         );
         assert!(db
@@ -2086,6 +2314,102 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_failed_workspace_rebuild_rolls_back_the_live_sqlite_table() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, Some(16)).await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO code_repo (
+                id, owner, root_path, display_name, default_base_ref,
+                branch_prefix, quick_actions, created_at
+             ) VALUES (
+                'repo-archive', 'local', '/tmp/archive', 'archive', 'main',
+                'tidebreak/', '[]', '2026-08-26T00:00:00Z'
+             );
+             INSERT INTO code_workspace (
+                id, owner, repo_id, title, worktree_path, branch_name, base_ref,
+                status, created_at
+             ) VALUES (
+                'workspace-archive', 'local', 'repo-archive', 'archive',
+                '/tmp/archive-worktree', 'tidebreak/archive', 'main', 'active',
+                '2026-08-26T00:00:00Z'
+             );
+             INSERT INTO code_session (
+                id, owner, workspace_id, kind, harness_kind, permission_mode,
+                lifecycle, attention_state, attention_source, created_at
+             ) VALUES (
+                'session-archive', 'local', 'workspace-archive', 'interactive',
+                'claude_code', 'plan', 'idle', '{}', 'lifecycle',
+                '2026-08-26T00:00:00Z'
+             )",
+        )
+        .await
+        .unwrap();
+
+        let manager = SchemaManager::new(&db);
+        let error = rebuild_sqlite_code_workspace_for_archiving_inner(&manager, true)
+            .await
+            .expect_err("the injected statement fails after the live table is dropped");
+        assert!(error
+            .to_string()
+            .contains("missing_workspace_rebuild_table"));
+
+        let workspace = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT status FROM code_workspace WHERE id = 'workspace-archive'".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("the original workspace table and row survive");
+        assert_eq!(workspace.try_get::<String>("", "status").unwrap(), "active");
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT 1 AS present FROM code_session WHERE id = 'session-archive'".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'code_workspace_archiving'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_none());
+
+        rebuild_sqlite_code_workspace_for_archiving_inner(&manager, false)
+            .await
+            .unwrap();
+        db.execute_unprepared(
+            "UPDATE code_workspace SET status = 'archiving' WHERE id = 'workspace-archive'",
+        )
+        .await
+        .unwrap();
+        assert!(db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_key_check".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_empty());
+        let foreign_keys = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_keys".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(foreign_keys.try_get::<i64>("", "foreign_keys").unwrap(), 1);
     }
 
     /// A database that stopped at the current baseline and later took the rest

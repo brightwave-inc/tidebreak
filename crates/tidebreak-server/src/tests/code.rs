@@ -3594,6 +3594,295 @@ async fn a_failing_archive_script_preserves_the_worktree() {
 }
 
 #[tokio::test]
+async fn archive_preserves_hook_created_files_without_force() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "path": repo,
+            "archive_script": "echo kept > hook-created.txt",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "hook output",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = archived.json().await.unwrap();
+    assert_eq!(body["kind"], "uncommitted");
+    assert!(path.join("hook-created.txt").is_file());
+    let stored = tidebreak_core::db::code::get_workspace(
+        &_runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        json_id(&workspace).parse().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.status, CodeWorkspaceStatus::Active);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn archive_rejects_concurrent_writes_after_the_first_check() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let started = dir.path().join("archive-started");
+    let proceed = dir.path().join("archive-proceed");
+    let script = format!(
+        "touch \"{}\"; while [ ! -f \"{}\" ]; do sleep 0.01; done",
+        started.display(),
+        proceed.display()
+    );
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "path": repo,
+            "archive_script": script,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "late writer",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let workspace_id = json_id(&workspace).to_owned();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    let archive_client = client.clone();
+    let archive_token = token.clone();
+    let archive = tokio::spawn(async move {
+        archive_client
+            .post(format!(
+                "http://{addr}/code/workspaces/{workspace_id}/archive"
+            ))
+            .bearer_auth(archive_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !started.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "archive hook did not reach its barrier"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let terminal = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/terminals",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(terminal.status(), reqwest::StatusCode::CONFLICT);
+    let terminal_body: serde_json::Value = terminal.json().await.unwrap();
+    assert_eq!(terminal_body["kind"], "workspace_not_ready");
+
+    std::fs::write(path.join("concurrent.txt"), "late\n").unwrap();
+    std::fs::write(&proceed, "go\n").unwrap();
+    let archived = archive.await.unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = archived.json().await.unwrap();
+    assert_eq!(body["kind"], "uncommitted");
+    assert_eq!(
+        std::fs::read_to_string(path.join("concurrent.txt")).unwrap(),
+        "late\n"
+    );
+}
+
+#[tokio::test]
+async fn archive_shutdown_timeout_preserves_the_checkout() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    runtime.set_archive_shutdown_timeout(true);
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = archived.json().await.unwrap();
+    assert_eq!(body["kind"], "workspace_shutdown_timeout");
+    assert!(path.join("README.md").is_file());
+    let stored = tidebreak_core::db::code::get_workspace(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        json_id(&workspace).parse().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.status, CodeWorkspaceStatus::Archiving);
+}
+
+#[tokio::test]
+async fn archive_recovery_finishes_after_checkout_removal() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let owner = tidebreak_core::OwnerId::local();
+    let (_registered, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let workspace_id: tidebreak_core::WorkspaceId = json_id(&workspace).parse().unwrap();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    assert!(tidebreak_core::db::code::compare_and_set_workspace_status(
+        &runtime.db,
+        &owner,
+        workspace_id,
+        CodeWorkspaceStatus::Active,
+        CodeWorkspaceStatus::Archiving,
+    )
+    .await
+    .unwrap());
+    let removed = std::process::Command::new("git")
+        .current_dir(&repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(removed.success());
+    assert!(!path.exists());
+
+    let restarted = CodeRuntime::with_registry(
+        runtime.db.clone(),
+        dir.path().to_path_buf(),
+        scripted_registry(),
+    );
+    restarted.recover().await.unwrap();
+
+    let stored = tidebreak_core::db::code::get_workspace(&runtime.db, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, CodeWorkspaceStatus::Archived);
+    assert!(stored.archived_at.is_some());
+}
+
+#[tokio::test]
+async fn archive_refuses_ignored_only_content_without_force() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    std::fs::write(repo.join(".gitignore"), ".env.local\nbuild/\n").unwrap();
+    for args in [
+        ["add", ".gitignore"].as_slice(),
+        ["commit", "-m", "ignore local files"].as_slice(),
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    std::fs::write(path.join(".env.local"), "ONLY_COPY=1\n").unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "ignored_content");
+    assert_eq!(
+        std::fs::read_to_string(path.join(".env.local")).unwrap(),
+        "ONLY_COPY=1\n"
+    );
+
+    assert!(std::process::Command::new("git")
+        .args([
+            "config",
+            "--add",
+            "tidebreak.archiveDisposablePath",
+            "build"
+        ])
+        .current_dir(&path)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::remove_file(path.join(".env.local")).unwrap();
+    std::fs::create_dir_all(path.join("build")).unwrap();
+    std::fs::write(path.join("build/cache.bin"), "generated\n").unwrap();
+    let archived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), reqwest::StatusCode::OK);
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn archive_ends_the_session_before_removing_the_worktree() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;

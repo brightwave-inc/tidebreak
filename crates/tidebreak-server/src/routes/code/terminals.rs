@@ -23,6 +23,10 @@ pub async fn create_terminal(
 ) -> Result<impl IntoResponse, ServerError> {
     let workspace = code.get_workspace(id).await?;
     require_active(&workspace.status)?;
+    let write = code.workspace_write_lock(id);
+    let _write_guard = write.lock().await;
+    let workspace = code.get_workspace(id).await?;
+    require_active(&workspace.status)?;
     let snap = state
         .terminals
         .open(
@@ -95,7 +99,12 @@ pub async fn write_terminal(
     Path(path): Path<WorkspaceTerminalPath>,
     Json(body): Json<TerminalWriteBody>,
 ) -> Result<StatusCode, ServerError> {
-    let _ = code.get_workspace(path.id).await?;
+    let workspace = code.get_workspace(path.id).await?;
+    require_active(&workspace.status)?;
+    let write = code.workspace_write_lock(path.id);
+    let _write_guard = write.lock().await;
+    let workspace = code.get_workspace(path.id).await?;
+    require_active(&workspace.status)?;
     let bytes = decode_write(&body.bytes)?;
     state
         .terminals
@@ -110,7 +119,12 @@ pub async fn resize_terminal(
     Path(path): Path<WorkspaceTerminalPath>,
     Json(body): Json<TerminalResizeBody>,
 ) -> Result<Json<CodeTerminalSnapshot>, ServerError> {
-    let _ = code.get_workspace(path.id).await?;
+    let workspace = code.get_workspace(path.id).await?;
+    require_active(&workspace.status)?;
+    let write = code.workspace_write_lock(path.id);
+    let _write_guard = write.lock().await;
+    let workspace = code.get_workspace(path.id).await?;
+    require_active(&workspace.status)?;
     let snap = state
         .terminals
         .resize(path.id, path.tid, body.cols, body.rows)

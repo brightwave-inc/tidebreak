@@ -91,8 +91,9 @@ pub async fn archive_workspace(
     Path(id): Path<WorkspaceId>,
     Json(body): Json<ArchiveWorkspaceBody>,
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    let archived = code.archive_workspace(id, body.force).await?;
-    state.terminals.close_workspace(id);
+    let archived = code
+        .archive_workspace(id, body.force, state.terminals.as_ref())
+        .await?;
     Ok(Json(CodeWorkspaceSnapshot::from(archived)))
 }
 

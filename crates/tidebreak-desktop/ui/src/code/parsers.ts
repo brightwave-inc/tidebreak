@@ -244,6 +244,7 @@ const WORKSPACE_STATUSES = new Set<CodeWorkspaceStatus>([
   "creating",
   "setup_failed",
   "active",
+  "archiving",
   "archived",
   "released",
 ]);

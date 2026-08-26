@@ -316,8 +316,18 @@ impl ScopedCode {
         &self,
         id: WorkspaceId,
         force: bool,
+        terminals: &crate::code::terminal::TerminalHub,
     ) -> Result<CodeWorkspace, ServerError> {
-        self.runtime.archive_workspace(&self.owner, id, force).await
+        self.runtime
+            .archive_workspace(&self.owner, id, force, terminals)
+            .await
+    }
+
+    pub(crate) fn workspace_write_lock(
+        &self,
+        id: WorkspaceId,
+    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.runtime.workspace_write_lock(id)
     }
 
     pub(crate) async fn release_workspace(
