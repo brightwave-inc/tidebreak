@@ -1470,10 +1470,12 @@ pub(crate) async fn user_git_fingerprint(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command as StdCommand;
+    use std::sync::Mutex;
     use tempfile::TempDir;
     use tidebreak_core::db::code::{
         insert_repo, insert_session, insert_turn, insert_workspace, list_events, MAX_REPLAY_EVENTS,
@@ -1482,6 +1484,86 @@ mod tests {
         Attention, AttentionSource, CodeRepo, CodeSessionKind, CodeSessionLifecycle, CodeTurnId,
         CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, RepoId,
     };
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    enum SnapshotStep {
+        Return(Result<String, GitCommandError>),
+        After(Duration, Result<String, GitCommandError>),
+        Pending,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SnapshotCall {
+        index_path: PathBuf,
+        reset_from_head: bool,
+        deadline: Instant,
+        remaining: Duration,
+    }
+
+    #[derive(Debug)]
+    struct ScriptedSnapshotGit {
+        reusable_index: PathBuf,
+        steps: Mutex<VecDeque<SnapshotStep>>,
+        calls: Mutex<Vec<SnapshotCall>>,
+        started: Notify,
+    }
+
+    impl ScriptedSnapshotGit {
+        fn new(reusable_index: PathBuf, steps: Vec<SnapshotStep>) -> Self {
+            Self {
+                reusable_index,
+                steps: Mutex::new(steps.into()),
+                calls: Mutex::new(Vec::new()),
+                started: Notify::new(),
+            }
+        }
+
+        fn calls(&self) -> Vec<SnapshotCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SnapshotGit for ScriptedSnapshotGit {
+        async fn checkpoint_index_path(
+            &self,
+            _worktree: &Path,
+            _deadline: Instant,
+        ) -> Result<Option<PathBuf>, GitCommandError> {
+            Ok(Some(self.reusable_index.clone()))
+        }
+
+        async fn snapshot_tree_with_index(
+            &self,
+            _worktree: &Path,
+            index_path: &Path,
+            reset_from_head: bool,
+            deadline: Instant,
+        ) -> Result<String, GitCommandError> {
+            self.calls.lock().unwrap().push(SnapshotCall {
+                index_path: index_path.to_path_buf(),
+                reset_from_head,
+                deadline,
+                remaining: deadline.saturating_duration_since(Instant::now()),
+            });
+            self.started.notify_one();
+            let step = self
+                .steps
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted snapshot step");
+            match step {
+                SnapshotStep::Return(result) => result,
+                SnapshotStep::After(delay, result) => {
+                    tokio::time::sleep(delay).await;
+                    result
+                }
+                SnapshotStep::Pending => std::future::pending().await,
+            }
+        }
+    }
 
     fn init_repo() -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
@@ -2174,6 +2256,144 @@ mod tests {
         // first in the ref path.
         let removed = delete_workspace_refs(&repo, workspace).await.unwrap();
         assert_eq!(removed, 2);
+    }
+
+    #[tokio::test]
+    async fn reusable_index_lock_failure_runs_one_cold_fallback() {
+        let dir = TempDir::new().unwrap();
+        let reusable = dir.path().join("tidebreak-checkpoint-index");
+        std::fs::write(&reusable, b"warm").unwrap();
+        let error = GitCommandError::Failed(format!(
+            "fatal: Unable to create '{}.lock': File exists.",
+            reusable.display()
+        ));
+        let git = ScriptedSnapshotGit::new(
+            reusable.clone(),
+            vec![
+                SnapshotStep::Return(Err(error)),
+                SnapshotStep::Return(Ok("cold-tree".into())),
+            ],
+        );
+
+        let tree = snapshot_tree_with_git(dir.path(), Duration::from_secs(1), &git)
+            .await
+            .unwrap();
+        let calls = git.calls();
+
+        assert_eq!(tree, "cold-tree");
+        assert_eq!(calls.len(), 2, "one warm and one cold attempt");
+        assert_eq!(calls[0].index_path, reusable);
+        assert!(!calls[0].reset_from_head);
+        assert_ne!(calls[1].index_path, calls[0].index_path);
+        assert!(calls[1].reset_from_head);
+    }
+
+    #[tokio::test]
+    async fn reusable_index_corruption_removes_it_and_runs_one_cold_fallback() {
+        let dir = TempDir::new().unwrap();
+        let reusable = dir.path().join("tidebreak-checkpoint-index");
+        std::fs::write(&reusable, b"corrupt").unwrap();
+        let git = ScriptedSnapshotGit::new(
+            reusable.clone(),
+            vec![
+                SnapshotStep::Return(Err(GitCommandError::Failed(
+                    "fatal: index file corrupt".into(),
+                ))),
+                SnapshotStep::Return(Ok("cold-tree".into())),
+            ],
+        );
+
+        let tree = snapshot_tree_with_git(dir.path(), Duration::from_secs(1), &git)
+            .await
+            .unwrap();
+
+        assert_eq!(tree, "cold-tree");
+        assert_eq!(git.calls().len(), 2, "one warm and one cold attempt");
+        assert!(
+            !reusable.exists(),
+            "the corrupt reusable index is discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn reusable_index_timeout_returns_without_a_cold_fallback() {
+        let dir = TempDir::new().unwrap();
+        let reusable = dir.path().join("tidebreak-checkpoint-index");
+        std::fs::write(&reusable, b"warm").unwrap();
+        let git = ScriptedSnapshotGit::new(
+            reusable,
+            vec![SnapshotStep::Return(Err(GitCommandError::timed_out(
+                "add -A",
+            )))],
+        );
+
+        let error = snapshot_tree_with_git(dir.path(), Duration::from_secs(1), &git)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(
+            git.calls().len(),
+            1,
+            "timeout must not start a cold attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_reusable_index_attempt_never_starts_cold_fallback() {
+        let dir = TempDir::new().unwrap();
+        let reusable = dir.path().join("tidebreak-checkpoint-index");
+        std::fs::write(&reusable, b"warm").unwrap();
+        let git = Arc::new(ScriptedSnapshotGit::new(
+            reusable,
+            vec![SnapshotStep::Pending],
+        ));
+        let started = git.started.notified();
+        let task_git = Arc::clone(&git);
+        let worktree = dir.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            snapshot_tree_with_git(&worktree, Duration::from_secs(30), task_git.as_ref()).await
+        });
+        started.await;
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::task::yield_now().await;
+        assert_eq!(
+            git.calls().len(),
+            1,
+            "cancellation must not start a cold attempt"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_fallback_consumes_only_the_outer_deadlines_remaining_time() {
+        let dir = TempDir::new().unwrap();
+        let reusable = dir.path().join("tidebreak-checkpoint-index");
+        std::fs::write(&reusable, b"warm").unwrap();
+        let error = GitCommandError::Failed(format!(
+            "fatal: Unable to create '{}.lock': File exists.",
+            reusable.display()
+        ));
+        let git = ScriptedSnapshotGit::new(
+            reusable,
+            vec![
+                SnapshotStep::After(Duration::from_secs(40), Err(error)),
+                SnapshotStep::Pending,
+            ],
+        );
+        let started_at = Instant::now();
+
+        let error = snapshot_tree_with_git(dir.path(), Duration::from_secs(120), &git)
+            .await
+            .unwrap_err();
+        let calls = git.calls();
+
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(Instant::now() - started_at, Duration::from_secs(120));
+        assert_eq!(calls.len(), 2, "the fallback starts once");
+        assert_eq!(calls[0].deadline, calls[1].deadline);
+        assert_eq!(calls[1].remaining, Duration::from_secs(80));
     }
 
     /// The reused index keeps git's stat cache, which is only safe if it
