@@ -20,9 +20,9 @@ use tidebreak_core::db::code::{
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
-    replace_session_execution_settings, save_repo, save_session, save_workspace,
-    settle_approval_claim, update_trigger_enabled, ClaimedApprovalSettlement,
-    CodeSessionExecutionSettings, PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
+    replace_session_execution_settings, save_repo, save_workspace, settle_approval_claim,
+    update_trigger_enabled, ClaimedApprovalSettlement, CodeSessionExecutionSettings,
+    PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,

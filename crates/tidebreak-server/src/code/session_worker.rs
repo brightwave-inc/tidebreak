@@ -34,7 +34,7 @@ use tidebreak_core::{
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
     CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspaceStatus, DbStore, FenceReason,
-    HarnessNoticeLevel, OwnerId, PermissionMode, ReasoningEffort, ToolOutcome,
+    HarnessNoticeLevel, OwnerId, PermissionMode, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
