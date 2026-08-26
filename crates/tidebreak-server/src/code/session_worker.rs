@@ -11,7 +11,6 @@
 //! it: an interrupt's grace period is exactly when the child's stdout most
 //! needs draining.
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -191,7 +190,7 @@ pub(crate) struct AttachmentStore {
     /// Published bytes, addressed by blob id.
     pub blobs: Option<Arc<dyn BlobStore>>,
     /// Private storage for this workspace, outside every Git worktree.
-    pub private_root: PathBuf,
+    pub private_root: super::scratch::ScratchRoot,
     /// Whether this engine consumes images over its own protocol.
     pub engine_reads_images: bool,
 }
@@ -1708,7 +1707,7 @@ async fn sweep_attachment_leftovers_or_fence(
     db: &DbStore,
     bus: &CodeEventBus,
     session: &mut CodeSession,
-    private_root: &Path,
+    private_root: &super::scratch::ScratchRoot,
 ) -> Result<(), WorkerError> {
     let Err(error) = super::scratch::sweep_scopes(private_root, ATTACHMENTS_DIR) else {
         return Ok(());
@@ -1774,7 +1773,7 @@ struct StagedTurnAttachments {
 /// The session and turn path prevents a later session from inheriting files
 /// from this one. The returned scope removes the directory on every exit.
 async fn write_turn_attachments(
-    private_root: &Path,
+    private_root: &super::scratch::ScratchRoot,
     session_id: CodeSessionId,
     turn_id: CodeTurnId,
     attachments: &[tidebreak_core::ImageRef],
@@ -1794,6 +1793,7 @@ async fn write_turn_attachments(
             .await?;
         written.push(
             private_root
+                .path()
                 .join(ATTACHMENTS_DIR)
                 .join(session_id.to_string())
                 .join(turn_id.to_string())
@@ -2756,8 +2756,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let (directory, store, sink, session_id) = seeded_sink().await;
-        let private_root = directory.path().join("private");
-        let attachment_root = private_root.join(ATTACHMENTS_DIR);
+        let private_path = directory.path().join("private");
+        std::fs::create_dir(&private_path).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private_path).expect("scratch root");
+        let attachment_root = private_root.path().join(ATTACHMENTS_DIR);
         let leftover = attachment_root.join(CodeSessionId::new().to_string());
         std::fs::create_dir_all(&leftover).unwrap();
         std::fs::write(leftover.join("private.png"), b"private").unwrap();
@@ -2887,6 +2890,8 @@ mod tests {
     #[tokio::test]
     async fn fallback_images_live_only_in_the_session_turn_scope() {
         let private = tempfile::tempdir().unwrap();
+        let private_root = super::super::scratch::ScratchRoot::open_for_test(private.path())
+            .expect("scratch root");
         let session_id = CodeSessionId::new();
         let turn_id = CodeTurnId::new();
         let attachment = ImageRef {
@@ -2897,7 +2902,7 @@ mod tests {
             byte_len: 4,
         };
         let staged = write_turn_attachments(
-            private.path(),
+            &private_root,
             session_id,
             turn_id,
             std::slice::from_ref(&attachment),

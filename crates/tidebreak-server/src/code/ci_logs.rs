@@ -120,7 +120,7 @@ fn job_ref_from_check_url(url: &str) -> Option<JobRef> {
 /// Stale files from an earlier fetch are removed once the new set is written,
 /// so the directory only ever describes one head.
 pub(crate) async fn write_failing_check_logs(
-    private_root: &Path,
+    private_root: &super::scratch::ScratchRoot,
     binary: &Path,
     checks: &[PullRequestCheck],
     head_sha: Option<&str>,
@@ -181,6 +181,7 @@ pub(crate) async fn write_failing_check_logs(
         logs.push(WrittenCheckLog {
             check,
             path: private_root
+                .path()
                 .join(CI_LOGS_DIR)
                 .join(&name)
                 .display()
@@ -392,8 +393,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_fetch_prunes_the_previous_heads_files() {
-        let root = tempfile::tempdir().expect("temp root");
-        let dir = super::super::scratch::scratch_dir(root.path(), CI_LOGS_DIR).expect("dir");
+        let directory = tempfile::tempdir().expect("temp root");
+        let root = super::super::scratch::ScratchRoot::open_for_test(directory.path())
+            .expect("scratch root");
+        let dir = super::super::scratch::scratch_dir(&root, CI_LOGS_DIR).expect("dir");
         dir.publish(std::ffi::OsStr::new("old-1.log"), b"old")
             .await
             .expect("publish old");

@@ -139,13 +139,14 @@ pub(crate) struct WrittenTranscript {
 /// directory rather than leaving a partial handoff for the child to trip
 /// over.
 pub(crate) async fn write_transcript(
-    private_root: &Path,
+    private_root: &super::scratch::ScratchRoot,
     blobs: &dyn BlobStore,
     session: &CodeSession,
     cut: ForkCut<'_>,
     events: &[SequencedCodeEvent],
 ) -> std::io::Result<WrittenTranscript> {
-    let write_lock = fork_lock(private_root, session.id);
+    let private_path = private_root.path();
+    let write_lock = fork_lock(private_path, session.id);
     let _write = write_lock.lock().await;
     let generation = uuid::Uuid::new_v4();
     let turns = cut.turns;
@@ -157,7 +158,7 @@ pub(crate) async fn write_transcript(
     materialize_attachments(&scope, blobs, turns, &retained_images).await?;
 
     let records = render_turn_records(
-        private_root,
+        private_path,
         session,
         turns,
         events,
@@ -175,7 +176,7 @@ pub(crate) async fn write_transcript(
     }
 
     let rendered = render_transcript_with_generation(
-        private_root,
+        private_path,
         session,
         turns,
         cut.excluded,
@@ -192,7 +193,7 @@ pub(crate) async fn write_transcript(
         .await?;
     scope.keep();
 
-    let dir = private_root
+    let dir = private_path
         .join(FORKS_DIR)
         .join(session.id.to_string())
         .join(generation.to_string());
@@ -1078,6 +1079,10 @@ mod tests {
             .collect()
     }
 
+    fn test_root(directory: &tempfile::TempDir) -> super::super::scratch::ScratchRoot {
+        super::super::scratch::ScratchRoot::open_for_test(directory.path()).expect("scratch root")
+    }
+
     /// Render the condensed transcript as if every turn had a record file and
     /// every image was retained, which is what most summary tests care about.
     fn render_transcript(
@@ -1547,9 +1552,10 @@ mod tests {
             turn(session.id, 1, "hello"),
             turn(session.id, 2, "and again"),
         ];
+        let private_root = test_root(&private);
 
         let written = write_transcript(
-            private.path(),
+            &private_root,
             &blobs,
             &session,
             ForkCut {
@@ -1587,8 +1593,9 @@ mod tests {
             .map(|ordinal| turn(session.id, ordinal, "work"))
             .collect();
         let cut = cut_at(&turns, Some(turns[0].id)).expect("known turn");
+        let private_root = test_root(&private);
 
-        let written = write_transcript(private.path(), &blobs, &session, cut, &[])
+        let written = write_transcript(&private_root, &blobs, &session, cut, &[])
             .await
             .expect("write");
 
@@ -1616,9 +1623,10 @@ mod tests {
             turn(session.id, 1, "hello"),
             turn(session.id, 2, "more work"),
         ];
+        let private_root = test_root(&private);
 
         let first = write_transcript(
-            private.path(),
+            &private_root,
             &blobs,
             &session,
             ForkCut {
@@ -1630,7 +1638,7 @@ mod tests {
         .await
         .expect("first write");
         let second = write_transcript(
-            private.path(),
+            &private_root,
             &blobs,
             &session,
             ForkCut {
@@ -1684,9 +1692,10 @@ mod tests {
             .unwrap();
         only.attachments = vec![first, second];
         let turns = vec![only];
+        let private_root = test_root(&private);
 
         let written = write_transcript(
-            private.path(),
+            &private_root,
             blobs.as_ref(),
             &session,
             ForkCut {
@@ -1743,9 +1752,10 @@ mod tests {
         let mut new = turn(session.id, 2, "and this");
         new.attachments = vec![real];
         let turns = vec![old, new];
+        let private_root = test_root(&private);
 
         let written = write_transcript(
-            private.path(),
+            &private_root,
             blobs.as_ref(),
             &session,
             ForkCut {
