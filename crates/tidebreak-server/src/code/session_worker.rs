@@ -1352,9 +1352,9 @@ async fn drive_turn_inner(
     worktree: WorktreeTurn<'_>,
     QueuedFollowUp {
         message,
-        mut model,
-        mut reasoning_effort,
-        mut fast_mode,
+        model: _,
+        reasoning_effort: _,
+        fast_mode: _,
         attachments,
         trigger_delivery,
         queued_row,
@@ -1421,29 +1421,22 @@ async fn drive_turn_inner(
         )));
     }
 
-    // A queued message resolves session settings only after it acquires the
-    // worktree. A live settings update can land while the row waits behind a
-    // sibling turn, so the durable row is the source of truth at promotion.
-    if queued_row.is_some() {
-        let current = get_session(db, &session.owner, session.id)
-            .await
-            .map_err(|err| WorkerError::Failed(err.to_string()))?
-            .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
-        if current.spawn_epoch != session.spawn_epoch {
-            return Err(WorkerError::Conflict(
-                "the session worker was superseded before the queued turn started".into(),
-            ));
-        }
-        model = current.model;
-        reasoning_effort = current.reasoning_effort;
-        fast_mode = current.fast_mode;
+    // Resolve settings after the worker owns the worktree. Both a queued row
+    // and an idle send can wait behind a transaction-safe settings
+    // reservation that began after the route read the session. The committed
+    // row is the only value that can reach the engine and the turn snapshot.
+    let current = get_session(db, &session.owner, session.id)
+        .await
+        .map_err(|err| WorkerError::Failed(err.to_string()))?
+        .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
+    if current.spawn_epoch != session.spawn_epoch {
+        return Err(WorkerError::Conflict(
+            "the session worker was superseded before the turn started".into(),
+        ));
     }
-
-    if let Some(model) = model.clone() {
-        session.model = Some(model);
-    }
-    session.reasoning_effort = reasoning_effort;
-    session.fast_mode = fast_mode;
+    session.model = current.model;
+    session.reasoning_effort = current.reasoning_effort;
+    session.fast_mode = current.fast_mode;
 
     let ordinal = next_turn_ordinal(db, &session.owner, session.id)
         .await
@@ -2586,14 +2579,17 @@ impl From<HarnessError> for WorkerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
     use chrono::Utc;
     use tidebreak_core::db::code::{
-        get_session, insert_repo, insert_session, insert_workspace, list_events, MAX_REPLAY_EVENTS,
+        get_session, insert_repo, insert_session, insert_workspace, list_events,
+        replace_session_execution_settings, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
         ImageMediaType, ImageRef, PermissionMode, RepoId, ToolDetail, WorkspaceId,
     };
+    use tidebreak_harness::{HarnessAdapter as _, SessionSpec};
 
     fn subagent(call_id: &str, status: CodeSubagentStatus) -> CodeSubagentSummary {
         CodeSubagentSummary {
@@ -2821,6 +2817,113 @@ mod tests {
             None,
         );
         (directory, store, sink, session_id)
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        session.model = Some("stale".into());
+        session.reasoning_effort = Some(ReasoningEffort::High);
+        session.fast_mode = true;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(plain_text_script());
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                env: Vec::new(),
+                approval: None,
+                binary: std::path::PathBuf::from("/scripted/engine"),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+
+        let committed = CodeSessionExecutionSettings {
+            model: Some("committed".into()),
+            reasoning_effort: None,
+            fast_mode: false,
+        };
+        let (reservation_reply, reservation_response) = oneshot::channel();
+        let (settlement, release) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::SetExecutionSettings {
+                settings: committed.clone(),
+                settlement: release,
+                reply: reservation_reply,
+            })
+            .await
+            .unwrap();
+        reservation_response.await.unwrap().unwrap();
+
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "use the committed settings".into(),
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+
+        let updated = replace_session_execution_settings(&store, &session, &committed)
+            .await
+            .unwrap()
+            .expect("the reserved settings commit");
+        settlement
+            .send(ExecutionSettingsSettlement::Confirmed)
+            .unwrap();
+
+        let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the turn completes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.model, updated.model);
+        assert_eq!(turn.fast_mode, updated.fast_mode);
+        assert_eq!(adapter.turn_efforts(), vec![updated.reasoning_effort]);
+        let inputs = adapter.turn_inputs();
+        assert_eq!(inputs[0].model, updated.model);
+        assert_eq!(inputs[0].fast_mode, updated.fast_mode);
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
     }
 
     #[tokio::test]
