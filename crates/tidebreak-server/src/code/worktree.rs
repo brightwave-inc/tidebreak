@@ -590,8 +590,13 @@ async fn run_hook_script(
     if run.success {
         Ok(())
     } else {
+        let truncation = if run.output_truncated {
+            " [output truncated]"
+        } else {
+            ""
+        };
         Err(WorktreeError::user(format!(
-            "{label} script failed (exit {}): {}",
+            "{label} script failed (exit {}): {}{truncation}",
             run.status
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".into()),
@@ -1214,6 +1219,23 @@ mod tests {
         assert!(err.to_string().contains("setup script failed"), "{err}");
         assert!(path.join("README.md").is_file());
         verify_inside_worktree(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn setup_failure_reports_when_its_output_was_truncated() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "noisy-setup");
+        create_worktree(&repo, &path, "tidebreak/noisy-setup", "main")
+            .await
+            .unwrap();
+
+        let error = run_setup_script(&path, Some("while :; do printf '0123456789abcdef'; done"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("[output truncated]"), "{error}");
+        assert!(path.join("README.md").is_file());
     }
 
     #[tokio::test]

@@ -14,11 +14,13 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStringExt;
 
-use tidebreak_harness::ProcessTreeChild;
+use tidebreak_harness::{OutputBudget, ProcessTreeChild};
 use tokio::process::Command;
 use tokio::time::timeout;
 
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(120);
+const SCRIPT_OUTPUT_BYTES: usize = 4_096;
+const SCRIPT_OUTPUT_LINES: usize = 256;
 
 /// Outcome of running a user-authored setup or archive script.
 #[derive(Debug)]
@@ -27,6 +29,7 @@ pub(crate) struct ScriptRun {
     pub status: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub output_truncated: bool,
 }
 
 /// Spawn a user-authored script in the platform-native non-interactive shell.
@@ -56,19 +59,29 @@ pub(crate) async fn run_workspace_script(
             status: Some(0),
             stdout: String::new(),
             stderr: String::new(),
+            output_truncated: false,
         });
     }
     let child = spawn_workspace_script(worktree, script)
         .map_err(|err| format!("failed to spawn workspace script: {err}"))?;
-    let output = timeout(SCRIPT_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| "workspace script timed out".to_owned())?
-        .map_err(|err| format!("workspace script failed: {err}"))?;
+    let output = timeout(
+        SCRIPT_TIMEOUT,
+        child.wait_with_bounded_output(
+            OutputBudget::head(SCRIPT_OUTPUT_BYTES, SCRIPT_OUTPUT_LINES),
+            OutputBudget::head(SCRIPT_OUTPUT_BYTES, SCRIPT_OUTPUT_LINES),
+            true,
+        ),
+    )
+    .await
+    .map_err(|_| "workspace script timed out".to_owned())?
+    .map_err(|err| format!("workspace script failed: {err}"))?;
+    let output_truncated = output.stdout.truncated || output.stderr.truncated;
     Ok(ScriptRun {
-        success: output.status.success(),
+        success: output.status.success() && !output.terminated_for_output,
         status: output.status.code(),
-        stdout: bound_text(&output.stdout),
-        stderr: bound_text(&output.stderr),
+        stdout: output.stdout.into_marked_text(),
+        stderr: output.stderr.into_marked_text(),
+        output_truncated,
     })
 }
 
@@ -141,15 +154,6 @@ fn system_windows_powershell() -> io::Result<PathBuf> {
     }
 }
 
-fn bound_text(bytes: &[u8]) -> String {
-    const MAX: usize = 4_096;
-    let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if text.chars().count() > MAX {
-        text = text.chars().take(MAX).collect();
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +169,20 @@ mod tests {
             args,
             [OsString::from("-lc"), OsString::from("printf ready")]
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_scripts_mark_output_truncated_at_the_read_limit() {
+        let directory = tempfile::tempdir().expect("worktree");
+        let script = format!("printf '%{}s' '' | tr ' ' x", SCRIPT_OUTPUT_BYTES + 128);
+        let run = run_workspace_script(directory.path(), &script)
+            .await
+            .expect("run noisy script");
+
+        assert!(run.stdout.starts_with(&"x".repeat(SCRIPT_OUTPUT_BYTES)));
+        assert!(run.stdout.contains("[output truncated]"));
+        assert!(run.output_truncated);
     }
 
     #[cfg(windows)]

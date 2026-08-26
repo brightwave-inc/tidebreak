@@ -16,7 +16,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction};
-use tidebreak_harness::{filter_child_env, probe_shell, HostEnv};
+use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, OutputBudget};
 
 use super::setup_script::spawn_workspace_script;
 use crate::obo_gateway::GitCredential;
@@ -27,6 +27,8 @@ const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_OUTPUT_CHARS: usize = 4_096;
+const MAX_ACTION_OUTPUT_BYTES: usize = 4_096;
+const MAX_ACTION_OUTPUT_LINES: usize = 256;
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
 pub(crate) const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
 pub(crate) const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
@@ -1529,13 +1531,22 @@ async fn run_action(worktree: &Path, action: &QuickAction) -> ActionOutcome {
             };
         }
     };
-    match timeout(ACTION_TIMEOUT, child.wait_with_output()).await {
+    match timeout(
+        ACTION_TIMEOUT,
+        child.wait_with_bounded_output(
+            OutputBudget::head(MAX_ACTION_OUTPUT_BYTES, MAX_ACTION_OUTPUT_LINES),
+            OutputBudget::head(MAX_ACTION_OUTPUT_BYTES, MAX_ACTION_OUTPUT_LINES),
+            true,
+        ),
+    )
+    .await
+    {
         Ok(Ok(output)) => ActionOutcome {
             name: action.name.clone(),
-            success: output.status.success(),
+            success: output.status.success() && !output.terminated_for_output,
             exit_code: output.status.code(),
-            stdout: bound_text(&String::from_utf8_lossy(&output.stdout)),
-            stderr: bound_text(&String::from_utf8_lossy(&output.stderr)),
+            stdout: output.stdout.into_marked_text(),
+            stderr: output.stderr.into_marked_text(),
             timed_out: false,
         },
         Ok(Err(err)) => ActionOutcome {
@@ -3073,12 +3084,13 @@ exit 3
         let dir = TempDir::new().unwrap();
         let long = QuickAction {
             name: "noise".into(),
-            command: format!("printf '%{}s' '' | tr ' ' x", MAX_OUTPUT_CHARS + 80),
+            command: "while :; do printf '0123456789abcdef'; done".into(),
             auto_run_on_create: false,
         };
         let noisy = run_action(dir.path(), &long).await;
-        assert!(noisy.success, "{}", noisy.stderr);
-        assert_eq!(noisy.stdout.chars().count(), MAX_OUTPUT_CHARS);
+        assert!(!noisy.success, "an over-limit producer must be terminated");
+        assert!(noisy.stdout.starts_with("0123456789abcdef"));
+        assert!(noisy.stdout.contains("[output truncated]"));
         assert!(!noisy.timed_out);
 
         let sleeper = QuickAction {
