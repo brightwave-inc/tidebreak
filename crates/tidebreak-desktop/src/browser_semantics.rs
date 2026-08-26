@@ -2805,7 +2805,7 @@ mod tests {
         assert!(inspect.contains("listen(observed.win, \"scroll\")"));
         assert!(inspect.contains("listen(observed.win, \"resize\")"));
         assert!(inspect.contains("listen(observedDocument, \"fullscreenchange\")"));
-        assert!(inspect.contains("target.removeEventListener(type, state.schedule, true)"));
+        assert!(inspect.contains("target.removeEventListener(type, schedule, true)"));
         assert!(inspect.contains("addMask(entries, frameRect"));
         assert!(inspect.contains("Sensitive content · human takeover"));
         assert!(screenshot.contains("tidebreakIsSensitiveField(element, doc)"));
