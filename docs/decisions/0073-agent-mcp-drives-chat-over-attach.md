@@ -1,4 +1,4 @@
-# 71. Agent MCP drives chat over the attach contract
+# 73. Agent MCP drives chat over the attach contract
 
 - Status: Proposed
 - Date: 2026-08-26
