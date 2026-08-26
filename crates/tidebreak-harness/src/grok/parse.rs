@@ -440,11 +440,8 @@ impl GrokStreamParser {
             "end_turn" => events.push(HarnessEvent::TurnCompleted {
                 usage: self.last_usage.clone(),
             }),
-            // A stop reason this build has never seen still ends the turn —
-            // the child has exited and something must close it out. Folding it
-            // into a plain completion without a word would be exactly the
-            // silent normalization decision 0031 forbids, so it is counted and
-            // stated before the turn closes.
+            // A stop reason this build has never seen is protocol drift. The
+            // child has exited, so close the turn as a visible failure.
             other => {
                 let label = if other.is_empty() { "missing" } else { other };
                 self.count_unrecognized(&format!("end/stopReason/{label}"), value);
@@ -453,13 +450,18 @@ impl GrokStreamParser {
                     message: bound(
                         &format!(
                             "the engine ended the turn with an unrecognized stop reason \
-                             ({label}); it was recorded as completed"
+                             ({label}); it was recorded as failed"
                         ),
                         MAX_NOTICE_CHARS,
                     ),
                 });
-                events.push(HarnessEvent::TurnCompleted {
-                    usage: self.last_usage.clone(),
+                events.push(HarnessEvent::TurnFailed {
+                    error: BoundedError {
+                        message: bound(
+                            &format!("Grok protocol drift: turn ended with stop reason {label}"),
+                            MAX_NOTICE_CHARS,
+                        ),
+                    },
                 });
             }
         }
@@ -799,7 +801,7 @@ mod tests {
     fn an_unknown_stop_reason_is_counted_and_stated_while_a_progress_frame_is_not() {
         // `status: null` on tool_call_update is the manifest's documented
         // progress frame: a deliberate no-op, not a drop. An unheard-of stop
-        // reason is the opposite — it still ends the turn, but it is counted.
+        // reason is the opposite: it ends the turn as a visible failure.
         let input = r#"
 {"type":"tool_call","toolCallId":"call-1","toolName":"read_file","rawInput":{}}
 {"type":"tool_call_update","toolCallId":"call-1","status":null}
@@ -816,7 +818,20 @@ mod tests {
         )));
         assert!(matches!(
             out.events.last(),
-            Some(HarnessEvent::TurnCompleted { .. })
+            Some(HarnessEvent::TurnFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_missing_stop_reason_fails_closed() {
+        let out = GrokStreamParser::parse_ndjson(
+            r#"{"type":"end","sessionId":"abc","usage":{"input_tokens":1}}"#,
+        );
+
+        assert_eq!(out.unrecognized, 1);
+        assert!(matches!(
+            out.events.last(),
+            Some(HarnessEvent::TurnFailed { .. })
         ));
     }
 

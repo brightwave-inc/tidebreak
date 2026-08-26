@@ -18,7 +18,8 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::time::timeout;
 use tracing::warn;
 
 use crate::browser_channel::apply_child_env_tokio;
@@ -32,7 +33,14 @@ use crate::{
 };
 use tidebreak_core::{PermissionMode, ReasoningEffort};
 
+#[cfg(not(test))]
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const INTERRUPT_GRACE: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 /// How long a dying child gets to finish writing its stderr before the turn
 /// reports why it died.
@@ -363,12 +371,12 @@ impl EngineChannel {
 
     /// Reap the process, recording its exit for the turn to report.
     async fn stop(&self, grace: Option<Duration>) -> Option<ExitStatus> {
+        if let Some(grace) = grace {
+            return self.interrupt_tree(grace).await.ok().flatten();
+        }
         let mut slot = self.child.lock().await;
         let status = match slot.as_mut() {
-            Some(child) => match grace {
-                Some(grace) => child.interrupt(grace).await.ok(),
-                None => child.terminate().await.ok(),
-            },
+            Some(child) => child.terminate().await.ok(),
             None => None,
         };
         *slot = None;
@@ -376,6 +384,16 @@ impl EngineChannel {
             *self.reaped.lock().expect("claude child exit") = status;
         }
         status
+    }
+
+    async fn interrupt_tree(&self, grace: Duration) -> io::Result<Option<ExitStatus>> {
+        let child = self.child.lock().await.take();
+        let Some(mut child) = child else {
+            return Ok(None);
+        };
+        let status = child.interrupt(grace).await?;
+        *self.reaped.lock().expect("claude child exit") = Some(status);
+        Ok(Some(status))
     }
 
     /// How the process ended, whoever reaped it.
@@ -419,6 +437,12 @@ pub struct ClaudeSession {
     /// Monotonic id for control requests, so a late `control_response` is
     /// never confused with the current one.
     next_control_id: AtomicU64,
+    pending_interrupt: Mutex<Option<PendingClaudeInterrupt>>,
+}
+
+struct PendingClaudeInterrupt {
+    request_id: String,
+    reply: Option<oneshot::Sender<Result<(), HarnessError>>>,
 }
 
 /// Clears the in-flight flag however `run_turn` leaves.
@@ -448,6 +472,7 @@ impl ClaudeSession {
             interrupts_this_turn: AtomicU64::new(0),
             turn_in_flight: AtomicBool::new(false),
             next_control_id: AtomicU64::new(1),
+            pending_interrupt: Mutex::new(None),
         }
     }
 
@@ -688,6 +713,130 @@ impl ClaudeSession {
         stdin.flush().await
     }
 
+    fn register_interrupt(
+        &self,
+        request_id: String,
+    ) -> oneshot::Receiver<Result<(), HarnessError>> {
+        let (reply, receiver) = oneshot::channel();
+        *self.pending_interrupt.lock().expect("claude interrupt") = Some(PendingClaudeInterrupt {
+            request_id,
+            reply: Some(reply),
+        });
+        receiver
+    }
+
+    fn cancel_interrupt(&self, request_id: &str, detail: &str) {
+        let pending = {
+            let mut slot = self.pending_interrupt.lock().expect("claude interrupt");
+            if slot
+                .as_ref()
+                .is_none_or(|pending| pending.request_id != request_id)
+            {
+                return;
+            }
+            slot.take()
+        };
+        if let Some(mut pending) = pending {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(HarnessError::Other(detail.into())));
+            }
+        }
+    }
+
+    fn fail_pending_interrupt(&self, detail: &str) {
+        let request_id = self
+            .pending_interrupt
+            .lock()
+            .expect("claude interrupt")
+            .as_ref()
+            .map(|pending| pending.request_id.clone());
+        if let Some(request_id) = request_id {
+            self.cancel_interrupt(&request_id, detail);
+        }
+    }
+
+    fn observe_control_response(&self, line: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("control_response") {
+            return;
+        }
+        let Some(request_id) = value
+            .pointer("/response/request_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let pending = {
+            let mut slot = self.pending_interrupt.lock().expect("claude interrupt");
+            if slot
+                .as_ref()
+                .is_none_or(|pending| pending.request_id != request_id)
+            {
+                return;
+            }
+            slot.take()
+        };
+        let Some(mut pending) = pending else {
+            return;
+        };
+        let result = match value
+            .pointer("/response/subtype")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("success") => Ok(()),
+            Some("error") => {
+                let detail = value
+                    .pointer("/response/error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("the engine rejected the interrupt");
+                Err(HarnessError::Other(detail.into()))
+            }
+            _ => Err(HarnessError::Other(
+                "the engine returned a malformed interrupt response".into(),
+            )),
+        };
+        if let Some(reply) = pending.reply.take() {
+            let _ = reply.send(result);
+        }
+    }
+
+    fn resolve_interrupt_for_terminal(&self, interrupted: bool) {
+        let pending = self
+            .pending_interrupt
+            .lock()
+            .expect("claude interrupt")
+            .take();
+        if let Some(mut pending) = pending {
+            if let Some(reply) = pending.reply.take() {
+                let result = if interrupted {
+                    Ok(())
+                } else {
+                    Err(HarnessError::Other(
+                        "the turn ended before the interrupt was acknowledged".into(),
+                    ))
+                };
+                let _ = reply.send(result);
+            }
+        }
+    }
+
+    async fn interrupt_process_tree(&self) -> Result<(), HarnessError> {
+        self.fail_pending_interrupt("the native interrupt did not complete");
+        let taken = self.channel.lock().await.take();
+        self.pid.clear();
+        if let Some(channel) = taken {
+            channel
+                .interrupt_tree(INTERRUPT_GRACE)
+                .await
+                .map_err(|err| {
+                    HarnessError::Other(format!("the process-tree interrupt failed: {err}"))
+                })?;
+        }
+        Ok(())
+    }
+
     /// Read the stream until the turn's own terminal event, or until the
     /// child's stdout closes.
     async fn read_turn(&self, channel: &EngineChannel) -> Result<TurnRead, HarnessError> {
@@ -721,13 +870,9 @@ impl ClaudeSession {
                         // the child has nothing more to say until the next
                         // prompt.
                         for line in tick.lines {
-                            saw_terminal |= emit_parsed(
-                                &self.spec,
-                                &mut reader.parser,
-                                &self.resume_ref,
-                                &line,
-                            )
-                            .await;
+                            saw_terminal |=
+                                emit_parsed(self, &mut reader.parser, &self.resume_ref, &line)
+                                    .await;
                         }
                         if saw_terminal {
                             break;
@@ -750,8 +895,12 @@ impl ClaudeSession {
         }
         if eof && !reader.lines.pending().is_empty() {
             let pending = reader.lines.pending().to_owned();
-            saw_terminal |=
-                emit_parsed(&self.spec, &mut reader.parser, &self.resume_ref, &pending).await;
+            saw_terminal |= emit_parsed(self, &mut reader.parser, &self.resume_ref, &pending).await;
+        }
+        if eof {
+            self.fail_pending_interrupt(
+                "engine stdout closed before the interrupt was acknowledged",
+            );
         }
         let total = reader.parser.unrecognized();
         self.unrecognized
@@ -764,6 +913,7 @@ impl ClaudeSession {
     }
 
     async fn run_turn_inner(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        self.fail_pending_interrupt("the prior turn ended before the interrupt was acknowledged");
         self.interrupts_this_turn.store(0, Ordering::SeqCst);
         self.turn_in_flight.store(true, Ordering::SeqCst);
         let _in_flight = TurnGuard(&self.turn_in_flight);
@@ -862,33 +1012,47 @@ impl HarnessSession for ClaudeSession {
         let Some(channel) = self.channel.lock().await.clone() else {
             return Ok(());
         };
+        if !self.turn_in_flight.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let asked = self.interrupts_this_turn.fetch_add(1, Ordering::SeqCst);
-        let escalate = asked > 0 && self.turn_in_flight.load(Ordering::SeqCst);
-        if !escalate {
-            let request_id = format!(
-                "tb-interrupt-{}",
-                self.next_control_id.fetch_add(1, Ordering::SeqCst)
-            );
-            let mut line = serde_json::to_vec(&serde_json::json!({
-                "type": "control_request",
-                "request_id": request_id,
-                "request": { "subtype": "interrupt" },
-            }))
-            .map_err(|err| HarnessError::Other(format!("encode interrupt: {err}")))?;
-            line.push(b'\n');
-            match self.write_line(&channel, &line).await {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    warn!(%err, "engine child refused a stop request; stopping the process")
-                }
+        if asked > 0 {
+            return self.interrupt_process_tree().await;
+        }
+
+        let request_id = format!(
+            "tb-interrupt-{}",
+            self.next_control_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let receiver = self.register_interrupt(request_id.clone());
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "interrupt" },
+        }))
+        .map_err(|err| HarnessError::Other(format!("encode interrupt: {err}")))?;
+        line.push(b'\n');
+        if let Err(err) = self.write_line(&channel, &line).await {
+            self.cancel_interrupt(&request_id, "the engine refused the interrupt request");
+            warn!(%err, "engine child refused a stop request; stopping the process");
+            return self.interrupt_process_tree().await;
+        }
+
+        match timeout(CONTROL_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(err))) => {
+                warn!(%err, "engine rejected a stop request; stopping the process");
+                self.interrupt_process_tree().await
+            }
+            Ok(Err(_)) => self.interrupt_process_tree().await,
+            Err(_) => {
+                self.cancel_interrupt(
+                    &request_id,
+                    "timed out waiting for the engine to acknowledge the interrupt",
+                );
+                self.interrupt_process_tree().await
             }
         }
-        let taken = self.channel.lock().await.take();
-        if let Some(channel) = taken {
-            channel.stop(Some(INTERRUPT_GRACE)).await;
-        }
-        self.pid.clear();
-        Ok(())
     }
 
     /// Re-posture a live child with the `set_permission_mode` control request.
@@ -972,12 +1136,14 @@ impl HarnessSession for ClaudeSession {
 
 /// Emits one line's events, reporting whether any of them ended the turn.
 async fn emit_parsed(
-    spec: &SessionSpec,
+    session: &ClaudeSession,
     parser: &mut ClaudeStreamParser,
     resume_ref: &Mutex<Option<String>>,
     line: &str,
 ) -> bool {
+    session.observe_control_response(line);
     let mut terminal = false;
+    let mut interrupted = false;
     for event in parser.push_line(line) {
         if let HarnessEvent::SessionStarted {
             resume_ref: Some(resume),
@@ -992,7 +1158,11 @@ async fn emit_parsed(
                 | HarnessEvent::TurnFailed { .. }
                 | HarnessEvent::TurnInterrupted
         );
-        spec.sink.emit(event).await;
+        interrupted |= matches!(event, HarnessEvent::TurnInterrupted);
+        session.spec.sink.emit(event).await;
+    }
+    if terminal {
+        session.resolve_interrupt_for_terminal(interrupted);
     }
     terminal
 }
@@ -1206,6 +1376,85 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    async fn run_interrupt_case(
+        mode: &str,
+    ) -> (
+        Result<TurnOutcome, HarnessError>,
+        Result<(), HarnessError>,
+        bool,
+        bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = write_engine(
+            dir.path(),
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *control_request*)
+      printf '%s\n' "$line" >>"$FAKE_CLAUDE_INTERRUPTS"
+      case "$FAKE_CLAUDE_INTERRUPT_MODE" in
+        wrong_id)
+          printf '{"type":"control_response","response":{"subtype":"success","request_id":"wrong-id","response":{}}}\n'
+          ;;
+        error)
+          printf '{"type":"control_response","response":{"subtype":"error","request_id":"tb-interrupt-1","error":"turn is no longer active"}}\n'
+          ;;
+        none)
+          :
+          ;;
+        exit)
+          exit 0
+          ;;
+      esac
+      ;;
+    *)
+      printf '{"type":"system","subtype":"init","session_id":"sess-1","claude_code_version":"2.1.238"}\n'
+      touch "$FAKE_CLAUDE_STARTED"
+      ;;
+  esac
+done
+"#,
+        );
+        let mut session = session_with(binary, dir.path(), Arc::new(Discard));
+        session.spec.extra_env.extend([
+            ("FAKE_CLAUDE_INTERRUPT_MODE".into(), mode.to_owned()),
+            (
+                "FAKE_CLAUDE_INTERRUPTS".into(),
+                dir.path()
+                    .join("interrupts.ndjson")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (
+                "FAKE_CLAUDE_STARTED".into(),
+                dir.path().join("started").to_string_lossy().into_owned(),
+            ),
+        ]);
+        let session = Arc::new(session);
+        let running = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.run_turn(turn("keep working")).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dir.path().join("started").exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fake turn did not start");
+
+        let stopped = session.interrupt().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("fake turn did not finish")
+            .expect("turn task panicked");
+        let child_alive = session.child_pid().is_some();
+        let request_written = std::fs::read_to_string(dir.path().join("interrupts.ndjson"))
+            .is_ok_and(|input| input.lines().count() == 1);
+        session.park().await.unwrap();
+        (outcome, stopped, child_alive, request_written)
     }
 
     /// The engine takes `low..max` on `--effort`. `Ultra` is ultracode, which
@@ -1793,6 +2042,42 @@ done
             .snapshot()
             .iter()
             .any(|event| matches!(event, HarnessEvent::TurnCompleted { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_claude_interrupt_id_times_out_and_stops_the_process_tree() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("wrong_id").await;
+        stopped.unwrap();
+        assert!(!matches!(outcome.unwrap(), TurnOutcome::Clean));
+        assert!(!child_alive);
+        assert!(request_written);
+    }
+
+    #[tokio::test]
+    async fn a_claude_interrupt_error_stops_the_process_tree() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("error").await;
+        stopped.unwrap();
+        assert!(!matches!(outcome.unwrap(), TurnOutcome::Clean));
+        assert!(!child_alive);
+        assert!(request_written);
+    }
+
+    #[tokio::test]
+    async fn a_missing_claude_interrupt_response_stops_the_process_tree() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("none").await;
+        stopped.unwrap();
+        assert!(!matches!(outcome.unwrap(), TurnOutcome::Clean));
+        assert!(!child_alive);
+        assert!(request_written);
+    }
+
+    #[tokio::test]
+    async fn a_claude_child_exit_during_interrupt_runs_the_process_fallback() {
+        let (outcome, stopped, child_alive, request_written) = run_interrupt_case("exit").await;
+        stopped.unwrap();
+        assert!(!matches!(outcome.unwrap(), TurnOutcome::Clean));
+        assert!(!child_alive);
+        assert!(request_written);
     }
 
     /// A second stop for the same turn does not wait on an engine that is not

@@ -431,6 +431,34 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_stop_reasons_are_allowlisted() {
+        for version in ["1.0.4", "1.0.5"] {
+            for entry in std::fs::read_dir(fixture_dir(version)).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("ndjson") {
+                    continue;
+                }
+                let input = std::fs::read_to_string(&path).unwrap();
+                for line in input.lines() {
+                    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                    if value.get("type").and_then(serde_json::Value::as_str) != Some("end") {
+                        continue;
+                    }
+                    let reason = value
+                        .get("stopReason")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("captured Grok terminal must name its stop reason");
+                    assert!(
+                        ["end_turn", "cancelled"].contains(&reason),
+                        "{} has unknown stop reason {reason}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn capabilities_for_1_0_4_are_honest() {
         let caps = GrokAdapter::new().capabilities(&HarnessProbe {
             found: true,

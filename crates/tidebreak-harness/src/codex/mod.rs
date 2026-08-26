@@ -669,6 +669,91 @@ mod tests {
     }
 
     #[test]
+    fn posture_retry_fixture_repeats_the_same_policy_after_rejection() {
+        let (events, unrecognized) = replay("posture-retry");
+        assert_eq!(unrecognized, 0);
+        assert!(matches!(
+            events.first(),
+            Some(HarnessEvent::TurnFailed { .. })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+
+        let input = std::fs::read_to_string(fixture_dir().join("posture-retry.ndjson")).unwrap();
+        let requests = input
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|value| value.get("msg").cloned())
+            .filter(|message| {
+                message.get("method").and_then(serde_json::Value::as_str) == Some("turn/start")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
+            assert_eq!(request["params"]["approvalPolicy"], "untrusted");
+        }
+    }
+
+    #[test]
+    fn checked_in_terminal_values_are_allowlisted() {
+        for entry in std::fs::read_dir(fixture_dir()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("ndjson") {
+                continue;
+            }
+            let input = std::fs::read_to_string(&path).unwrap();
+            for line in input.lines() {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                let message = value.get("msg").unwrap_or(&value);
+                match message.get("method").and_then(serde_json::Value::as_str) {
+                    Some("turn/completed") => {
+                        let status = message
+                            .pointer("/params/turn/status")
+                            .and_then(serde_json::Value::as_str)
+                            .expect("captured turn terminal must name its status");
+                        assert!(
+                            ["completed", "interrupted", "failed"].contains(&status),
+                            "{} has unknown turn status {status}",
+                            path.display()
+                        );
+                    }
+                    Some("item/completed") => {
+                        let item = &message["params"]["item"];
+                        let item_type = item.get("type").and_then(serde_json::Value::as_str);
+                        if matches!(
+                            item_type,
+                            Some("commandExecution" | "fileChange" | "collabAgentToolCall")
+                        ) {
+                            let status = item
+                                .get("status")
+                                .and_then(serde_json::Value::as_str)
+                                .expect("captured tool terminal must name its status");
+                            assert!(
+                                [
+                                    "completed",
+                                    "declined",
+                                    "failed",
+                                    "interrupted",
+                                    "cancelled",
+                                    "canceled"
+                                ]
+                                .contains(&status),
+                                "{} has unknown {item_type:?} status {status}",
+                                path.display()
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
     fn adapter_has_a_fixtures_directory_with_a_manifest() {
         assert!(fixture_dir().join("manifest.toml").is_file());
     }

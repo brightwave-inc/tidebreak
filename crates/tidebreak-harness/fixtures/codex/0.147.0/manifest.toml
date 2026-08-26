@@ -35,6 +35,7 @@ scenarios = [
   "resume",
   "interrupt",
   "error",
+  "posture-retry",
   "collab-agents",
 ]
 
