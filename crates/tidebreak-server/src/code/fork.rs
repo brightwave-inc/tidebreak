@@ -1452,8 +1452,9 @@ mod tests {
         let completed = turn(session.id, 1, "run the command");
         let pending = HashSet::from([completed.id]);
         let events = completed_events(completed.id);
+        let turns = [completed];
 
-        let result = cut_at_settled_boundary(&[completed], &events, &pending, false, None);
+        let result = cut_at_settled_boundary(&turns, &events, &pending, false, None);
 
         assert!(matches!(
             result,
@@ -1515,20 +1516,17 @@ mod tests {
 
         let mut settled = stale;
         settled.status = CodeTurnStatus::Completed;
-        let row_ahead = cut_at_settled_boundary(
-            std::slice::from_ref(&settled),
-            &started,
-            &HashSet::new(),
-            false,
-            None,
-        );
+        let settled_turns = [settled];
+        let row_ahead =
+            cut_at_settled_boundary(&settled_turns, &started, &HashSet::new(), false, None);
         assert!(matches!(
             row_ahead,
             Err(ForkBoundaryError::Settling { ordinal: 1 })
         ));
 
-        let retry = cut_at_settled_boundary(&[settled], &completed, &HashSet::new(), false, None)
-            .expect("fresh settled snapshot");
+        let retry =
+            cut_at_settled_boundary(&settled_turns, &completed, &HashSet::new(), false, None)
+                .expect("fresh settled snapshot");
         assert_eq!(retry.turns.len(), 1);
     }
 
