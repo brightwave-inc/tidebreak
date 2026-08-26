@@ -192,6 +192,13 @@ struct FetchedRuns {
     errors: Vec<CodeDeliverySourceError>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RunFetchOptions {
+    fetch_workflows: bool,
+    fetch_deployments: bool,
+    force_refresh: bool,
+}
+
 /// Short-lived owner/query caches. No GitHub response is durable.
 #[derive(Debug, Default)]
 pub(crate) struct DeliveryCache {
@@ -1274,6 +1281,11 @@ pub(crate) async fn query_runs(
     };
 
     let (remote_scope, fetch_workflows, fetch_deployments) = run_remote_scope(&query);
+    let fetch_options = RunFetchOptions {
+        fetch_workflows,
+        fetch_deployments,
+        force_refresh,
+    };
     let cache_key = aggregate_cache_key(
         owner,
         &format!("runs:{}:{remote_scope}", reader.cache_scope()),
@@ -1307,9 +1319,7 @@ pub(crate) async fn query_runs(
                             &reader,
                             &target,
                             &workspace_index,
-                            fetch_workflows,
-                            fetch_deployments,
-                            force_refresh,
+                            fetch_options,
                         )
                         .await
                         .map_err(|message| (target, message))
@@ -1906,17 +1916,17 @@ fn repository_ref_from_value(
         .and_then(Value::as_str)
         .unwrap_or(&target.owner)
         .to_owned();
-    let name = text_field(&value, "name").unwrap_or_else(|| target.name.clone());
+    let name = text_field(value, "name").unwrap_or_else(|| target.name.clone());
     let name_with_owner =
-        text_field(&value, "full_name").unwrap_or_else(|| format!("{owner}/{name}"));
+        text_field(value, "full_name").unwrap_or_else(|| format!("{owner}/{name}"));
     CodeGitHubRepositoryRef {
         host: target.host.clone(),
         owner,
         name,
         name_with_owner,
-        url: text_field(&value, "html_url")
+        url: text_field(value, "html_url")
             .unwrap_or_else(|| format!("https://{}/{}/{}", target.host, target.owner, target.name)),
-        default_branch: text_field(&value, "default_branch"),
+        default_branch: text_field(value, "default_branch"),
         tidebreak_repo_id,
     }
 }
@@ -2497,18 +2507,17 @@ async fn fetch_runs(
     reader: &DeliveryReader,
     target: &CodeGitHubRepositoryTarget,
     workspaces: &[WorkspaceIndexEntry],
-    fetch_workflows: bool,
-    fetch_deployments: bool,
-    force_refresh: bool,
+    options: RunFetchOptions,
 ) -> Result<FetchedRuns, String> {
     let (repository, workflow_runs, deployments) = match reader {
         DeliveryReader::Gh(binary) => {
             let repository =
-                resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
+                resolve_repository_cached(runtime, binary, target, None, options.force_refresh)
+                    .await?;
             let workflow_endpoint = api_endpoint(target, "actions/runs?per_page=100");
             let deployments_endpoint = api_endpoint(target, "deployments?per_page=100");
             let workflow_read = async {
-                if fetch_workflows {
+                if options.fetch_workflows {
                     run_api_json(binary, &target.host, &workflow_endpoint)
                         .await
                         .map(Some)
@@ -2517,7 +2526,7 @@ async fn fetch_runs(
                 }
             };
             let deployment_read = async {
-                if fetch_deployments {
+                if options.fetch_deployments {
                     run_api_json(binary, &target.host, &deployments_endpoint)
                         .await
                         .map(Some)
@@ -2530,12 +2539,17 @@ async fn fetch_runs(
         }
         DeliveryReader::Forge => {
             let credential = borrow_delivery_credential(runtime, owner, target).await?;
-            let repository =
-                resolve_repository_rest_cached(runtime, target, None, force_refresh, &credential)
-                    .await?;
+            let repository = resolve_repository_rest_cached(
+                runtime,
+                target,
+                None,
+                options.force_refresh,
+                &credential,
+            )
+            .await?;
             let api_base = runtime.forge_api_base_for(&target.host);
             let workflow_read = async {
-                if fetch_workflows {
+                if options.fetch_workflows {
                     super::forge_rest::workflow_runs(&api_base, target, &credential)
                         .await
                         .map(Some)
@@ -2544,7 +2558,7 @@ async fn fetch_runs(
                 }
             };
             let deployment_read = async {
-                if fetch_deployments {
+                if options.fetch_deployments {
                     super::forge_rest::deployments(&api_base, target, &credential)
                         .await
                         .map(Some)
@@ -3483,15 +3497,6 @@ fn observation_error_kind(observation: &GhObservation) -> &'static str {
         "gh_signed_out"
     } else {
         "gh_unavailable"
-    }
-}
-
-fn observation_source_error(observation: &GhObservation) -> CodeDeliverySourceError {
-    CodeDeliverySourceError {
-        repository: None,
-        kind: observation_error_kind(observation).into(),
-        message: observation.remediation.clone(),
-        retry_at: None,
     }
 }
 

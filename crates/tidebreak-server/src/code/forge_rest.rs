@@ -459,10 +459,11 @@ async fn check_run_values(
         .filter_map(|run| {
             let name = run.get("name").and_then(Value::as_str)?;
             let conclusion = run.get("conclusion").cloned().unwrap_or(Value::Null);
-            let pending_state = conclusion
-                .is_null()
-                .then(|| Value::String("PENDING".to_owned()))
-                .unwrap_or(Value::Null);
+            let pending_state = if conclusion.is_null() {
+                Value::String("PENDING".to_owned())
+            } else {
+                Value::Null
+            };
             let details_url = run
                 .get("details_url")
                 .filter(|value| value.as_str().is_some())
