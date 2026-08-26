@@ -56,7 +56,11 @@ import { FilesPanel } from "./FilesPanel";
 import { FOCUS_RING, FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 import { PrCommentCard } from "./PrCommentCard";
-import { prMergeControls, prWorkflowStatus } from "./prActions";
+import {
+  prDirectMergeAction,
+  prMergeControls,
+  prWorkflowStatus,
+} from "./prActions";
 import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import { useWorkspacePullRequests } from "./useWorkspacePullRequests";
@@ -508,8 +512,8 @@ export function PrTab({
 
   async function merge(auto: boolean) {
     if (!pr) return;
-    const controls = prMergeControls(prWorkflowStatus(pr).state);
-    if (auto ? !controls.canEnableAutoMerge : !controls.canMerge) return;
+    const action = prDirectMergeAction(pr);
+    if (!action || action.auto !== auto) return;
     if (!auto) {
       const ok = await confirm({
         title: `Merge #${pr.number}?`,
@@ -558,9 +562,8 @@ export function PrTab({
   const tone = prTone(pr);
   const workflow = prWorkflowStatus(pr);
   const mergeControls = prMergeControls(workflow.state);
-  const showMergeMethod =
-    mergeControls.canMerge ||
-    (mergeControls.canEnableAutoMerge && !pr.auto_merge_enabled);
+  const directMerge = prDirectMergeAction(pr);
+  const showMergeMethod = directMerge !== null;
   const counts = checkCounts(pr);
   const open = tone === "open" || tone === "draft";
   const branchLine =
@@ -681,7 +684,7 @@ export function PrTab({
               </Select>
             )}
           </div>
-          {mergeControls.canMerge ? (
+          {directMerge?.kind === "merge" ? (
             <Button
               type="button"
               size="sm"
@@ -692,7 +695,7 @@ export function PrTab({
               {merging === "merge" ? <Spinner aria-hidden /> : null}
               {mergeMethodLabel(method)}
             </Button>
-          ) : mergeControls.canEnableAutoMerge && !pr.auto_merge_enabled ? (
+          ) : directMerge ? (
             <Button
               type="button"
               size="sm"
@@ -702,7 +705,7 @@ export function PrTab({
               onClick={() => void merge(true)}
             >
               {merging === "auto_merge" ? <Spinner aria-hidden /> : null}
-              Enable auto-merge
+              {directMerge.label}
             </Button>
           ) : workflow.state === "queued" ? (
             <div className="text-warning-foreground flex items-center gap-1.5 px-1 text-xs font-medium">
@@ -715,20 +718,6 @@ export function PrTab({
               Auto-merge is enabled
             </div>
           ) : null}
-          {mergeControls.canMerge && !pr.auto_merge_enabled && (
-            <button
-              type="button"
-              className={cn(
-                "text-muted-foreground hover:text-foreground cursor-pointer self-center rounded-sm text-xs",
-                FOCUS_RING,
-                HOVER_TINT,
-              )}
-              disabled={mutationBusy || !mergeControls.canEnableAutoMerge}
-              onClick={() => void merge(true)}
-            >
-              Enable auto-merge instead
-            </button>
-          )}
           {mergeError && (
             <p className="text-critical text-xs" role="alert">
               {mergeError}

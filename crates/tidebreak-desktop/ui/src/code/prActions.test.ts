@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { PullRequestDigest } from "../api/types";
 import {
+  deliveryRepositoryHasMergeQueue,
   prAgentQuickActions,
+  prDirectMergeAction,
   prFreshAgentPrompt,
   prHasConflicts,
   prIsQueued,
@@ -267,6 +269,126 @@ describe("prWorkflowPrompt", () => {
     expect(() => prWorkflowPrompt("merge", pr({}))).toBeDefined();
     // @ts-expect-error readying a draft is not an agent action
     expect(() => prWorkflowPrompt("mark_ready", pr({}))).toBeDefined();
+  });
+});
+
+describe("prDirectMergeAction", () => {
+  it("offers merge only when the pull request is affirmatively ready", () => {
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          mergeable: "mergeable",
+          merge_state_status: "clean",
+          checks: [{ name: "ci", bucket: "pass" }],
+        }),
+      ),
+    ).toEqual({ kind: "merge", label: "Merge", auto: false });
+  });
+
+  it("offers enable auto-merge when a direct merge is still blocked", () => {
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          checks: [{ name: "ci", bucket: "pending" }],
+        }),
+      ),
+    ).toEqual({
+      kind: "enable_auto_merge",
+      label: "Enable auto-merge",
+      auto: true,
+    });
+  });
+
+  it("offers merge when ready on a merge-queue repository", () => {
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          mergeable: "mergeable",
+          merge_state_status: "clean",
+          checks: [{ name: "ci", bucket: "pass" }],
+        }),
+        { hasMergeQueue: true },
+      ),
+    ).toEqual({
+      kind: "merge_when_ready",
+      label: "Merge when ready",
+      auto: true,
+    });
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          checks: [{ name: "ci", bucket: "pending" }],
+        }),
+        { hasMergeQueue: true },
+      )?.kind,
+    ).toBe("merge_when_ready");
+  });
+
+  it("offers nothing once the host is already landing the pull request", () => {
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          in_merge_queue: true,
+          auto_merge_enabled: true,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          auto_merge_enabled: true,
+          mergeable: "mergeable",
+          merge_state_status: "clean",
+          checks: [{ name: "ci", bucket: "pass" }],
+        }),
+      ),
+    ).toBeNull();
+    expect(prDirectMergeAction(pr({ state: "merged", head_sha: "abc" }))).toBe(
+      null,
+    );
+  });
+});
+
+describe("deliveryRepositoryHasMergeQueue", () => {
+  it("treats a repository as queued when any of its rows is in the queue", () => {
+    const queued = {
+      repository: {
+        host: "github.com",
+        owner: "acme",
+        name: "app",
+        name_with_owner: "acme/app",
+        url: "https://github.com/acme/app",
+      },
+      in_merge_queue: true as const,
+    };
+    const other = {
+      repository: {
+        host: "github.com",
+        owner: "acme",
+        name: "docs",
+        name_with_owner: "acme/docs",
+        url: "https://github.com/acme/docs",
+      },
+      in_merge_queue: true as const,
+    };
+    expect(
+      deliveryRepositoryHasMergeQueue(
+        [queued, other] as never,
+        queued.repository,
+      ),
+    ).toBe(true);
+    expect(
+      deliveryRepositoryHasMergeQueue(
+        [{ ...queued, in_merge_queue: false }, other] as never,
+        queued.repository,
+      ),
+    ).toBe(false);
   });
 });
 

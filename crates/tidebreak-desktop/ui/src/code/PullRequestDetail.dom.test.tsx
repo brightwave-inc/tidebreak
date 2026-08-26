@@ -168,7 +168,10 @@ describe("PullRequestDetailSheet", () => {
         "Resolve the conflicts with the base branch first.",
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Merge" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Enable auto-merge" }),
+    ).toBeNull();
   });
 
   it("shows the changed files with their diffs", async () => {
@@ -351,6 +354,17 @@ describe("PullRequestDetailSheet", () => {
    * modal: the sheet is already one, and stacked modals share a dismiss
    * layer and the body pointer-events lock.
    */
+  it("shows only the host merge action that is available", async () => {
+    await renderPanel(2247);
+    expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Enable auto-merge" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Merge when ready" }),
+    ).toBeNull();
+  });
+
   it("admin-merges only through the inline confirmation, with the bypass flag", async () => {
     const runAction = vi.fn(
       async (_body: CodeDeliveryPullRequestActionBody) => ({
@@ -363,8 +377,11 @@ describe("PullRequestDetailSheet", () => {
       client({ runCodeDeliveryPullRequestAction: runAction }),
     );
 
-    // The plain merge stays disabled while branch protection blocks it.
-    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    // Direct merge is not available; the host action is auto-merge instead.
+    expect(screen.queryByRole("button", { name: "Merge" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Enable auto-merge" }),
+    ).toBeEnabled();
     await userEvent.click(
       screen.getByRole("button", { name: "More pull request actions" }),
     );

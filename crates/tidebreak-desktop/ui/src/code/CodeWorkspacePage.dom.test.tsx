@@ -1147,7 +1147,7 @@ describe("CodeWorkspacePage", () => {
     );
 
     const confirmation = await screen.findByRole("alertdialog");
-    expect(confirmation).toHaveTextContent("Auto-merge #41?");
+    expect(confirmation).toHaveTextContent("Enable auto-merge on #41?");
     expect(confirmation).toHaveTextContent(
       "once the remaining requirements pass",
     );

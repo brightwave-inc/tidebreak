@@ -118,6 +118,68 @@ export function prWorkflowStatus(pr: PullRequestDigest): PrWorkflowStatus {
  * the pull request is either mergeable or already resolved, and there is
  * nothing to explain.
  */
+export type PrDirectMergeKind =
+  | "merge"
+  | "enable_auto_merge"
+  | "merge_when_ready";
+
+export type PrDirectMergeAction = {
+  kind: PrDirectMergeKind;
+  label: string;
+  /** True when the API call arms auto-merge or the merge queue. */
+  auto: boolean;
+};
+
+/**
+ * The one merge button a surface may show.
+ *
+ * GitHub offers three distinct host actions: merge now, enable auto-merge, or
+ * add the pull request to a merge queue ("Merge when ready"). A ready
+ * pull request on a queue repository is the queue action, not a direct merge.
+ * Already-queued and already-armed pull requests offer nothing.
+ */
+export function prDirectMergeAction(
+  pr: PullRequestDigest,
+  options?: { hasMergeQueue?: boolean },
+): PrDirectMergeAction | null {
+  const { state } = prWorkflowStatus(pr);
+  const controls = prMergeControls(state);
+  if (state === "queued" || state === "auto_merge") return null;
+  if (options?.hasMergeQueue) {
+    if (!controls.canMerge && !controls.canEnableAutoMerge) return null;
+    return {
+      kind: "merge_when_ready",
+      label: "Merge when ready",
+      auto: true,
+    };
+  }
+  if (controls.canMerge) {
+    return { kind: "merge", label: "Merge", auto: false };
+  }
+  if (controls.canEnableAutoMerge && !pr.auto_merge_enabled) {
+    return {
+      kind: "enable_auto_merge",
+      label: "Enable auto-merge",
+      auto: true,
+    };
+  }
+  return null;
+}
+
+/** True when this repository already has a pull request in its merge queue. */
+export function deliveryRepositoryHasMergeQueue(
+  items: readonly CodeDeliveryPullRequestSummary[],
+  repository: CodeDeliveryPullRequestSummary["repository"],
+): boolean {
+  return items.some(
+    (item) =>
+      item.in_merge_queue === true &&
+      item.repository.host === repository.host &&
+      item.repository.owner === repository.owner &&
+      item.repository.name === repository.name,
+  );
+}
+
 export function prMergeControls(state: PrWorkflowState): {
   canMerge: boolean;
   canEnableAutoMerge: boolean;

@@ -1,5 +1,6 @@
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
 import {
+  prDirectMergeAction,
   prMergeControls,
   prWorkflowStatus,
   type PrCheckCounts,
@@ -445,9 +446,10 @@ function mergeIfGreen(
   }
   const pr = model.pr;
   if (!pr) return { blocked: "No pull request yet" };
+  const action = prDirectMergeAction(pr);
+  if (action?.kind === "merge") return { run: "merge" };
+  if (action) return { autoMerge: true };
   const controls = prMergeControls(prWorkflowStatus(pr).state);
-  if (controls.canMerge) return { run: "merge" };
-  if (controls.canEnableAutoMerge) return { autoMerge: true };
   return {
     blocked:
       controls.explanation ?? `Pull request #${pr.number} cannot merge yet`,
