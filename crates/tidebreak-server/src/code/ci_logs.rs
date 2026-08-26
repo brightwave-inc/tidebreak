@@ -40,6 +40,12 @@ const MAX_JOB_LOG_BYTES: usize = 512 * 1024;
 /// 30 seconds the renderer gives a GitHub read before it gives up.
 const GH_LOG_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// A failing check whose URL does not identify a GitHub Actions job cannot be
+/// downloaded through the job-log endpoint. Report it instead of making an
+/// empty result look like every failing log was handled.
+const UNSUPPORTED_CHECK_LOG_MESSAGE: &str =
+    "This failing check does not link to a supported GitHub Actions job, so Tidebreak could not download its log.";
+
 /// One downloaded job log, as the route reports it.
 pub(crate) struct WrittenCheckLog {
     /// Check name as the host reports it.
@@ -117,35 +123,41 @@ fn job_ref_from_check_url(url: &str) -> Option<JobRef> {
 
 /// Download every failing check's job log and publish it under `private_root`.
 ///
-/// Stale files from an earlier fetch are removed once the new set is written,
-/// so the directory only ever describes one head.
+/// Stale files from an earlier fetch are removed once the refresh completes,
+/// including when the new head has no downloadable job logs. The directory
+/// therefore only ever describes one head.
 pub(crate) async fn write_failing_check_logs(
     private_root: &super::scratch::ScratchRoot,
     binary: &Path,
     checks: &[PullRequestCheck],
     head_sha: Option<&str>,
 ) -> std::io::Result<WrittenCheckLogs> {
-    let targets = checks
+    let mut targets = Vec::new();
+    let mut failures = Vec::new();
+    for check in checks
         .iter()
         .filter(|check| check.bucket == PullRequestCheckBucket::Fail)
-        // Owned, not borrowed: a `&PullRequestCheck` riding through the stream
-        // ties the mapped future to one lifetime, and the handler bound needs
-        // it general over any. The name is all this reads anyway.
-        .filter_map(|check| {
-            let url = check.url.as_deref()?;
-            Some((
-                check.name.clone(),
-                url.to_owned(),
-                job_ref_from_check_url(url)?,
-            ))
-        })
-        .take(MAX_JOBS)
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        return Ok(WrittenCheckLogs {
-            logs: Vec::new(),
-            failures: Vec::new(),
-        });
+    {
+        let Some(url) = check.url.as_deref() else {
+            failures.push(CheckLogFailure {
+                check: check.name.clone(),
+                message: UNSUPPORTED_CHECK_LOG_MESSAGE.to_owned(),
+            });
+            continue;
+        };
+        let Some(job) = job_ref_from_check_url(url) else {
+            failures.push(CheckLogFailure {
+                check: check.name.clone(),
+                message: UNSUPPORTED_CHECK_LOG_MESSAGE.to_owned(),
+            });
+            continue;
+        };
+        if targets.len() < MAX_JOBS {
+            // Owned, not borrowed: a `&PullRequestCheck` riding through the
+            // stream ties the mapped future to one lifetime, and the handler
+            // bound needs it general over any.
+            targets.push((check.name.clone(), url.to_owned(), job));
+        }
     }
 
     let fetched = stream::iter(targets)
@@ -164,7 +176,6 @@ pub(crate) async fn write_failing_check_logs(
 
     let dir = super::scratch::scratch_dir(private_root, CI_LOGS_DIR)?;
     let mut logs = Vec::new();
-    let mut failures = Vec::new();
     let mut written_names = Vec::new();
     for (check, url, job, raw) in fetched {
         let raw = match raw {
@@ -324,8 +335,7 @@ mod tests {
         assert_eq!(job.job_id, 34);
     }
 
-    /// A check-run URL and an external provider have no job log to fetch. The
-    /// check still reaches the prompt by name; it just has no file.
+    /// A check-run URL and an external provider have no job log to fetch.
     #[test]
     fn a_url_without_a_job_segment_is_skipped() {
         assert!(job_ref_from_check_url(
@@ -412,5 +422,69 @@ mod tests {
         assert!(!logs.join("old-1.log").exists());
         assert!(logs.join("new-2.log").exists());
         assert!(logs.join("notes.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_head_prunes_the_previous_supported_heads_logs() {
+        let directory = tempfile::tempdir().expect("temp root");
+        let root = super::super::scratch::ScratchRoot::open_for_test(directory.path())
+            .expect("scratch root");
+        let dir = super::super::scratch::scratch_dir(&root, CI_LOGS_DIR).expect("dir");
+        let old_name = log_file_name("clippy", 34);
+        dir.publish(std::ffi::OsStr::new(&old_name), b"old supported log")
+            .await
+            .expect("publish old log");
+        let checks = [PullRequestCheck {
+            name: "external CI".to_owned(),
+            bucket: PullRequestCheckBucket::Fail,
+            detail: None,
+            url: Some("https://buildkite.com/acme/widgets/builds/12".to_owned()),
+        }];
+
+        let written = write_failing_check_logs(
+            &root,
+            &directory.path().join("gh-must-not-run"),
+            &checks,
+            Some("new-head"),
+        )
+        .await
+        .expect("refresh unsupported head");
+
+        assert!(written.logs.is_empty());
+        assert_eq!(written.failures.len(), 1);
+        assert_eq!(written.failures[0].check, "external CI");
+        assert_eq!(written.failures[0].message, UNSUPPORTED_CHECK_LOG_MESSAGE);
+        assert!(!root.path().join(CI_LOGS_DIR).join(old_name).exists());
+    }
+
+    #[tokio::test]
+    async fn a_head_without_failures_prunes_the_previous_supported_heads_logs() {
+        let directory = tempfile::tempdir().expect("temp root");
+        let root = super::super::scratch::ScratchRoot::open_for_test(directory.path())
+            .expect("scratch root");
+        let dir = super::super::scratch::scratch_dir(&root, CI_LOGS_DIR).expect("dir");
+        let old_name = log_file_name("clippy", 34);
+        dir.publish(std::ffi::OsStr::new(&old_name), b"old supported log")
+            .await
+            .expect("publish old log");
+        let checks = [PullRequestCheck {
+            name: "clippy".to_owned(),
+            bucket: PullRequestCheckBucket::Pass,
+            detail: None,
+            url: Some("https://github.com/acme/widgets/actions/runs/12/job/34".to_owned()),
+        }];
+
+        let written = write_failing_check_logs(
+            &root,
+            &directory.path().join("gh-must-not-run"),
+            &checks,
+            Some("new-head"),
+        )
+        .await
+        .expect("refresh passing head");
+
+        assert!(written.logs.is_empty());
+        assert!(written.failures.is_empty());
+        assert!(!root.path().join(CI_LOGS_DIR).join(old_name).exists());
     }
 }
