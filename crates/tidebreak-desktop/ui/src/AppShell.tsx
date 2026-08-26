@@ -41,6 +41,7 @@ import {
   stepCenterTab,
 } from "./code/codeChrome";
 import { CodeDeliveryMonitor } from "./code/CodeDeliveryMonitor";
+import { activateCodeClient } from "./code/CodeClientScope";
 import { useCodeUiStore } from "./code/CodeUiStore";
 import { stepRailWorkspace } from "./code/railNavigation";
 import {
@@ -447,7 +448,12 @@ export function AppShell() {
         // three host callers that sit outside React read this flag rather
         // than a hook. See `host.ts`.
         setAttachedRemotely(server.attachment === "remote");
-        setClient(new ApiClient(server.baseUrl, server.token));
+        const nextClient = new ApiClient(server.baseUrl, server.token);
+        // Reset host-scoped Code state before React can mount routes against
+        // the replacement authority. Every pending store write also checks
+        // the generation activated here.
+        activateCodeClient(nextClient);
+        setClient(nextClient);
         // Outputs are read over the same API; their module holds the
         // connection because they are called from places with no client.
         connectOutputs(server.baseUrl, server.token);

@@ -4,6 +4,10 @@ import { create } from "zustand";
 import { useApp } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type { CodeSubscriptionUsage } from "@/api/types";
+import {
+  codeClientGeneration,
+  isCodeClientGenerationActive,
+} from "./CodeClientGeneration";
 
 const REFRESH_INTERVAL_MS = 60_000;
 
@@ -15,23 +19,68 @@ type CodeSubscriptionUsageState = {
   refresh: (client: ApiClient) => Promise<void>;
 };
 
+type SubscriptionRequest = {
+  clientGeneration: number;
+  storeGeneration: number;
+  promise: Promise<void>;
+};
+
+let storeGeneration = 0;
+let refreshRequest: SubscriptionRequest | null = null;
+
+function requestIsCurrent(
+  clientGeneration: number,
+  requestStoreGeneration: number,
+): boolean {
+  return (
+    requestStoreGeneration === storeGeneration &&
+    isCodeClientGenerationActive(clientGeneration)
+  );
+}
+
 export const useCodeSubscriptionUsageStore = create<CodeSubscriptionUsageState>(
-  (set, get) => ({
+  (set) => ({
     report: null,
     refreshing: false,
     error: null,
     refreshInFlight: false,
-    refresh: async (client) => {
-      if (get().refreshInFlight) return;
-      set({ refreshInFlight: true, refreshing: true });
-      try {
-        const report = await client.getCodeSubscriptionUsage();
-        set({ report, error: null });
-      } catch {
-        set({ error: "Usage could not be refreshed." });
-      } finally {
-        set({ refreshInFlight: false, refreshing: false });
+    refresh: (client) => {
+      const clientGeneration = codeClientGeneration(client);
+      const requestStoreGeneration = storeGeneration;
+      if (!requestIsCurrent(clientGeneration, requestStoreGeneration)) {
+        return Promise.resolve();
       }
+      if (
+        refreshRequest?.clientGeneration === clientGeneration &&
+        refreshRequest.storeGeneration === requestStoreGeneration
+      ) {
+        return refreshRequest.promise;
+      }
+      set({ refreshInFlight: true, refreshing: true });
+      const promise = Promise.resolve()
+        .then(() => client.getCodeSubscriptionUsage())
+        .then((report) => {
+          if (requestIsCurrent(clientGeneration, requestStoreGeneration)) {
+            set({ report, error: null });
+          }
+        })
+        .catch(() => {
+          if (requestIsCurrent(clientGeneration, requestStoreGeneration)) {
+            set({ error: "Usage could not be refreshed." });
+          }
+        })
+        .finally(() => {
+          if (refreshRequest?.promise === promise) refreshRequest = null;
+          if (requestIsCurrent(clientGeneration, requestStoreGeneration)) {
+            set({ refreshInFlight: false, refreshing: false });
+          }
+        });
+      refreshRequest = {
+        clientGeneration,
+        storeGeneration: requestStoreGeneration,
+        promise,
+      };
+      return promise;
     },
   }),
 );
@@ -58,6 +107,8 @@ export function useCodeSubscriptionUsage() {
 }
 
 export function resetCodeSubscriptionUsageStore() {
+  storeGeneration += 1;
+  refreshRequest = null;
   useCodeSubscriptionUsageStore.setState({
     report: null,
     refreshing: false,

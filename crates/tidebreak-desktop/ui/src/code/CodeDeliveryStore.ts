@@ -474,6 +474,21 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
   };
 });
 
+/** Clear server-derived Delivery data without deleting reader preferences. */
+export function resetCodeDeliveryHostState(): void {
+  repositoryGeneration += 1;
+  repositoryRequest = null;
+  useCodeDeliveryStore.setState({
+    polling: false,
+    monitorError: null,
+    lastSuccessfulPollAt: null,
+    repositorySnapshot: null,
+    repositoryLoading: false,
+    repositoryError: null,
+    repositoryFetchedAt: null,
+  });
+}
+
 function buildDeliveryPoll(
   state: Pick<
     CodeDeliveryStore,

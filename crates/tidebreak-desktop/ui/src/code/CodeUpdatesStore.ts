@@ -14,6 +14,10 @@ import type {
   PullRequestDigest,
 } from "../api/types";
 import {
+  codeClientGeneration,
+  isCodeClientGenerationActive,
+} from "./CodeClientGeneration";
+import {
   INITIAL_RECONNECT_DELAY_MS,
   MAX_RECONNECT_DELAY_MS,
   nextReconnectDelay,
@@ -483,18 +487,9 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
   reset: () => set({ ...EMPTY }),
 }));
 
-const clientGenerations = new WeakMap<object, number>();
-let nextClientGeneration = 0;
 let nextCloneOrder = 0;
 
-/** A stable identity for one ApiClient object. */
-export function codeClientGeneration(client: object): number {
-  const existing = clientGenerations.get(client);
-  if (existing !== undefined) return existing;
-  nextClientGeneration += 1;
-  clientGenerations.set(client, nextClientGeneration);
-  return nextClientGeneration;
-}
+export { codeClientGeneration };
 
 /**
  * Move clone state to one client authority. A job ID from another machine or
@@ -502,6 +497,7 @@ export function codeClientGeneration(client: object): number {
  */
 export function activateCodeCloneClient(client: object): number {
   const clientGeneration = codeClientGeneration(client);
+  if (!isCodeClientGenerationActive(clientGeneration)) return clientGeneration;
   useCodeUpdatesStore.setState((state) => {
     if (state.cloneClientGeneration === clientGeneration) return state;
     return {
@@ -833,9 +829,17 @@ export function disconnectCodeUpdates(): void {
 }
 
 function open(client: CloneUpdatesClient, born: number): void {
-  if (born !== generation) return;
+  const clientGeneration = codeClientGeneration(client);
+  if (born !== generation || !isCodeClientGenerationActive(clientGeneration)) {
+    return;
+  }
   const next = client.openCodeUpdates((notice) => {
-    if (born !== generation) return;
+    if (
+      born !== generation ||
+      !isCodeClientGenerationActive(clientGeneration)
+    ) {
+      return;
+    }
     const action = noticeToAction(notice);
     if (
       action?.type === "clone_progress" &&
@@ -848,12 +852,22 @@ function open(client: CloneUpdatesClient, born: number): void {
   });
   socket = next;
   next.onopen = () => {
-    if (born !== generation) return;
+    if (
+      born !== generation ||
+      !isCodeClientGenerationActive(clientGeneration)
+    ) {
+      return;
+    }
     reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
     reconcileTrackedClones(client, born);
   };
   next.onclose = () => {
-    if (born !== generation) return;
+    if (
+      born !== generation ||
+      !isCodeClientGenerationActive(clientGeneration)
+    ) {
+      return;
+    }
     socket = null;
     scheduleReconnect(client, born);
   };
@@ -863,7 +877,12 @@ function open(client: CloneUpdatesClient, born: number): void {
 }
 
 function scheduleReconnect(client: CloneUpdatesClient, born: number): void {
-  if (born !== generation) return;
+  if (
+    born !== generation ||
+    !isCodeClientGenerationActive(codeClientGeneration(client))
+  ) {
+    return;
+  }
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     open(client, born);

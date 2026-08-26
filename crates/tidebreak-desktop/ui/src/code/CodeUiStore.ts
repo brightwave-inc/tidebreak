@@ -481,3 +481,22 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     return true;
   },
 }));
+
+/** Clear Code actions that refer to the authority AppShell just replaced. */
+export function resetCodeUiHostState(): void {
+  useCodeUiStore.setState({
+    newWorkspaceOpen: false,
+    newWorkspaceRepoId: undefined,
+    addRepoOpen: false,
+    inspectorScope: null,
+    terminalPending: false,
+    pendingComposerPrompt: null,
+    composerActionScope: null,
+    quickOpenPending: false,
+    filesSearchPending: false,
+    workflowShortcutPending: null,
+    archivePending: false,
+    workflowSuggestion: null,
+    openFilePending: null,
+  });
+}

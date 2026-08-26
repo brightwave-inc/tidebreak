@@ -9,6 +9,10 @@ import type {
   HarnessKind,
   ReasoningEffort,
 } from "../api/types";
+import {
+  codeClientGeneration,
+  isCodeClientGenerationActive,
+} from "./CodeClientGeneration";
 import { harnessCodeModels, type CodeModelOption } from "./labels";
 
 const HARNESS_KINDS: HarnessKind[] = [
@@ -19,9 +23,23 @@ const HARNESS_KINDS: HarnessKind[] = [
 ];
 
 /** One native model probe per harness, shared by every open picker. */
-const modelRequests = new Map<HarnessKind, Promise<CodeModelOption[]>>();
+type CatalogRequestContext = {
+  clientGeneration: number;
+  storeGeneration: number;
+};
+
+type ModelRequest = CatalogRequestContext & {
+  promise: Promise<CodeModelOption[]>;
+};
+
+type CatalogRefresh = CatalogRequestContext & {
+  promise: Promise<void>;
+};
+
+const modelRequests = new Map<HarnessKind, ModelRequest>();
 /** Sidebar and route bodies mount together; they share one catalog refresh. */
-let catalogRefresh: Promise<void> | null = null;
+let catalogRefresh: CatalogRefresh | null = null;
+let storeGeneration = 0;
 
 /**
  * Repos, workspaces, and the last session each workspace opened.
@@ -93,27 +111,56 @@ function loadHarnessModels(
   kind: HarnessKind,
   get: () => CodeCatalogStore,
   force: boolean,
+  context = requestContext(client),
 ): Promise<CodeModelOption[]> {
+  if (!requestIsCurrent(context)) return Promise.resolve([]);
   const cached = get().modelsByHarness[kind];
   // An empty array is a finished probe: this engine advertised no models.
   // Treating it as a cache miss makes every picker open run the CLI again.
   if (!force && cached !== undefined) return Promise.resolve(cached);
   const pending = modelRequests.get(kind);
-  if (pending) return pending;
+  if (pending && sameRequestContext(pending, context)) return pending.promise;
 
   const request = client
     .listCodeHarnessModels(kind)
     .then((listed) => {
+      if (!requestIsCurrent(context)) return [];
       const models = harnessCodeModels(listed.models, kind);
       get().rememberHarnessModels(kind, models, listed.reasoning_efforts);
       return models;
     })
     .catch(() => [])
     .finally(() => {
-      if (modelRequests.get(kind) === request) modelRequests.delete(kind);
+      if (modelRequests.get(kind)?.promise === request) {
+        modelRequests.delete(kind);
+      }
     });
-  modelRequests.set(kind, request);
+  modelRequests.set(kind, { ...context, promise: request });
   return request;
+}
+
+function requestContext(client: object): CatalogRequestContext {
+  return {
+    clientGeneration: codeClientGeneration(client),
+    storeGeneration,
+  };
+}
+
+function sameRequestContext(
+  left: CatalogRequestContext,
+  right: CatalogRequestContext,
+): boolean {
+  return (
+    left.clientGeneration === right.clientGeneration &&
+    left.storeGeneration === right.storeGeneration
+  );
+}
+
+function requestIsCurrent(context: CatalogRequestContext): boolean {
+  return (
+    context.storeGeneration === storeGeneration &&
+    isCodeClientGenerationActive(context.clientGeneration)
+  );
 }
 
 export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
@@ -126,7 +173,11 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
   loaded: false,
   error: null,
   refresh: (client) => {
-    if (catalogRefresh) return catalogRefresh;
+    const context = requestContext(client);
+    if (!requestIsCurrent(context)) return Promise.resolve();
+    if (catalogRefresh && sameRequestContext(catalogRefresh, context)) {
+      return catalogRefresh.promise;
+    }
     const workspaceIdsAtStart = new Set(
       get().workspaces.map((workspace) => workspace.id),
     );
@@ -137,6 +188,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
           client.listCodeRepos(),
           client.listCodeWorkspaces(),
         ]);
+        if (!requestIsCurrent(context)) return;
         const localCreates = get().workspaces.filter(
           (workspace) =>
             isOptimisticWorkspace(workspace) ||
@@ -157,17 +209,22 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
           error: null,
         });
       } catch (error) {
+        if (!requestIsCurrent(context)) return;
         set({
           loaded: true,
           error: error instanceof Error ? error.message : String(error),
         });
         return;
       }
+      if (!requestIsCurrent(context)) return;
       const extras: Promise<void>[] = [
         client
           .getHarnessDoctor()
-          .then((doctor) => set({ doctor }))
+          .then((doctor) => {
+            if (requestIsCurrent(context)) set({ doctor });
+          })
           .catch(() => {
+            if (!requestIsCurrent(context)) return;
             // Home waits on a settled report. An empty one leaves the loading
             // empty and shows the install section instead of spinning forever.
             if (get().doctor === null) {
@@ -177,26 +234,33 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
       ];
       for (const kind of HARNESS_KINDS) {
         extras.push(
-          loadHarnessModels(client, kind, get, true).then(() => undefined),
+          loadHarnessModels(client, kind, get, true, context).then(
+            () => undefined,
+          ),
         );
       }
       await Promise.all(extras);
     })().finally(() => {
-      if (catalogRefresh === request) catalogRefresh = null;
+      if (catalogRefresh?.promise === request) catalogRefresh = null;
     });
-    catalogRefresh = request;
+    catalogRefresh = { ...context, promise: request };
     return request;
   },
   refreshDoctor: async (client) => {
+    const context = requestContext(client);
+    if (!requestIsCurrent(context)) return;
     const doctor = await client.refreshHarnessDoctor();
-    set({ doctor });
+    if (requestIsCurrent(context)) set({ doctor });
   },
   // The memoized read, for picking up an engine a download just put on disk.
   // `refreshDoctor` is the doctor's own button: it drops every memoized probe
   // and takes them all cold, which is far more than reading one result that
   // already exists.
   reloadDoctor: async (client) => {
-    set({ doctor: await client.getHarnessDoctor() });
+    const context = requestContext(client);
+    if (!requestIsCurrent(context)) return;
+    const doctor = await client.getHarnessDoctor();
+    if (requestIsCurrent(context)) set({ doctor });
   },
   ensureHarnessModels: (client, kind) =>
     loadHarnessModels(client, kind, get, false),
@@ -269,6 +333,7 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     });
   },
   reset: () => {
+    storeGeneration += 1;
     catalogRefresh = null;
     modelRequests.clear();
     set({

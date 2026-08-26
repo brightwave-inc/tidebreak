@@ -9,6 +9,10 @@ import type {
 } from "../api/types";
 import { requestUserAttention } from "../host";
 import {
+  codeClientGeneration,
+  isCodeClientGenerationActive,
+} from "./CodeClientGeneration";
+import {
   codeDeliveryRepositoryTarget,
   trackedCodeDeliveryRepositories,
   useCodeDeliveryStore,
@@ -52,11 +56,14 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
   }, [pathname, deliveryRevision]);
 
   useEffect(() => {
+    const clientGeneration = codeClientGeneration(client);
     let cancelled = false;
     let running = false;
     let rerunRequested = false;
     let timer: number | null = null;
     let queryController: AbortController | null = null;
+    const isCurrent = () =>
+      !cancelled && isCodeClientGenerationActive(clientGeneration);
 
     const interval = () => {
       if (document.hidden) return HIDDEN_POLL_MS;
@@ -64,7 +71,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     };
 
     const schedule = (delay = interval()) => {
-      if (cancelled) return;
+      if (!isCurrent()) return;
       if (running) {
         rerunRequested = true;
         return;
@@ -77,7 +84,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     };
 
     const poll = async () => {
-      if (cancelled) return;
+      if (!isCurrent()) return;
       if (running) {
         rerunRequested = true;
         return;
@@ -89,7 +96,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
       initial.setPollState(true, null);
       try {
         const discovered = await initial.loadRepositories(client);
-        if (cancelled) return;
+        if (!isCurrent()) return;
         const current = useCodeDeliveryStore.getState();
         if (
           !discovered.capability.found ||
@@ -157,7 +164,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
           runCursor = runBatch.nextCursor;
         }
 
-        if (cancelled) return;
+        if (!isCurrent()) return;
         const added = useCodeDeliveryStore
           .getState()
           .completeDeliveryPoll(pullRequests, runs, startedAt);
@@ -167,14 +174,14 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
           });
         }
       } catch (error) {
-        if (cancelled || isAbortError(error)) return;
+        if (!isCurrent() || isAbortError(error)) return;
         useCodeDeliveryStore
           .getState()
           .setPollState(false, deliveryErrorMessage(error));
       } finally {
         queryController = null;
         running = false;
-        if (!cancelled) schedule(rerunRequested ? 0 : interval());
+        if (isCurrent()) schedule(rerunRequested ? 0 : interval());
       }
     };
 
