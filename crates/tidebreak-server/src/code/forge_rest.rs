@@ -8,9 +8,10 @@
 //! parses — one JSON vocabulary, however the host was asked.
 //!
 //! Deliberately narrow: creation, the PR-card digest, the fact reads
-//! (decision 62), and the repository-wide Delivery lists. Merge, ready,
-//! close, comments, CI logs, and Delivery detail drawers stay `gh`-only and
-//! keep answering exactly as they do today on machines without it.
+//! (decision 62), and the Delivery reads — repository lists, by-number
+//! sweeps, and the detail drawers. Mutations (merge, ready, close, comments,
+//! rerun) still shell out to `gh`, so a hosted Delivery action refuses with
+//! its own kind rather than a `gh` remediation no hosted machine can follow.
 
 use std::time::Duration;
 
@@ -125,6 +126,62 @@ pub(crate) async fn repository(
         return Err(forge_message(status, &value));
     }
     Ok(value)
+}
+
+/// One authenticated GET on a repository-scoped endpoint, answered in the
+/// same REST shape `gh api <endpoint>` returns.
+///
+/// The detail drawers already speak endpoint strings; this lets them ask the
+/// forge directly when no `gh` exists.
+pub(crate) async fn api_get(
+    api_base: &str,
+    credential: &GitCredential,
+    endpoint: &str,
+) -> Result<Value, String> {
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!("{api_base}/{endpoint}"),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(value)
+}
+
+/// Read one pull request in the `gh pr view --json` vocabulary, checks
+/// included — the single-row read the by-number sweep and the detail
+/// drawer share.
+pub(crate) async fn delivery_pull_request(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    number: u64,
+) -> Result<Value, String> {
+    let (status, value) = request(
+        reqwest::Method::GET,
+        format!(
+            "{api_base}/repos/{}/{}/pulls/{number}",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    let mut fact = fact_value(&value);
+    let checks = match value.pointer("/head/sha").and_then(Value::as_str) {
+        Some(sha) => check_run_values(api_base, target, credential, sha).await?,
+        None => Vec::new(),
+    };
+    fact.as_object_mut()
+        .expect("fact values are objects")
+        .insert("statusCheckRollup".to_owned(), Value::Array(checks));
+    Ok(fact)
 }
 
 /// List one repository's pull requests in the `gh pr list --json`
