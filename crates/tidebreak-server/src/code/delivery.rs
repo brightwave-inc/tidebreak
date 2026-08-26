@@ -70,7 +70,7 @@ const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,
 
 #[derive(Debug, Clone)]
 enum DeliveryReader {
-    Gh(PathBuf),
+    Gh(GhObservation),
     Forge,
 }
 
@@ -111,13 +111,13 @@ impl DeliveryAccess {
     }
 }
 
-/// One authenticated GET runner for the detail drawers: the same
-/// repository-scoped endpoint strings, answered by `gh api` or by the forge
-/// REST API depending on the reader.
-enum DeliveryEndpointApi {
+/// One authenticated Delivery transport. Reads and user actions select the
+/// same local `gh` or hosted forge REST path for each repository operation.
+enum DeliveryApi {
     Gh {
-        binary: PathBuf,
+        observation: GhObservation,
         host: String,
+        search_path: Option<String>,
     },
     Rest {
         api_base: String,
@@ -125,10 +125,22 @@ enum DeliveryEndpointApi {
     },
 }
 
-impl DeliveryEndpointApi {
+impl DeliveryApi {
     async fn get(&self, endpoint: &str) -> Result<Value, String> {
         match self {
-            Self::Gh { binary, host } => run_api_json(binary, host, endpoint).await,
+            Self::Gh {
+                observation, host, ..
+            } => {
+                run_api_json(
+                    observation
+                        .binary
+                        .as_deref()
+                        .expect("authenticated gh has a binary"),
+                    host,
+                    endpoint,
+                )
+                .await
+            }
             Self::Rest {
                 api_base,
                 credential,
@@ -143,7 +155,11 @@ impl DeliveryEndpointApi {
         number: u64,
     ) -> Result<Value, String> {
         match self {
-            Self::Gh { binary, .. } => {
+            Self::Gh { observation, .. } => {
+                let binary = observation
+                    .binary
+                    .as_deref()
+                    .expect("authenticated gh has a binary");
                 let cli_repository =
                     gh::cli_repository(&repository.host, &repository.owner, &repository.name);
                 let number = number.to_string();
@@ -173,22 +189,216 @@ impl DeliveryEndpointApi {
             }
         }
     }
+
+    async fn mark_pull_request_ready(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        number: u64,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Gh { search_path, .. } => gh::mark_pull_request_ready(
+                &target.host,
+                &target.owner,
+                &target.name,
+                number,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error),
+            Self::Rest { .. } => Err(ServerError::conflict_kind(
+                "git_forge_mark_ready_unsupported",
+                "This hosted machine cannot mark a draft pull request ready because GitHub's pinned REST API does not expose that transition. Open the pull request on GitHub to mark it ready.",
+            )),
+        }
+    }
+
+    async fn merge_pull_request(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        number: u64,
+        method: CodePrMergeMethod,
+        auto: bool,
+        admin: bool,
+        expected_head_sha: &str,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Gh { search_path, .. } => gh::merge_pull_request_target(
+                &target.host,
+                &target.owner,
+                &target.name,
+                number,
+                merge_method(method),
+                auto,
+                admin,
+                expected_head_sha,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error),
+            Self::Rest {
+                api_base,
+                credential,
+            } => {
+                if auto {
+                    return Err(ServerError::conflict_kind(
+                        "git_forge_auto_merge_unsupported",
+                        "This hosted machine cannot enable auto-merge through GitHub's stable REST API. Open the pull request on GitHub to enable auto-merge.",
+                    ));
+                }
+                if admin {
+                    return Err(ServerError::conflict_kind(
+                        "git_forge_admin_merge_unsupported",
+                        "This hosted machine cannot request an admin branch-protection bypass through GitHub's stable REST API. Open the pull request on GitHub to merge with admin privileges.",
+                    ));
+                }
+                super::forge_rest::merge_pull_request(
+                    api_base,
+                    target,
+                    credential,
+                    number,
+                    rest_merge_method(method),
+                    expected_head_sha,
+                )
+                .await
+                .map_err(map_forge_action_error)
+            }
+        }
+    }
+
+    async fn update_pull_request_state(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        number: u64,
+        state: &str,
+    ) -> Result<(), ServerError> {
+        match (self, state) {
+            (Self::Gh { search_path, .. }, "closed") => gh::close_pull_request_target(
+                &target.host,
+                &target.owner,
+                &target.name,
+                number,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error),
+            (Self::Gh { search_path, .. }, "open") => gh::reopen_pull_request_target(
+                &target.host,
+                &target.owner,
+                &target.name,
+                number,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error),
+            (Self::Gh { .. }, _) => Err(ServerError::internal(
+                "Delivery requested an unsupported pull request state",
+            )),
+            (
+                Self::Rest {
+                    api_base,
+                    credential,
+                },
+                state,
+            ) => super::forge_rest::update_pull_request_state(
+                api_base, target, credential, number, state,
+            )
+            .await
+            .map_err(map_forge_action_error),
+        }
+    }
+
+    async fn comment_on_pull_request(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        number: u64,
+        body: &str,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Gh { search_path, .. } => gh::comment_on_pull_request_target(
+                &target.host,
+                &target.owner,
+                &target.name,
+                number,
+                body,
+                search_path.as_deref(),
+            )
+            .await
+            .map_err(map_gh_error),
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::forge_rest::comment_on_pull_request(
+                api_base, target, credential, number, body,
+            )
+            .await
+            .map_err(map_forge_action_error),
+        }
+    }
+
+    async fn rerun_failed_jobs(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        run_id: u64,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Gh { observation, .. } => gh::rerun_failed_jobs_with_observation(
+                observation,
+                &target.host,
+                &target.owner,
+                &target.name,
+                run_id,
+            )
+            .await
+            .map_err(map_gh_error),
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::forge_rest::rerun_failed_jobs(api_base, target, credential, run_id)
+                .await
+                .map_err(map_forge_action_error),
+        }
+    }
+
+    async fn rerun_workflow(
+        &self,
+        target: &CodeGitHubRepositoryTarget,
+        run_id: u64,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Gh { observation, .. } => gh::rerun_workflow_with_observation(
+                observation,
+                &target.host,
+                &target.owner,
+                &target.name,
+                run_id,
+            )
+            .await
+            .map_err(map_gh_error),
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::forge_rest::rerun_workflow(api_base, target, credential, run_id)
+                .await
+                .map_err(map_forge_action_error),
+        }
+    }
 }
 
-async fn delivery_endpoint_api(
+async fn delivery_api(
     runtime: &CodeRuntime,
     owner: &OwnerId,
     reader: &DeliveryReader,
     target: &CodeGitHubRepositoryTarget,
-) -> Result<DeliveryEndpointApi, String> {
+) -> Result<DeliveryApi, String> {
     match reader {
-        DeliveryReader::Gh(binary) => Ok(DeliveryEndpointApi::Gh {
-            binary: binary.clone(),
+        DeliveryReader::Gh(observation) => Ok(DeliveryApi::Gh {
+            observation: observation.clone(),
             host: target.host.clone(),
+            search_path: runtime.gh_search_path_owned(),
         }),
         DeliveryReader::Forge => {
             let credential = borrow_delivery_credential(runtime, owner, target).await?;
-            Ok(DeliveryEndpointApi::Rest {
+            Ok(DeliveryApi::Rest {
                 api_base: runtime.forge_api_base_for(&target.host),
                 credential,
             })
@@ -198,17 +408,26 @@ async fn delivery_endpoint_api(
 
 async fn resolve_repository_for_api(
     runtime: &CodeRuntime,
-    api: &DeliveryEndpointApi,
+    api: &DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     tidebreak_repo_id: Option<tidebreak_core::RepoId>,
     force_refresh: bool,
 ) -> Result<CodeGitHubRepositoryRef, String> {
     match api {
-        DeliveryEndpointApi::Gh { binary, .. } => {
-            resolve_repository_cached(runtime, binary, target, tidebreak_repo_id, force_refresh)
-                .await
+        DeliveryApi::Gh { observation, .. } => {
+            resolve_repository_cached(
+                runtime,
+                observation
+                    .binary
+                    .as_deref()
+                    .expect("authenticated gh has a binary"),
+                target,
+                tidebreak_repo_id,
+                force_refresh,
+            )
+            .await
         }
-        DeliveryEndpointApi::Rest { credential, .. } => {
+        DeliveryApi::Rest { credential, .. } => {
             resolve_repository_rest_cached(
                 runtime,
                 target,
@@ -614,7 +833,7 @@ pub(crate) async fn query_pull_requests_by_number(
         .map(|(target, numbers)| {
             let reader = reader.clone();
             async move {
-                let api = delivery_endpoint_api(runtime, owner, &reader, &target)
+                let api = delivery_api(runtime, owner, &reader, &target)
                     .await
                     .map_err(|message| (target.clone(), message))?;
                 let repository = resolve_repository_for_api(runtime, &api, &target, None, false)
@@ -979,7 +1198,7 @@ pub(crate) async fn pull_request_detail(
     .await?;
     let access = delivery_access(runtime, owner, false).await;
     let reader = access.require_reader()?;
-    let api = delivery_endpoint_api(runtime, owner, &reader, &target.repository)
+    let api = delivery_api(runtime, owner, &reader, &target.repository)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let repository = resolve_repository_for_api(runtime, &api, &target.repository, None, false)
@@ -1203,9 +1422,64 @@ pub(crate) async fn act_on_pull_request(
         std::slice::from_ref(&body.target.repository),
     )
     .await?;
-    require_gh_actions(runtime)?;
-    let search_path = runtime.gh_search_path_owned();
     let target = body.target;
+    match &body.action {
+        CodeDeliveryPullRequestAction::Merge {
+            auto: true,
+            admin: true,
+            ..
+        } => {
+            return Err(ServerError::bad_request(
+                "an admin merge is immediate; it cannot arm auto-merge",
+            ));
+        }
+        CodeDeliveryPullRequestAction::RerunFailed { workflow_run_ids }
+            if workflow_run_ids.is_empty() =>
+        {
+            return Err(ServerError::bad_request(
+                "at least one workflow run id is required",
+            ));
+        }
+        CodeDeliveryPullRequestAction::Comment { body } if body.trim().is_empty() => {
+            return Err(ServerError::bad_request("a comment needs a body"));
+        }
+        CodeDeliveryPullRequestAction::Comment { body }
+            if body.trim().len() > MAX_COMMENT_BYTES =>
+        {
+            return Err(ServerError::bad_request(format!(
+                "a comment may be at most {MAX_COMMENT_BYTES} bytes"
+            )));
+        }
+        _ => {}
+    }
+    let access = delivery_access(runtime, owner, false).await;
+    let reader = access.require_reader()?;
+    if matches!(&reader, DeliveryReader::Forge) {
+        match &body.action {
+            CodeDeliveryPullRequestAction::MarkReady => {
+                return Err(ServerError::conflict_kind(
+                    "git_forge_mark_ready_unsupported",
+                    "This hosted machine cannot mark a draft pull request ready because GitHub's pinned REST API does not expose that transition. Open the pull request on GitHub to mark it ready.",
+                ));
+            }
+            CodeDeliveryPullRequestAction::Merge { auto: true, .. } => {
+                return Err(ServerError::conflict_kind(
+                    "git_forge_auto_merge_unsupported",
+                    "This hosted machine cannot enable auto-merge through GitHub's stable REST API. Open the pull request on GitHub to enable auto-merge.",
+                ));
+            }
+            CodeDeliveryPullRequestAction::Merge { admin: true, .. } => {
+                return Err(ServerError::conflict_kind(
+                    "git_forge_admin_merge_unsupported",
+                    "This hosted machine cannot request an admin branch-protection bypass through GitHub's stable REST API. Open the pull request on GitHub to merge with admin privileges.",
+                ));
+            }
+            _ => {}
+        }
+    }
+    let api = delivery_api(runtime, owner, &reader, &target.repository)
+        .await
+        .map_err(map_forge_action_error)?;
     // The canonical URL of the pull request being acted on: the key the
     // workspace-side digest refresh matches on (decision 66).
     let pull_request_url = format!(
@@ -1214,15 +1488,8 @@ pub(crate) async fn act_on_pull_request(
     );
     match body.action {
         CodeDeliveryPullRequestAction::MarkReady => {
-            gh::mark_pull_request_ready(
-                &target.repository.host,
-                &target.repository.owner,
-                &target.repository.name,
-                target.number,
-                search_path.as_deref(),
-            )
-            .await
-            .map_err(map_gh_error)?;
+            api.mark_pull_request_ready(&target.repository, target.number)
+                .await?;
             runtime.delivery_cache.invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
@@ -1236,27 +1503,15 @@ pub(crate) async fn act_on_pull_request(
             admin,
             expected_head_sha,
         } => {
-            // An admin merge lands now, bypassing branch protection; arming
-            // auto-merge is the opposite ask. `gh` refuses the pair too, but
-            // with a message about flags rather than about the request.
-            if admin && auto {
-                return Err(ServerError::bad_request(
-                    "an admin merge is immediate; it cannot arm auto-merge",
-                ));
-            }
-            gh::merge_pull_request_target(
-                &target.repository.host,
-                &target.repository.owner,
-                &target.repository.name,
+            api.merge_pull_request(
+                &target.repository,
                 target.number,
-                merge_method(method),
+                method,
                 auto,
                 admin,
                 &expected_head_sha,
-                search_path.as_deref(),
             )
-            .await
-            .map_err(map_gh_error)?;
+            .await?;
             runtime.delivery_cache.invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(if auto {
@@ -1272,29 +1527,11 @@ pub(crate) async fn act_on_pull_request(
         }
         CodeDeliveryPullRequestAction::RerunFailed { workflow_run_ids } => {
             let unique = workflow_run_ids.into_iter().collect::<HashSet<_>>();
-            if unique.is_empty() {
-                return Err(ServerError::bad_request(
-                    "at least one workflow run id is required",
-                ));
-            }
-            let observation = require_authenticated(runtime).await?;
             let results = stream::iter(unique)
                 .map(|run_id| {
-                    let observation = observation.clone();
+                    let api = &api;
                     let repository = target.repository.clone();
-                    async move {
-                        (
-                            run_id,
-                            gh::rerun_failed_jobs_with_observation(
-                                &observation,
-                                &repository.host,
-                                &repository.owner,
-                                &repository.name,
-                                run_id,
-                            )
-                            .await,
-                        )
-                    }
+                    async move { (run_id, api.rerun_failed_jobs(&repository, run_id).await) }
                 })
                 .buffer_unordered(DELIVERY_CONCURRENCY)
                 .collect::<Vec<_>>()
@@ -1321,7 +1558,7 @@ pub(crate) async fn act_on_pull_request(
                         CodeDeliveryRerunOutcome {
                             workflow_run_id,
                             success: false,
-                            error: Some(error.to_string()),
+                            error: Some(error.message().to_owned()),
                         }
                     }
                 })
@@ -1329,15 +1566,8 @@ pub(crate) async fn act_on_pull_request(
             Ok(rerun_action_result(outcomes))
         }
         CodeDeliveryPullRequestAction::Close => {
-            gh::close_pull_request_target(
-                &target.repository.host,
-                &target.repository.owner,
-                &target.repository.name,
-                target.number,
-                search_path.as_deref(),
-            )
-            .await
-            .map_err(map_gh_error)?;
+            api.update_pull_request_state(&target.repository, target.number, "closed")
+                .await?;
             runtime.delivery_cache.invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
@@ -1346,15 +1576,8 @@ pub(crate) async fn act_on_pull_request(
             )))
         }
         CodeDeliveryPullRequestAction::Reopen => {
-            gh::reopen_pull_request_target(
-                &target.repository.host,
-                &target.repository.owner,
-                &target.repository.name,
-                target.number,
-                search_path.as_deref(),
-            )
-            .await
-            .map_err(map_gh_error)?;
+            api.update_pull_request_state(&target.repository, target.number, "open")
+                .await?;
             runtime.delivery_cache.invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
@@ -1364,24 +1587,8 @@ pub(crate) async fn act_on_pull_request(
         }
         CodeDeliveryPullRequestAction::Comment { body } => {
             let body = body.trim();
-            if body.is_empty() {
-                return Err(ServerError::bad_request("a comment needs a body"));
-            }
-            if body.len() > MAX_COMMENT_BYTES {
-                return Err(ServerError::bad_request(format!(
-                    "a comment may be at most {MAX_COMMENT_BYTES} bytes"
-                )));
-            }
-            gh::comment_on_pull_request_target(
-                &target.repository.host,
-                &target.repository.owner,
-                &target.repository.name,
-                target.number,
-                body,
-                search_path.as_deref(),
-            )
-            .await
-            .map_err(map_gh_error)?;
+            api.comment_on_pull_request(&target.repository, target.number, body)
+                .await?;
             runtime.delivery_cache.invalidate();
             Ok(delivery_action_result(format!(
                 "Comment posted on pull request #{}",
@@ -1525,7 +1732,7 @@ pub(crate) async fn run_detail(
     .await?;
     let access = delivery_access(runtime, owner, false).await;
     let reader = access.require_reader()?;
-    let api = delivery_endpoint_api(runtime, owner, &reader, &target.repository)
+    let api = delivery_api(runtime, owner, &reader, &target.repository)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let repository = resolve_repository_for_api(runtime, &api, &target.repository, None, false)
@@ -1644,24 +1851,29 @@ pub(crate) async fn act_on_run(
         std::slice::from_ref(&body.target.repository),
     )
     .await?;
-    require_gh_actions(runtime)?;
+    if body.target.kind != CodeDeliveryRunKind::WorkflowRun {
+        return Err(ServerError::bad_request(
+            "only GitHub Actions workflow runs can be rerun",
+        ));
+    }
+    let access = delivery_access(runtime, owner, false).await;
+    let reader = access.require_reader()?;
+    let api = delivery_api(runtime, owner, &reader, &body.target.repository)
+        .await
+        .map_err(map_forge_action_error)?;
     match body.action {
+        CodeDeliveryRunAction::Rerun => {
+            api.rerun_workflow(&body.target.repository, body.target.id)
+                .await?;
+            runtime.delivery_cache.invalidate();
+            Ok(delivery_action_result(format!(
+                "Workflow run {} queued again",
+                body.target.id
+            )))
+        }
         CodeDeliveryRunAction::RerunFailed => {
-            if body.target.kind != CodeDeliveryRunKind::WorkflowRun {
-                return Err(ServerError::bad_request(
-                    "only GitHub Actions workflow runs can be rerun",
-                ));
-            }
-            let observation = require_authenticated(runtime).await?;
-            gh::rerun_failed_jobs_with_observation(
-                &observation,
-                &body.target.repository.host,
-                &body.target.repository.owner,
-                &body.target.repository.name,
-                body.target.id,
-            )
-            .await
-            .map_err(map_gh_error)?;
+            api.rerun_failed_jobs(&body.target.repository, body.target.id)
+                .await?;
             runtime.delivery_cache.invalidate();
             Ok(rerun_action_result(vec![CodeDeliveryRerunOutcome {
                 workflow_run_id: body.target.id,
@@ -1681,7 +1893,7 @@ fn github_capability(observation: &GhObservation) -> CodeGitHubCapability {
     }
 }
 
-/// Select Delivery's read path for one caller.
+/// Select Delivery's transport for one caller.
 ///
 /// A machine with a gateway lender never consults `gh`: the lender's forge
 /// probe is the source of availability and identity. Every other machine
@@ -1729,8 +1941,8 @@ async fn delivery_access(
         gh::observe_gh(search_path.as_deref()).await
     };
     let unavailable_kind = observation_error_kind(&observation);
-    let reader = (observation.authenticated == Some(true))
-        .then(|| DeliveryReader::Gh(observation.binary.clone().expect("authenticated gh")));
+    let reader =
+        (observation.authenticated == Some(true)).then(|| DeliveryReader::Gh(observation.clone()));
     DeliveryAccess {
         capability: github_capability(&observation),
         reader,
@@ -1738,7 +1950,7 @@ async fn delivery_access(
     }
 }
 
-/// Borrow one credential for one repository Delivery read.
+/// Borrow one credential for one repository Delivery operation.
 async fn borrow_delivery_credential(
     runtime: &CodeRuntime,
     owner: &OwnerId,
@@ -1760,49 +1972,6 @@ async fn borrow_delivery_credential(
         .git_credential(owner, &format!("{}/{}", target.owner, target.name))
         .await
         .map_err(|refusal| super::clone::git_forge_refusal_message(&refusal))
-}
-
-/// Refuse Delivery actions on a hosted machine, by name.
-///
-/// Reads borrow per-operation credentials, but merge, ready, close, comment,
-/// and rerun still shell out to `gh`. Until those move to the forge REST
-/// API, a hosted caller gets one honest refusal instead of a `gh`
-/// remediation no hosted machine can follow.
-fn require_gh_actions(runtime: &CodeRuntime) -> Result<(), ServerError> {
-    if runtime.git_credentials().is_some() {
-        return Err(ServerError::conflict_kind(
-            "git_forge_actions_unsupported",
-            "This hosted machine cannot act on pull requests or runs yet. \
-             Open the pull request or run on GitHub to act there.",
-        ));
-    }
-    Ok(())
-}
-
-async fn require_authenticated(runtime: &CodeRuntime) -> Result<GhObservation, ServerError> {
-    let observation = gh::observe_gh(runtime.gh_search_path_owned().as_deref()).await;
-    if !observation.found {
-        return Err(ServerError::conflict_kind(
-            "gh_absent",
-            observation.remediation,
-        ));
-    }
-    match observation.authenticated {
-        Some(true) => {}
-        Some(false) => {
-            return Err(ServerError::conflict_kind(
-                "gh_signed_out",
-                observation.remediation,
-            ));
-        }
-        None => {
-            return Err(ServerError::conflict_kind(
-                "gh_unavailable",
-                observation.remediation,
-            ));
-        }
-    }
-    Ok(observation)
 }
 
 pub(crate) async fn repository_target_from_local(
@@ -2115,9 +2284,18 @@ async fn resolve_repository_for_reader(
     force_refresh: bool,
 ) -> Result<CodeGitHubRepositoryRef, String> {
     match reader {
-        DeliveryReader::Gh(binary) => {
-            resolve_repository_cached(runtime, binary, target, tidebreak_repo_id, force_refresh)
-                .await
+        DeliveryReader::Gh(observation) => {
+            resolve_repository_cached(
+                runtime,
+                observation
+                    .binary
+                    .as_deref()
+                    .expect("authenticated gh has a binary"),
+                target,
+                tidebreak_repo_id,
+                force_refresh,
+            )
+            .await
         }
         DeliveryReader::Forge => {
             let credential = borrow_delivery_credential(runtime, owner, target).await?;
@@ -2299,7 +2477,11 @@ async fn fetch_pull_requests(
     force_refresh: bool,
 ) -> Result<Vec<PullRequestObservation>, String> {
     let (repository, values) = match reader {
-        DeliveryReader::Gh(binary) => {
+        DeliveryReader::Gh(observation) => {
+            let binary = observation
+                .binary
+                .as_deref()
+                .expect("authenticated gh has a binary");
             let repository =
                 resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
             let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
@@ -2386,7 +2568,7 @@ fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequest
 }
 
 async fn fetch_pull_request(
-    api: &DeliveryEndpointApi,
+    api: &DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     repository: &CodeGitHubRepositoryRef,
     number: u64,
@@ -2638,7 +2820,11 @@ async fn fetch_runs(
     options: RunFetchOptions,
 ) -> Result<FetchedRuns, String> {
     let (repository, workflow_runs, deployments) = match reader {
-        DeliveryReader::Gh(binary) => {
+        DeliveryReader::Gh(observation) => {
+            let binary = observation
+                .binary
+                .as_deref()
+                .expect("authenticated gh has a binary");
             let repository =
                 resolve_repository_cached(runtime, binary, target, None, options.force_refresh)
                     .await?;
@@ -3655,11 +3841,30 @@ fn map_gh_error(error: gh::GhError) -> ServerError {
     }
 }
 
+fn map_forge_action_error(message: String) -> ServerError {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("head branch was modified") || lower.contains("head sha") {
+        ServerError::conflict_kind("pr_head_changed", message)
+    } else if lower.contains("not mergeable") || lower.contains("merge cannot be performed") {
+        ServerError::conflict_kind("pr_not_mergeable", message)
+    } else {
+        ServerError::bad_request_kind("github", message)
+    }
+}
+
 fn merge_method(method: CodePrMergeMethod) -> gh::MergeMethod {
     match method {
         CodePrMergeMethod::Squash => gh::MergeMethod::Squash,
         CodePrMergeMethod::Merge => gh::MergeMethod::Merge,
         CodePrMergeMethod::Rebase => gh::MergeMethod::Rebase,
+    }
+}
+
+fn rest_merge_method(method: CodePrMergeMethod) -> &'static str {
+    match method {
+        CodePrMergeMethod::Squash => "squash",
+        CodePrMergeMethod::Merge => "merge",
+        CodePrMergeMethod::Rebase => "rebase",
     }
 }
 

@@ -16,6 +16,7 @@ import type {
   CodeDeliveryPullRequestActionBody,
   CodeDeliveryPullRequestTarget,
   CodeDeliveryRepositoriesSnapshot,
+  CodeDeliveryRunActionBody,
   CodeDeliveryRunTarget,
   CodeWorkspaceSnapshot,
   HarnessKind,
@@ -234,9 +235,14 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     }),
     getCodeDeliveryRunDetail: async ({ id }: CodeDeliveryRunTarget) =>
       deliveryRunDetails[id] ?? deliveryRunDetails[4401]!,
-    runCodeDeliveryRunAction: async () => ({
+    runCodeDeliveryRunAction: async ({
+      action,
+    }: CodeDeliveryRunActionBody) => ({
       success: true,
-      message: "Failed jobs queued.",
+      message:
+        action.type === "rerun"
+          ? "Workflow queued again."
+          : "Failed jobs queued.",
     }),
     restoreCodeWorkspace: async (workspaceId: string) => {
       const workspace = deliveryWorkspaces.find(
@@ -903,6 +909,12 @@ export const RunDetail: Story = {
     await userEvent.click(await canvas.findByText("Desktop CI"));
     await expect(
       await body.findByRole("heading", { name: "Desktop CI" }),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: "Rerun all" }),
+    ).toBeVisible();
+    await expect(
+      await body.findByRole("button", { name: "Rerun failed" }),
     ).toBeVisible();
     await expect(await body.findByText("Build static Storybook")).toBeVisible();
   },

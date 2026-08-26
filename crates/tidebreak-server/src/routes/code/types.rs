@@ -1440,6 +1440,7 @@ pub struct CodeDeliveryRunDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CodeDeliveryRunAction {
+    Rerun,
     RerunFailed,
 }
 

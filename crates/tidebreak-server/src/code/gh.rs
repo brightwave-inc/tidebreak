@@ -1837,8 +1837,37 @@ pub(crate) async fn rerun_failed_jobs_with_observation(
     repo: &str,
     run_id: u64,
 ) -> Result<(), GhError> {
+    rerun_workflow_endpoint_with_observation(
+        observation,
+        host,
+        owner,
+        repo,
+        run_id,
+        "rerun-failed-jobs",
+    )
+    .await
+}
+
+pub(crate) async fn rerun_workflow_with_observation(
+    observation: &GhObservation,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+) -> Result<(), GhError> {
+    rerun_workflow_endpoint_with_observation(observation, host, owner, repo, run_id, "rerun").await
+}
+
+async fn rerun_workflow_endpoint_with_observation(
+    observation: &GhObservation,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    run_id: u64,
+    action: &str,
+) -> Result<(), GhError> {
     let binary = require_gh_binary(observation)?;
-    let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs");
+    let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}/{action}");
     let mut args = vec![
         "api".to_owned(),
         "--method".to_owned(),
@@ -2623,15 +2652,21 @@ exit 3
             remediation: String::new(),
         };
 
-        let (first, second) = tokio::join!(
+        let (first, second, all) = tokio::join!(
             rerun_failed_jobs_with_observation(&observation, "github.com", "acme", "app", 10,),
             rerun_failed_jobs_with_observation(&observation, "github.com", "acme", "app", 11,),
+            rerun_workflow_with_observation(&observation, "github.com", "acme", "app", 12,),
         );
         first.unwrap();
         second.unwrap();
+        all.unwrap();
 
         let logged = std::fs::read_to_string(log).unwrap();
-        assert_eq!(logged.matches("api --method POST").count(), 2, "{logged}");
+        assert_eq!(logged.matches("api --method POST").count(), 3, "{logged}");
+        assert!(
+            logged.contains("repos/acme/app/actions/runs/12/rerun"),
+            "{logged}"
+        );
         assert!(!logged.contains("auth status"), "{logged}");
     }
 

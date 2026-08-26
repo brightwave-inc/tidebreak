@@ -25,6 +25,13 @@ async fn code_app() -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
 async fn code_app_with(
     lender: Option<Arc<dyn GitCredentialLender>>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_principal(lender, None).await
+}
+
+async fn code_app_with_principal(
+    lender: Option<Arc<dyn GitCredentialLender>>,
+    member_token: Option<&str>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code-git.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -35,8 +42,19 @@ async fn code_app_with(
         runtime = runtime.with_git_credentials(lender);
     }
     let runtime = Arc::new(runtime);
+    let mut config = Config::desktop(dir.path());
+    if let Some(member_token) = member_token {
+        let tokens_file = dir.path().join("tokens");
+        std::fs::write(
+            &tokens_file,
+            format!("alice {ALICE_TOKEN} admin\nbob {member_token}\n"),
+        )
+        .unwrap();
+        config.profile = tidebreak_core::Profile::SelfHost;
+        config.auth_tokens_file = Some(tokens_file);
+    }
     let mut state = AppState::new(
-        Config::desktop(dir.path()),
+        config,
         store_trait,
         Arc::new(FixedResolver(Arc::new(FakeProvider))),
         Arc::new(MemSecrets::default()),
@@ -47,7 +65,9 @@ async fn code_app_with(
         },
     );
     state.code = Some(runtime.clone());
-    let token = state.token.clone();
+    let token = member_token
+        .map(Arc::<str>::from)
+        .unwrap_or_else(|| state.token.clone());
     (app(state), token, runtime, dir)
 }
 
@@ -1688,11 +1708,14 @@ async fn register_delivery_repository(
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
 }
 
-/// Issue #2673: a gateway-authenticated hosted caller reads Delivery lists
-/// and details through one borrowed credential per repository operation. No
-/// `gh` observation participates, and check runs keep attention useful.
+/// Issues #2673 and #2700: a gateway-authenticated hosted caller reads and
+/// acts through one borrowed credential per repository operation. Every
+/// request stays pinned to the registered host and repository.
 #[tokio::test]
-async fn a_hosted_delivery_page_reads_lists_and_details_over_forge_rest() {
+async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
+    type RecordedActions = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    let recorded_actions: RecordedActions = Arc::default();
+
     fn pull_request() -> serde_json::Value {
         serde_json::json!({
             "number": 17,
@@ -1881,13 +1904,92 @@ async fn a_hosted_delivery_page_reads_lists_and_details_over_forge_rest() {
             "created_at": "2026-08-25T10:35:00Z"
         }]))
     };
+    let merge_actions = Arc::clone(&recorded_actions);
+    let merge = move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+        let recorded = Arc::clone(&merge_actions);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(serde_json::json!({ "action": "merge", "body": body }));
+            axum::Json(serde_json::json!({
+                "merged": true,
+                "message": "Pull Request successfully merged"
+            }))
+        }
+    };
+    let state_actions = Arc::clone(&recorded_actions);
+    let update_pull = move |headers: axum::http::HeaderMap,
+                            axum::Json(body): axum::Json<serde_json::Value>| {
+        let recorded = Arc::clone(&state_actions);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(serde_json::json!({ "action": "state", "body": body }));
+            axum::Json(pull_request())
+        }
+    };
+    let comment_actions = Arc::clone(&recorded_actions);
+    let comment = move |headers: axum::http::HeaderMap,
+                        axum::Json(body): axum::Json<serde_json::Value>| {
+        let recorded = Arc::clone(&comment_actions);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(serde_json::json!({ "action": "comment", "body": body }));
+            (
+                axum::http::StatusCode::CREATED,
+                axum::Json(serde_json::json!({ "id": 101 })),
+            )
+        }
+    };
+    let rerun_actions = Arc::clone(&recorded_actions);
+    let rerun = move |headers: axum::http::HeaderMap,
+                      axum::extract::Path(run_id): axum::extract::Path<u64>| {
+        let recorded = Arc::clone(&rerun_actions);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(serde_json::json!({ "action": "rerun", "run_id": run_id }));
+            axum::http::StatusCode::CREATED
+        }
+    };
+    let rerun_failed_actions = Arc::clone(&recorded_actions);
+    let rerun_failed =
+        move |headers: axum::http::HeaderMap,
+              axum::extract::Path(run_id): axum::extract::Path<u64>| {
+            let recorded = Arc::clone(&rerun_failed_actions);
+            async move {
+                assert_borrowed_forge_credential(&headers);
+                recorded
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(serde_json::json!({
+                        "action": "rerun_failed",
+                        "run_id": run_id
+                    }));
+                axum::http::StatusCode::CREATED
+            }
+        };
     let forge = axum::Router::new()
         .route("/repos/acme/demo", axum::routing::get(repository))
         .route("/repos/acme/demo/pulls", axum::routing::get(pulls))
-        .route("/repos/acme/demo/pulls/17", axum::routing::get(pull))
+        .route(
+            "/repos/acme/demo/pulls/17",
+            axum::routing::get(pull).patch(update_pull),
+        )
+        .route("/repos/acme/demo/pulls/17/merge", axum::routing::put(merge))
         .route(
             "/repos/acme/demo/issues/17/comments",
-            axum::routing::get(issue_comments),
+            axum::routing::get(issue_comments).post(comment),
         )
         .route(
             "/repos/acme/demo/pulls/17/reviews",
@@ -1913,6 +2015,14 @@ async fn a_hosted_delivery_page_reads_lists_and_details_over_forge_rest() {
         .route(
             "/repos/acme/demo/actions/runs/44/jobs",
             axum::routing::get(jobs),
+        )
+        .route(
+            "/repos/acme/demo/actions/runs/{run_id}/rerun",
+            axum::routing::post(rerun),
+        )
+        .route(
+            "/repos/acme/demo/actions/runs/{run_id}/rerun-failed-jobs",
+            axum::routing::post(rerun_failed),
         )
         .route(
             "/repos/acme/demo/deployments",
@@ -2088,52 +2198,265 @@ async fn a_hosted_delivery_page_reads_lists_and_details_over_forge_rest() {
         "success"
     );
 
-    for (path, body) in [
-        (
-            "/code/delivery/pull-requests/action",
-            serde_json::json!({
-                "target": { "repository": target.clone(), "number": 17 },
-                "action": { "type": "close" }
-            }),
-        ),
-        (
-            "/code/delivery/runs/action",
-            serde_json::json!({
-                "target": {
-                    "repository": target.clone(),
-                    "kind": "workflow_run",
-                    "id": 44
-                },
-                "action": { "type": "rerun_failed" }
-            }),
-        ),
+    for body in [
+        serde_json::json!({
+            "target": { "repository": target.clone(), "number": 17 },
+            "action": {
+                "type": "merge",
+                "method": "squash",
+                "auto": false,
+                "admin": false,
+                "expected_head_sha": "feedfeedfeedfeedfeed"
+            }
+        }),
+        serde_json::json!({
+            "target": { "repository": target.clone(), "number": 17 },
+            "action": { "type": "close" }
+        }),
+        serde_json::json!({
+            "target": { "repository": target.clone(), "number": 17 },
+            "action": { "type": "reopen" }
+        }),
+        serde_json::json!({
+            "target": { "repository": target.clone(), "number": 17 },
+            "action": { "type": "comment", "body": "  Ship this change.  " }
+        }),
+        serde_json::json!({
+            "target": { "repository": target.clone(), "number": 17 },
+            "action": {
+                "type": "rerun_failed",
+                "workflow_run_ids": [45, 44, 44]
+            }
+        }),
     ] {
         let response = client
-            .post(format!("http://{addr}{path}"))
+            .post(format!("http://{addr}/code/delivery/pull-requests/action"))
             .bearer_auth(&token)
             .json(&body)
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
-        let error: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(error["kind"], "git_forge_actions_unsupported");
-        assert!(error["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Open the pull request or run on GitHub"));
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    for action in ["rerun", "rerun_failed"] {
+        let response = client
+            .post(format!("http://{addr}/code/delivery/runs/action"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "target": {
+                    "repository": target.clone(),
+                    "kind": "workflow_run",
+                    "id": 44
+                },
+                "action": { "type": action }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    let borrows_before_unsupported = lender.minted().len();
+    for (action, expected_kind) in [
+        (
+            serde_json::json!({ "type": "mark_ready" }),
+            "git_forge_mark_ready_unsupported",
+        ),
+        (
+            serde_json::json!({
+                "type": "merge",
+                "method": "squash",
+                "auto": true,
+                "admin": false,
+                "expected_head_sha": "feedfeedfeedfeedfeed"
+            }),
+            "git_forge_auto_merge_unsupported",
+        ),
+        (
+            serde_json::json!({
+                "type": "merge",
+                "method": "squash",
+                "auto": false,
+                "admin": true,
+                "expected_head_sha": "feedfeedfeedfeedfeed"
+            }),
+            "git_forge_admin_merge_unsupported",
+        ),
+    ] {
+        let response = client
+            .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "target": { "repository": target.clone(), "number": 17 },
+                "action": action
+            }))
+            .send()
+            .await
+            .unwrap();
+        let (status, kind, message) = error_kind(response).await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert_eq!(kind, expected_kind);
+        assert!(
+            message.contains("Open the pull request on GitHub"),
+            "{message}"
+        );
     }
     assert_eq!(
+        lender.minted().len(),
+        borrows_before_unsupported,
+        "unsupported hosted actions do not borrow a credential"
+    );
+
+    let actions = recorded_actions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(actions.contains(&serde_json::json!({
+        "action": "merge",
+        "body": {
+            "sha": "feedfeedfeedfeedfeed",
+            "merge_method": "squash"
+        }
+    })));
+    assert!(actions.contains(&serde_json::json!({
+        "action": "state",
+        "body": { "state": "closed" }
+    })));
+    assert!(actions.contains(&serde_json::json!({
+        "action": "state",
+        "body": { "state": "open" }
+    })));
+    assert!(actions.contains(&serde_json::json!({
+        "action": "comment",
+        "body": { "body": "Ship this change." }
+    })));
+    assert!(actions.contains(&serde_json::json!({
+        "action": "rerun",
+        "run_id": 44
+    })));
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| action["action"] == "rerun_failed")
+            .count(),
+        3,
+        "two pull request runs and one run-detail action reach the failed-jobs endpoint"
+    );
+    assert_eq!(
         lender.minted(),
-        vec![
-            "acme/demo".to_owned(),
-            "acme/demo".to_owned(),
-            "acme/demo".to_owned(),
-            "acme/demo".to_owned(),
-            "acme/demo".to_owned(),
-            "acme/demo".to_owned()
+        vec!["acme/demo".to_owned(); 13],
+        "every read and action borrows only for the registered repository"
+    );
+}
+
+/// Issue #2700: the forge's action failure reaches the caller with its
+/// actionable message, and an unregistered host or repository cannot mint a
+/// credential or reach the REST origin.
+#[tokio::test]
+async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let merge_requests = Arc::clone(&requests);
+    let merge = move |headers: axum::http::HeaderMap| {
+        let requests = Arc::clone(&merge_requests);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({
+                    "message": "Head branch was modified. Review and try the merge again."
+                })),
+            )
+        }
+    };
+    let forge =
+        axum::Router::new().route("/repos/acme/demo/pulls/17/merge", axum::routing::put(merge));
+    let forge_addr = serve(forge).await;
+
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, runtime, dir) = code_app_with_principal(
+        Some(lender.clone() as Arc<dyn GitCredentialLender>),
+        Some(BOB_TOKEN),
+    )
+    .await;
+    runtime.set_gh_search_path(Some("/path/with/no/gh".into()));
+    runtime.set_forge_api_base(Some(format!("http://{forge_addr}")));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let root = init_paired_repo(dir.path());
+    run(
+        &root,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
         ],
-        "each repository read borrows once"
+    );
+    register_delivery_repository(&client, addr, &token, &root).await;
+
+    let merge_action = |repository: serde_json::Value| {
+        serde_json::json!({
+            "target": { "repository": repository, "number": 17 },
+            "action": {
+                "type": "merge",
+                "method": "squash",
+                "auto": false,
+                "admin": false,
+                "expected_head_sha": "old-head"
+            }
+        })
+    };
+    let response = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+        .bearer_auth(&token)
+        .json(&merge_action(serde_json::json!({
+            "host": "github.com",
+            "owner": "acme",
+            "name": "demo"
+        })))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "pr_head_changed");
+    assert!(message.contains("Head branch was modified"), "{message}");
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(lender.minted(), vec!["acme/demo"]);
+
+    for repository in [
+        serde_json::json!({
+            "host": "ghe.example",
+            "owner": "acme",
+            "name": "demo"
+        }),
+        serde_json::json!({
+            "host": "github.com",
+            "owner": "acme",
+            "name": "other"
+        }),
+    ] {
+        let response = client
+            .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+            .bearer_auth(&token)
+            .json(&merge_action(repository))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "unregistered targets never reach the forge"
+    );
+    assert_eq!(
+        lender.minted(),
+        vec!["acme/demo"],
+        "unregistered targets never mint a credential"
     );
 }
 

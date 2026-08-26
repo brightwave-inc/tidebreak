@@ -8,10 +8,9 @@
 //! parses — one JSON vocabulary, however the host was asked.
 //!
 //! Deliberately narrow: creation, the PR-card digest, the fact reads
-//! (decision 62), and the Delivery reads — repository lists, by-number
-//! sweeps, and the detail drawers. Mutations (merge, ready, close, comments,
-//! rerun) still shell out to `gh`, so a hosted Delivery action refuses with
-//! its own kind rather than a `gh` remediation no hosted machine can follow.
+//! (decision 62), and Delivery's repository-scoped reads and actions. The
+//! stable REST API still has no ready-for-review transition, so that one
+//! hosted action remains an explicit refusal.
 
 use std::time::Duration;
 
@@ -304,6 +303,125 @@ pub(crate) async fn create_pull_request(
         return Err(forge_message(status, &value));
     }
     Ok(fact_value(&value))
+}
+
+/// Merge one pull request only when its head still matches the reviewed SHA.
+pub(crate) async fn merge_pull_request(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    number: u64,
+    method: &str,
+    expected_head_sha: &str,
+) -> Result<(), String> {
+    let (status, value) = request(
+        reqwest::Method::PUT,
+        format!(
+            "{api_base}/repos/{}/{}/pulls/{number}/merge",
+            target.owner, target.name
+        ),
+        credential,
+        Some(&serde_json::json!({
+            "sha": expected_head_sha,
+            "merge_method": method,
+        })),
+    )
+    .await?;
+    if !status.is_success() || value.get("merged").and_then(Value::as_bool) != Some(true) {
+        return Err(forge_message(status, &value));
+    }
+    Ok(())
+}
+
+/// Close or reopen one pull request through the repository-pinned endpoint.
+pub(crate) async fn update_pull_request_state(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    number: u64,
+    state: &str,
+) -> Result<(), String> {
+    let (status, value) = request(
+        reqwest::Method::PATCH,
+        format!(
+            "{api_base}/repos/{}/{}/pulls/{number}",
+            target.owner, target.name
+        ),
+        credential,
+        Some(&serde_json::json!({ "state": state })),
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(())
+}
+
+/// Post one issue comment on a pull request.
+pub(crate) async fn comment_on_pull_request(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    number: u64,
+    body: &str,
+) -> Result<(), String> {
+    let (status, value) = request(
+        reqwest::Method::POST,
+        format!(
+            "{api_base}/repos/{}/{}/issues/{number}/comments",
+            target.owner, target.name
+        ),
+        credential,
+        Some(&serde_json::json!({ "body": body })),
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(())
+}
+
+/// Re-run every job in one GitHub Actions workflow run.
+pub(crate) async fn rerun_workflow(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    run_id: u64,
+) -> Result<(), String> {
+    rerun(api_base, target, credential, run_id, "rerun").await
+}
+
+/// Re-run failed jobs and their dependent jobs in one workflow run.
+pub(crate) async fn rerun_failed_jobs(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    run_id: u64,
+) -> Result<(), String> {
+    rerun(api_base, target, credential, run_id, "rerun-failed-jobs").await
+}
+
+async fn rerun(
+    api_base: &str,
+    target: &CodeGitHubRepositoryTarget,
+    credential: &GitCredential,
+    run_id: u64,
+    action: &str,
+) -> Result<(), String> {
+    let (status, value) = request(
+        reqwest::Method::POST,
+        format!(
+            "{api_base}/repos/{}/{}/actions/runs/{run_id}/{action}",
+            target.owner, target.name
+        ),
+        credential,
+        None,
+    )
+    .await?;
+    if !status.is_success() {
+        return Err(forge_message(status, &value));
+    }
+    Ok(())
 }
 
 /// List the pull requests whose head is one branch, in the fact shape.
