@@ -1,10 +1,12 @@
-//! Subscription quota usage for code mode.
+//! Local-owner subscription quota usage for code mode.
 //!
 //! Model Gateway is the richest source and already exposes a stable JSON CLI
 //! contract. When it is absent or signed out, Codex's app-server protocol is a
 //! useful direct-provider fallback. Other harnesses remain visible in the UI
 //! through the doctor, but are not guessed here when their CLIs expose no
-//! machine-readable quota command.
+//! machine-readable quota command. Both sources describe process-global
+//! accounts, so hosted owners receive a typed unavailable report without
+//! starting either process.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -13,6 +15,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tidebreak_core::OwnerId;
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, ProbeCapture};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -71,13 +74,33 @@ struct UsageWindow {
     model_scope: Option<String>,
 }
 
-/// Read every subscription quota source the local code installation can
-/// answer. Source failures are diagnostics, not route failures: a missing
-/// optional CLI must render as an honest empty state rather than a broken rail.
+/// Read subscription quota sources only for the local-profile owner.
+///
+/// The CLIs expose machine-wide account state rather than owner-scoped state.
+/// Hosted owners therefore receive an unavailable report, while source
+/// failures for the local owner remain diagnostics rather than route failures.
 pub(crate) async fn subscription_usage(
-    _code: ScopedCode,
+    code: ScopedCode,
 ) -> Result<Json<CodeSubscriptionUsage>, ServerError> {
-    Ok(Json(collect_usage().await))
+    Ok(Json(
+        collect_usage_for_owner(code.owner(), collect_usage).await,
+    ))
+}
+
+async fn collect_usage_for_owner<C, F>(owner: &OwnerId, collect: C) -> CodeSubscriptionUsage
+where
+    C: FnOnce() -> F,
+    F: Future<Output = CodeSubscriptionUsage>,
+{
+    if !owner.is_local() {
+        return CodeSubscriptionUsage {
+            source: UsageSource::Unavailable,
+            providers: Vec::new(),
+            diagnostics: vec!["Subscription usage is unavailable for hosted accounts.".to_owned()],
+        };
+    }
+
+    collect().await
 }
 
 async fn collect_usage() -> CodeSubscriptionUsage {
@@ -462,7 +485,53 @@ fn bounded_text(bytes: &[u8], max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     use super::*;
+
+    #[tokio::test]
+    async fn local_owner_receives_collected_subscription_usage() {
+        let expected = CodeSubscriptionUsage {
+            source: UsageSource::Direct,
+            providers: vec![UsageProvider {
+                id: "openai".into(),
+                label: "Codex".into(),
+                accounts: Vec::new(),
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let report =
+            collect_usage_for_owner(&OwnerId::local(), || async { expected.clone() }).await;
+
+        assert_eq!(report, expected);
+    }
+
+    #[tokio::test]
+    async fn hosted_owner_receives_unavailable_without_reading_machine_usage() {
+        let collected = Arc::new(AtomicBool::new(false));
+        let collected_in_route = Arc::clone(&collected);
+        let owner = OwnerId::new("member-123").expect("hosted owner");
+
+        let report = collect_usage_for_owner(&owner, || async move {
+            collected_in_route.store(true, Ordering::SeqCst);
+            CodeSubscriptionUsage {
+                source: UsageSource::Direct,
+                providers: Vec::new(),
+                diagnostics: Vec::new(),
+            }
+        })
+        .await;
+
+        assert!(!collected.load(Ordering::SeqCst));
+        assert_eq!(report.source, UsageSource::Unavailable);
+        assert!(report.providers.is_empty());
+        assert_eq!(
+            report.diagnostics,
+            vec!["Subscription usage is unavailable for hosted accounts."]
+        );
+    }
 
     #[tokio::test]
     async fn direct_usage_is_used_when_modelctl_is_unavailable() {
