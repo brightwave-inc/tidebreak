@@ -2821,6 +2821,7 @@ fn parse_pull_request(
             closed_at,
         },
         head_repository: parse_head_repository(repository, value),
+        host_stack: None,
     })
 }
 

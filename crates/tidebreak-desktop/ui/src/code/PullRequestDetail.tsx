@@ -863,16 +863,19 @@ function PrActions({
       : null;
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;
   const canAdminMerge = detail.can_merge && Boolean(summary.head_sha);
-  // The stack offer is GitHub's own: merging lands every unmerged layer, in
-  // order, bottom to top. A draft layer stops the chain — GitHub lands the
-  // layers below the latest ready pull request and leaves the drafts above
-  // open — so the offer counts only the non-draft layers. Two is the
+  // The stack offer is GitHub's own: merging lands the bottom run of
+  // non-draft layers, in order. Merged layers below the run are skipped, a
+  // draft layer stops it — GitHub lands everything below the latest ready
+  // pull request and leaves the drafts above open. Two layers is the
   // smallest stack worth confirming, and while the offer is on the table it
   // replaces the single-layer merge: merging one layer of a live stack alone
   // is the half-measure the stack exists to avoid.
-  const mergeableStackLayers = (detail.stack ?? []).filter(
-    (member) => member.state === "open" && !member.draft,
-  );
+  const mergeableStackLayers: CodeDeliveryStackMember[] = [];
+  for (const member of detail.stack ?? []) {
+    if (member.state !== "open") continue;
+    if (member.draft) break;
+    mergeableStackLayers.push(member);
+  }
   const canMergeStack =
     detail.can_merge &&
     Boolean(summary.head_sha) &&
@@ -970,18 +973,19 @@ function PrActions({
                 <LoaderCircle className="animate-spin" />
               )}
               <GitMerge />
-              Merge stack ({openStackLayers.length} layers)
+              Merge stack ({mergeableStackLayers.length} layers)
             </Button>
             {confirmingStackMerge && (
               <div className="mt-2.5 flex w-full flex-col gap-2 rounded-md border border-border-subtle bg-background p-2.5">
-                <p className="text-xs text-muted-foreground">
-                  Lands {openStackLayers.length} open layers bottom to top:
-                  {openStackLayers.map((member) => ` #${member.number}`)}. Each
-                  layer merges with{" "}
+                <p className="text-muted-foreground text-xs">
+                  Lands {mergeableStackLayers.length} layers bottom to top:
+                  {mergeableStackLayers.map((member) => ` #${member.number}`)}.
+                  Each layer merges with{" "}
                   {hasMergeQueue
                     ? "the merge queue"
-                    : "a direct " + mergeMethod + " merge"}
-                  , and the chain stops at the first layer that cannot merge.
+                    : `a direct ${mergeMethod} merge`}
+                  . The chain stops at the first layer that cannot merge, and
+                  draft layers above it stay open.
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -990,7 +994,7 @@ function PrActions({
                     disabled={Boolean(busy)}
                     onClick={() => {
                       setConfirmingStackMerge(false);
-                      onMergeStack(openStackLayers);
+                      onMergeStack(mergeableStackLayers);
                     }}
                   >
                     Merge stack

@@ -55,6 +55,13 @@ place a state becomes a color, and its maps (`STATUS_TEXT`, `STATUS_MARK`,
 `STATUS_DOT`, `STATUS_CHIP`) pick the rung for the surface being painted.
 Elsewhere, the `Badge` variants carry the same tones.
 
+Pull requests are their own sub-vocabulary on top of these tones:
+ `src/code/prState.ts` is the one place a pull request's lifecycle, gate,
+ and chips are decided, and it paints with the same tones — green open,
+ gray draft, purple merged, red closed, the info tone for a merge queue or
+ armed auto-merge. A surface that renders a pull request from raw host
+ fields is a bug.
+
 Identity is not status. File types, repository swatches, and engine badges
 use the `--icon-*` family (`icon-blue` through `icon-green`), which lifts
 from the 600 step in light to the 400 step in dark. A `.json` file must
