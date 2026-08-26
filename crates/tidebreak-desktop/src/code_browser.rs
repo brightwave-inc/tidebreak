@@ -662,10 +662,8 @@ fn start_same_document_navigation_observer(
             return;
         };
         let renderer_url = main.url().ok();
-        let Ok(initial) = browser_install_same_document_navigation_observer(&webview).await else {
-            return;
-        };
-        let mut last_sequence = initial.sequence;
+        let mut observer_installed = false;
+        let mut last_sequence = None;
         let mut interval = tokio::time::interval(SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -678,21 +676,33 @@ fn start_same_document_navigation_observer(
                 return;
             }
 
-            let observation = match browser_read_same_document_navigation_observer(&webview).await {
-                Ok(Some(observation)) => observation,
-                Ok(None) => match browser_install_same_document_navigation_observer(&webview).await
-                {
-                    Ok(observation) => observation,
-                    Err(_) => return,
-                },
-                Err(_) => return,
+            let observation = if observer_installed {
+                match browser_read_same_document_navigation_observer(&webview).await {
+                    Ok(Some(observation)) => Some(observation),
+                    Ok(None) | Err(_) => {
+                        observer_installed = false;
+                        None
+                    }
+                }
+            } else {
+                None
             };
-            if observation.sequence == last_sequence
+            let observation = match observation {
+                Some(observation) => observation,
+                None => match browser_install_same_document_navigation_observer(&webview).await {
+                    Ok(observation) => {
+                        observer_installed = true;
+                        observation
+                    }
+                    Err(_) => continue,
+                },
+            };
+            if last_sequence == Some(observation.sequence)
                 && snapshot.url.as_deref() == Some(observation.url.as_str())
             {
                 continue;
             }
-            last_sequence = observation.sequence;
+            last_sequence = Some(observation.sequence);
             let Ok(url) = validated_same_document_url(
                 &observation.url,
                 renderer_url.as_ref(),

@@ -115,6 +115,9 @@ function CodeBrowserTabSession({
   const nativeReady = useRef(false);
   const nativePresence = useRef<"unknown" | "missing" | "present">("unknown");
   const nativeCreateInFlight = useRef<Promise<void> | null>(null);
+  const nativeCreateRequestedUrl = useRef<string | null>(null);
+  const nativeExpectedNavigationUrl = useRef<string | null>(null);
+  const nativeDocumentEpoch = useRef(0);
   const resizeCreateAttempted = useRef(false);
   const nativeHistoryAvailable = useRef(false);
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
@@ -169,6 +172,12 @@ function CodeBrowserTabSession({
         snapshot.workspaceId === workspaceId
       ) {
         setRuntime(snapshot);
+        if (snapshot.documentEpoch !== undefined) {
+          nativeDocumentEpoch.current = Math.max(
+            nativeDocumentEpoch.current,
+            snapshot.documentEpoch,
+          );
+        }
         if (snapshot.inspectEnabled !== undefined) {
           updateSession((current) => ({
             ...current,
@@ -266,8 +275,10 @@ function CodeBrowserTabSession({
         await reconcileAfterNativeReady();
         return true;
       }
+      nativeCreateRequestedUrl.current = url;
       const pending = nativeCreateInFlight.current;
       if (pending) {
+        nativeExpectedNavigationUrl.current = url;
         await pending;
         return nativeReady.current;
       }
@@ -293,7 +304,24 @@ function CodeBrowserTabSession({
         } catch (error) {
           nativeReady.current = false;
           nativePresence.current = "missing";
+          if (nativeExpectedNavigationUrl.current === url) {
+            nativeExpectedNavigationUrl.current = null;
+          }
           throw error;
+        }
+
+        let deliveredUrl = url;
+        while (mountedRef.current && nativeReady.current) {
+          const requestedUrl = nativeCreateRequestedUrl.current;
+          if (!requestedUrl || requestedUrl === deliveredUrl) break;
+          recordRuntime(
+            await host.command(workspaceId, browserId, {
+              type: "navigate",
+              url: requestedUrl,
+            }),
+          );
+          deliveredUrl = requestedUrl;
+          nativeHistoryAvailable.current = false;
         }
       })();
       nativeCreateInFlight.current = operation;
@@ -303,6 +331,7 @@ function CodeBrowserTabSession({
       } finally {
         if (nativeCreateInFlight.current === operation) {
           nativeCreateInFlight.current = null;
+          nativeCreateRequestedUrl.current = null;
         }
       }
     },
@@ -464,6 +493,29 @@ function CodeBrowserTabSession({
     }
 
     function handleHostEvent(event: BrowserHostEvent) {
+      if (
+        event.documentEpoch !== undefined &&
+        event.documentEpoch < nativeDocumentEpoch.current
+      ) {
+        return;
+      }
+      if (
+        (event.type === "navigation_started" ||
+          event.type === "navigation_finished") &&
+        event.url
+      ) {
+        const expectedUrl = nativeExpectedNavigationUrl.current;
+        if (expectedUrl && event.url !== expectedUrl) return;
+        if (event.url === expectedUrl) {
+          nativeExpectedNavigationUrl.current = null;
+        }
+      }
+      if (event.documentEpoch !== undefined) {
+        nativeDocumentEpoch.current = Math.max(
+          nativeDocumentEpoch.current,
+          event.documentEpoch,
+        );
+      }
       if (event.type === "navigation_started" && event.url) {
         updateSession((current) =>
           observeBrowserNavigation(current, event.url!, "loading"),
@@ -666,6 +718,9 @@ function CodeBrowserTabSession({
       const created = await createAndReconcileNative(target.url);
       if (!created) throw new Error("The browser surface is not ready");
     } catch (error) {
+      if (nativeExpectedNavigationUrl.current === target.url) {
+        nativeExpectedNavigationUrl.current = null;
+      }
       if (mountedRef.current) {
         updateSession((current) =>
           failBrowserSession(

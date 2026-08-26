@@ -451,6 +451,73 @@ describe("CodeBrowserTab", () => {
     );
   });
 
+  it("navigates to the newest address entered while native creation is in flight", async () => {
+    let releaseCreate: (() => void) | undefined;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const runtime = browserHost({ createGate });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/first"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(1),
+    );
+
+    const input = screen.getByRole("textbox", { name: "Address or search" });
+    await userEvent.clear(input);
+    await userEvent.type(input, "example.com/second{enter}");
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/first",
+        documentEpoch: 1,
+      });
+    });
+    expect(input).toHaveValue("example.com/second");
+    releaseCreate?.();
+
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: {
+          type: "navigate",
+          url: "https://example.com/second",
+        },
+      }),
+    );
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(1);
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_started",
+        url: "https://example.com/second",
+        documentEpoch: 2,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/first",
+        documentEpoch: 1,
+      });
+    });
+    expect(input).toHaveValue("example.com/second");
+  });
+
   it.each([
     { label: "newly created", existing: false },
     { label: "restored", existing: true },
