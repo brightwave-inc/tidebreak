@@ -2240,9 +2240,11 @@ impl MigrationTrait for CodeQueuedTurns {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
-    use sea_orm_migration::prelude::{PostgresQueryBuilder, SqliteQueryBuilder};
+    use sea_orm_migration::prelude::{PostgresQueryBuilder, SchemaManager, SqliteQueryBuilder};
     use sea_orm_migration::MigratorTrait;
 
+    #[cfg(feature = "sqlite")]
+    use super::rebuild_sqlite_code_workspace_for_archiving_inner;
     use super::Migrator;
 
     /// Every `CREATE TABLE` a fresh database runs comes from `sqlite_master`,
