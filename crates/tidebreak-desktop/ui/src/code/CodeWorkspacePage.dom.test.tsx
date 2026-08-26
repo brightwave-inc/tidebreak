@@ -113,9 +113,14 @@ vi.mock("sonner", () => ({
 // The resize library lays out from real element measurements, which jsdom does
 // not provide; left alone it registers no regions and renders nothing.
 vi.mock("react-resizable-panels", () => ({
-  PanelGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  Group: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Panel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  PanelResizeHandle: () => <div />,
+  Separator: () => <div />,
+  useDefaultLayout: () => ({
+    defaultLayout: undefined,
+    onLayoutChange: () => {},
+    onLayoutChanged: () => {},
+  }),
 }));
 
 const WORKSPACE: CodeWorkspaceSnapshot = {

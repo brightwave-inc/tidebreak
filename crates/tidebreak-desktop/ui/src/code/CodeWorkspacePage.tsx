@@ -23,6 +23,7 @@ import {
   type ReactNode,
 } from "react";
 import { ArrowDown, Bot, CircleDotDashed } from "lucide-react";
+import { useDefaultLayout } from "react-resizable-panels";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
@@ -227,6 +228,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   };
   const taskParam = workspaceSearch.task;
   const subagentParam = workspaceSearch.subagent;
+  const inspectorLayout = useDefaultLayout({ id: "code-inspector" });
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore(
     (state) => state.toggleReviewSidebar,
@@ -1285,14 +1287,24 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           {hasEditorSplit ? (
             <ResizablePanelGroup
-              direction="horizontal"
+              orientation="horizontal"
               className="h-full min-h-0"
             >
-              <ResizablePanel defaultSize={55} minSize={25} className="min-w-0">
+              <ResizablePanel
+                id="editor-primary"
+                defaultSize="55"
+                minSize="25"
+                className="min-w-0"
+              >
                 {primaryEditorGroup}
               </ResizablePanel>
               <ResizableHandle />
-              <ResizablePanel defaultSize={45} minSize={25} className="min-w-0">
+              <ResizablePanel
+                id="editor-split"
+                defaultSize="45"
+                minSize="25"
+                className="min-w-0"
+              >
                 {splitEditorGroup}
               </ResizablePanel>
             </ResizablePanelGroup>
@@ -1419,21 +1431,24 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         </div>
       ) : reviewSidebarOpen ? (
         <ResizablePanelGroup
-          autoSaveId="code-inspector"
-          direction="horizontal"
+          defaultLayout={inspectorLayout.defaultLayout}
+          onLayoutChanged={inspectorLayout.onLayoutChanged}
+          orientation="horizontal"
           className="min-h-0 flex-1"
         >
           <ResizablePanel
-            defaultSize={68}
-            minSize={42}
+            id="workspace"
+            defaultSize="68"
+            minSize="42"
             className="h-full min-h-0 min-w-0"
           >
             {workspaceMain}
           </ResizablePanel>
           <ResizableHandle className="bg-border-subtle transition-colors hover:bg-border" />
           <ResizablePanel
-            defaultSize={32}
-            minSize={22}
+            id="inspector"
+            defaultSize="32"
+            minSize="22"
             className="min-w-0 bg-page-background"
           >
             <CodeInspector

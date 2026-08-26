@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Group,
   Panel,
-  PanelGroup,
-  type ImperativePanelGroupHandle,
+  type GroupImperativeHandle,
 } from "react-resizable-panels";
 
 import { cn } from "@/lib/utils";
@@ -11,8 +11,8 @@ import { PanelTabs } from "./PanelTabs";
 import { activePanel, type LayoutState, type PanelContent } from "./panelTypes";
 import { usePanelNav } from "./usePanelNav";
 
-const MIN_PANEL_SIZE = 25;
-const MAX_PANEL_SIZE = 75;
+const MIN_PANEL_SIZE = "25";
+const MAX_PANEL_SIZE = "75";
 
 /**
  * Two regions: the conversation, and the panels open beside it.
@@ -65,7 +65,7 @@ export function PanelLayout({
   onFocusTab?: (index: number) => void;
   onCloseTab?: (index: number) => void;
 }) {
-  const groupRef = useRef<ImperativePanelGroupHandle>(null);
+  const groupRef = useRef<GroupImperativeHandle>(null);
   const [dragging, setDragging] = useState(false);
   const { focusTab, closeTab } = usePanelNav();
 
@@ -96,7 +96,7 @@ export function PanelLayout({
     // Before the group has registered its regions there is no layout to
     // replace, and handing it one is rejected outright. The regions' own
     // defaults already describe the arrangement at that point.
-    if (!group || group.getLayout().length === 0) return;
+    if (!group || Object.keys(group.getLayout()).length === 0) return;
     group.setLayout(panelSizes({ hasTabs, fullscreen }));
   }, [hasTabs, fullscreen]);
 
@@ -106,9 +106,9 @@ export function PanelLayout({
   const showChat = !fullscreen;
 
   return (
-    <PanelGroup
-      ref={groupRef}
-      direction="horizontal"
+    <Group
+      groupRef={groupRef}
+      orientation="horizontal"
       className={cn(
         // min-w-0 stops the group's content-driven min-content width from
         // pushing the row wider than its flex basis, which is what let panel
@@ -119,10 +119,10 @@ export function PanelLayout({
       data-dragging={dragging || undefined}
     >
       <Panel
-        order={1}
-        minSize={showChat ? (hasTabs ? MIN_PANEL_SIZE : 100) : 0}
-        maxSize={showChat ? (hasTabs ? MAX_PANEL_SIZE : 100) : 0}
-        defaultSize={initialSizes[0]}
+        id="chat"
+        minSize={showChat ? (hasTabs ? MIN_PANEL_SIZE : "100") : "0"}
+        maxSize={showChat ? (hasTabs ? MAX_PANEL_SIZE : "100") : "0"}
+        defaultSize={String(initialSizes.chat)}
         className="panel-animated"
       >
         {renderChat(showChat)}
@@ -134,10 +134,10 @@ export function PanelLayout({
       />
 
       <Panel
-        order={2}
-        minSize={hasTabs && !fullscreen ? MIN_PANEL_SIZE : 0}
-        maxSize={hasTabs ? 100 : 0}
-        defaultSize={initialSizes[1]}
+        id="panels"
+        minSize={hasTabs && !fullscreen ? MIN_PANEL_SIZE : "0"}
+        maxSize={hasTabs ? "100" : "0"}
+        defaultSize={String(initialSizes.panels)}
         className="panel-animated"
       >
         {panel && (
@@ -157,12 +157,12 @@ export function PanelLayout({
           </div>
         )}
       </Panel>
-    </PanelGroup>
+    </Group>
   );
 }
 
 /**
- * The share each region takes, as `[chat, panels]`.
+ * The share each region takes, keyed by panel id.
  *
  * Nothing open leaves the conversation the window; anything open splits it,
  * and an expanded panel takes all of it.
@@ -173,8 +173,8 @@ export function panelSizes({
 }: {
   hasTabs: boolean;
   fullscreen?: boolean;
-}): [number, number] {
-  if (!hasTabs) return [100, 0];
-  if (fullscreen) return [0, 100];
-  return [50, 50];
+}): { chat: number; panels: number } {
+  if (!hasTabs) return { chat: 100, panels: 0 };
+  if (fullscreen) return { chat: 0, panels: 100 };
+  return { chat: 50, panels: 50 };
 }

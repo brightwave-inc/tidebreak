@@ -321,11 +321,14 @@ vi.mock("./ChatApprovalHydration", async () => {
 // arrangement it is handed is covered by the panelSizes tests; what matters
 // here is which panels the shell composes, so the group is a plain container.
 vi.mock("react-resizable-panels", () => ({
-  PanelGroup: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
+  Group: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Panel: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  PanelResizeHandle: () => <div />,
+  Separator: () => <div />,
+  useDefaultLayout: () => ({
+    defaultLayout: undefined,
+    onLayoutChange: () => {},
+    onLayoutChanged: () => {},
+  }),
 }));
 
 async function mountApp({ at }: { at?: string } = {}) {
