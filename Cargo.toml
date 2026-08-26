@@ -74,6 +74,7 @@ symphonia = { version = "=0.6.0", default-features = false, features = ["aac", "
 opus-decoder = "=0.1.1"
 whisper-rs = "=0.16.0"
 base64 = "=0.23.1"
+minisign-verify = "=0.2.5"
 libc = "=0.2.189"
 async-stream = "=0.3.6"
 axum = { version = "=0.8.9", features = ["ws"] }

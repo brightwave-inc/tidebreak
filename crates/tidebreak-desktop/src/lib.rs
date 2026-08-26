@@ -54,6 +54,7 @@ mod skill_import;
 mod trusted_folders;
 mod updater;
 mod voice_transcription;
+mod whisper_install;
 
 /// Connection details the webview needs to reach the API it is attached to.
 #[derive(Clone, Serialize)]

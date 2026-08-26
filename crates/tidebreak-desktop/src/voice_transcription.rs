@@ -2,11 +2,13 @@
 //!
 //! The renderer sends only recorded bytes to the loopback API. This native
 //! runner owns the pinned model path, download verification, media decoding,
-//! resampling, and whisper.cpp inference.
+//! and resampling. It delegates whisper.cpp inference to a separately
+//! published helper that the desktop verifies before every use.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
@@ -23,9 +25,9 @@ use tidebreak_server::voice_transcription::{
 };
 use tidebreak_server::{LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
 use tokio::io::AsyncWriteExt as _;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
+const HELPER_RESULT_PREFIX: &str = "TIDEBREAK_WHISPER_BYTES=";
 
 fn model_version(model: &LocalVoiceModel) -> String {
     format!("whisper.cpp-{LOCAL_VOICE_REPO_COMMIT}-{}", model.id)
@@ -248,52 +250,99 @@ impl LocalVoiceRunner for DesktopLocalVoiceRunner {
         self.ensure_installed(model)
             .await
             .map_err(LocalVoiceError::Runner)?;
-        let path = self.model_path(model);
+        let model_path = self.model_path(model);
         let language = if model.english_only { "en" } else { "auto" };
         let content_type = content_type.to_owned();
-        tokio::task::spawn_blocking(move || {
-            transcribe_blocking(&path, language, &content_type, audio)
-        })
-        .await
-        .map_err(|_| {
-            LocalVoiceError::Runner(
-                "Local voice transcription worker stopped unexpectedly".to_owned(),
-            )
-        })?
+        let samples = tokio::task::spawn_blocking(move || decode_audio(&content_type, audio))
+            .await
+            .map_err(|_| {
+                LocalVoiceError::Runner("Local voice audio decoder stopped unexpectedly".to_owned())
+            })??;
+        let helper = crate::whisper_install::ensure_helper(&self.data_dir)
+            .await
+            .map_err(LocalVoiceError::Runner)?;
+        transcribe_with_helper(&helper, &model_path, language, &samples).await
     }
 }
 
-fn transcribe_blocking(
+async fn transcribe_with_helper(
+    helper: &Path,
     model: &Path,
     language: &str,
-    content_type: &str,
-    audio: Vec<u8>,
+    samples: &[f32],
 ) -> Result<String, LocalVoiceError> {
-    let samples = decode_audio(content_type, audio)?;
-    let context = WhisperContext::new_with_params(model, WhisperContextParameters::default())
-        .map_err(|_| LocalVoiceError::Runner("Could not load the local voice model".to_owned()))?;
-    let mut state = context.create_state().map_err(|_| {
-        LocalVoiceError::Runner("Could not initialize local voice transcription".to_owned())
+    let input = encode_samples(samples);
+    let input_len = input.len();
+    let mut command = tokio::process::Command::new(helper);
+    command
+        .arg("--model")
+        .arg(model)
+        .arg("--language")
+        .arg(language)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| {
+        LocalVoiceError::Runner("Could not start the local voice helper".to_owned())
     })?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    // "auto" asks whisper to detect the language; the English-only models
-    // reject anything else, so the catalog decides which is passed.
-    params.set_language(Some(language));
-    params.set_translate(false);
-    params.set_no_context(true);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    state
-        .full(params, &samples)
-        .map_err(|_| LocalVoiceError::Runner("Local voice transcription failed".to_owned()))?;
-    let mut text = String::new();
-    for segment in state.as_iter() {
-        text.push_str(&segment.to_str_lossy().map_err(|_| {
-            LocalVoiceError::Runner("Local voice transcription returned invalid text".to_owned())
-        })?);
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        LocalVoiceError::Runner("Could not open the local voice helper input".to_owned())
+    })?;
+    let write_input = async move {
+        stdin.write_all(&input).await?;
+        stdin.shutdown().await
+    };
+    let (write_result, output_result) = tokio::join!(write_input, child.wait_with_output());
+    let output = output_result.map_err(|_| {
+        LocalVoiceError::Runner("The local voice helper stopped unexpectedly".to_owned())
+    })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        let message = if detail.is_empty() {
+            format!("Local voice transcription failed ({})", output.status)
+        } else {
+            format!("Local voice transcription failed: {detail}")
+        };
+        return Err(LocalVoiceError::Runner(message));
+    }
+    write_result.map_err(|_| {
+        LocalVoiceError::Runner("Could not send audio to the local voice helper".to_owned())
+    })?;
+    decode_helper_output(output.stdout, input_len)
+}
+
+fn decode_helper_output(
+    stdout: Vec<u8>,
+    expected_input_bytes: usize,
+) -> Result<String, LocalVoiceError> {
+    let result = String::from_utf8(stdout).map_err(|_| {
+        LocalVoiceError::Runner("Local voice transcription returned invalid text".to_owned())
+    })?;
+    let (receipt, text) = result.split_once('\n').ok_or_else(|| {
+        LocalVoiceError::Runner("Local voice helper returned an invalid result".to_owned())
+    })?;
+    let consumed = receipt
+        .strip_prefix(HELPER_RESULT_PREFIX)
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| {
+            LocalVoiceError::Runner("Local voice helper returned an invalid result".to_owned())
+        })?;
+    if consumed != expected_input_bytes {
+        return Err(LocalVoiceError::Runner(format!(
+            "Local voice helper consumed {consumed} of {expected_input_bytes} audio bytes"
+        )));
     }
     Ok(text.trim().to_owned())
+}
+
+fn encode_samples(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
 }
 
 fn decode_audio(content_type: &str, audio: Vec<u8>) -> Result<Vec<f32>, LocalVoiceError> {
@@ -448,6 +497,102 @@ mod tests {
     }
 
     #[test]
+    fn helper_input_is_little_endian_f32_pcm() {
+        assert_eq!(
+            encode_samples(&[1.0, -0.5]),
+            [0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xbf]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn helper_process_receives_the_pinned_protocol() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = dir.path().join("model.bin");
+        std::fs::write(&model, b"model").expect("model");
+        let helper = dir.path().join("fake-whisper-helper");
+        std::fs::write(
+            &helper,
+            r#"#!/bin/sh
+if [ "$#" -ne 4 ] || [ "$1" != "--model" ] || [ ! -f "$2" ] || [ "$3" != "--language" ] || [ "$4" != "en" ]; then
+  echo "unexpected helper arguments" >&2
+  exit 2
+fi
+hex="$(od -An -tx1 | tr -d '[:space:]')"
+if [ "$hex" != "0000803f000000bf" ]; then
+  echo "unexpected PCM bytes: $hex" >&2
+  exit 3
+fi
+printf 'TIDEBREAK_WHISPER_BYTES=8\n helper transcript '
+"#,
+        )
+        .expect("helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions");
+
+        assert_eq!(
+            transcribe_with_helper(&helper, &model, "en", &[1.0, -0.5])
+                .await
+                .expect("transcript"),
+            "helper transcript"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn helper_failure_preserves_stderr_when_stdin_closes_early() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = dir.path().join("model.bin");
+        std::fs::write(&model, b"model").expect("model");
+        let helper = dir.path().join("failing-whisper-helper");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\necho 'could not load the voice model' >&2\nexit 1\n",
+        )
+        .expect("helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions");
+
+        let error = transcribe_with_helper(&helper, &model, "en", &[1.0, -0.5])
+            .await
+            .expect_err("helper failure");
+        assert_eq!(
+            error.message(),
+            "Local voice transcription failed: could not load the voice model"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn helper_success_requires_a_complete_input_receipt() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = dir.path().join("model.bin");
+        std::fs::write(&model, b"model").expect("model");
+        let helper = dir.path().join("truncating-whisper-helper");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\nprintf 'TIDEBREAK_WHISPER_BYTES=0\\npartial transcript'\n",
+        )
+        .expect("helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions");
+
+        let error = transcribe_with_helper(&helper, &model, "en", &[1.0, -0.5])
+            .await
+            .expect_err("incomplete helper input");
+        assert_eq!(
+            error.message(),
+            "Local voice helper consumed 0 of 8 audio bytes"
+        );
+    }
+
+    #[test]
     fn marker_must_match_the_exact_pinned_model() {
         let dir = tempfile::tempdir().unwrap();
         let runner = DesktopLocalVoiceRunner::new(dir.path().to_owned());
@@ -497,13 +642,13 @@ mod tests {
     }
 
     /// Drives a second catalog entry through the real install path: download,
-    /// SHA-256 verification, marker, and inference on a recording. Ignored
-    /// because it fetches 57 MB; run it when the catalog or the runner's
-    /// per-model layout changes.
+    /// SHA-256 verification, marker, and helper inference on a recording.
+    /// Ignored because it fetches the model and the published helper; run it
+    /// when the catalog or either side of the helper protocol changes.
     ///
     /// `cargo test -p tidebreak-desktop installs_and_transcribes -- --ignored`
     #[tokio::test]
-    #[ignore = "downloads a catalog model over the network"]
+    #[ignore = "downloads a catalog model and the voice helper over the network"]
     async fn installs_and_transcribes_with_a_second_catalog_model() {
         let dir = tempfile::tempdir().unwrap();
         let runner = DesktopLocalVoiceRunner::new(dir.path().to_owned());
@@ -548,20 +693,21 @@ mod tests {
         assert!(runner.install("whisper-imaginary").await.is_err());
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "downloads the pinned model and runs real local inference"]
-    fn transcribes_real_webm_and_mp4_fixtures() {
+    async fn transcribes_real_webm_and_mp4_fixtures() {
         let webm = std::env::var("TIDEBREAK_TEST_VOICE_WEBM").expect("webm fixture path");
         let mp4 = std::env::var("TIDEBREAK_TEST_VOICE_MP4").expect("mp4 fixture path");
-        let model = std::env::var("TIDEBREAK_TEST_VOICE_MODEL").expect("model path");
+        let model = PathBuf::from(std::env::var("TIDEBREAK_TEST_VOICE_MODEL").expect("model path"));
+        let helper = PathBuf::from(
+            std::env::var(crate::whisper_install::HELPER_PATH_ENV).expect("helper path"),
+        );
         for (mime, path) in [("audio/webm", webm), ("audio/mp4", mp4)] {
-            let text = transcribe_blocking(
-                Path::new(&model),
-                "en",
-                mime,
-                std::fs::read(path).expect("voice fixture"),
-            )
-            .expect("local transcription");
+            let samples = decode_audio(mime, std::fs::read(path).expect("voice fixture"))
+                .expect("decode fixture");
+            let text = transcribe_with_helper(&helper, &model, "en", &samples)
+                .await
+                .expect("local transcription");
             assert!(!text.is_empty());
         }
     }

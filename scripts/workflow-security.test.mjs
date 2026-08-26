@@ -55,6 +55,24 @@ const desktopBroker = readFileSync(
   repositoryFile("crates", "tidebreak-desktop", "src", "broker.rs"),
   "utf8",
 );
+const desktopVoice = readFileSync(
+  repositoryFile(
+    "crates",
+    "tidebreak-desktop",
+    "src",
+    "voice_transcription.rs",
+  ),
+  "utf8",
+);
+const desktopWhisperInstall = readFileSync(
+  repositoryFile(
+    "crates",
+    "tidebreak-desktop",
+    "src",
+    "whisper_install.rs",
+  ),
+  "utf8",
+);
 const dockerIgnore = readFileSync(
   repositoryFile("deploy", "self-host", "Dockerfile.dockerignore"),
   "utf8",
@@ -851,6 +869,36 @@ test("production secrets remain isolated to the release workflow", () => {
     /\.github\/e2b-cli\/node_modules\/\.bin\/e2b --version/,
   );
   assert.doesNotMatch(publishJob, /npm install|@latest/);
+});
+
+test("desktop voice delegates whisper.cpp to the verified helper", () => {
+  assert.match(desktopHost, /^mod whisper_install;$/m);
+  assert.match(
+    desktopVoice,
+    /crate::whisper_install::ensure_helper\(&self\.data_dir\)/,
+  );
+  assert.match(desktopVoice, /tokio::process::Command::new\(helper\)/);
+  assert.doesNotMatch(desktopVoice, /\bWhisperContext\b|whisper_rs/);
+  assert.doesNotMatch(desktopCargo, /^whisper-rs\s*=/m);
+  assert.match(desktopCargo, /^minisign-verify\.workspace = true$/m);
+  assert.match(
+    desktopWhisperInstall,
+    /sha256_hex_of_file\(&binary\).*marker\.binary_sha256/s,
+  );
+
+  const releaseWindows = workflowJob(workflows["release.yml"], "build_windows");
+  const warmWindows = workflows["cache-windows.yml"];
+  for (const job of [releaseWindows, warmWindows]) {
+    assert.doesNotMatch(job, /Use clang-cl for Windows ARM native code/);
+    assert.doesNotMatch(job, /CMAKE_GENERATOR=Ninja/);
+  }
+
+  const helperBuild = workflowJob(
+    workflows["publish-whisper-helper.yml"],
+    "build",
+  );
+  assert.match(helperBuild, /Use clang-cl for Windows ARM native code/);
+  assert.match(helperBuild, /CMAKE_GENERATOR=Ninja/);
 });
 
 test("dependency policy covers advisories, licenses, sources, and the locked graph", () => {
