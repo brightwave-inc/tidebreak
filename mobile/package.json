@@ -1,0 +1,42 @@
+{
+  "name": "tidebreak-mobile",
+  "private": true,
+  "version": "0.0.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.90.21",
+    "expo": "55.0.30",
+    "expo-constants": "55.0.17",
+    "expo-crypto": "55.0.19",
+    "expo-linking": "55.0.17",
+    "expo-router": "55.0.18",
+    "expo-secure-store": "55.0.18",
+    "expo-status-bar": "55.0.6",
+    "expo-web-browser": "55.0.20",
+    "js-sha256": "1.0.0",
+    "nativewind": "4.2.1",
+    "react": "19.2.8",
+    "react-native": "0.83.1",
+    "react-native-gesture-handler": "2.30.0",
+    "react-native-reanimated": "4.2.1",
+    "react-native-safe-area-context": "5.6.2",
+    "react-native-screens": "4.23.0",
+    "zustand": "5.0.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "eslint": "9.39.1",
+    "tailwindcss": "3.4.17",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.4",
+    "vitest": "3.2.4"
+  }
+}
