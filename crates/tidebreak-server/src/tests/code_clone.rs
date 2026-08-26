@@ -14,10 +14,12 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use crate::code::clone::CloneRequest;
 use crate::code::CodeRuntime;
 use crate::obo_gateway::test_support::FakeLender;
 use crate::obo_gateway::{GitCredentialLender, GitForgeError};
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
+use tidebreak_core::OwnerId;
 use tidebreak_harness::AdapterRegistry;
 
 async fn code_app() -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
@@ -247,6 +249,25 @@ async fn clone_rejects_bad_url_existing_target_and_unusable_parent() {
     let parent = dir.path().join("checkouts");
     std::fs::create_dir_all(&parent).unwrap();
 
+    for unsafe_url in [
+        "https://ghp_secret@github.com/acme/demo.git",
+        "https://github.com/acme/demo.git?access_token=secret",
+    ] {
+        let response = client
+            .post(format!("http://{addr}/code/repos/clone"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "url": unsafe_url,
+                "parent_dir": parent,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["kind"], "clone_credentials_in_url");
+    }
+
     let missing = client
         .post(format!("http://{addr}/code/repos/clone"))
         .bearer_auth(&token)
@@ -361,6 +382,31 @@ exit 3
     assert_eq!(finished["done"], true, "{finished}");
     assert!(finished["error"].is_null(), "{finished}");
     assert!(finished["repo_id"].is_string());
+}
+
+#[tokio::test]
+async fn a_hosted_member_cannot_clone_a_local_transport() {
+    let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
+    let (_router, _token, runtime, dir) =
+        code_app_with(Some(lender as Arc<dyn GitCredentialLender>)).await;
+    let origin = init_bare_origin(dir.path());
+    let parent = dir.path().join("checkouts");
+    std::fs::create_dir_all(&parent).unwrap();
+
+    let error = runtime
+        .start_clone(
+            &OwnerId::new("user:alice").unwrap(),
+            CloneRequest {
+                url: Some(origin.display().to_string()),
+                github: None,
+                parent_dir: Some(parent.display().to_string()),
+                name: Some("private".to_owned()),
+            },
+        )
+        .await
+        .expect_err("a hosted clone must not read a local path");
+    assert_eq!(error.kind(), "clone_transport_refused");
+    assert!(!parent.join("private").exists());
 }
 
 #[tokio::test]
