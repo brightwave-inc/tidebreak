@@ -187,7 +187,7 @@ async fn rebuild_sqlite_code_workspace_for_archiving_inner(
     manager: &SchemaManager<'_>,
     _fail_after_drop_for_test: bool,
 ) -> Result<(), DbErr> {
-    use sea_orm::sqlx::{Acquire as _, Executor as _};
+    use sea_orm::sqlx::Acquire as _;
     use sea_orm::DatabaseExecutor;
 
     let DatabaseExecutor::Connection(database) = manager.get_connection() else {
