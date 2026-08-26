@@ -686,24 +686,34 @@ impl CodeRuntime {
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
         self.ensure_stall_sweep();
         let mut actions = Vec::new();
-        for pending in list_pending_permission_mode_changes(&self.db).await? {
-            let reason = FenceReason::ProbeAmbiguous {
-                detail: format!(
-                    "permission mode change from {} to {} stopped before revision {} committed",
-                    pending.intent.previous_mode,
-                    pending.intent.requested_mode,
-                    pending.intent.revision
-                ),
-            };
-            if let Some(fenced) =
-                fence_permission_mode_change(&self.db, &pending.intent, &reason).await?
-            {
-                super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
-                actions.push(RecoveryAction::Fenced {
-                    session: fenced.id.to_string(),
-                });
-            } else {
-                let _ = discard_permission_mode_change(&self.db, &pending.intent).await?;
+        let mut recovery_owners = list_sessions_all_owners(&self.db)
+            .await?
+            .into_iter()
+            .map(|session| session.owner)
+            .collect::<Vec<_>>();
+        recovery_owners.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        recovery_owners.dedup();
+        for owner in &recovery_owners {
+            for pending in list_pending_permission_mode_changes(&self.db, owner).await? {
+                let reason = FenceReason::ProbeAmbiguous {
+                    detail: format!(
+                        "permission mode change from {} to {} stopped before revision {} committed",
+                        pending.intent.previous_mode,
+                        pending.intent.requested_mode,
+                        pending.intent.revision
+                    ),
+                };
+                if let Some(fenced) =
+                    fence_permission_mode_change(&self.db, owner, &pending.intent, &reason).await?
+                {
+                    super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
+                    actions.push(RecoveryAction::Fenced {
+                        session: fenced.id.to_string(),
+                    });
+                } else {
+                    let _ =
+                        discard_permission_mode_change(&self.db, owner, &pending.intent).await?;
+                }
             }
         }
         actions.extend(
@@ -3731,7 +3741,7 @@ impl CodeRuntime {
         let caps = adapter.capabilities(&probe);
         refuse_unhonored_mode(session.harness_kind, mode, &caps)?;
 
-        let intent = begin_permission_mode_change(&self.db, &session, mode)
+        let intent = begin_permission_mode_change(&self.db, owner, &session, mode)
             .await?
             .ok_or_else(|| {
                 ServerError::conflict_kind(
@@ -3746,11 +3756,11 @@ impl CodeRuntime {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                match cancel_permission_mode_change(&self.db, &intent).await {
+                match cancel_permission_mode_change(&self.db, owner, &intent).await {
                     Ok(true) => return Err(error),
                     Ok(false) => {
                         self.retire_permission_mode_worker(&intent).await;
-                        let _ = discard_permission_mode_change(&self.db, &intent).await;
+                        let _ = discard_permission_mode_change(&self.db, owner, &intent).await;
                     }
                     Err(cancel_error) => {
                         self.retire_permission_mode_worker(&intent).await;
@@ -3766,7 +3776,7 @@ impl CodeRuntime {
         };
 
         if let LivePermissionModeOutcome::Acknowledged(change) = live {
-            return match confirm_permission_mode_change(&self.db, &intent).await {
+            return match confirm_permission_mode_change(&self.db, owner, &intent).await {
                 Ok(true) => {
                     if change
                         .settlement
@@ -3790,7 +3800,7 @@ impl CodeRuntime {
                 }
                 Ok(false) => {
                     let fenced = self
-                        .stop_and_fence_permission_mode_change(&intent, change)
+                        .stop_and_fence_permission_mode_change(owner, &intent, change)
                         .await?;
                     if fenced.is_some() {
                         Err(ServerError::conflict_kind(
@@ -3806,7 +3816,7 @@ impl CodeRuntime {
                 }
                 Err(error) => {
                     if let Err(fence_error) = self
-                        .stop_and_fence_permission_mode_change(&intent, change)
+                        .stop_and_fence_permission_mode_change(owner, &intent, change)
                         .await
                     {
                         tracing::warn!(
@@ -3826,18 +3836,18 @@ impl CodeRuntime {
         // back running the old one while the record claimed the new one.
         if !adapter.relaunch_composes_permission_mode() && session.harness_resume_ref.is_some() {
             let cancelled = matches!(
-                cancel_permission_mode_change(&self.db, &intent).await,
+                cancel_permission_mode_change(&self.db, owner, &intent).await,
                 Ok(true)
             );
             if !cancelled {
                 self.retire_permission_mode_worker(&intent).await;
                 let reason = permission_mode_fence_reason(&intent);
                 if let Some(fenced) =
-                    fence_permission_mode_change(&self.db, &intent, &reason).await?
+                    fence_permission_mode_change(&self.db, owner, &intent, &reason).await?
                 {
                     super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
                 } else {
-                    let _ = discard_permission_mode_change(&self.db, &intent).await?;
+                    let _ = discard_permission_mode_change(&self.db, owner, &intent).await?;
                 }
             }
             return Err(ServerError::conflict_kind(
@@ -3863,11 +3873,12 @@ impl CodeRuntime {
         if let Some(handle) = handle {
             if !Self::shut_down_worker(id, handle).await {
                 let reason = permission_mode_fence_reason(&intent);
-                let fenced = fence_permission_mode_change(&self.db, &intent, &reason).await?;
+                let fenced =
+                    fence_permission_mode_change(&self.db, owner, &intent, &reason).await?;
                 if let Some(fenced) = fenced {
                     super::attention::emit_digest(&self.db, &self.bus, &fenced).await;
                 } else {
-                    let _ = discard_permission_mode_change(&self.db, &intent).await?;
+                    let _ = discard_permission_mode_change(&self.db, owner, &intent).await?;
                 }
                 return Err(ServerError::conflict_kind(
                     "permission_mode_unconfirmed",
@@ -3884,8 +3895,8 @@ impl CodeRuntime {
             intent.worker_epoch,
         )
         .await;
-        if !confirm_permission_mode_change(&self.db, &intent).await? {
-            let _ = discard_permission_mode_change(&self.db, &intent).await;
+        if !confirm_permission_mode_change(&self.db, owner, &intent).await? {
+            let _ = discard_permission_mode_change(&self.db, owner, &intent).await;
             return Err(ServerError::conflict_kind(
                 "permission_mode_changed",
                 "the session changed while its worker stopped for the permission mode update",
@@ -3940,6 +3951,7 @@ impl CodeRuntime {
 
     async fn stop_and_fence_permission_mode_change(
         &self,
+        owner: &OwnerId,
         intent: &PermissionModeChangeIntent,
         change: LivePermissionModeChange,
     ) -> Result<Option<CodeSession>, ServerError> {
@@ -3956,11 +3968,11 @@ impl CodeRuntime {
         };
         let _ = Self::shut_down_worker(intent.session_id, handle).await;
         let reason = permission_mode_fence_reason(intent);
-        let fenced = fence_permission_mode_change(&self.db, intent, &reason).await?;
+        let fenced = fence_permission_mode_change(&self.db, owner, intent, &reason).await?;
         if let Some(fenced) = &fenced {
             super::attention::emit_digest(&self.db, &self.bus, fenced).await;
         } else {
-            let _ = discard_permission_mode_change(&self.db, intent).await;
+            let _ = discard_permission_mode_change(&self.db, owner, intent).await;
         }
         Ok(fenced)
     }
