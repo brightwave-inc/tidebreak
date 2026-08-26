@@ -27,6 +27,7 @@ pub(crate) struct ScriptedApprover {
     parked: std::sync::Mutex<Option<oneshot::Sender<ApprovalDecision>>>,
     staged: std::sync::Mutex<Option<ApprovalDecision>>,
     observed: std::sync::Mutex<Vec<(String, ApprovalDecision)>>,
+    delivery_error: std::sync::Mutex<Option<String>>,
 }
 
 impl ScriptedApprover {
@@ -49,13 +50,21 @@ impl ScriptedApprover {
 impl ApprovalCompleter for ScriptedApprover {
     async fn complete(
         &self,
-        call_id: &str,
+        approval: &HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
+        if let Some(error) = self
+            .delivery_error
+            .lock()
+            .expect("scripted approval error")
+            .clone()
+        {
+            return Err(HarnessError::Other(error));
+        }
         self.observed
             .lock()
             .expect("scripted observed")
-            .push((call_id.to_owned(), decision.clone()));
+            .push((approval.call_id.clone(), decision.clone()));
         if let Some(tx) = self.parked.lock().expect("scripted park").take() {
             let _ = tx.send(decision);
         } else {
@@ -108,6 +117,10 @@ pub(crate) struct ScriptedAdapter {
     lost_resume: Option<String>,
     park_approvals: bool,
     approver: Arc<ScriptedApprover>,
+    /// Delay the native acknowledgement after the scripted engine accepts
+    /// an approval. Tests use this to exercise shutdown and ambiguous-delivery
+    /// races without changing the approval itself.
+    approval_ack_delay: Duration,
     probes: Arc<AtomicU64>,
     /// Approval endpoint each launch was handed, `None` when it was handed no
     /// channel at all. Lets a test see how a session was wired.
@@ -141,6 +154,7 @@ impl ScriptedAdapter {
             lost_resume: None,
             park_approvals: true,
             approver: Arc::new(ScriptedApprover::default()),
+            approval_ack_delay: Duration::ZERO,
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -174,6 +188,24 @@ impl ScriptedAdapter {
     pub(crate) fn with_approvals(mut self, level: CapLevel) -> Self {
         self.structured_approvals = level;
         self.auto_mode = level;
+        self
+    }
+
+    /// Make the native approval channel reject every decision.
+    #[allow(dead_code)]
+    pub(crate) fn with_approval_delivery_error(self, detail: impl Into<String>) -> Self {
+        *self
+            .approver
+            .delivery_error
+            .lock()
+            .expect("scripted approval error") = Some(detail.into());
+        self
+    }
+
+    /// Accept the approval, then delay the native acknowledgement.
+    #[allow(dead_code)]
+    pub(crate) fn with_approval_ack_delay(mut self, delay: Duration) -> Self {
+        self.approval_ack_delay = delay;
         self
     }
 
@@ -370,6 +402,7 @@ impl HarnessAdapter for ScriptedAdapter {
             unrecognized: AtomicU64::new(0),
             unrecognized_per_turn: self.unrecognized_per_turn,
             approver: self.approver.clone(),
+            approval_ack_delay: self.approval_ack_delay,
             live_mode_switch: self.live_mode_switch,
             posture_fixed: self.posture_fixed,
             turns: self.turns.clone(),
@@ -399,6 +432,7 @@ struct ScriptedSession {
     unrecognized: AtomicU64,
     unrecognized_per_turn: u64,
     approver: Arc<ScriptedApprover>,
+    approval_ack_delay: Duration,
     live_mode_switch: bool,
     posture_fixed: bool,
     /// Shared with the adapter so a test can read what the engine was told
@@ -511,7 +545,11 @@ impl HarnessSession for ScriptedSession {
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        self.approver.complete(&approval.call_id, decision).await
+        self.approver.complete(&approval, decision).await?;
+        if !self.approval_ack_delay.is_zero() {
+            tokio::time::sleep(self.approval_ack_delay).await;
+        }
+        Ok(())
     }
 
     async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), HarnessError> {

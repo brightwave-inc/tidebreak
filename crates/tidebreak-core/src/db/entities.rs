@@ -1964,6 +1964,12 @@ pub mod code_approval {
         pub kind: Json,
         #[sea_orm(column_type = "JsonBinary")]
         pub harness_raw: Json,
+        pub native_call_id: Option<String>,
+        pub server_capability: Option<String>,
+        pub request_sha256: Option<String>,
+        pub worker_epoch: Option<i64>,
+        pub decision_claim: Option<Uuid>,
+        pub claimed_at: Option<DateTimeUtc>,
         pub state: String,
         pub feedback: Option<String>,
         pub requested_at: DateTimeUtc,

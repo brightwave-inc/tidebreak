@@ -842,10 +842,7 @@ impl HarnessSession for ClaudeSession {
                 "this session has no approval channel".into(),
             ));
         };
-        channel
-            .completer
-            .complete(&approval.call_id, decision)
-            .await
+        channel.completer.complete(&approval, decision).await
     }
 
     /// Stop the running turn without ending the session.
@@ -1147,7 +1144,7 @@ mod tests {
     impl crate::ApprovalCompleter for NoopCompleter {
         async fn complete(
             &self,
-            _call_id: &str,
+            _approval: &crate::HarnessApprovalRef,
             _decision: crate::ApprovalDecision,
         ) -> Result<(), crate::HarnessError> {
             Ok(())

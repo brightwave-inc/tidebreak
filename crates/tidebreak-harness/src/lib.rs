@@ -164,11 +164,48 @@ pub enum HarnessEvent {
     },
 }
 
+/// Server-issued binding for one exact parked approval.
+///
+/// Claude's permission bridge receives engine-controlled call IDs over MCP.
+/// The server adds this binding before it persists the approval, so a repeated
+/// call ID cannot redirect a later decision to another session or request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HarnessApprovalCapability {
+    /// Opaque server-issued token. The server uses the durable approval ID.
+    pub token: String,
+    /// Durable owner whose session requested the approval.
+    pub owner_id: String,
+    /// Durable approval row this capability resolves.
+    pub approval_id: String,
+    /// Session the permission request arrived on.
+    pub session_id: String,
+    /// Turn that was running when the permission request arrived.
+    pub turn_id: String,
+    /// Worker epoch that owned the native request.
+    pub spawn_epoch: i64,
+    /// SHA-256 of the exact permission request.
+    pub request_sha256: String,
+}
+
 /// Engine-native handle for a parked approval.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HarnessApprovalRef {
     /// Call or request id the engine will recognize on decide.
     pub call_id: String,
+    /// Exact server binding for bridges whose engine IDs are not unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<HarnessApprovalCapability>,
+}
+
+impl HarnessApprovalRef {
+    /// Create an engine-native reference before a server binding exists.
+    #[must_use]
+    pub fn engine(call_id: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            capability: None,
+        }
+    }
 }
 
 /// Decision returned through the engine's native approval channel.
@@ -250,9 +287,12 @@ pub enum TurnOutcome {
 /// [`HarnessSession::decide`] can run while `run_turn` is blocked on the child.
 #[async_trait]
 pub trait ApprovalCompleter: Send + Sync {
-    /// Finish the native channel for `call_id`.
-    async fn complete(&self, call_id: &str, decision: ApprovalDecision)
-        -> Result<(), HarnessError>;
+    /// Finish the exact native channel this reference identifies.
+    async fn complete(
+        &self,
+        approval: &HarnessApprovalRef,
+        decision: ApprovalDecision,
+    ) -> Result<(), HarnessError>;
 }
 
 /// Loopback approval-channel wiring supplied by the server layer.
@@ -645,6 +685,15 @@ pub enum HarnessError {
     /// The native engine refused a steer for the currently active turn.
     #[error("the engine refused mid-turn steering: {0}")]
     SteeringRejected(String),
+    /// The server can no longer prove that a native approval waiter exists.
+    #[error("the approval request is no longer waiting: {0}")]
+    ApprovalWaiterMissing(String),
+    /// The waiter received the decision, but its acknowledgement was lost.
+    #[error("the approval decision may have been delivered: {0}")]
+    ApprovalAcknowledgementLost(String),
+    /// The server-issued approval binding does not match the parked request.
+    #[error("the approval request binding does not match: {0}")]
+    ApprovalBindingMismatch(String),
     /// I/O or spawn failure.
     #[error("engine io: {0}")]
     Io(#[from] std::io::Error),

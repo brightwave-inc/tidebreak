@@ -8,15 +8,13 @@
 #[cfg(unix)]
 use std::io::ErrorKind;
 
-use chrono::Utc;
 use tidebreak_core::db::code::{
-    append_event, clear_session_harness_resume_ref, get_open_turn,
-    list_sessions_by_lifecycle_all_owners, replace_session_attention, save_session, save_turn,
-    set_session_subagents,
+    clear_session_harness_resume_ref, list_sessions_by_lifecycle_all_owners,
+    recover_interrupted_session, replace_session_attention, save_session, set_session_subagents,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeEvent, CodeSession, CodeSessionLifecycle,
-    CodeSubagentStatus, CodeTurnStatus, DbStore, FenceReason,
+    Attention, AttentionSource, AttentionState, CodeSession, CodeSessionLifecycle,
+    CodeSubagentStatus, DbStore, FenceReason,
 };
 
 use super::attention::{emit_digest, persist_session, replace_attention};
@@ -161,38 +159,18 @@ async fn recover_one(
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
     let Some(pid) = session.child_pid else {
         // No recorded pid: treat as dead. Never invent a pid to probe.
-        interrupt_open_turn(store, &session).await?;
-        settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
-        session.lifecycle = CodeSessionLifecycle::Idle;
-        session.child_pid = None;
-        replace_attention(
-            &mut session,
-            Attention::needs_you(
-                "session recovered after the engine process exited",
-                AttentionSource::Lifecycle,
-            ),
-            false,
-        );
-        persist_recovery_session(store, bus, &session).await?;
+        let Some(session) = recover_dead_worker(store, bus, &session).await? else {
+            return Ok(None);
+        };
         return Ok(Some(RecoveryAction::Interrupted {
             session: session.id.to_string(),
         }));
     };
     match probe(pid) {
         PidLiveness::Dead => {
-            interrupt_open_turn(store, &session).await?;
-            settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
-            session.lifecycle = CodeSessionLifecycle::Idle;
-            session.child_pid = None;
-            replace_attention(
-                &mut session,
-                Attention::needs_you(
-                    "session recovered after the engine process exited",
-                    AttentionSource::Lifecycle,
-                ),
-                false,
-            );
-            persist_recovery_session(store, bus, &session).await?;
+            let Some(session) = recover_dead_worker(store, bus, &session).await? else {
+                return Ok(None);
+            };
             Ok(Some(RecoveryAction::Interrupted {
                 session: session.id.to_string(),
             }))
@@ -219,30 +197,21 @@ async fn recover_one(
     }
 }
 
-async fn interrupt_open_turn(
+async fn recover_dead_worker(
     store: &DbStore,
+    bus: &CodeEventBus,
     session: &CodeSession,
-) -> Result<(), tidebreak_core::AgentError> {
-    if let Some(mut turn) = get_open_turn(store, &session.owner, session.id).await? {
-        turn.status = CodeTurnStatus::Interrupted;
-        turn.ended_at = Some(Utc::now());
-        save_turn(store, &session.owner, &turn).await?;
-        match append_event(
-            store,
-            &session.owner,
-            session.id,
-            session.spawn_epoch,
-            &CodeEvent::TurnInterrupted,
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(tidebreak_core::db::code::CodeJournalError::StaleSpawnEpoch { .. }) => {}
-            Err(tidebreak_core::db::code::CodeJournalError::SessionNotFound { .. }) => {}
-            Err(tidebreak_core::db::code::CodeJournalError::Store(err)) => return Err(err),
-        }
+) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
+    let Some(recovered) =
+        recover_interrupted_session(store, &session.owner, session.id, session.spawn_epoch).await?
+    else {
+        return Ok(None);
+    };
+    for event in recovered.events {
+        bus.publish(session.id, event);
     }
-    Ok(())
+    emit_digest(store, bus, &recovered.session).await;
+    Ok(Some(recovered.session))
 }
 
 /// Existence probe of a pid that was recorded at spawn.
@@ -332,13 +301,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tidebreak_core::db::code::{
-        get_session, get_turn, insert_repo, insert_session, insert_turn, insert_workspace,
-        set_session_subagents,
+        get_approval, get_session, get_turn, insert_approval, insert_repo, insert_session,
+        insert_turn, insert_workspace, list_events, set_session_subagents, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
-        Attention, CodeRepo, CodeSessionId, CodeSessionKind, CodeSubagentSummary, CodeTurn,
-        CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId,
-        WorkspaceId,
+        ApprovalDecisionKind, Attention, CodeApproval, CodeApprovalId, CodeApprovalKind,
+        CodeApprovalState, CodeEvent, CodeRepo, CodeSessionId, CodeSessionKind,
+        CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
+        CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
@@ -491,6 +461,32 @@ mod tests {
     async fn dead_pid_closes_the_open_turn_as_interrupted() {
         let (_dir, store, session_id, turn_id) = seeded_running(Some(9_999_991)).await;
         seed_running_subagent(&store, session_id).await;
+        let approval_id = CodeApprovalId::new();
+        insert_approval(
+            &store,
+            &tidebreak_core::OwnerId::local(),
+            &CodeApproval {
+                id: approval_id,
+                session_id,
+                turn_id,
+                kind: CodeApprovalKind::Other {
+                    summary: "run command".into(),
+                },
+                harness_raw: serde_json::json!({"call_id":"toolu_recovery"}),
+                native_call_id: Some("toolu_recovery".into()),
+                server_capability: Some("cap_recovery".into()),
+                request_sha256: Some("sha_recovery".into()),
+                worker_epoch: Some(1),
+                decision_claim: Some(uuid::Uuid::new_v4()),
+                claimed_at: Some(now()),
+                state: CodeApprovalState::Pending,
+                feedback: None,
+                requested_at: now(),
+                decided_at: None,
+            },
+        )
+        .await
+        .unwrap();
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, |_| PidLiveness::Dead)
             .await
@@ -516,6 +512,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        let approval = get_approval(&store, &tidebreak_core::OwnerId::local(), approval_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.state, CodeApprovalState::Abandoned);
+        assert!(approval.decision_claim.is_none());
+        assert!(approval.decided_at.is_some());
+        let events = list_events(
+            &store,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+            0,
+            MAX_REPLAY_EVENTS,
+        )
+        .await
+        .unwrap()
+        .events;
+        assert!(matches!(&events[0].event, CodeEvent::TurnInterrupted));
+        assert!(matches!(
+            &events[1].event,
+            CodeEvent::ApprovalResolved {
+                approval_id: resolved,
+                decision: ApprovalDecisionKind::Abandoned,
+            } if *resolved == approval_id
+        ));
         assert_subagent_failed(&store, session_id).await;
     }
 

@@ -1,7 +1,7 @@
 //! Reconcile approvals whose tool call resolved before anyone decided.
 //!
 //! An approval is parked on the engine's `tool_use_id`, and the same id comes
-//! back on [`CodeEvent::ToolCompleted`]. When a completion arrives for a call
+//! back on [`tidebreak_core::CodeEvent::ToolCompleted`]. When a completion arrives for a call
 //! that still has a pending approval, nobody's decision can reach the engine
 //! any more: the engine timed the call out, denied it itself, or ran it under
 //! a rule of its own. Leaving the row `Pending` would list a request that can
@@ -10,14 +10,16 @@
 //!
 //! So the row moves to [`CodeApprovalState::Abandoned`] and the session
 //! journals an `ApprovalResolved` carrying
-//! [`ApprovalDecisionKind::Abandoned`]. The turn and session boundaries sweep
+//! [`tidebreak_core::ApprovalDecisionKind::Abandoned`]. The turn and session boundaries sweep
 //! the same way, because a tool call that never reports completion must not
 //! leave a row pending forever.
 
-use tidebreak_core::db::code::{list_approvals, list_turns, save_approval};
+use tidebreak_core::db::code::{
+    abandon_pending_approval, abandon_pending_approvals_for_stopped_session, get_session,
+    list_approvals, list_turns,
+};
 use tidebreak_core::{
-    ApprovalDecisionKind, Attention, AttentionSource, CodeApproval, CodeApprovalState, CodeEvent,
-    CodeSessionId, CodeTurnStatus, DbStore, OwnerId,
+    CodeApproval, CodeApprovalState, CodeSessionId, CodeTurnStatus, DbStore, OwnerId,
 };
 
 use super::bus::CodeEventBus;
@@ -28,11 +30,13 @@ use super::bus::CodeEventBus;
 /// carries it — the same field [`super::runtime::CodeRuntime::decide_approval`]
 /// reads.
 fn call_id_of(approval: &CodeApproval) -> Option<&str> {
-    approval
-        .harness_raw
-        .get("call_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|call_id| !call_id.is_empty())
+    approval.native_call_id.as_deref().or_else(|| {
+        approval
+            .harness_raw
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|call_id| !call_id.is_empty())
+    })
 }
 
 /// Abandon the pending approval parked on `call_id`, if there is one.
@@ -47,7 +51,7 @@ pub(crate) async fn abandon_for_call(
     if call_id.is_empty() {
         return;
     }
-    let doomed: Vec<CodeApproval> = pending(db, owner, session_id)
+    let doomed: Vec<CodeApproval> = pending_for_epoch(db, owner, session_id, spawn_epoch)
         .await
         .into_iter()
         .filter(|approval| call_id_of(approval) == Some(call_id))
@@ -65,7 +69,7 @@ pub(crate) async fn abandon_for_settled_turns(
     session_id: CodeSessionId,
     spawn_epoch: i64,
 ) {
-    let waiting = pending(db, owner, session_id).await;
+    let waiting = pending_for_epoch(db, owner, session_id, spawn_epoch).await;
     if waiting.is_empty() {
         return;
     }
@@ -97,6 +101,25 @@ pub(crate) async fn abandon_for_ended_session(
     abandon(db, bus, owner, session_id, spawn_epoch, doomed).await;
 }
 
+/// Settle every approval whose native waiter disappeared with the process.
+pub(crate) async fn abandon_for_restart(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+) {
+    let now = chrono::Utc::now();
+    let abandoned =
+        abandon_pending_approvals_for_stopped_session(db, owner, session_id, spawn_epoch, now)
+            .await
+            .unwrap_or_default();
+    for settlement in abandoned {
+        bus.publish(session_id, settlement.event);
+    }
+    refresh_attention_if_clear(db, bus, owner, session_id).await;
+}
+
 async fn pending(db: &DbStore, owner: &OwnerId, session_id: CodeSessionId) -> Vec<CodeApproval> {
     list_approvals(
         db,
@@ -106,6 +129,19 @@ async fn pending(db: &DbStore, owner: &OwnerId, session_id: CodeSessionId) -> Ve
     )
     .await
     .unwrap_or_default()
+}
+
+async fn pending_for_epoch(
+    db: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+) -> Vec<CodeApproval> {
+    pending(db, owner, session_id)
+        .await
+        .into_iter()
+        .filter(|approval| approval.worker_epoch == Some(spawn_epoch))
+        .collect()
 }
 
 /// Mark each row abandoned and journal the resolution.
@@ -125,39 +161,40 @@ async fn abandon(
         return;
     }
     let now = chrono::Utc::now();
-    for mut approval in doomed {
-        approval.state = CodeApprovalState::Abandoned;
-        approval.decided_at = Some(now);
-        match save_approval(db, owner, &approval).await {
-            Ok(true) => {}
+    for approval in doomed {
+        let worker_epoch = approval.worker_epoch.unwrap_or(spawn_epoch);
+        match abandon_pending_approval(db, owner, approval.id, session_id, worker_epoch, now).await
+        {
+            Ok(Some(settlement)) => bus.publish(session_id, settlement.event),
             _ => continue,
         }
-        // Boxed because the turn-end sweep is itself reached from the
-        // journal path: without it the two futures would size each other.
-        let _ = Box::pin(super::session_worker::journal_event(
-            db,
-            bus,
-            owner,
-            session_id,
-            spawn_epoch,
-            CodeEvent::ApprovalResolved {
-                approval_id: approval.id,
-                decision: ApprovalDecisionKind::Abandoned,
-            },
-        ))
-        .await;
     }
-    // Nothing is waiting on the user any more. Mirrors the decision path:
-    // the turn boundary overwrites this with its own verdict a moment later.
-    if pending(db, owner, session_id).await.is_empty() {
-        let _ = super::attention::apply_attention(
+    // Nothing is waiting on the user any more. Recompute instead of assuming
+    // the session is working: this path also runs at turn, end, and recovery
+    // boundaries.
+    refresh_attention_if_clear(db, bus, owner, session_id).await;
+}
+
+async fn refresh_attention_if_clear(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) {
+    if !pending(db, owner, session_id).await.is_empty() {
+        return;
+    }
+    if let Ok(Some(session)) = get_session(db, owner, session_id).await {
+        if let Ok(next) = super::attention::compute_attention(
             db,
             bus,
-            owner,
-            session_id,
-            Attention::working(AttentionSource::Lifecycle),
-            false,
+            &session,
+            super::attention::ComputeOpts::default(),
         )
-        .await;
+        .await
+        {
+            let _ =
+                super::attention::apply_attention(db, bus, owner, session_id, next, false).await;
+        }
     }
 }

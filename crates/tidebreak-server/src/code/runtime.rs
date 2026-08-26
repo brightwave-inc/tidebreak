@@ -11,12 +11,12 @@ use tokio::sync::oneshot;
 use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
-    arm_trigger, delete_trigger, delete_workspace, get_approval, get_open_turn, get_repo,
-    get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
-    insert_workspace, list_approvals, list_events, list_repos, list_sessions,
-    list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo, list_turns,
-    list_workspaces, mark_repo_removed, save_approval, save_repo, save_session, save_workspace,
-    update_trigger_enabled, MAX_REPLAY_EVENTS,
+    abandon_pending_approval, arm_trigger, claim_approval, delete_trigger, delete_workspace,
+    get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_workspace,
+    insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_repos,
+    list_sessions, list_sessions_all_owners, list_sessions_for_workspace, list_triggers_for_repo,
+    list_turns, list_workspaces, mark_repo_removed, save_repo, save_session, save_workspace,
+    settle_approval_claim, update_trigger_enabled, ClaimedApprovalSettlement, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -28,7 +28,8 @@ use tidebreak_core::{
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
-    HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HostEnv, SessionSpec,
+    HarnessApprovalCapability, HarnessApprovalRef, HarnessError, HarnessEventSink, HarnessProbe,
+    HostEnv, SessionSpec,
 };
 
 use super::approval_bridge::ApprovalBridge;
@@ -46,8 +47,8 @@ use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, Worksp
 use super::harness_install::HarnessInstallJobs;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
-    attach_engine, journal_event, spawn_session_worker, wake_queue, AttachmentStore,
-    TriggerDeliveryClaim, WorkerCommand, WorkerError, WorkerHandle,
+    attach_engine, spawn_session_worker, wake_queue, AttachmentStore, TriggerDeliveryClaim,
+    WorkerCommand, WorkerError, WorkerHandle,
 };
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
@@ -587,6 +588,7 @@ impl CodeRuntime {
     /// removed the transient bearer token and capfile.
     fn revoke_browser_session(&self, session: &CodeSession) {
         self.browser_tokens.revoke(session.id);
+        self.approvals.revoke_session(session.id);
         if let Some(runtime) = &self.browser_runtime {
             let scope = crate::code::browser_runtime::BrowserRuntimeScope {
                 owner: session.owner.clone(),
@@ -597,15 +599,16 @@ impl CodeRuntime {
         }
     }
 
-    /// Revoke only the outgoing worker's bearer token and capfile.
+    /// Revoke only the outgoing worker's transient browser and approval channels.
     ///
     /// Reap and launch-failure paths replace a worker while preserving the
     /// same logical code session. Its native browser capability therefore
     /// stays live and can be reused by the fresh channel. Only terminal end
     /// paths call [`Self::revoke_browser_session`] and plant the adapter's
     /// enduring tombstone.
-    fn revoke_browser_channel(&self, session_id: CodeSessionId) {
+    fn revoke_worker_channels(&self, session_id: CodeSessionId) {
         self.browser_tokens.revoke(session_id);
+        self.approvals.revoke_session(session_id);
     }
 
     pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
@@ -613,6 +616,19 @@ impl CodeRuntime {
         let actions = recovery::recover_running_sessions(&self.db, &self.bus)
             .await
             .map_err(ServerError::from)?;
+        let recovered_sessions = list_sessions_all_owners(&self.db).await?;
+        for session in &recovered_sessions {
+            super::approval_sweep::abandon_for_restart(
+                &self.db,
+                &self.bus,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+            )
+            .await;
+            self.refresh_approval_attention(&session.owner, session.id)
+                .await;
+        }
         // Do not sweep repository-wide checkpoint refs here. Another
         // Tidebreak profile can manage the same repository from a separate
         // database, so this process cannot identify global orphans safely.
@@ -620,8 +636,7 @@ impl CodeRuntime {
         // that is still usable so submit_turn is not stuck after a restart.
         // Concurrently: each attach launches an engine child, so a serial pass
         // charged app launch the sum of every restored session.
-        let resumable: Vec<CodeSession> = list_sessions_all_owners(&self.db)
-            .await?
+        let resumable: Vec<CodeSession> = recovered_sessions
             .into_iter()
             .filter(|session| {
                 !matches!(
@@ -3117,7 +3132,14 @@ impl CodeRuntime {
             ));
         }
         let handle = self.workers.lock().expect("code workers").remove(&id);
-        self.revoke_browser_channel(id);
+        let decision_gate = handle
+            .as_ref()
+            .map(|handle| handle.approval_decisions.clone());
+        let _decision_guard = match decision_gate {
+            Some(gate) => Some(gate.lock_owned().await),
+            None => None,
+        };
+        self.revoke_worker_channels(id);
         let session = match handle {
             // The outgoing worker writes its own final state as it stops, and
             // the new spawn must not be started against a row it is still
@@ -3128,6 +3150,14 @@ impl CodeRuntime {
             }
             None => session,
         };
+        super::approval_sweep::abandon_for_restart(
+            &self.db,
+            &self.bus,
+            owner,
+            session.id,
+            session.spawn_epoch,
+        )
+        .await;
         let session = recovery::reap_session(&self.db, &self.bus, session)
             .await
             .map_err(ServerError::from)?;
@@ -3212,12 +3242,27 @@ impl CodeRuntime {
         }
 
         let handle = self.workers.lock().expect("code workers").remove(&id);
+        let decision_gate = handle
+            .as_ref()
+            .map(|handle| handle.approval_decisions.clone());
+        let _decision_guard = match decision_gate {
+            Some(gate) => Some(gate.lock_owned().await),
+            None => None,
+        };
         if let Some(handle) = handle {
             Self::shut_down_worker(id, handle).await;
         }
-        self.revoke_browser_channel(id);
+        self.revoke_worker_channels(id);
 
         let mut session = self.get_session(owner, id).await?;
+        super::approval_sweep::abandon_for_restart(
+            &self.db,
+            &self.bus,
+            owner,
+            session.id,
+            session.spawn_epoch,
+        )
+        .await;
         let previous = session.permission_mode;
         session.permission_mode = mode;
         save_session(&self.db, &session).await?;
@@ -3554,14 +3599,22 @@ impl CodeRuntime {
             .lock()
             .expect("code workers")
             .remove(&session.id);
+        let decision_gate = handle
+            .as_ref()
+            .map(|handle| handle.approval_decisions.clone());
+        let _decision_guard = match decision_gate {
+            Some(gate) => Some(gate.lock_owned().await),
+            None => None,
+        };
         self.revoke_browser_session(&session);
         session.lifecycle = CodeSessionLifecycle::Ended;
         session.child_pid = None;
         session.fence_reason = None;
         super::attention::persist_session(&self.db, &self.bus, &session).await?;
-        if let Some(handle) = handle {
-            Self::shut_down_worker(session.id, handle).await;
-        }
+        let stopped = match handle {
+            Some(handle) => Self::shut_down_worker(session.id, handle).await,
+            None => true,
+        };
         let mut current = self.get_session(owner, session.id).await?;
         current.lifecycle = CodeSessionLifecycle::Ended;
         current.child_pid = None;
@@ -3572,14 +3625,25 @@ impl CodeRuntime {
                 "the session did not stay ended after the worker stopped",
             ));
         }
-        super::approval_sweep::abandon_for_ended_session(
-            &self.db,
-            &self.bus,
-            owner,
-            current.id,
-            current.spawn_epoch,
-        )
-        .await;
+        if stopped {
+            super::approval_sweep::abandon_for_restart(
+                &self.db,
+                &self.bus,
+                owner,
+                current.id,
+                current.spawn_epoch,
+            )
+            .await;
+        } else {
+            super::approval_sweep::abandon_for_ended_session(
+                &self.db,
+                &self.bus,
+                owner,
+                current.id,
+                current.spawn_epoch,
+            )
+            .await;
+        }
         // Nothing will ever promote an ended session's queued rows; retract
         // them so the queue does not read as pending work forever.
         if let Err(error) =
@@ -3858,6 +3922,13 @@ impl CodeRuntime {
                 .lock()
                 .expect("code workers")
                 .remove(&session.id);
+            let decision_gate = handle
+                .as_ref()
+                .map(|handle| handle.approval_decisions.clone());
+            let _decision_guard = match decision_gate {
+                Some(gate) => Some(gate.lock_owned().await),
+                None => None,
+            };
             self.revoke_browser_session(&session);
             // Mark the row ended before asking the worker to stop. A worker
             // interrupted mid-turn re-reads the row on its way round the loop
@@ -3867,9 +3938,11 @@ impl CodeRuntime {
             session.child_pid = None;
             session.fence_reason = None;
             super::attention::persist_session(&self.db, &self.bus, &session).await?;
-            if let Some(handle) = handle {
-                all_stopped &= Self::shut_down_worker(session.id, handle).await;
-            }
+            let stopped = match handle {
+                Some(handle) => Self::shut_down_worker(session.id, handle).await,
+                None => true,
+            };
+            all_stopped &= stopped;
             // The outgoing worker still holds this epoch, so a persist during
             // the wait can overwrite Ended. Re-assert from a fresh load.
             let mut current = self.get_session(owner, session.id).await?;
@@ -3882,14 +3955,25 @@ impl CodeRuntime {
                     "the session did not stay ended after the worker stopped",
                 ));
             }
-            super::approval_sweep::abandon_for_ended_session(
-                &self.db,
-                &self.bus,
-                owner,
-                current.id,
-                current.spawn_epoch,
-            )
-            .await;
+            if stopped {
+                super::approval_sweep::abandon_for_restart(
+                    &self.db,
+                    &self.bus,
+                    owner,
+                    current.id,
+                    current.spawn_epoch,
+                )
+                .await;
+            } else {
+                super::approval_sweep::abandon_for_ended_session(
+                    &self.db,
+                    &self.bus,
+                    owner,
+                    current.id,
+                    current.spawn_epoch,
+                )
+                .await;
+            }
         }
         Ok(all_stopped)
     }
@@ -3970,7 +4054,12 @@ impl CodeRuntime {
             self.gh_search_path_owned(),
             self.recap_hook(),
         );
-        let approval = self.approval_channel(session.id, session.permission_mode);
+        let approval = self.approval_channel(
+            &attached.owner,
+            attached.id,
+            attached.spawn_epoch,
+            session.permission_mode,
+        );
 
         // Mint a browser channel only when both halves are present: the
         // native BrowserRuntime (the desktop adapter) and the trusted
@@ -4020,7 +4109,7 @@ impl CodeRuntime {
         let engine = match adapter.launch(spec).await {
             Ok(engine) => engine,
             Err(HarnessError::ResumeLost(detail)) => {
-                self.revoke_browser_channel(session.id);
+                self.revoke_worker_channels(session.id);
                 // The engine refused the stored resume ref. Fence with a
                 // reason the UI can explain — the fence drops the dead ref, so
                 // a reap re-attaches with a fresh engine session.
@@ -4039,7 +4128,7 @@ impl CodeRuntime {
                 ));
             }
             Err(err) => {
-                self.revoke_browser_channel(session.id);
+                self.revoke_worker_channels(session.id);
                 return Err(ServerError::internal(format!(
                     "failed to launch engine session: {err}"
                 )));
@@ -4113,6 +4202,7 @@ impl CodeRuntime {
                 commands: handle.commands.clone(),
                 queue: handle.queue.clone(),
                 sink: handle.sink.clone(),
+                approval_decisions: handle.approval_decisions.clone(),
             })
             .ok_or_else(|| {
                 ServerError::conflict_kind(
@@ -4124,29 +4214,22 @@ impl CodeRuntime {
 
     fn approval_channel(
         &self,
+        owner: &OwnerId,
         session_id: CodeSessionId,
+        spawn_epoch: i64,
         mode: PermissionMode,
     ) -> Option<ApprovalChannelSpec> {
+        self.approvals.revoke_session(session_id);
         if !matches!(mode, PermissionMode::Ask | PermissionMode::Auto) {
             return None;
         }
         let base = self.loopback_base.lock().expect("loopback base").clone()?;
-        let token = self.approvals.issue_token(session_id);
+        let token = self.approvals.issue_token(owner, session_id, spawn_epoch);
         Some(ApprovalChannelSpec {
             mcp_endpoint_url: format!("{base}/code/mcp/approval-prompt"),
             token,
             completer: self.approvals.clone(),
         })
-    }
-
-    pub(crate) async fn ingest_harness_event(
-        &self,
-        session_id: CodeSessionId,
-        event: HarnessEvent,
-    ) -> Result<(), ServerError> {
-        let handle = self.require_worker(session_id)?;
-        handle.sink.emit(event).await;
-        Ok(())
     }
 
     pub(crate) async fn list_approvals(
@@ -4168,17 +4251,189 @@ impl CodeRuntime {
             .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))
     }
 
+    pub(crate) async fn record_external_approval(
+        &self,
+        session_id: CodeSessionId,
+        approval_id: CodeApprovalId,
+        approval: &HarnessApprovalRef,
+        raw: &serde_json::Value,
+    ) -> Result<CodeApproval, ServerError> {
+        let capability = approval.capability.as_ref().ok_or_else(|| {
+            ServerError::internal("external approval is missing its server capability")
+        })?;
+        let handle = self.require_worker(session_id)?;
+        if handle.spawn_epoch != capability.spawn_epoch {
+            return Err(ServerError::conflict_kind(
+                "approval_worker_replaced",
+                "the worker that requested this approval is no longer attached",
+            ));
+        }
+        handle
+            .sink
+            .record_external_approval(approval_id, approval, raw)
+            .await
+            .map_err(map_worker)
+    }
+
+    pub(crate) async fn abandon_external_approval(
+        &self,
+        session_id: CodeSessionId,
+        approval_id: CodeApprovalId,
+    ) -> Result<(), ServerError> {
+        let session = tidebreak_core::db::code::get_session_all_owners(&self.db, session_id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("session {session_id} not found")))?;
+        let Some(approval) = get_approval(&self.db, &session.owner, approval_id).await? else {
+            return Ok(());
+        };
+        if approval.session_id != session_id {
+            return Err(ServerError::internal(format!(
+                "approval {approval_id} belongs to a different session"
+            )));
+        }
+        let Some(worker_epoch) = approval.worker_epoch else {
+            return Err(ServerError::internal(format!(
+                "approval {approval_id} has no worker epoch"
+            )));
+        };
+        if let Some(settlement) = abandon_pending_approval(
+            &self.db,
+            &session.owner,
+            approval_id,
+            session_id,
+            worker_epoch,
+            Utc::now(),
+        )
+        .await?
+        {
+            self.bus.publish(session_id, settlement.event);
+            self.refresh_approval_attention(&session.owner, session_id)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn refresh_approval_attention(&self, owner: &OwnerId, session_id: CodeSessionId) {
+        let Ok(Some(session)) = get_session(&self.db, owner, session_id).await else {
+            return;
+        };
+        let Ok(next) = super::attention::compute_attention(
+            &self.db,
+            &self.bus,
+            &session,
+            super::attention::ComputeOpts::default(),
+        )
+        .await
+        else {
+            return;
+        };
+        let _ =
+            super::attention::apply_attention(&self.db, &self.bus, owner, session_id, next, false)
+                .await;
+    }
+
+    fn native_approval_ref(
+        owner: &OwnerId,
+        approval: &CodeApproval,
+    ) -> Result<HarnessApprovalRef, ServerError> {
+        let call_id = approval.native_call_id.clone().ok_or_else(|| {
+            ServerError::internal(format!("approval {} has no native call ID", approval.id))
+        })?;
+        if approval
+            .harness_raw
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|stored| stored != call_id)
+        {
+            return Err(ServerError::internal(format!(
+                "approval {} has conflicting native call IDs",
+                approval.id
+            )));
+        }
+        let worker_epoch = approval.worker_epoch.ok_or_else(|| {
+            ServerError::internal(format!("approval {} has no worker epoch", approval.id))
+        })?;
+        let (Some(token), Some(request_sha256)) = (
+            approval.server_capability.clone(),
+            approval.request_sha256.clone(),
+        ) else {
+            if approval.server_capability.is_none() && approval.request_sha256.is_none() {
+                return Ok(HarnessApprovalRef::engine(call_id));
+            }
+            return Err(ServerError::internal(format!(
+                "approval {} has an incomplete server capability",
+                approval.id
+            )));
+        };
+        Ok(HarnessApprovalRef {
+            call_id,
+            capability: Some(HarnessApprovalCapability {
+                token,
+                owner_id: owner.to_string(),
+                approval_id: approval.id.to_string(),
+                session_id: approval.session_id.to_string(),
+                turn_id: approval.turn_id.to_string(),
+                spawn_epoch: worker_epoch,
+                request_sha256,
+            }),
+        })
+    }
+
+    async fn abandon_claim_after_delivery_failure(
+        &self,
+        owner: &OwnerId,
+        session_id: CodeSessionId,
+        approval_id: CodeApprovalId,
+        worker_epoch: i64,
+        claim: uuid::Uuid,
+    ) -> Result<(), ServerError> {
+        if let Some(settlement) = settle_approval_claim(
+            &self.db,
+            owner,
+            ClaimedApprovalSettlement {
+                approval_id,
+                session_id,
+                worker_epoch,
+                claim,
+                decision: ApprovalDecisionKind::Abandoned,
+                decided_at: Utc::now(),
+            },
+        )
+        .await?
+        {
+            self.bus.publish(session_id, settlement.event);
+            self.refresh_approval_attention(owner, session_id).await;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn decide_approval(
         &self,
         owner: &OwnerId,
         id: CodeApprovalId,
         decision: ApprovalDecision,
     ) -> Result<CodeApproval, ServerError> {
-        let mut approval = self.get_approval(owner, id).await?;
-        // A terminal row is the only thing standing between the user and a
-        // decision that reaches nothing: the parked MCP call may be long gone
-        // — after a restart, for one — and the bridge accepts a decision with
-        // no waiter on purpose. So the row's state, not the park, decides.
+        let initial = self.get_approval(owner, id).await?;
+        if !initial.state.is_pending() {
+            return Err(ServerError::conflict_kind(
+                "approval_not_pending",
+                format!(
+                    "approval {id} is no longer awaiting a decision: it is {}",
+                    initial.state.as_str()
+                ),
+            ));
+        }
+        if initial.decision_claim.is_some() {
+            return Err(ServerError::conflict_kind(
+                "approval_decision_in_progress",
+                format!("approval {id} already has a decision in progress"),
+            ));
+        }
+        let handle = self.require_worker(initial.session_id)?;
+        let _decision_guard = handle.approval_decisions.clone().lock_owned().await;
+        // Shutdown can remove the handle before this task acquires the gate.
+        // Re-read every durable precondition after the gate is ours.
+        let approval = self.get_approval(owner, id).await?;
         if !approval.state.is_pending() {
             return Err(ServerError::conflict_kind(
                 "approval_not_pending",
@@ -4188,84 +4443,135 @@ impl CodeRuntime {
                 ),
             ));
         }
-        let call_id = approval
-            .harness_raw
-            .get("call_id")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_owned();
-        if call_id.is_empty() {
-            return Err(ServerError::internal(
-                "approval row is missing a harness call_id",
+        if approval.decision_claim.is_some() {
+            return Err(ServerError::conflict_kind(
+                "approval_decision_in_progress",
+                format!("approval {id} already has a decision in progress"),
             ));
         }
-        let handle = self.require_worker(approval.session_id)?;
+        let worker_epoch = approval
+            .worker_epoch
+            .ok_or_else(|| ServerError::internal(format!("approval {id} has no worker epoch")))?;
+        let session = self.get_session(owner, approval.session_id).await?;
+        if session.lifecycle != CodeSessionLifecycle::Running {
+            return Err(ServerError::conflict_kind(
+                "approval_worker_inactive",
+                format!(
+                    "approval {id} cannot be decided while session {} is {}",
+                    session.id,
+                    session.lifecycle.as_str()
+                ),
+            ));
+        }
+        if session.spawn_epoch != worker_epoch || handle.spawn_epoch != worker_epoch {
+            return Err(ServerError::conflict_kind(
+                "approval_worker_replaced",
+                "the worker that requested this approval is no longer attached",
+            ));
+        }
+        let native_ref = Self::native_approval_ref(owner, &approval)?;
+        let claim = uuid::Uuid::new_v4();
+        let Some(_) = claim_approval(
+            &self.db,
+            owner,
+            id,
+            approval.session_id,
+            worker_epoch,
+            claim,
+            Utc::now(),
+        )
+        .await?
+        else {
+            let current = self.get_approval(owner, id).await?;
+            let kind = if current.state.is_pending() && current.decision_claim.is_some() {
+                "approval_decision_in_progress"
+            } else {
+                "approval_not_pending"
+            };
+            return Err(ServerError::conflict_kind(
+                kind,
+                format!("approval {id} no longer accepts this decision"),
+            ));
+        };
         let (reply, rx) = oneshot::channel();
-        handle
+        if handle
             .commands
             .send(crate::code::session_worker::WorkerCommand::Decide {
-                approval: tidebreak_harness::HarnessApprovalRef { call_id },
+                approval: native_ref,
                 decision: decision.clone(),
                 reply,
             })
             .await
-            .map_err(|_| ServerError::internal("session worker is gone"))?;
-        rx.await
-            .map_err(|_| ServerError::internal("session worker dropped the decision"))?
-            .map_err(map_worker)?;
-        let now = Utc::now();
-        match &decision {
-            ApprovalDecision::Approve => {
-                approval.state = CodeApprovalState::Approved;
-                approval.feedback = None;
-            }
-            ApprovalDecision::Deny { feedback } => {
-                approval.state = CodeApprovalState::Denied;
-                approval.feedback = feedback.clone();
-            }
-        }
-        approval.decided_at = Some(now);
-        if !save_approval(&self.db, owner, &approval).await? {
-            return Err(ServerError::not_found(format!("approval {id} not found")));
-        }
-        let session = self.get_session(owner, approval.session_id).await?;
-        journal_event(
-            &self.db,
-            &self.bus,
-            owner,
-            approval.session_id,
-            session.spawn_epoch,
-            CodeEvent::ApprovalResolved {
-                approval_id: approval.id,
-                decision: match &decision {
-                    ApprovalDecision::Approve => ApprovalDecisionKind::Approve,
-                    ApprovalDecision::Deny { feedback } => ApprovalDecisionKind::Deny {
-                        feedback: feedback.clone(),
-                    },
-                },
-            },
-        )
-        .await
-        .map_err(|err| ServerError::internal(err.to_string()))?;
-        let still_pending = list_approvals(
-            &self.db,
-            owner,
-            Some(CodeApprovalState::Pending),
-            Some(approval.session_id),
-        )
-        .await?;
-        if still_pending.is_empty() {
-            let _ = super::attention::apply_attention(
-                &self.db,
-                &self.bus,
+            .is_err()
+        {
+            self.abandon_claim_after_delivery_failure(
                 owner,
                 approval.session_id,
-                Attention::working(AttentionSource::Lifecycle),
-                false,
+                id,
+                worker_epoch,
+                claim,
             )
-            .await;
+            .await?;
+            return Err(ServerError::conflict_kind(
+                "approval_delivery_failed",
+                "the session worker stopped before it received the decision",
+            ));
         }
-        Ok(approval)
+        let native_result = match rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(WorkerError::ApprovalDeliveryUnknown(message))) => {
+                return Err(ServerError::conflict_kind(
+                    "approval_delivery_unknown",
+                    message,
+                ));
+            }
+            Ok(Err(error)) => Err(map_worker(error)),
+            Err(_) => {
+                return Err(ServerError::conflict_kind(
+                    "approval_delivery_unknown",
+                    "the session worker stopped before it acknowledged the decision; the approval stays claimed until recovery",
+                ));
+            }
+        };
+        if let Err(error) = native_result {
+            self.abandon_claim_after_delivery_failure(
+                owner,
+                approval.session_id,
+                id,
+                worker_epoch,
+                claim,
+            )
+            .await?;
+            return Err(error);
+        }
+        let event_decision = match &decision {
+            ApprovalDecision::Approve => ApprovalDecisionKind::Approve,
+            ApprovalDecision::Deny { feedback } => ApprovalDecisionKind::Deny {
+                feedback: feedback.clone(),
+            },
+        };
+        let Some(settlement) = settle_approval_claim(
+            &self.db,
+            owner,
+            ClaimedApprovalSettlement {
+                approval_id: id,
+                session_id: approval.session_id,
+                worker_epoch,
+                claim,
+                decision: event_decision,
+                decided_at: Utc::now(),
+            },
+        )
+        .await?
+        else {
+            return Err(ServerError::internal(format!(
+                "approval {id} lost its durable decision claim after native acknowledgement"
+            )));
+        };
+        self.bus.publish(approval.session_id, settlement.event);
+        self.refresh_approval_attention(owner, approval.session_id)
+            .await;
+        Ok(settlement.approval)
     }
 }
 
@@ -4419,6 +4725,12 @@ fn map_worker(err: WorkerError) -> ServerError {
         }
         WorkerError::SteeringRejected(message) => {
             ServerError::conflict_kind("steering_rejected", message)
+        }
+        WorkerError::ApprovalDeliveryFailed(message) => {
+            ServerError::conflict_kind("approval_delivery_failed", message)
+        }
+        WorkerError::ApprovalDeliveryUnknown(message) => {
+            ServerError::conflict_kind("approval_delivery_unknown", message)
         }
         // `set_permission_mode` intercepts this and relaunches, so reaching
         // here means a caller asked the engine to re-posture without a

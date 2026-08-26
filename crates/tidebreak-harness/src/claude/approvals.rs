@@ -91,9 +91,7 @@ impl PermissionPromptResponse {
 #[must_use]
 pub fn event_from_prompt_request(request: &PermissionPromptRequest) -> HarnessEvent {
     HarnessEvent::ApprovalRequested {
-        harness_ref: HarnessApprovalRef {
-            call_id: request.tool_use_id.clone(),
-        },
+        harness_ref: HarnessApprovalRef::engine(request.tool_use_id.clone()),
         raw: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
     }
 }

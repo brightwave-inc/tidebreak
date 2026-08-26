@@ -1,12 +1,43 @@
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
+};
 
 use crate::code::{
-    CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeSessionId, CodeTurnId,
+    ApprovalDecisionKind, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
+    CodeEvent, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, SequencedCodeEvent,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
 use super::super::super::{entities, store_err, DbStore};
+use super::{acquire_code_session_write_lock, append_event_on_locked};
+
+/// One approval row and its matching journal event committed together.
+#[derive(Debug)]
+pub struct ApprovalSettlement {
+    /// The terminal approval row.
+    pub approval: CodeApproval,
+    /// The journal event committed beside that row.
+    pub event: SequencedCodeEvent,
+}
+
+/// The exact durable claim and decision that settle one approval.
+#[derive(Debug)]
+pub struct ClaimedApprovalSettlement {
+    /// Approval to settle.
+    pub approval_id: CodeApprovalId,
+    /// Session that owns the approval.
+    pub session_id: CodeSessionId,
+    /// Worker epoch that created the approval.
+    pub worker_epoch: i64,
+    /// Claim token reserved before native delivery.
+    pub claim: uuid::Uuid,
+    /// Decision acknowledged by the engine.
+    pub decision: ApprovalDecisionKind,
+    /// Time when the engine acknowledged the decision.
+    pub decided_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Insert an approval row under its session's owner.
 pub async fn insert_approval(
@@ -14,22 +45,88 @@ pub async fn insert_approval(
     owner: &OwnerId,
     approval: &CodeApproval,
 ) -> Result<()> {
-    entities::code_approval::ActiveModel {
+    approval_active_model(owner, approval)?
+        .insert(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// Insert an approval only while its exact worker and turn still own the session.
+///
+/// The session lock serializes this check with worker replacement. A stale
+/// permission-prompt request therefore cannot create a newly actionable row
+/// after its bearer and native waiter have been revoked.
+pub async fn insert_approval_for_worker(
+    store: &DbStore,
+    owner: &OwnerId,
+    approval: &CodeApproval,
+) -> Result<Option<SequencedCodeEvent>> {
+    let worker_epoch = approval.worker_epoch.ok_or_else(|| {
+        AgentError::Store(format!("approval {} has no worker epoch", approval.id))
+    })?;
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, approval.session_id).await? {
+        return Ok(None);
+    }
+    let Some(session) = entities::code_session::Entity::find_by_id(approval.session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if session.spawn_epoch != worker_epoch
+        || session.lifecycle != CodeSessionLifecycle::Running.as_str()
+    {
+        return Ok(None);
+    }
+    let turn_is_running = entities::code_turn::Entity::find_by_id(approval.turn_id.0)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_turn::Column::SessionId.eq(approval.session_id.0))
+        .filter(entities::code_turn::Column::Status.eq(CodeTurnStatus::Running.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if !turn_is_running {
+        return Ok(None);
+    }
+    approval_active_model(owner, approval)?
+        .insert(&transaction)
+        .await
+        .map_err(store_err)?;
+    let event = CodeEvent::ApprovalRequested {
+        approval_id: approval.id,
+    };
+    let seq = append_event_on_locked(&transaction, owner, approval.session_id, &event).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(SequencedCodeEvent { seq, event }))
+}
+
+fn approval_active_model(
+    owner: &OwnerId,
+    approval: &CodeApproval,
+) -> Result<entities::code_approval::ActiveModel> {
+    Ok(entities::code_approval::ActiveModel {
         id: Set(approval.id.0),
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(approval.session_id.0),
         turn_id: Set(approval.turn_id.0),
         kind: Set(serde_json::to_value(&approval.kind)?),
         harness_raw: Set(approval.harness_raw.clone()),
+        native_call_id: Set(approval.native_call_id.clone()),
+        server_capability: Set(approval.server_capability.clone()),
+        request_sha256: Set(approval.request_sha256.clone()),
+        worker_epoch: Set(approval.worker_epoch),
+        decision_claim: Set(approval.decision_claim),
+        claimed_at: Set(approval.claimed_at),
         state: Set(approval.state.as_str().to_owned()),
         feedback: Set(approval.feedback.clone()),
         requested_at: Set(approval.requested_at),
         decided_at: Set(approval.decided_at),
-    }
-    .insert(&store.conn)
-    .await
-    .map_err(store_err)?;
-    Ok(())
+    })
 }
 
 /// Load one of the owner's approvals by id.
@@ -49,31 +146,295 @@ pub async fn get_approval(
     Ok(Some(approval_from_row(row)?))
 }
 
-/// Persist a decision or other mutation. Returns whether a row was updated.
-pub async fn save_approval(
+/// Atomically reserve one pending approval for a native decision.
+///
+/// A competing decision or abandonment sees no matching row. The claim stays
+/// durable until the exact claimant records the native acknowledgement or
+/// recovery abandons it after a restart.
+pub async fn claim_approval(
     store: &DbStore,
     owner: &OwnerId,
-    approval: &CodeApproval,
-) -> Result<bool> {
+    id: CodeApprovalId,
+    session_id: CodeSessionId,
+    worker_epoch: i64,
+    claim: uuid::Uuid,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<CodeApproval>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Ok(None);
+    }
+    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if session.spawn_epoch != worker_epoch
+        || session.lifecycle != crate::code::CodeSessionLifecycle::Running.as_str()
+    {
+        return Ok(None);
+    }
     let result = entities::code_approval::Entity::update_many()
         .col_expr(
+            entities::code_approval::Column::DecisionClaim,
+            sea_orm::sea_query::Expr::value(Some(claim)),
+        )
+        .col_expr(
+            entities::code_approval::Column::ClaimedAt,
+            sea_orm::sea_query::Expr::value(Some(claimed_at)),
+        )
+        .filter(entities::code_approval::Column::Id.eq(id.0))
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .filter(entities::code_approval::Column::DecisionClaim.is_null())
+        .filter(entities::code_approval::Column::WorkerEpoch.eq(worker_epoch))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if result.rows_affected != 1 {
+        return Ok(None);
+    }
+    let row = entities::code_approval::Entity::find_by_id(id.0)
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("claimed approval {id} disappeared")))?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(approval_from_row(row)?))
+}
+
+/// Finish the exact claimed approval and append its matching journal event.
+pub async fn settle_approval_claim(
+    store: &DbStore,
+    owner: &OwnerId,
+    settlement: ClaimedApprovalSettlement,
+) -> Result<Option<ApprovalSettlement>> {
+    settle_approval(
+        store,
+        owner,
+        settlement.approval_id,
+        settlement.session_id,
+        settlement.worker_epoch,
+        ApprovalClaim::Exact(settlement.claim),
+        settlement.decision,
+        settlement.decided_at,
+    )
+    .await
+}
+
+/// Abandon one unclaimed pending approval and append its matching event.
+pub async fn abandon_pending_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeApprovalId,
+    session_id: CodeSessionId,
+    worker_epoch: i64,
+    decided_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ApprovalSettlement>> {
+    settle_approval(
+        store,
+        owner,
+        id,
+        session_id,
+        worker_epoch,
+        ApprovalClaim::Unclaimed,
+        ApprovalDecisionKind::Abandoned,
+        decided_at,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalClaim {
+    Unclaimed,
+    Exact(uuid::Uuid),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeApprovalId,
+    session_id: CodeSessionId,
+    worker_epoch: i64,
+    claim: ApprovalClaim,
+    decision: ApprovalDecisionKind,
+    decided_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ApprovalSettlement>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Ok(None);
+    }
+    let session_exists = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_some();
+    if !session_exists {
+        return Ok(None);
+    }
+    // The approval row carries the worker epoch that created and claimed it.
+    // Do not require the session's current epoch here: after native
+    // acknowledgement, an old worker must still make its exact durable claim
+    // terminal even if another process has already attached a replacement.
+    let settlement = settle_approval_on_locked(
+        &transaction,
+        owner,
+        id,
+        session_id,
+        worker_epoch,
+        claim,
+        decision,
+        decided_at,
+    )
+    .await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(settlement)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_approval_on_locked<C>(
+    conn: &C,
+    owner: &OwnerId,
+    id: CodeApprovalId,
+    session_id: CodeSessionId,
+    worker_epoch: i64,
+    claim: ApprovalClaim,
+    decision: ApprovalDecisionKind,
+    decided_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ApprovalSettlement>>
+where
+    C: ConnectionTrait,
+{
+    let (state, feedback) = match &decision {
+        ApprovalDecisionKind::Approve => (CodeApprovalState::Approved, None),
+        ApprovalDecisionKind::Deny { feedback } => (CodeApprovalState::Denied, feedback.clone()),
+        ApprovalDecisionKind::Abandoned => (CodeApprovalState::Abandoned, None),
+    };
+    let mut update = entities::code_approval::Entity::update_many()
+        .col_expr(
             entities::code_approval::Column::State,
-            sea_orm::sea_query::Expr::value(approval.state.as_str().to_owned()),
+            sea_orm::sea_query::Expr::value(state.as_str().to_owned()),
         )
         .col_expr(
             entities::code_approval::Column::Feedback,
-            sea_orm::sea_query::Expr::value(approval.feedback.clone()),
+            sea_orm::sea_query::Expr::value(feedback),
         )
         .col_expr(
             entities::code_approval::Column::DecidedAt,
-            sea_orm::sea_query::Expr::value(approval.decided_at),
+            sea_orm::sea_query::Expr::value(Some(decided_at)),
         )
-        .filter(entities::code_approval::Column::Id.eq(approval.id.0))
+        .col_expr(
+            entities::code_approval::Column::DecisionClaim,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::code_approval::Column::ClaimedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+        )
+        .filter(entities::code_approval::Column::Id.eq(id.0))
         .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .exec(&store.conn)
+        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_approval::Column::WorkerEpoch.eq(worker_epoch))
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()));
+    update = match claim {
+        ApprovalClaim::Unclaimed => {
+            update.filter(entities::code_approval::Column::DecisionClaim.is_null())
+        }
+        ApprovalClaim::Exact(claim) => {
+            update.filter(entities::code_approval::Column::DecisionClaim.eq(claim))
+        }
+    };
+    let result = update.exec(conn).await.map_err(store_err)?;
+    if result.rows_affected != 1 {
+        return Ok(None);
+    }
+    let row = entities::code_approval::Entity::find_by_id(id.0)
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("settled approval {id} disappeared")))?;
+    let event = CodeEvent::ApprovalResolved {
+        approval_id: id,
+        decision,
+    };
+    let seq = append_event_on_locked(conn, owner, session_id, &event).await?;
+    let approval = approval_from_row(row)?;
+    Ok(Some(ApprovalSettlement {
+        approval,
+        event: SequencedCodeEvent { seq, event },
+    }))
+}
+
+/// Abandon every pending approval after its exact worker has stopped.
+///
+/// Recovery refuses to touch rows while the session still says `Running` or
+/// after another worker epoch takes ownership. The same transaction settles
+/// claimed and unclaimed rows, so a restart cannot expose a pending approval
+/// whose native waiter disappeared with the process.
+pub async fn abandon_pending_approvals_for_stopped_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    expected_spawn_epoch: i64,
+    decided_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<ApprovalSettlement>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Ok(Vec::new());
+    }
+    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(Vec::new());
+    };
+    if session.spawn_epoch != expected_spawn_epoch
+        || session.lifecycle == CodeSessionLifecycle::Running.as_str()
+    {
+        return Ok(Vec::new());
+    }
+    let rows = entities::code_approval::Entity::find()
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_approval::Column::WorkerEpoch.eq(expected_spawn_epoch))
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .order_by_asc(entities::code_approval::Column::RequestedAt)
+        .all(&transaction)
         .await
         .map_err(store_err)?;
-    Ok(result.rows_affected == 1)
+    let mut abandoned = Vec::new();
+    for row in rows {
+        let claim = match row.decision_claim {
+            Some(claim) => ApprovalClaim::Exact(claim),
+            None => ApprovalClaim::Unclaimed,
+        };
+        if let Some(settlement) = settle_approval_on_locked(
+            &transaction,
+            owner,
+            CodeApprovalId(row.id),
+            session_id,
+            expected_spawn_epoch,
+            claim,
+            ApprovalDecisionKind::Abandoned,
+            decided_at,
+        )
+        .await?
+        {
+            abandoned.push(settlement);
+        }
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(abandoned)
 }
 
 /// The owner's approvals, optionally filtered by state and session.
@@ -110,6 +471,12 @@ pub(super) fn approval_from_row(row: entities::code_approval::Model) -> Result<C
         turn_id: CodeTurnId(row.turn_id),
         kind,
         harness_raw: row.harness_raw,
+        native_call_id: row.native_call_id,
+        server_capability: row.server_capability,
+        request_sha256: row.request_sha256,
+        worker_epoch: row.worker_epoch,
+        decision_claim: row.decision_claim,
+        claimed_at: row.claimed_at,
         state,
         feedback: row.feedback,
         requested_at: row.requested_at,

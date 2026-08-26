@@ -528,7 +528,7 @@ impl OpencodeStreamParser {
             return Vec::new();
         }
         vec![HarnessEvent::ApprovalRequested {
-            harness_ref: HarnessApprovalRef { call_id },
+            harness_ref: HarnessApprovalRef::engine(call_id),
             raw: props.clone(),
         }]
     }
@@ -563,7 +563,7 @@ impl OpencodeStreamParser {
             }
         };
         vec![HarnessEvent::ApprovalResolved {
-            harness_ref: HarnessApprovalRef { call_id },
+            harness_ref: HarnessApprovalRef::engine(call_id),
             decision,
         }]
     }
@@ -591,7 +591,7 @@ impl OpencodeStreamParser {
             }
         };
         vec![HarnessEvent::ApprovalResolved {
-            harness_ref: HarnessApprovalRef { call_id },
+            harness_ref: HarnessApprovalRef::engine(call_id),
             decision,
         }]
     }
