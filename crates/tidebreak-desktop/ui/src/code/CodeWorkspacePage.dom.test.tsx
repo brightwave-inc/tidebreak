@@ -10,7 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -633,6 +633,11 @@ async function mountWorkspaceWithClientSwap(
   return render(<RouterProvider router={router as never} />);
 }
 
+beforeEach(() => {
+  resetCodeSessionRegistry();
+  vi.useRealTimers();
+});
+
 afterEach(() => {
   cleanup();
   resetCodeSessionRegistry();
@@ -659,7 +664,7 @@ describe("CodeWorkspacePage", () => {
     const { container } = await mountWorkspace(client);
 
     expect(
-      await screen.findByRole("article", { name: "You" }),
+      await screen.findByRole("article", { name: "You" }, { timeout: 5_000 }),
     ).toHaveTextContent("list the files");
 
     const view = container.querySelector(".message-view");
