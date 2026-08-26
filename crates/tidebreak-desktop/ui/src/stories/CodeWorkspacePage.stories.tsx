@@ -228,6 +228,7 @@ const turns: CodeTurnSnapshot[] = [
     session_id: session.id,
     ordinal: 1,
     status: "completed",
+    fast_mode: false,
     user_input:
       "Take a ground-up pass at the workspace UI. Keep the conversation central and make the pane system feel effortless.",
     attachments: [],
@@ -241,6 +242,7 @@ const turns: CodeTurnSnapshot[] = [
     session_id: session.id,
     ordinal: 2,
     status: "completed",
+    fast_mode: false,
     user_input:
       "Make drag and drop into a split pane reliable, then Storybook the important states.",
     attachments: [],

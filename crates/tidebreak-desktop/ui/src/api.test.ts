@@ -1759,6 +1759,7 @@ describe("code workspace sessions", () => {
       session_id: "sess-1",
       ordinal: 1,
       status: "completed",
+      fast_mode: false,
       user_input: "list the files",
       attachments: [],
       started_at: "2026-08-15T12:00:00.000Z",
