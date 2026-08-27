@@ -1,11 +1,14 @@
 //! Commit, push, pull-request, and quick-action routes for a workspace.
 
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
+use crate::routes::providers_models::refuse_permission_mode_over_ceiling;
+use crate::state::AppState;
 
 use super::types::{
     CodeActionSnapshot, CodeCheckLog, CodeCheckLogError, CodeCheckLogsSnapshot, CodeCommitSnapshot,
@@ -14,7 +17,7 @@ use super::types::{
     CodeWorkspacePullRequests, CommitWorkspaceBody, CreatePullRequestBody, MergeCodePrBody,
 };
 use crate::code::gh::{ActionOutcome, CommitOutcome, MergeMethod, PushOutcome, WorkspaceGitStatus};
-use tidebreak_core::WorkspaceId;
+use tidebreak_core::{PermissionMode, WorkspaceId};
 
 pub async fn commit_workspace(
     code: ScopedCode,
@@ -97,9 +100,11 @@ pub async fn refresh_workspace_pr(
 }
 
 pub async fn start_workspace_watch(
+    State(state): State<AppState>,
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
 ) -> Result<impl IntoResponse, ServerError> {
+    refuse_permission_mode_over_ceiling(&state, Some(PermissionMode::Auto)).await?;
     let watch = code.start_watch(id).await?;
     Ok((StatusCode::CREATED, Json(CodeWatchSnapshot::from(watch))))
 }
