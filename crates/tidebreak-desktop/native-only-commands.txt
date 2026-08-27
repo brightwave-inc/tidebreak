@@ -27,6 +27,7 @@ server_info: hands the renderer the embedded server's address and per-launch tok
 request_user_attention: native window attention hint when a parked question needs the user.
 is_window_focused: reports main-window focus; document.hidden is the tab, not the window.
 present_native_notification: posts an OS banner and asks for notification permission on first unfocused present.
+code_browser_import_legacy_state: moves one renderer browser record into private native storage and acknowledges disposal before the renderer deletes its old copy.
 code_browser_command: creates and controls sandboxed native child webviews whose bounds and lifecycle exist only in the desktop shell.
 open_code_worktree: opens a local Code worktree through this operating system's folder handler; a headless server cannot open desktop UI.
 open_in_editor: starts the editor installed on the machine the reader is sitting at, on one file inside a local worktree; the server may be that machine or another, and neither can raise a desktop editor here.

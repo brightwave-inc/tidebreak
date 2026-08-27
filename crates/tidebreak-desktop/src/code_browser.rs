@@ -27,6 +27,9 @@ use crate::browser_control::{
 #[cfg(any(target_os = "macos", test))]
 use crate::browser_profile::normalize_website_host;
 use crate::browser_profile::{BrowserProfileStore, ManagedBrowserProfile};
+use crate::browser_recovery::{
+    LegacyBrowserImportResult, LegacyBrowserSession, RecoveredBrowserSession,
+};
 use crate::browser_semantics::{
     browser_inject_inspect_overlay, browser_install_same_document_navigation_observer,
     browser_read_same_document_navigation_observer, browser_remove_inspect_overlay,
@@ -53,6 +56,24 @@ pub(crate) struct CodeBrowserCommandRequest {
     workspace_id: String,
     browser_id: String,
     action: CodeBrowserAction,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodeBrowserLegacyStateRequest {
+    workspace_id: String,
+    browser_id: String,
+    legacy_state: Option<CodeBrowserLegacyState>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CodeBrowserLegacyState {
+    version: u8,
+    id: String,
+    workspace_id: String,
+    url: Option<String>,
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +160,28 @@ struct CodeBrowserProfileResetEvent {
 }
 
 #[tauri::command]
+pub(crate) fn code_browser_import_legacy_state(
+    registry: tauri::State<'_, BrowserRegistry>,
+    request: CodeBrowserLegacyStateRequest,
+) -> Result<LegacyBrowserImportResult, String> {
+    validated_workspace_id(&request.workspace_id)?;
+    browser_label(&request.browser_id)?;
+    let legacy = request.legacy_state.map(|state| LegacyBrowserSession {
+        version: state.version,
+        browser_id: state.id,
+        workspace_id: state.workspace_id,
+        url: state.url,
+        title: state.title,
+    });
+    registry.import_legacy_session(
+        &OwnerId::local(),
+        &request.browser_id,
+        &request.workspace_id,
+        legacy,
+    )
+}
+
+#[tauri::command]
 pub(crate) async fn code_browser_command(
     app: AppHandle,
     registry: tauri::State<'_, BrowserRegistry>,
@@ -213,9 +256,15 @@ pub(crate) async fn code_browser_command(
             Some(_) => registry.snapshot(&request.browser_id, &request.workspace_id),
             None => {
                 registry.remove(&request.browser_id, &request.workspace_id)?;
-                Ok(BrowserSnapshot::missing(
+                let recovered = registry.recover_session(
+                    &OwnerId::local(),
                     &request.browser_id,
                     &request.workspace_id,
+                )?;
+                Ok(missing_browser_snapshot(
+                    &request.browser_id,
+                    &request.workspace_id,
+                    recovered,
                 ))
             }
         },
@@ -447,6 +496,19 @@ pub(crate) async fn navigate_browser_for_agent(
             },
         )
         .await
+}
+
+fn missing_browser_snapshot(
+    browser_id: &str,
+    workspace_id: &str,
+    recovered: Option<RecoveredBrowserSession>,
+) -> BrowserSnapshot {
+    let mut snapshot = BrowserSnapshot::missing(browser_id, workspace_id);
+    if let Some(recovered) = recovered {
+        snapshot.url = Some(recovered.url);
+        snapshot.title = recovered.title;
+    }
+    snapshot
 }
 
 #[allow(
@@ -1489,6 +1551,29 @@ mod tests {
         assert!(validated_workspace_id("").is_err());
         assert!(validated_workspace_id("workspace\nother").is_err());
         assert!(validated_workspace_id(&"w".repeat(MAX_WORKSPACE_ID_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn missing_webview_snapshot_projects_only_durable_navigation_metadata() {
+        let snapshot = missing_browser_snapshot(
+            "browser-1",
+            "workspace-1",
+            Some(RecoveredBrowserSession {
+                url: "https://example.com/restored".to_owned(),
+                title: Some("Restored page".to_owned()),
+            }),
+        );
+
+        assert!(!snapshot.exists);
+        assert_eq!(
+            snapshot.url.as_deref(),
+            Some("https://example.com/restored")
+        );
+        assert_eq!(snapshot.title.as_deref(), Some("Restored page"));
+        assert!(snapshot.profile_id.is_none());
+        assert!(snapshot.document_epoch.is_none());
+        assert!(snapshot.controller.is_none());
+        assert!(snapshot.agent_access.is_none());
     }
 
     #[test]

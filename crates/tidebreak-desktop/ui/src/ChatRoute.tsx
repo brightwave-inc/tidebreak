@@ -45,7 +45,6 @@ import { hasLocalHostAuthority, hasNativeHost } from "./host";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import { foregroundBrowserScope } from "./code/browser/foregroundBrowserScope";
-import { seedBrowserSession } from "./code/browser/browserPersistence";
 import { MarkdownLinkProvider } from "./MessageMarkdown";
 
 import { friendlyErrorMessage } from "./lib/utils";
@@ -188,6 +187,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
     {},
   );
+  const [browserInitialUrls, setBrowserInitialUrls] = useState<
+    Record<string, string>
+  >({});
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame. The
@@ -701,14 +703,15 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       }
     }
     const browserId = crypto.randomUUID();
-    const session = seedBrowserSession({
-      browserId,
-      workspaceId: foregroundBrowserScope(chatId),
-      initialUrl: url,
-    });
+    if (url) {
+      setBrowserInitialUrls((current) => ({
+        ...current,
+        [browserId]: url,
+      }));
+    }
     setBrowserTitles((current) => ({
       ...current,
-      [browserId]: session.title || "Browser",
+      [browserId]: "Browser",
     }));
     openPanel({ type: "browser", browserId });
   }
@@ -1029,6 +1032,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             <CodeBrowserTab
               workspaceId={foregroundBrowserScope(chatId)}
               browserId={panel.browserId}
+              initialUrl={browserInitialUrls[panel.browserId]}
               obscured={overlayOpen}
               onTitleChange={(title) =>
                 setBrowserTitles((current) =>

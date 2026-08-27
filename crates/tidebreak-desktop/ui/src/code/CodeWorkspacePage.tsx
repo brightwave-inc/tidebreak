@@ -112,10 +112,6 @@ import {
 } from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
 import { closeCodeBrowser } from "./browser/browserHost";
-import {
-  seedBrowserSession,
-  storedBrowserTitle,
-} from "./browser/browserPersistence";
 
 const FileViewer = lazy(async () => {
   const module = await import("./FileViewer");
@@ -447,8 +443,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     revision: number;
   } | null>(null);
   const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
-    () => storedBrowserTitles(layout),
+    () => browserTitlesForLayout(layout),
   );
+  const [browserInitialUrls, setBrowserInitialUrls] = useState<
+    Record<string, string>
+  >({});
   const [terminalLabels, setTerminalLabels] = useState<Record<string, string>>(
     () => nameTerminals({}, codeTerminalIds(layout)),
   );
@@ -548,7 +547,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       let changed = false;
       const next: Record<string, string> = {};
       for (const browserId of ids) {
-        const title = current[browserId] ?? storedBrowserTitle(browserId);
+        const title = current[browserId] ?? "Browser";
         next[browserId] = title;
         if (current[browserId] !== title) changed = true;
       }
@@ -831,14 +830,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   function openBrowser(url?: string, preferredRegion?: CodeEditorRegion) {
     const browserId = crypto.randomUUID();
-    const browser = seedBrowserSession({
-      browserId,
-      workspaceId,
-      initialUrl: url,
-    });
+    if (url) {
+      setBrowserInitialUrls((current) => ({
+        ...current,
+        [browserId]: url,
+      }));
+    }
     setBrowserTitles((current) => ({
       ...current,
-      [browserId]: browser.title || "Browser",
+      [browserId]: "Browser",
     }));
     setWorkspaceLayout(
       openCodeEditor(layout, { type: "browser", browserId }, preferredRegion),
@@ -1201,6 +1201,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             <CodeBrowserTab
               workspaceId={workspaceId}
               browserId={panel.browserId}
+              initialUrl={browserInitialUrls[panel.browserId]}
               obscured={workspaceOverlayOpen}
               onTitleChange={(title) =>
                 setBrowserTitles((current) =>
@@ -1856,12 +1857,9 @@ function useCodeShortcutHints(): { terminal: string; review: string } {
   }, []);
 }
 
-function storedBrowserTitles(layout: LayoutState): Record<string, string> {
+function browserTitlesForLayout(layout: LayoutState): Record<string, string> {
   return Object.fromEntries(
-    codeBrowserIds(layout).map((browserId) => [
-      browserId,
-      storedBrowserTitle(browserId),
-    ]),
+    codeBrowserIds(layout).map((browserId) => [browserId, "Browser"]),
   );
 }
 

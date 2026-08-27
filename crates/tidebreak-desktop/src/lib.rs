@@ -855,6 +855,7 @@ pub fn run() {
             request_user_attention,
             is_window_focused,
             present_native_notification,
+            code_browser::code_browser_import_legacy_state,
             code_browser::code_browser_command,
             code_worktree::open_code_worktree,
             code_editor::open_in_editor,
