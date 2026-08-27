@@ -85,7 +85,6 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
 
   useEffect(() => {
     const previousTarget = targetRef.current;
-    const wasLive = liveRef.current;
     targetRef.current = text;
     liveRef.current = live;
 
@@ -97,17 +96,12 @@ export function useStreamingTypewriter(text: string, live: boolean): string {
       return;
     }
     if (!live) {
-      // A stream that just ended may still have a small presentation buffer.
-      // Drain it quickly instead of snapping the final characters into place.
-      // Ordinary historical updates still render immediately.
-      const canFinishSmoothly =
-        wasLive && text.startsWith(displayedRef.current);
-      if (!canFinishSmoothly) {
-        stop();
-        showImmediately(text);
-      } else if (timerRef.current === null) {
-        tick();
-      }
+      // A settled row must not wait on the typewriter timer. If that timer
+      // never fires, the prose stays blank until some later render — a send
+      // was enough to unstick it. Historical updates and a stream that just
+      // ended both render at once.
+      stop();
+      showImmediately(text);
       return;
     }
     if (text === previousTarget) return;

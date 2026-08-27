@@ -37,7 +37,7 @@ describe("useStreamingTypewriter", () => {
     expect(result.current).toBe("Searching the web and 1 other task");
   });
 
-  it("drains the remaining buffer smoothly when a live step settles", async () => {
+  it("shows the full text when a live step settles", () => {
     vi.useFakeTimers();
     const { result, rerender } = renderHook(
       ({ text, live }) => useStreamingTypewriter(text, live),
@@ -45,15 +45,8 @@ describe("useStreamingTypewriter", () => {
     );
 
     rerender({ text: "Searching the web and 1 other task", live: true });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(20);
-    });
     rerender({ text: "Searching the web and 1 other task", live: false });
 
-    expect(result.current).not.toBe("Searching the web and 1 other task");
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
     expect(result.current).toBe("Searching the web and 1 other task");
   });
 

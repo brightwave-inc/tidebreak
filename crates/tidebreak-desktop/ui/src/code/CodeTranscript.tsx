@@ -506,7 +506,7 @@ function itemSignature(
     case "turn_boundary":
       return `${item.status}:${item.diffstat?.files ?? -1}`;
     case "assistant":
-      return `${item.streaming}:${ownsCopyAction}`;
+      return `${item.streaming}:${ownsCopyAction}:${item.text.length}`;
     case "reasoning":
       return String(item.streaming);
     case "file_activity":

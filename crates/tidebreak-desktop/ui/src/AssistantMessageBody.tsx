@@ -18,6 +18,8 @@ export function AssistantMessageBody({
 }) {
   const displayed = useStreamingTypewriter(text, streaming);
   return (
-    <MessageMarkdown containerRef={containerRef}>{displayed}</MessageMarkdown>
+    <MessageMarkdown containerRef={containerRef}>
+      {streaming ? displayed : text}
+    </MessageMarkdown>
   );
 }
