@@ -415,12 +415,20 @@ export function workspaceCardLabel(input: {
 }): string {
   const parts = [input.title];
   if (input.workspaceStatus === "creating") parts.push("Creating workspace");
-  if (input.attention && input.attention.state.type !== "working") {
+  if (
+    input.attention &&
+    input.attention.state.type !== "working" &&
+    input.attention.state.type !== "idle"
+  ) {
     parts.push(attentionLabel(input.attention));
   }
   if (input.session?.lifecycle === "running") {
     parts.push(sessionActivityLabel(input.session));
-  } else if (input.session && input.attention?.state.type === "working") {
+  } else if (
+    input.session &&
+    (input.attention?.state.type === "working" ||
+      input.attention?.state.type === "idle")
+  ) {
     parts.push(sessionRowLabel(input.session));
   }
   if (input.pr) {

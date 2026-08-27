@@ -174,7 +174,7 @@ export function WorkspaceCard({
                   title,
                   repoName,
                   branchName: workspace.branch_name,
-                  attention: digest?.attention,
+                  attention: attentionMark,
                   session: digest,
                   pr,
                   terminalOpen,

@@ -325,6 +325,49 @@ describe("WorkspaceCard", () => {
     ).toBeInTheDocument();
   });
 
+  it("announces Done when parked attention is already idle", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      harness_kind: "grok",
+      lifecycle: "idle",
+      attention: { state: { type: "idle" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 4,
+      recap: "Folded the backoff into refresh.",
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Done")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Fix login · Done · app · tidebreak/fix-login",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Idle/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not show live motion when an older idle digest still says Working", () => {
     const digest: CodeSessionDigest = {
       workspace: workspace.id,

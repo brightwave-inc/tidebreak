@@ -474,6 +474,35 @@ describe("workspaceCardLabel", () => {
     ).toBe("Fix login · Idle · app · tidebreak/fix-login");
   });
 
+  it("announces Done for a parked idle session, matching the complete mark", () => {
+    const session = digest("ws-a", {
+      lifecycle: "idle",
+      attention: { state: { type: "idle" }, source: "lifecycle" },
+      turn_count: 4,
+    });
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: {
+          state: { type: "done_unreviewed" },
+          source: "lifecycle",
+        },
+        session,
+      }),
+    ).toBe("Fix login · Done · app · tidebreak/fix-login");
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: session.attention,
+        session,
+      }),
+    ).toBe("Fix login · Done · app · tidebreak/fix-login");
+  });
+
   it("announces queue membership instead of the open lifecycle", () => {
     expect(
       workspaceCardLabel({
