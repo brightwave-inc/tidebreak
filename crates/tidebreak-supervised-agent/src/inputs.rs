@@ -17,6 +17,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use tidebreak_core::HarnessKind;
+
 use crate::EXIT_MISSING_INPUT;
 
 /// The task handed to the agent. Required.
@@ -47,6 +49,16 @@ pub const FORGE_PUSH_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_FORGE_PUSH";
 pub const SANDBOX_ID_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_ID";
 /// Incarnation counter for reincarnation-aware naming.
 pub const INCARNATION_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_INCARNATION";
+/// Engine CLI the agent drives, as a `HarnessKind` token. Defaults to
+/// `claude_code`.
+///
+/// This one is Tidebreak's own, not part of the environment's contract: the
+/// environment declares no engine selector for a custom workload, so the pod
+/// specification that installs the agent also picks its engine. An
+/// unrecognized token fails loudly rather than silently running the default,
+/// because a typo here would otherwise drive the wrong engine for the whole
+/// run.
+pub const ENGINE_VARIABLE: &str = "TIDEBREAK_AGENT_ENGINE";
 
 const DEFAULT_SUPERVISOR_ENDPOINT: &str = "127.0.0.1:15003";
 /// Poll cadence, matching the endpoint's expected liveness rhythm.
@@ -97,6 +109,8 @@ pub struct Inputs {
     pub sandbox_id: Option<String>,
     /// Incarnation counter, defaulting to 1.
     pub incarnation: u32,
+    /// Engine CLI the agent drives.
+    pub engine: HarnessKind,
 }
 
 /// A missing or unusable input, carrying the exit code and the variable name.
@@ -142,6 +156,7 @@ pub struct RawInputs {
     pub forge_push: Option<String>,
     pub sandbox_id: Option<String>,
     pub incarnation: Option<String>,
+    pub engine: Option<String>,
 }
 
 impl RawInputs {
@@ -164,6 +179,7 @@ impl RawInputs {
             forge_push: var(FORGE_PUSH_VARIABLE),
             sandbox_id: var(SANDBOX_ID_VARIABLE),
             incarnation: var(INCARNATION_VARIABLE),
+            engine: var(ENGINE_VARIABLE),
         }
     }
 }
@@ -252,6 +268,21 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
 
+    let engine = match optional(raw.engine) {
+        None => HarnessKind::ClaudeCode,
+        Some(token) => HarnessKind::from_str(&token).ok_or_else(|| {
+            let known = HarnessKind::ALL
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            InputError::unusable(
+                ENGINE_VARIABLE,
+                &format!("unknown engine {token:?}; expected one of {known}"),
+            )
+        })?,
+    };
+
     Ok(Inputs {
         task,
         control_url,
@@ -265,6 +296,7 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
         forge_push_denied,
         sandbox_id: optional(raw.sandbox_id),
         incarnation,
+        engine,
     })
 }
 
@@ -432,5 +464,32 @@ mod tests {
             ..minimal()
         };
         assert!(resolve(raw).unwrap().repositories.is_empty());
+    }
+
+    #[test]
+    fn the_engine_defaults_to_claude_code() {
+        assert_eq!(resolve(minimal()).unwrap().engine, HarnessKind::ClaudeCode);
+    }
+
+    #[test]
+    fn a_declared_engine_is_honored() {
+        let raw = RawInputs {
+            engine: Some("codex".to_owned()),
+            ..minimal()
+        };
+        assert_eq!(resolve(raw).unwrap().engine, HarnessKind::Codex);
+    }
+
+    /// A typo must not silently drive the default engine for the whole run.
+    #[test]
+    fn an_unknown_engine_fails_naming_the_variable_and_the_tokens() {
+        let raw = RawInputs {
+            engine: Some("claude".to_owned()),
+            ..minimal()
+        };
+        let error = resolve(raw).unwrap_err();
+        assert_eq!(error.code, EXIT_MISSING_INPUT);
+        assert!(error.message.contains(ENGINE_VARIABLE));
+        assert!(error.message.contains("claude_code"));
     }
 }

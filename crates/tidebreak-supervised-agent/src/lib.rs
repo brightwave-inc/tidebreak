@@ -7,16 +7,21 @@
 //! reports lifecycle events outward. It runs no listener, accepts no attach,
 //! and keeps no durable state of its own: the endpoint's cursor is the truth.
 //!
-//! This crate is a library for now. The binary arrives with the engine-drive
-//! slice; until then the modules here are the poll client, the environment
-//! contract, and the turn state machine, each testable against an in-process
-//! mock endpoint.
+//! The crate ships one binary, `tidebreak-supervised-agent`, assembled from
+//! modules that stay individually testable against an in-process mock
+//! endpoint: the environment contract ([`inputs`]), trust and clone
+//! preparation ([`trust`], [`bootstrap`]), the poll client ([`control`],
+//! [`wire`]), the turn state machine ([`drive`]), and the engine seam
+//! ([`engine`]) with its `tidebreak-harness` implementation
+//! ([`harness_engine`]).
 
 pub mod bootstrap;
 pub mod completion;
 pub mod control;
 pub mod drive;
+pub mod effort;
 pub mod engine;
+pub mod harness_engine;
 pub mod inputs;
 pub mod trust;
 pub mod wip;
