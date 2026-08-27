@@ -3,6 +3,7 @@
 use super::*;
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8298,6 +8299,425 @@ async fn the_doctor_reports_relay_engines_ready_on_a_hosted_machine() {
     assert_eq!(opencode["kind"], "opencode");
     assert_eq!(opencode["auth_mode"], "gateway_relay");
     assert_eq!(opencode["remediation"], "");
+}
+
+/// A caller-scoped fake for the exact compat surfaces hosted engine pickers
+/// read. Either surface may be absent, which lets tests prove a one-protocol
+/// engine never depends on the other protocol's listing.
+#[derive(Clone)]
+struct FakeModelGateway {
+    anthropic: Option<serde_json::Value>,
+    openai: Option<serde_json::Value>,
+    anthropic_reads: Arc<AtomicUsize>,
+    openai_reads: Arc<AtomicUsize>,
+}
+
+impl FakeModelGateway {
+    fn new(anthropic: Option<serde_json::Value>, openai: Option<serde_json::Value>) -> Self {
+        Self {
+            anthropic,
+            openai,
+            anthropic_reads: Arc::new(AtomicUsize::new(0)),
+            openai_reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn full() -> Self {
+        Self::new(
+            Some(serde_json::json!({
+                "data": [
+                    {
+                        "type": "model",
+                        "id": " claude-opus-5 ",
+                        "display_name": " Claude Opus 5 ",
+                        "is_family_default": true,
+                    },
+                    {
+                        "type": "model",
+                        "id": "shared/model",
+                        "display_name": "Shared via Anthropic",
+                    },
+                    { "type": "model", "id": "   ", "display_name": "Dead row" },
+                    { "type": "model", "display_name": "Missing id" },
+                ],
+                "has_more": false,
+            })),
+            Some(serde_json::json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "glm-5.3",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "model-gateway",
+                    },
+                    {
+                        "id": "shared/model",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "model-gateway",
+                    },
+                    {
+                        "id": " trim-me ",
+                        "display_name": "   ",
+                        "object": "model",
+                    },
+                    { "id": "", "object": "model" },
+                    { "id": 7, "object": "model" },
+                ],
+            })),
+        )
+    }
+
+    async fn start(
+        self,
+    ) -> (
+        Arc<crate::obo_gateway::OboGateway>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut app = axum::Router::new().route(
+            "/oauth/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "mg_it_fresh",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                }))
+            }),
+        );
+        if let Some(listing) = self.anthropic {
+            let reads = self.anthropic_reads.clone();
+            app = app.route(
+                "/compat/anthropic/v1/models",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let listing = listing.clone();
+                    let reads = reads.clone();
+                    async move {
+                        assert_eq!(
+                            headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok()),
+                            Some("Bearer mg_it_fresh"),
+                            "the listing must ride the caller's exchanged inference grant"
+                        );
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(listing)
+                    }
+                }),
+            );
+        }
+        if let Some(listing) = self.openai {
+            let reads = self.openai_reads.clone();
+            app = app.route(
+                "/compat/openai/v1/models",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let listing = listing.clone();
+                    let reads = reads.clone();
+                    async move {
+                        assert_eq!(
+                            headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok()),
+                            Some("Bearer mg_it_fresh"),
+                            "the listing must ride the caller's exchanged inference grant"
+                        );
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(listing)
+                    }
+                }),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let gateway = Arc::new(
+            crate::obo_gateway::OboGateway::new(
+                &format!("http://{address}"),
+                "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed"
+                    .to_owned(),
+            )
+            .unwrap(),
+        );
+        (gateway, server)
+    }
+}
+
+async fn hosted_model_app(
+    gateway: Arc<crate::obo_gateway::OboGateway>,
+    record_caller: bool,
+) -> (Router, Arc<str>, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("code.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let mut registry = AdapterRegistry::new();
+    for &kind in HarnessKind::ALL {
+        let mut adapter = ScriptedAdapter::new(plain_text_script())
+            .with_kind(kind)
+            .with_models(vec![listed_model("local-only-model", true, &[], true)]);
+        if kind == HarnessKind::ClaudeCode {
+            adapter = adapter.with_reasoning_levels(CapLevel::Supported);
+        }
+        registry.register(Arc::new(adapter));
+    }
+    if record_caller {
+        gateway.record_caller(&tidebreak_core::OwnerId::local(), "mg_at_live".into());
+    }
+    let runtime = Arc::new(
+        CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry).with_harness_llm(
+            Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway)),
+        ),
+    );
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime);
+    let token = state.token.clone();
+    (app(state), token, dir)
+}
+
+async fn fetch_harness_models(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    kind: HarnessKind,
+) -> reqwest::Response {
+    client
+        .get(format!("http://{addr}/code/harnesses/{kind}/models"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+}
+
+fn model_ids(listing: &serde_json::Value) -> Vec<&str> {
+    listing["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect()
+}
+
+/// Issue 2755: all four hosted engines list the caller-usable gateway rows
+/// their relay wiring can run. OpenCode's ids name the configured provider,
+/// duplicate raw ids prefer the Anthropic surface, malformed rows disappear,
+/// and no engine's local-only row leaks into the hosted picker.
+#[tokio::test]
+async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
+    let fake = FakeModelGateway::full();
+    let observed = fake.clone();
+    let (gateway, gateway_server) = fake.start().await;
+    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let claude = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::ClaudeCode)
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let rows = claude["models"].as_array().unwrap();
+    assert_eq!(
+        model_ids(&claude),
+        ["claude-opus-5", "shared/model"],
+        "the Anthropic surface's rows are the picker truth: {claude}"
+    );
+    assert_eq!(
+        rows[0]["label"], "Claude Opus 5",
+        "display name maps to the label"
+    );
+    assert_eq!(
+        rows[0]["default"], true,
+        "the catalog's family default claims the picker default"
+    );
+    assert_eq!(rows[1]["default"], false);
+    assert_eq!(
+        rows[0]["fast_mode"], false,
+        "a gateway row promises no fast mode the catalog does not state"
+    );
+    assert_eq!(
+        claude["reasoning_efforts"],
+        serde_json::to_value(ReasoningEffort::ALL).unwrap(),
+        "the engine's own ladder stays the outer bound"
+    );
+
+    let codex = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::Codex)
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        model_ids(&codex),
+        ["glm-5.3", "shared/model", "trim-me"],
+        "Codex sees the OpenAI surface, which the Anthropic-only row stays off: {codex}"
+    );
+    assert_eq!(
+        codex["models"][2]["label"], "trim-me",
+        "a blank display name falls back to the trimmed id"
+    );
+
+    let grok = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::Grok)
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(model_ids(&grok), model_ids(&codex));
+
+    let opencode = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::Opencode)
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        model_ids(&opencode),
+        [
+            "anthropic/claude-opus-5",
+            "anthropic/shared/model",
+            "model-gateway/glm-5.3",
+            "model-gateway/trim-me",
+        ],
+        "OpenCode must post every pick through the provider wired to the listing surface: {opencode}"
+    );
+    for listing in [&claude, &codex, &grok, &opencode] {
+        assert_eq!(
+            listing["source"], "model_gateway",
+            "hosted rows must identify the gateway catalog: {listing}"
+        );
+        assert!(
+            !model_ids(listing).contains(&"local-only-model"),
+            "the engine's local listing is never the hosted truth: {listing}"
+        );
+    }
+    assert_eq!(
+        observed.anthropic_reads.load(Ordering::SeqCst),
+        2,
+        "Claude and OpenCode are the only Anthropic listing readers"
+    );
+    assert_eq!(
+        observed.openai_reads.load(Ordering::SeqCst),
+        3,
+        "Codex, Grok, and OpenCode are the only OpenAI listing readers"
+    );
+    gateway_server.abort();
+}
+
+/// A one-protocol engine reads only the listing its turns use. An unrelated
+/// compat surface may be unavailable without turning every picker into an
+/// error; OpenCode still requires both because it offers both providers.
+#[tokio::test]
+async fn a_hosted_engine_does_not_require_an_unrelated_gateway_listing() {
+    let anthropic_only = FakeModelGateway::new(
+        Some(serde_json::json!({
+            "data": [{ "id": "claude-opus-5", "display_name": "Claude Opus 5" }]
+        })),
+        None,
+    );
+    let observed_anthropic = anthropic_only.clone();
+    let (gateway, gateway_server) = anthropic_only.start().await;
+    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let claude = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::ClaudeCode).await;
+    assert_eq!(claude.status(), reqwest::StatusCode::OK);
+    assert_eq!(observed_anthropic.anthropic_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(observed_anthropic.openai_reads.load(Ordering::SeqCst), 0);
+    gateway_server.abort();
+
+    let openai_only = FakeModelGateway::new(
+        None,
+        Some(serde_json::json!({
+            "object": "list",
+            "data": [{ "id": "glm-5.3", "object": "model" }]
+        })),
+    );
+    let observed_openai = openai_only.clone();
+    let (gateway, gateway_server) = openai_only.start().await;
+    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let addr = serve(router).await;
+    for kind in [HarnessKind::Codex, HarnessKind::Grok] {
+        let response = fetch_harness_models(&client, addr, token.as_ref(), kind).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "{kind}");
+    }
+    assert_eq!(observed_openai.anthropic_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(observed_openai.openai_reads.load(Ordering::SeqCst), 2);
+    gateway_server.abort();
+}
+
+/// The hosted branch is caller-owned and fail-closed. If authentication has
+/// not recorded this request's principal, the route returns an error and
+/// never falls back to a local CLI row or reads a gateway listing unauthenticated.
+#[tokio::test]
+async fn a_hosted_model_listing_without_caller_ownership_fails_closed() {
+    let fake = FakeModelGateway::full();
+    let observed = fake.clone();
+    let (gateway, gateway_server) = fake.start().await;
+    let (router, token, _dir) = hosted_model_app(gateway, false).await;
+    let addr = serve(router).await;
+    let response = fetch_harness_models(
+        &reqwest::Client::new(),
+        addr,
+        token.as_ref(),
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(body["kind"], "authentication", "{body}");
+    assert!(
+        !body.to_string().contains("local-only-model"),
+        "a missing caller grant must never fall back locally: {body}"
+    );
+    assert_eq!(observed.anthropic_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(observed.openai_reads.load(Ordering::SeqCst), 0);
+    gateway_server.abort();
+}
+
+/// Issue 2755's other half: away from a hosted machine the models route is
+/// the engine's own listing, exactly as before.
+#[tokio::test]
+async fn a_local_machine_keeps_the_engine_own_model_listing() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_reasoning_levels(CapLevel::Supported)
+        .with_models(vec![
+            listed_model("fast-thinker", true, &[ReasoningEffort::High], true),
+            listed_model("steady", false, &[ReasoningEffort::Low], false),
+        ]);
+    let (router, token, _runtime, _dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let listed = client
+        .get(format!("http://{addr}/code/harnesses/claude_code/models"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(listed["kind"], "claude_code");
+    assert_eq!(listed["source"], "harness");
+    let rows = listed["models"].as_array().unwrap();
+    let ids: Vec<&str> = rows.iter().map(|row| row["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["fast-thinker", "steady"]);
+    assert_eq!(rows[0]["default"], true);
+    assert_eq!(rows[0]["reasoning_efforts"], serde_json::json!(["high"]));
+    assert_eq!(rows[0]["fast_mode"], true);
+    assert_eq!(rows[1]["reasoning_efforts"], serde_json::json!(["low"]));
+    assert_eq!(
+        listed["reasoning_efforts"],
+        serde_json::to_value(ReasoningEffort::ALL).unwrap()
+    );
 }
 
 /// A session restored at boot comes back supervised. Recovery re-attaches its

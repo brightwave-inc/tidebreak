@@ -43,6 +43,8 @@ use futures::StreamExt as _;
 use tidebreak_core::{AgentError, OwnerId, Profile, Result};
 use tidebreak_router::BearerTokenSource;
 
+use crate::providers::GatewayModelProtocol;
+
 /// Mint a replacement this close to expiry instead of using the cached token.
 ///
 /// Matches the desktop's refresh leeway, so a turn never opens a request with
@@ -263,6 +265,16 @@ pub(crate) enum GitForgeError {
     Unavailable(String),
 }
 
+/// One model row from a gateway compat listing, reduced to what an engine
+/// picker needs: the id a turn presents, the display name when the listing
+/// carries one, and the family default the Anthropic surface annotates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatewayCompatModel {
+    pub(crate) id: String,
+    pub(crate) display_name: Option<String>,
+    pub(crate) family_default: bool,
+}
+
 /// Per-caller inference credentials for a gateway-authenticated deployment.
 ///
 /// Construct one per process with [`OboGateway::from_config`], record each
@@ -275,6 +287,10 @@ pub(crate) struct OboGateway {
     token_url: reqwest::Url,
     /// The member catalog a caller's exchanged capability reads.
     catalog_url: reqwest::Url,
+    /// The per-protocol compat model listings the engine relay can carry
+    /// (decision 71, issue 2755).
+    anthropic_models_url: reqwest::Url,
+    openai_models_url: reqwest::Url,
     /// The git-credential mint, presented with the machine-bound token
     /// directly (decision 63).
     git_credential_url: reqwest::Url,
@@ -343,6 +359,8 @@ impl OboGateway {
         let base = normalized_gateway_base(base_url)?;
         let token_url = join_below(&base, "oauth/token")?;
         let catalog_url = join_below(&base, "api/v1/me/catalog")?;
+        let anthropic_models_url = join_below(&base, "compat/anthropic/v1/models")?;
+        let openai_models_url = join_below(&base, "compat/openai/v1/models")?;
         let git_credential_url = join_below(&base, "api/v1/tidebreak/git-credential")?;
         let git_forge_url = join_below(&base, "api/v1/tidebreak/git-forge")?;
         let git_repositories_url = join_below(&base, "api/v1/tidebreak/git-repositories")?;
@@ -357,6 +375,8 @@ impl OboGateway {
         Ok(Self {
             token_url,
             catalog_url,
+            anthropic_models_url,
+            openai_models_url,
             git_credential_url,
             git_forge_url,
             git_repositories_url,
@@ -664,6 +684,94 @@ impl OboGateway {
             },
             etag,
         })
+    }
+
+    /// One model listing the engine relay can carry for `owner`, read from
+    /// the matching gateway compat surface with their fresh inference token
+    /// (decision 71, issue 2755).
+    ///
+    /// The listing is exactly the set a turn through that protocol
+    /// authenticates against, so an engine picker served from it offers no
+    /// dead picks and omits nothing entitled. Reading one protocol does not
+    /// depend on the other compat surface being available.
+    ///
+    /// # Errors
+    /// Fails when this process holds no live subject for `owner`, when the
+    /// exchange or a read is refused, on transport failure, and when a body
+    /// is not a listing shape.
+    pub(crate) async fn compat_models(
+        &self,
+        owner: &OwnerId,
+        protocol: GatewayModelProtocol,
+    ) -> Result<Vec<GatewayCompatModel>> {
+        let token = self.bearer_for(owner).await?;
+        let url = match protocol {
+            GatewayModelProtocol::AnthropicMessages => &self.anthropic_models_url,
+            GatewayModelProtocol::OpenaiResponses => &self.openai_models_url,
+        };
+        self.compat_models_page(url, &token).await
+    }
+
+    /// One compat listing. The two surfaces share the `data` array shape;
+    /// only the Anthropic surface carries display names and family defaults.
+    async fn compat_models_page(
+        &self,
+        url: &reqwest::Url,
+        token: &str,
+    ) -> Result<Vec<GatewayCompatModel>> {
+        let response = self
+            .client
+            .get(url.clone())
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| {
+                AgentError::msg(format!("the Model Gateway model listing failed: {error}"))
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(AgentError::SignInRequired(
+                "the Model Gateway refused the model listing for your session; sign in again"
+                    .into(),
+            ));
+        }
+        let body = read_bounded(response, CATALOG_RESPONSE_LIMIT).await?;
+        if !status.is_success() {
+            return Err(AgentError::msg(format!(
+                "the Model Gateway model listing failed with status {status}"
+            )));
+        }
+        let listing: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+            AgentError::msg(format!(
+                "the Model Gateway returned an unreadable model listing: {error}"
+            ))
+        })?;
+        let rows = listing
+            .get("data")
+            .and_then(|data| data.as_array())
+            .ok_or_else(|| AgentError::msg("the Model Gateway model listing has no data array"))?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                Some(GatewayCompatModel {
+                    display_name: row
+                        .get("display_name")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|display_name| !display_name.is_empty())
+                        .map(str::to_owned),
+                    family_default: row
+                        .get("is_family_default")
+                        .and_then(|value| value.as_bool())
+                        == Some(true),
+                    id: id.to_owned(),
+                })
+            })
+            .collect())
     }
 
     /// The forge identity this caller's git operations would act as, probed

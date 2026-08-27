@@ -2613,7 +2613,7 @@ export type HarnessDoctorReport = { harnesses: Array<HarnessDoctorEntry>, };
 export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok";
 
 /**
- * One model a harness CLI listed.
+ * One model row offered for a harness session.
  */
 export type HarnessModel = { id: string, label: string, default: boolean, 
 /**
@@ -2625,6 +2625,11 @@ reasoning_efforts: Array<ReasoningEffort>,
  * control, the same way an empty effort ladder does.
  */
 fast_mode: boolean, };
+
+/**
+ * Whose catalog produced a harness model list.
+ */
+export type HarnessModelSource = "harness" | "model_gateway";
 
 /**
  * `GET /code/harnesses/{kind}/models`.
@@ -2639,7 +2644,7 @@ export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>,
  * and wins where it exists. Empty means the engine takes no effort
  * control at all.
  */
-reasoning_efforts: Array<ReasoningEffort>, };
+reasoning_efforts: Array<ReasoningEffort>, source: HarnessModelSource, };
 
 /**
  * Severity of a visible-degradation notice.

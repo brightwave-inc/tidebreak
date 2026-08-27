@@ -36,6 +36,7 @@ import {
   parseCodeWorkspaceTree,
   parseCodeWorktreeRoot,
   parseFenceReason,
+  parseHarnessModelList,
   parseCodeCheckLogsSnapshot,
 } from "./parsers";
 
@@ -145,6 +146,39 @@ const SESSION = {
   unrecognized_event_count: 0,
   created_at: "2026-08-15T12:00:00.000Z",
 };
+
+describe("parseHarnessModelList", () => {
+  const listing = {
+    kind: "opencode",
+    models: [
+      {
+        id: "model-gateway/glm-5.3",
+        label: "GLM 5.3",
+        default: true,
+        reasoning_efforts: [],
+        fast_mode: false,
+      },
+    ],
+    reasoning_efforts: [],
+  };
+
+  it(
+    "preserves hosted catalog provenance and defaults old servers to native",
+    () => {
+      expect(
+        parseHarnessModelList({ ...listing, source: "model_gateway" }),
+      ).toEqual({ ...listing, source: "model_gateway" });
+      expect(parseHarnessModelList(listing)).toEqual({
+        ...listing,
+        source: "harness",
+      });
+    },
+  );
+
+  it("rejects an unknown catalog source", () => {
+    expect(parseHarnessModelList({ ...listing, source: "shared" })).toBeNull();
+  });
+});
 
 describe("parseCodeSubscriptionUsage", () => {
   it("accepts normalized personal and shared provider windows", () => {

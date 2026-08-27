@@ -187,7 +187,7 @@ import {
   parseCodeWatch,
   parseCodePrComments,
   parseHarnessModelList,
-  type ParsedHarnessModel,
+  type ParsedHarnessModelList,
   parseHarnessDoctorReport,
   parseSequencedCodeEvent,
   parseCodeUpdateNotice,
@@ -2285,11 +2285,9 @@ export class ApiClient {
     );
   }
 
-  async listCodeHarnessModels(kind: HarnessKind): Promise<{
-    kind: HarnessKind;
-    models: ParsedHarnessModel[];
-    reasoning_efforts: ReasoningEffort[];
-  }> {
+  async listCodeHarnessModels(
+    kind: HarnessKind,
+  ): Promise<ParsedHarnessModelList> {
     return requireParsed(
       parseHarnessModelList(
         await this.json(`/code/harnesses/${encodeURIComponent(kind)}/models`, {

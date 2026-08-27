@@ -196,6 +196,36 @@ describe("CodeCatalogStore.ensureHarnessModels", () => {
     ]);
   });
 
+  it("preserves model-gateway provenance for hosted picker rows", async () => {
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "opencode" as const,
+        source: "model_gateway" as const,
+        models: [
+          {
+            id: "model-gateway/glm-5.3",
+            label: "GLM 5.3",
+            default: true,
+            reasoning_efforts: [],
+            fast_mode: false,
+          },
+        ],
+        reasoning_efforts: [],
+      })),
+    };
+
+    await useCodeCatalogStore
+      .getState()
+      .ensureHarnessModels(client, "opencode");
+
+    expect(useCodeCatalogStore.getState().modelsByHarness.opencode).toEqual([
+      expect.objectContaining({
+        id: "model-gateway/glm-5.3",
+        source: "opencode · model-gateway",
+      }),
+    ]);
+  });
+
   it("shares the initial catalog refresh with an opening picker", async () => {
     let resolveCodex!: (value: { kind: "codex"; models: [] }) => void;
     const codex = new Promise<Parameters<typeof resolveCodex>[0]>((done) => {

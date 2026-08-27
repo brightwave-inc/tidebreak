@@ -13,7 +13,12 @@ import {
   codeClientGeneration,
   isCodeClientGenerationActive,
 } from "./CodeClientGeneration";
-import { harnessCodeModels, type CodeModelOption } from "./labels";
+import {
+  HARNESS_LABELS,
+  harnessCodeModels,
+  type CodeModelOption,
+} from "./labels";
+import type { ParsedHarnessModelList } from "./parsers";
 
 const HARNESS_KINDS: HarnessKind[] = [
   "claude_code",
@@ -106,6 +111,17 @@ export function isOptimisticWorkspace(workspace: CodeWorkspaceSnapshot) {
   return workspace.id.startsWith(OPTIMISTIC_WORKSPACE_ID_PREFIX);
 }
 
+/** Preserve whether the server listed the engine or the hosted gateway. */
+export function codeModelsFromHarnessListing(
+  listed: Pick<ParsedHarnessModelList, "models" | "source">,
+  kind: HarnessKind,
+): CodeModelOption[] {
+  const models = harnessCodeModels(listed.models, kind);
+  if (listed.source !== "model_gateway") return models;
+  const source = `${HARNESS_LABELS[kind]} · model-gateway`;
+  return models.map((model) => ({ ...model, source }));
+}
+
 function loadHarnessModels(
   client: Pick<ApiClient, "listCodeHarnessModels">,
   kind: HarnessKind,
@@ -125,7 +141,7 @@ function loadHarnessModels(
     .listCodeHarnessModels(kind)
     .then((listed) => {
       if (!requestIsCurrent(context)) return [];
-      const models = harnessCodeModels(listed.models, kind);
+      const models = codeModelsFromHarnessListing(listed, kind);
       get().rememberHarnessModels(kind, models, listed.reasoning_efforts);
       return models;
     })
