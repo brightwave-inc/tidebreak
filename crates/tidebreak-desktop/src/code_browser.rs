@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
-    BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
+    BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot, ManagedBrowserRegistration,
 };
 #[cfg(any(target_os = "macos", test))]
 use crate::browser_profile::normalize_website_host;
@@ -166,13 +166,18 @@ pub(crate) async fn code_browser_command(
                 registry.set_visible(&request.browser_id, &request.workspace_id, visible)?;
                 return registry.snapshot(&request.browser_id, &request.workspace_id);
             }
+            let owner_id = OwnerId::local();
+            let recovered =
+                registry.recover_session(&owner_id, &request.browser_id, &request.workspace_id)?;
             // A platform webview can disappear independently after a native
             // failure. Remove that same-workspace stale record before
             // allocating a fresh native instance; a cross-workspace record is
             // deliberately rejected rather than rebound.
             registry.remove(&request.browser_id, &request.workspace_id)?;
-            let owner_id = OwnerId::local();
             let profile = profiles.get_or_create(&owner_id)?;
+            let (url, title) = recovered
+                .map(|session| (session.url, session.title))
+                .unwrap_or((url, None));
             create_browser(
                 &app,
                 &registry,
@@ -182,6 +187,7 @@ pub(crate) async fn code_browser_command(
                 &request.browser_id,
                 &label,
                 &url,
+                title,
                 bounds,
                 visible,
             )
@@ -255,11 +261,18 @@ pub(crate) async fn code_browser_command(
             registry.snapshot(&request.browser_id, &request.workspace_id)
         }
         CodeBrowserAction::Close => {
+            let owner_id = OwnerId::local();
+            registry.ensure_recovery_binding(
+                &owner_id,
+                &request.browser_id,
+                &request.workspace_id,
+            )?;
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
                 webview.close().map_err(browser_error)?;
             }
             registry.remove(&request.browser_id, &request.workspace_id)?;
+            registry.forget_recovery(&owner_id, &request.browser_id, &request.workspace_id)?;
             Ok(BrowserSnapshot::missing(
                 &request.browser_id,
                 &request.workspace_id,
@@ -449,6 +462,7 @@ fn create_browser(
     browser_id: &str,
     label: &str,
     url: &str,
+    title: Option<String>,
     bounds: CodeBrowserBounds,
     visible: bool,
 ) -> Result<BrowserSnapshot, String> {
@@ -465,13 +479,16 @@ fn create_browser(
     let profile_id = profile.profile_id();
     profiles.record_url(&owner_id, &profile_id, &target)?;
 
-    let instance_id = registry.register_managed(
+    let instance_id = registry.register_managed_with_title(
         browser_id,
         workspace_id,
-        owner_id.clone(),
-        profile_id.clone(),
-        target.to_string(),
-        visible,
+        ManagedBrowserRegistration {
+            owner_id: owner_id.clone(),
+            profile_id: profile_id.clone(),
+            url: target.to_string(),
+            title,
+            visible,
+        },
     )?;
 
     let navigation_main = main.clone();
