@@ -88,23 +88,13 @@ impl ForgeActionError {
         Self { kind, message }
     }
 
-    fn merge_response(status: reqwest::StatusCode, value: &Value) -> Self {
+    fn pull_request_merge_response(status: reqwest::StatusCode, value: &Value) -> Self {
         let message = forge_message(status, value);
-        let lower = message.to_ascii_lowercase();
-        let kind = if status == reqwest::StatusCode::UNAUTHORIZED {
-            ForgeActionErrorKind::AuthFailed
-        } else if status == reqwest::StatusCode::CONFLICT
-            || lower.contains("head branch was modified")
-            || lower.contains("head sha")
-        {
-            ForgeActionErrorKind::HeadChanged
-        } else if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
-            || lower.contains("not mergeable")
-            || lower.contains("merge cannot be performed")
-        {
-            ForgeActionErrorKind::NotMergeable
-        } else {
-            ForgeActionErrorKind::Other
+        let kind = match status {
+            reqwest::StatusCode::UNAUTHORIZED => ForgeActionErrorKind::AuthFailed,
+            reqwest::StatusCode::CONFLICT => ForgeActionErrorKind::HeadChanged,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED => ForgeActionErrorKind::NotMergeable,
+            _ => ForgeActionErrorKind::Other,
         };
         Self { kind, message }
     }
@@ -446,7 +436,9 @@ pub(crate) async fn merge_pull_request(
     .await
     .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(ForgeActionError::merge_response(status, &value));
+        return Err(ForgeActionError::pull_request_merge_response(
+            status, &value,
+        ));
     }
     if value.get("merged").and_then(Value::as_bool) != Some(true) {
         return Err(ForgeActionError {
@@ -480,7 +472,7 @@ pub(crate) async fn enable_pull_request_auto_merge(
     .await
     .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(ForgeActionError::merge_response(status, &pull));
+        return Err(ForgeActionError::response(status, &pull));
     }
     let node_id = pull
         .get("node_id")
@@ -520,7 +512,7 @@ pub(crate) async fn enable_pull_request_auto_merge(
             .pointer("/data/enablePullRequestAutoMerge")
             .is_none_or(Value::is_null)
     {
-        return Err(ForgeActionError::merge_response(status, &value));
+        return Err(ForgeActionError::response(status, &value));
     }
     Ok(())
 }
@@ -1013,23 +1005,32 @@ mod tests {
     #[test]
     fn pull_request_merge_statuses_ignore_rewritten_messages() {
         let kind = |status: reqwest::StatusCode, message: &str| {
-            ForgeActionError::merge_response(status, &serde_json::json!({ "message": message }))
-                .kind()
+            ForgeActionError::pull_request_merge_response(
+                status,
+                &serde_json::json!({ "message": message }),
+            )
+            .kind()
         };
         assert_eq!(
-            kind(reqwest::StatusCode::CONFLICT, "Opaque enterprise response"),
-            ForgeActionErrorKind::HeadChanged
-        );
-        assert_eq!(
-            kind(reqwest::StatusCode::CONFLICT, "Merge conflict"),
+            kind(
+                reqwest::StatusCode::CONFLICT,
+                "Pull Request is not mergeable"
+            ),
             ForgeActionErrorKind::HeadChanged
         );
         assert_eq!(
             kind(
                 reqwest::StatusCode::METHOD_NOT_ALLOWED,
-                "Opaque enterprise response"
+                "Head sha did not match the reviewed revision"
             ),
             ForgeActionErrorKind::NotMergeable
+        );
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "Head branch was modified"
+            ),
+            ForgeActionErrorKind::Other
         );
     }
 
