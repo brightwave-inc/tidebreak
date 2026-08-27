@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { PullRequestDigest } from "../api/types";
 import {
@@ -10,6 +10,11 @@ import {
   prWorkflowStatus,
 } from "./prActions";
 import { prHasConflicts, prIsQueued } from "./prState";
+import { resetWorkflowPromptStore } from "./workflowPrompts";
+
+afterEach(() => {
+  resetWorkflowPromptStore();
+});
 
 function pr(partial: Partial<PullRequestDigest>): PullRequestDigest {
   return {

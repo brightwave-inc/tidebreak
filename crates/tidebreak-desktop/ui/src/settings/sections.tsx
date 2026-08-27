@@ -14,6 +14,7 @@ import {
   Mic,
   Terminal,
   Waypoints,
+  Zap,
 } from "lucide-react";
 
 import { useApp } from "@/AppContext";
@@ -33,6 +34,7 @@ import { UpdatesPanel } from "./UpdatesPanel";
 import { WebSearchPanel } from "./WebSearchPanel";
 import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
+import { QuickActionsPanel } from "./QuickActionsPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -184,6 +186,10 @@ function CodingHarnessesSection() {
   return <CodingHarnessesPanel client={client} />;
 }
 
+function QuickActionsSection() {
+  return <QuickActionsPanel />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -291,6 +297,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: Terminal,
     iconClass: "text-icon-amber",
     Component: CodingHarnessesSection,
+  },
+  {
+    path: "quick-actions",
+    label: "Quick actions",
+    group: "capabilities",
+    icon: Zap,
+    iconClass: "text-icon-violet",
+    Component: QuickActionsSection,
   },
   {
     path: "connected-apps",

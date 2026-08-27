@@ -34,6 +34,7 @@ import { toast } from "sonner";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
+import { resetWorkflowPromptStore } from "./workflowPrompts";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
 import {
@@ -652,6 +653,7 @@ afterEach(() => {
     workflowShortcutPending: null,
     archivePending: false,
   });
+  resetWorkflowPromptStore();
   browserMocks.close.mockClear();
   window.localStorage.clear();
   vi.restoreAllMocks();
@@ -1641,8 +1643,9 @@ describe("CodeWorkspacePage", () => {
     expect(toast.error).toHaveBeenCalledWith("worktree is busy");
   });
 
-  it("drafts the Create PR request into the composer for local changes", async () => {
+  it("sends the Create PR request into the workspace chat for local changes", async () => {
     const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
     client.getCodeWorkspacePr.mockResolvedValue({
       dirty: true,
       unpushed: false,
@@ -1664,21 +1667,19 @@ describe("CodeWorkspacePage", () => {
       within(control).getByRole("button", { name: "Create PR" }),
     );
 
-    // Offered, not sent: the request lands as an editable draft and no turn
-    // starts until the reader submits it.
-    const composer = await waitFor(() => {
-      const input = document.querySelector<HTMLTextAreaElement>(
-        "[data-composer-input]",
-      );
-      expect(input?.value).toContain("open a pull request against `main`");
-      return input!;
-    });
-    expect(composer.value).toContain("Do not merge.");
-    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+    await waitFor(() => expect(client.submitCodeTurn).toHaveBeenCalled());
+    expect(client.submitCodeTurn.mock.calls[0]?.[0]).toBe("sess-1");
+    expect(client.submitCodeTurn.mock.calls[0]?.[1]).toContain(
+      "open a pull request against `main`",
+    );
+    expect(client.submitCodeTurn.mock.calls[0]?.[1]).toContain("Do not merge.");
 
-    // Hand review is one step away: the menu still opens Source control, and
-    // the suggested commit message still does not crowd the composer — the
-    // draft stays exactly what Create PR put there.
+    const composer = document.querySelector<HTMLTextAreaElement>(
+      "[data-composer-input]",
+    );
+    expect(composer?.value ?? "").not.toContain("improve login flow");
+    expect(composer?.value ?? "").not.toContain("open a pull request");
+
     await user.click(
       within(control).getByRole("button", { name: "More workspace actions" }),
     );
@@ -1689,7 +1690,6 @@ describe("CodeWorkspacePage", () => {
       "aria-selected",
       "true",
     );
-    expect(composer.value).not.toContain("improve login flow");
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     await user.click(screen.getByRole("button", { name: "Review sidebar" }));
