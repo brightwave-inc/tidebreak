@@ -7,6 +7,7 @@ import {
   Ellipsis,
   FolderGit2,
   GitBranch,
+  Plus,
 } from "lucide-react";
 
 import type {
@@ -33,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   Popover,
+  PopoverAnchor,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
@@ -47,6 +49,8 @@ import {
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
+import { AddRepoInline } from "./AddRepoInline";
+import { useAddRepoInline } from "./useAddRepoInline";
 import {
   FastModeToggle,
   HarnessModelMenu,
@@ -102,6 +106,11 @@ const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
  * engine honors (decision 0039, amended). The engine menu lists every doctor
  * entry — ready rows are selectable; unusable ones stay visible, dimmed, with
  * the reason.
+ *
+ * The repo pill registers one too. With nothing in the catalog it opens the
+ * add-repo field directly, and that field's submit is this dialog's submit:
+ * the repo is registered or cloned, and the create chain continues on it. A
+ * first run is one message and one submit, not a palette round trip.
  */
 
 /** The repo this reader worked on last: newest workspace, then storage. */
@@ -143,7 +152,14 @@ function recentHarness(
 }
 
 /** Pickers a chord can open; one open at a time, chords toggle. */
-type PickerId = "repo" | "engine" | "model" | "mode" | "base" | "name";
+type PickerId =
+  | "repo"
+  | "addRepo"
+  | "engine"
+  | "model"
+  | "mode"
+  | "base"
+  | "name";
 
 type CreateAttempt = {
   repoId: string;
@@ -220,6 +236,21 @@ export function NewWorkspaceDialog({
   const createLocked = useRef(false);
   const retryAttempt = useRef<CreateAttempt | null>(null);
   const command = useMemo(() => usesCommandModifier(navigator.userAgent), []);
+  // A repo registered from this dialog reaches the catalog before the prop
+  // carrying it comes back around, and the create that follows must not wait
+  // a render for it.
+  const [addedRepo, setAddedRepo] = useState<CodeRepoSnapshot | null>(null);
+  // The repo this reader chose during this opening. A catalog that grows
+  // mid-opening — which is exactly what adding a repo does — must not reseed
+  // the form they are already filling in.
+  const pickedRepo = useRef<string | null>(null);
+  const knownRepos = useMemo(
+    () =>
+      addedRepo && !repos.some((repo) => repo.id === addedRepo.id)
+        ? [...repos, addedRepo]
+        : repos,
+    [addedRepo, repos],
+  );
 
   const allHarnesses = doctor?.harnesses ?? [];
   const selectableHarnesses = allHarnesses.filter(
@@ -254,7 +285,14 @@ export function NewWorkspaceDialog({
     : false;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      pickedRepo.current = null;
+      setAddedRepo(null);
+      return;
+    }
+    // A repo picked or added in this opening is the reader's answer. Catalog
+    // churn after that — including the repo they just added — reseeds nothing.
+    if (pickedRepo.current) return;
     createLocked.current = false;
     const retry = retryAttempt.current;
     retryAttempt.current = null;
@@ -262,7 +300,7 @@ export function NewWorkspaceDialog({
     const nextRepo =
       retry?.repoId ??
       defaultRepoId ??
-      recentRepoId(repos, known, lastCreate?.repoId);
+      recentRepoId(knownRepos, known, lastCreate?.repoId);
     setRepoId(nextRepo);
     if (retry) {
       useCodeUiStore.getState().setNewWorkspaceDraft({
@@ -272,7 +310,7 @@ export function NewWorkspaceDialog({
     }
     setBaseRef(
       retry?.baseRef ??
-        repos.find((repo) => repo.id === nextRepo)?.default_base_ref ??
+        knownRepos.find((repo) => repo.id === nextRepo)?.default_base_ref ??
         "",
     );
     setPickedHarness(retry?.harness ?? null);
@@ -295,7 +333,7 @@ export function NewWorkspaceDialog({
     // Reset against the dialog opening, not against catalog refreshes
     // mid-open — a workspace created elsewhere must not move this form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, defaultRepoId, repos]);
+  }, [open, defaultRepoId, knownRepos]);
 
   // A pin this machine has never installed is minutes of npm. Warming it
   // when the dialog opens — and again when the engine changes — moves that
@@ -308,7 +346,7 @@ export function NewWorkspaceDialog({
   const needsDownload = Boolean(doctorEntry && !doctorEntry.found);
   const install = useWarmHarnessInstall(client, harness, open, needsDownload);
 
-  const selectedRepo = repos.find((repo) => repo.id === repoId);
+  const selectedRepo = knownRepos.find((repo) => repo.id === repoId);
   const selectedHarness = selectableHarnesses.find(
     (entry) => entry.kind === harness,
   );
@@ -344,13 +382,13 @@ export function NewWorkspaceDialog({
   // would sit on the same npm install with nothing but a spinner. The install
   // note under the pills says what the wait is, and any engine already on
   // disk is one pick away.
-  const canCreate = Boolean(
-    repoId &&
-      selectedRepo &&
-      selectedHarness &&
-      installed &&
-      !policyBlocksCreate,
+  //
+  // Split from the repo so a repo added inline can create in the same submit,
+  // before the catalog prop carrying it has come back around.
+  const engineReady = Boolean(
+    selectedHarness && installed && !policyBlocksCreate,
   );
+  const canCreate = Boolean(repoId && selectedRepo && engineReady);
   const installNote = install && (!install.done || install.error);
 
   useEffect(() => {
@@ -452,13 +490,16 @@ export function NewWorkspaceDialog({
     setOpenPicker(id);
   }
 
-  function create() {
-    if (!canCreate || !selectedRepo || createLocked.current) return;
+  function create(added?: CodeRepoSnapshot) {
+    // A repo handed in came from the add-repo field this submit started in,
+    // and carries its own base ref: `baseRef` still holds the old repo's.
+    const repo = added ?? selectedRepo;
+    if (!engineReady || !repo || createLocked.current) return;
     createLocked.current = true;
     const attempt: CreateAttempt = {
-      repoId,
+      repoId: repo.id,
       title,
-      baseRef,
+      baseRef: added ? added.default_base_ref : baseRef,
       startingPrompt,
       harness,
       permissionMode: postedMode,
@@ -479,7 +520,28 @@ export function NewWorkspaceDialog({
     } else {
       onOpenChange(false);
     }
-    startCreateAttempt(attempt, selectedRepo);
+    startCreateAttempt(attempt, repo);
+  }
+
+  /**
+   * Take the repo the add-repo field just registered, then keep going.
+   *
+   * The whole point of the field is that adding a repo is not its own errand:
+   * the first message is already typed, so this submit continues into the
+   * same create chain. An engine that cannot start yet is the one case that
+   * stops here, and it leaves the repo picked and the message intact.
+   */
+  function repoAdded(repo: CodeRepoSnapshot) {
+    pickedRepo.current = repo.id;
+    setAddedRepo(repo);
+    setRepoId(repo.id);
+    setBaseRef(repo.default_base_ref);
+    setOpenPicker(null);
+    if (engineReady) {
+      create(repo);
+      return;
+    }
+    focusPrompt();
   }
 
   function startCreateAttempt(
@@ -488,7 +550,7 @@ export function NewWorkspaceDialog({
   ) {
     const repo =
       selectedRepo ??
-      repos.find((candidate) => candidate.id === attempt.repoId);
+      knownRepos.find((candidate) => candidate.id === attempt.repoId);
     if (!repo) {
       toast.error("Could not create the workspace because its repo is gone");
       return;
@@ -680,6 +742,14 @@ export function NewWorkspaceDialog({
     void create();
   }
 
+  const addRepo = useAddRepoInline({
+    open,
+    active: openPicker === "addRepo",
+    onAdded: repoAdded,
+  });
+  /** With no repo yet, the pill is the add-repo field rather than a menu. */
+  const firstRepo = knownRepos.length === 0;
+
   const HarnessIcon = HARNESS_ICONS[harness];
   const anyUnusable = allHarnesses.some((entry) =>
     harnessUnusableReason(entry),
@@ -714,7 +784,11 @@ export function NewWorkspaceDialog({
             // with a dropdown up as well.
             if (mod && !event.altKey && !event.shiftKey) {
               event.preventDefault();
-              void create();
+              // The chord belongs to whatever this submit is finishing. With
+              // the add-repo field open, that is registering the repo — which
+              // then continues into the create anyway.
+              if (openPicker === "addRepo") addRepo.submit();
+              else void create();
             }
             return;
           }
@@ -728,7 +802,7 @@ export function NewWorkspaceDialog({
             event.code === "KeyN"
           ) {
             event.preventDefault();
-            togglePicker("repo");
+            togglePicker(firstRepo ? "addRepo" : "repo");
             return;
           }
           if (!event.altKey || mod || event.shiftKey) return;
@@ -755,45 +829,91 @@ export function NewWorkspaceDialog({
           onSubmit={submit}
         >
           <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 px-3 pt-3">
-            <DropdownMenu {...pickerProps("repo")}>
-              <WithTooltip label={`Repo · ${command ? "⌘N" : "Ctrl+N"}`}>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    className="h-8 max-w-64 gap-2 px-2.5"
-                    disabled={repos.length === 0}
-                    aria-label="Repo"
-                  >
-                    <FolderGit2 className="size-4 shrink-0 opacity-70" />
-                    <span className="truncate">
-                      {selectedRepo?.display_name ?? "No repos"}
-                    </span>
-                    <ChevronDown className="size-4 shrink-0 opacity-50" />
-                  </Button>
-                </DropdownMenuTrigger>
-              </WithTooltip>
-              <DropdownMenuContent align="start" className="z-[60] w-64">
-                {repos.map((repo) => (
-                  <DropdownMenuItem
-                    key={repo.id}
-                    onSelect={() => {
-                      setRepoId(repo.id);
-                      setBaseRef(repo.default_base_ref);
-                    }}
-                    className="flex items-center gap-2"
-                  >
-                    <FolderGit2 className="text-muted-foreground size-4 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {repo.display_name}
-                    </span>
-                    {repo.id === repoId && (
-                      <Check className="size-4 shrink-0" />
-                    )}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Popover {...pickerProps("addRepo")}>
+              {firstRepo ? (
+                <WithTooltip
+                  label={`Add a repo · ${command ? "⌘N" : "Ctrl+N"}`}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="h-8 max-w-64 gap-2 px-2.5"
+                      aria-label="Repo"
+                    >
+                      <FolderGit2 className="size-4 shrink-0 opacity-70" />
+                      <span className="truncate">Add a repo</span>
+                      <ChevronDown className="size-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                </WithTooltip>
+              ) : (
+                <PopoverAnchor asChild>
+                  <span className="inline-flex min-w-0">
+                    <DropdownMenu {...pickerProps("repo")}>
+                      <WithTooltip
+                        label={`Repo · ${command ? "⌘N" : "Ctrl+N"}`}
+                      >
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-8 max-w-64 gap-2 px-2.5"
+                            aria-label="Repo"
+                          >
+                            <FolderGit2 className="size-4 shrink-0 opacity-70" />
+                            <span className="truncate">
+                              {selectedRepo?.display_name ?? "No repo"}
+                            </span>
+                            <ChevronDown className="size-4 shrink-0 opacity-50" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                      </WithTooltip>
+                      <DropdownMenuContent
+                        align="start"
+                        className="z-[60] w-64"
+                      >
+                        {knownRepos.map((repo) => (
+                          <DropdownMenuItem
+                            key={repo.id}
+                            onSelect={() => {
+                              pickedRepo.current = repo.id;
+                              setRepoId(repo.id);
+                              setBaseRef(repo.default_base_ref);
+                            }}
+                            className="flex items-center gap-2"
+                          >
+                            <FolderGit2 className="text-muted-foreground size-4 shrink-0" />
+                            <span className="min-w-0 flex-1 truncate">
+                              {repo.display_name}
+                            </span>
+                            {repo.id === repoId && (
+                              <Check className="size-4 shrink-0" />
+                            )}
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={() => setOpenPicker("addRepo")}
+                          className="flex items-center gap-2"
+                        >
+                          <Plus className="text-muted-foreground size-4 shrink-0" />
+                          <span className="min-w-0 flex-1 truncate">
+                            Add a repo…
+                          </span>
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </span>
+                </PopoverAnchor>
+              )}
+              <PopoverContent align="start" className="z-[60] w-80 p-3">
+                <AddRepoInline
+                  state={addRepo}
+                  submitLabel={engineReady ? "Add and create" : "Add repo"}
+                />
+              </PopoverContent>
+            </Popover>
             <Popover {...pickerProps("name")}>
               <WithTooltip label={`Name · ${alt("N")}`}>
                 <PopoverTrigger asChild>

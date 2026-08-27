@@ -26,6 +26,7 @@ import {
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { ALLOW_ALL_NOTE, PERMISSION_MODE_POLICY_BLOCKED } from "./labels";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
@@ -43,6 +44,7 @@ vi.mock("sonner", () => ({
 afterEach(() => {
   cleanup();
   useCodeCatalogStore.getState().reset();
+  useCodeUpdatesStore.getState().reset();
   useCodeUiStore.setState({
     lastCreate: null,
     pendingComposerPrompt: null,
@@ -1846,5 +1848,216 @@ describe("NewWorkspaceDialog", () => {
     expect(
       screen.queryByRole("switch", { name: /Fast mode/ }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("NewWorkspaceDialog add-repo field", () => {
+  function machineOffersEverything(
+    overrides: Partial<AppContextValue["client"]> = {},
+  ) {
+    return {
+      getCodeRepoSources: vi.fn(async () => ({
+        sources: [
+          { kind: "local", available: true },
+          { kind: "git_url", available: true },
+          { kind: "github", available: true },
+        ],
+        chooses_destination: false,
+      })),
+      getCodeCloneDefaults: vi.fn(async () => ({
+        parent_dir: "/tmp/src",
+        gh_found: true,
+        gh_authenticated: true,
+        gh_remediation: "",
+      })),
+      listCodeHarnessModels: claudeModels(),
+      ...overrides,
+    } as Partial<AppContextValue["client"]>;
+  }
+
+  function firstRun() {
+    useCodeCatalogStore.setState({
+      repos: [],
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+  }
+
+  it("registers a repo and creates on the same submit", async () => {
+    firstRun();
+    const added = repo("repo-added", "tidebreak");
+    const created = workspace(
+      "ws-first",
+      "repo-added",
+      "2026-08-27T12:00:00.000Z",
+    );
+    const createCodeRepo = vi.fn(async () => added);
+    const createCodeWorkspace = vi.fn(async () => created);
+    const createCodeSession = vi.fn(async () =>
+      session("ws-first", "claude_code", "2026-08-27T12:00:00.000Z"),
+    );
+    const submitCodeTurn = vi.fn(async () => ({}) as CodeTurnSubmission);
+    await renderWithRouter(
+      <AppContextProvider
+        value={app(
+          machineOffersEverything({
+            createCodeRepo,
+            createCodeWorkspace,
+            createCodeSession,
+            submitCodeTurn,
+          }),
+        )}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={[]} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    // With nothing registered, the repo pill is the add-repo field.
+    const pill = screen.getByRole("button", { name: "Repo" });
+    expect(pill).toHaveTextContent("Add a repo");
+    expect(pill).toBeEnabled();
+
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox", { name: "First message" }),
+      "ship the thing",
+    );
+    await user.click(pill);
+    await user.type(
+      await screen.findByRole("textbox", { name: "Repository path or URL" }),
+      "/tmp/src/tidebreak",
+    );
+    await user.click(screen.getByRole("button", { name: /Add and create/ }));
+
+    await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalled());
+    expect(createCodeRepo).toHaveBeenCalledWith({ path: "/tmp/src/tidebreak" });
+    expect(createCodeWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ repo_id: "repo-added" }),
+    );
+    // The whole point: the message typed before the repo existed is the first
+    // turn of the session that same submit started.
+    await waitFor(() =>
+      expect(submitCodeTurn).toHaveBeenCalledWith(
+        "sess-ws-first",
+        "ship the thing",
+      ),
+    );
+  });
+
+  it("keeps the message and says why when registering fails", async () => {
+    firstRun();
+    const createCodeRepo = vi.fn(async () => {
+      throw new Error("not a git repository");
+    });
+    const createCodeWorkspace = vi.fn();
+    await renderWithRouter(
+      <AppContextProvider
+        value={app(
+          machineOffersEverything({ createCodeRepo, createCodeWorkspace }),
+        )}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={[]} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox", { name: "First message" }),
+      "ship the thing",
+    );
+    await user.click(screen.getByRole("button", { name: "Repo" }));
+    await user.type(
+      await screen.findByRole("textbox", { name: "Repository path or URL" }),
+      "/tmp/src/not-a-repo",
+    );
+    await user.click(screen.getByRole("button", { name: /Add and create/ }));
+
+    expect(await screen.findByTestId("add-repo-error")).toHaveTextContent(
+      "not a git repository",
+    );
+    expect(createCodeWorkspace).not.toHaveBeenCalled();
+    // Nothing typed is dropped: the message, and the path that needs an edit.
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue(
+      "ship the thing",
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Repository path or URL" }),
+    ).toHaveValue("/tmp/src/not-a-repo");
+    expect(useCodeUiStore.getState().newWorkspaceDraft.startingPrompt).toBe(
+      "ship the thing",
+    );
+  });
+
+  it("clones a remote and creates on the repository it registers", async () => {
+    firstRun();
+    const cloned = repo("repo-cloned", "app");
+    const created = workspace(
+      "ws-cloned",
+      "repo-cloned",
+      "2026-08-27T12:00:00.000Z",
+    );
+    const startCodeClone = vi.fn(async () => ({
+      id: "job-1",
+      phase: "Counting objects",
+      percent: 10,
+      done: false,
+    }));
+    const getCodeCloneJob = vi.fn(async () => ({
+      id: "job-1",
+      phase: "Done",
+      percent: 100,
+      done: true,
+      repo_id: "repo-cloned",
+    }));
+    const getCodeRepo = vi.fn(async () => cloned);
+    const createCodeWorkspace = vi.fn(async () => created);
+    await renderWithRouter(
+      <AppContextProvider
+        value={app(
+          machineOffersEverything({
+            startCodeClone,
+            getCodeCloneJob,
+            getCodeRepo,
+            createCodeWorkspace,
+            createCodeSession: vi.fn(async () =>
+              session("ws-cloned", "claude_code", "2026-08-27T12:00:00.000Z"),
+            ),
+          }),
+        )}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={[]} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Repo" }));
+    await user.type(
+      await screen.findByRole("textbox", { name: "Repository path or URL" }),
+      "acme/app",
+    );
+    // The destination comes from the machine's remembered default.
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: /Destination/i })).toHaveValue(
+        "/tmp/src",
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: /Add and create/ }));
+
+    await waitFor(() =>
+      expect(startCodeClone).toHaveBeenCalledWith({
+        github: "acme/app",
+        parent_dir: "/tmp/src",
+      }),
+    );
+    await waitFor(() =>
+      expect(createCodeWorkspace).toHaveBeenCalledWith(
+        expect.objectContaining({ repo_id: "repo-cloned" }),
+      ),
+    );
   });
 });

@@ -1531,7 +1531,12 @@ function FormSubmit({
   );
 }
 
-function ParentDirField({
+/**
+ * The clone destination, with the retry the administrator-only defaults read
+ * needs. Shared with the new-workspace composer's inline add-repo field, so
+ * both surfaces ask for a destination the same way.
+ */
+export function ParentDirField({
   value,
   busy,
   canBrowse,
