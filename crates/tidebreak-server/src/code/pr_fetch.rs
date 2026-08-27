@@ -652,6 +652,38 @@ fn bounded_body(response: &RawHttpResponse) -> String {
     bounded
 }
 
+/// Advance the durable fact snapshot after a fresh pull read, before its new
+/// ETag is stored. A later 304 reconstructs these fields from the fact, so
+/// persisting the validator without the representation it validates would
+/// roll title, lifecycle, or head state back to the previous slow-sweep
+/// snapshot.
+pub(crate) fn apply_fresh_pull_to_fact(
+    fact: &mut CodePullRequestFact,
+    pull: &RestPull,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) {
+    if let Some(url) = &pull.url {
+        fact.url.clone_from(url);
+    }
+    if let Some(title) = &pull.title {
+        fact.title.clone_from(title);
+    }
+    if let Some(state) = CodePullRequestState::from_str(&pull.state) {
+        fact.state = state;
+    }
+    if let Some(draft) = pull.draft {
+        fact.draft = draft;
+    }
+    if let Some(head_branch) = &pull.head_branch {
+        fact.head_branch.clone_from(head_branch);
+    }
+    if let Some(base_branch) = &pull.base_branch {
+        fact.base_branch.clone_from(base_branch);
+    }
+    fact.head_sha.clone_from(&pull.head_sha);
+    fact.last_seen_at = observed_at;
+}
+
 /// The same digest-relevant fields, projected from a stored fact row when a
 /// 304 says nothing moved since the row was written.
 pub(crate) fn rest_pull_from_fact(fact: &CodePullRequestFact) -> RestPull {
@@ -854,6 +886,56 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(merged.state, "merged");
+    }
+
+    #[test]
+    fn a_304_must_reuse_the_snapshot_advanced_by_the_fresh_pull() {
+        let now = chrono::Utc::now();
+        let mut fact = CodePullRequestFact {
+            id: tidebreak_core::CodePullRequestId::new(),
+            owner: tidebreak_core::OwnerId::local(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "demo".into(),
+            number: 12,
+            url: "https://github.com/acme/demo/pull/12".into(),
+            title: "Stale title".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+            head_sha: Some("deadbeef".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        };
+        let fresh = rest_pull_from_value(&serde_json::json!({
+            "number": 12,
+            "html_url": "https://github.com/acme/demo/pull/12",
+            "state": "open",
+            "title": "Fresh title",
+            "draft": false,
+            "head": { "ref": "feature", "sha": "feedfeed" },
+            "base": { "ref": "main" },
+        }))
+        .unwrap();
+
+        apply_fresh_pull_to_fact(&mut fact, &fresh, now);
+
+        let after_304 = rest_pull_from_fact(&fact);
+        assert_eq!(
+            after_304.title, fresh.title,
+            "a 304 must not roll the title back to the pre-200 fact snapshot"
+        );
+        assert_eq!(
+            after_304.head_sha, fresh.head_sha,
+            "a 304 must not reuse the pre-200 head SHA"
+        );
     }
 
     #[test]

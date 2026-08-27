@@ -4,7 +4,7 @@ use crate::code::{
     CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn,
     CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
     CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-    CodeWorkspaceStatus, HarnessKind, RepoId, WorkspaceId,
+    CodeWorkspaceStatus, HarnessKind, PullRequestDigest, RepoId, WorkspaceId,
 };
 use crate::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
@@ -18,9 +18,10 @@ use crate::db::code::{
     list_queued_turns, list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
     promote_queued_turn, queue_paused, queued_turn_head, recover_interrupted_session,
     replace_session_attention, replace_session_execution_settings, save_session, save_turn,
-    set_queue_paused, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
-    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
-    CodeJournalError, CodeSessionExecutionSettings, MAX_REPLAY_EVENTS,
+    set_active_workspace_pull_request, set_queue_paused, set_session_harness_resume_ref,
+    set_session_subagents, set_turn_narrative, set_workspace_title_if, settle_approval_claim,
+    update_queued_turn, ClaimedApprovalSettlement, CodeJournalError, CodeSessionExecutionSettings,
+    MAX_REPLAY_EVENTS,
 };
 use crate::{
     BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, ReasoningEffort, Store,
@@ -651,6 +652,63 @@ async fn workspace_title_swap_replaces_only_the_expected_title() {
             .title,
         "Derived name"
     );
+}
+
+/// A pull-request refresh holds its workspace snapshot across host I/O. Its
+/// eventual PR-column write must not erase a title changed in the meantime.
+#[tokio::test]
+async fn pull_request_write_preserves_a_concurrent_workspace_rename() {
+    let (_dir, store, session_id, _turn) = seeded_session().await;
+    let owner = OwnerId::local();
+    let workspace_id = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .workspace_id;
+    let refresh_snapshot = get_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refresh_snapshot.title, "first");
+
+    assert!(set_workspace_title_if(
+        &store,
+        &owner,
+        workspace_id,
+        "first",
+        "Renamed while refresh waited"
+    )
+    .await
+    .unwrap());
+    let digest = PullRequestDigest {
+        number: 42,
+        url: Some("https://github.com/acme/demo/pull/42".into()),
+        state: "open".into(),
+        title: Some("PR title".into()),
+        checks_summary: None,
+        checks: None,
+        draft: Some(false),
+        merged: Some(false),
+        review_decision: None,
+        mergeable: None,
+        merge_state_status: None,
+        head_branch: Some("feature".into()),
+        base_branch: Some("main".into()),
+        head_sha: Some("feedfeed".into()),
+        auto_merge_enabled: Some(false),
+        in_merge_queue: Some(false),
+    };
+    assert!(
+        set_active_workspace_pull_request(&store, &owner, refresh_snapshot.id, &digest)
+            .await
+            .unwrap()
+    );
+    let stored = get_workspace(&store, &owner, workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.title, "Renamed while refresh waited");
+    assert_eq!(stored.pr.as_ref(), Some(&digest));
 }
 
 #[tokio::test]
@@ -3488,9 +3546,10 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         PullRequestCheck, PullRequestCheckBucket,
     };
     use crate::db::code::{
-        count_attributed_prs_for_workspace, get_pull_request_fact, insert_pull_request_attribution,
-        list_attributed_facts_for_workspace, list_fact_repo_identities,
-        promote_attribution_to_authored, save_pull_request_fact, set_pull_request_live_state,
+        count_attributed_prs_for_workspace, get_pull_request_fact, get_pull_request_fetch_state,
+        insert_pull_request_attribution, list_attributed_facts_for_workspace,
+        list_fact_repo_identities, promote_attribution_to_authored, save_pull_request_fact,
+        set_pull_request_fetch_state, set_pull_request_live_state,
     };
 
     let (_dir, store) = temp_store().await;
@@ -3554,6 +3613,31 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     assert_eq!(stored.head_sha.as_deref(), Some("bbb222"));
     assert_eq!(stored.first_seen_at, first_seen);
     assert_eq!(stored.last_seen_at, later);
+
+    assert!(set_pull_request_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        412,
+        Some(&refreshed),
+        Some("W/\"pull-2\""),
+        Some("W/\"checks-2\""),
+        Some("W/\"reviews-2\""),
+    )
+    .await
+    .unwrap());
+    let fetch_state =
+        get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(fetch_state.fact.title, "First, retitled");
+    assert_eq!(fetch_state.fact.head_sha.as_deref(), Some("bbb222"));
+    assert_eq!(fetch_state.pull_etag.as_deref(), Some("W/\"pull-2\""));
+    assert_eq!(fetch_state.checks_etag.as_deref(), Some("W/\"checks-2\""));
+    assert_eq!(fetch_state.reviews_etag.as_deref(), Some("W/\"reviews-2\""));
 
     // The live tier (decision 66): the first write reports change, an
     // identical write does not, and a snapshot upsert never blanks it.

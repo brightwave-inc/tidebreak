@@ -207,18 +207,23 @@ pub async fn get_pull_request_fetch_state(
     }))
 }
 
-/// Store the ETags one fetch pass ended with (decision 66). The caller
-/// passes each endpoint's current value — the fresh ETag after a 200, the
-/// one it sent after a 304 — so the row always names what the host holds.
-/// `Ok(false)` when no fact row exists for the identity.
+/// Store one conditional fetch pass atomically (decision 66).
+///
+/// `fresh_fact` carries the representation a pull-request 200 validated; a
+/// 304 passes `None`. The pull snapshot and its ETag must move in one row
+/// update, or concurrent refreshes can pair one response's validator with
+/// another response's snapshot and make the next 304 reconstruct stale
+/// state. Endpoint ETags carry the pass's final values. `Ok(false)` when no
+/// fact row exists for the identity.
 #[allow(clippy::too_many_arguments)]
-pub async fn set_pull_request_etags(
+pub async fn set_pull_request_fetch_state(
     store: &DbStore,
     owner: &OwnerId,
     host: &str,
     repo_owner: &str,
     repo_name: &str,
     number: u64,
+    fresh_fact: Option<&CodePullRequestFact>,
     pull_etag: Option<&str>,
     checks_etag: Option<&str>,
     reviews_etag: Option<&str>,
@@ -229,6 +234,16 @@ pub async fn set_pull_request_etags(
         return Ok(false);
     };
     let mut model: entities::code_pull_request::ActiveModel = row.into();
+    if let Some(fact) = fresh_fact {
+        model.url = Set(fact.url.clone());
+        model.title = Set(fact.title.clone());
+        model.state = Set(fact.state.as_str().to_owned());
+        model.draft = Set(fact.draft);
+        model.head_branch = Set(fact.head_branch.clone());
+        model.base_branch = Set(fact.base_branch.clone());
+        model.head_sha = Set(fact.head_sha.clone());
+        model.last_seen_at = Set(fact.last_seen_at);
+    }
     model.pull_etag = Set(pull_etag.map(ToOwned::to_owned));
     model.checks_etag = Set(checks_etag.map(ToOwned::to_owned));
     model.reviews_etag = Set(reviews_etag.map(ToOwned::to_owned));
