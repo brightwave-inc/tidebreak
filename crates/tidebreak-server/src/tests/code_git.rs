@@ -1654,13 +1654,13 @@ async fn a_hosted_digest_reads_the_row_and_refreshes_conditionally() {
             repo_name: "demo".into(),
             number: 12,
             url: "https://github.com/acme/demo/pull/12".into(),
-            title: "Hosted change".into(),
+            title: "Stale hosted change".into(),
             state: CodePullRequestState::Open,
             draft: false,
             author: None,
             head_branch: "feature".into(),
             base_branch: "main".into(),
-            head_sha: Some("feedfeedfeedfeedfeed".into()),
+            head_sha: Some("deadbeefdeadbeefdead".into()),
             created_at: now,
             updated_at: now,
             merged_at: None,
@@ -1730,6 +1730,7 @@ async fn a_hosted_digest_reads_the_row_and_refreshes_conditionally() {
         .await
         .unwrap();
     assert_eq!(unchanged["pr"]["title"], "Hosted change");
+    assert_eq!(unchanged["pr"]["head_sha"], "feedfeedfeedfeedfeed");
     assert_eq!(
         unchanged["pr"]["checks_summary"],
         "1 passing, 0 pending, 0 failing"

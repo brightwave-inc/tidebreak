@@ -196,6 +196,33 @@ pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Resul
     Ok(result.rows_affected == 1)
 }
 
+/// Write only the pull-request compatibility column of an active workspace.
+///
+/// Background refreshes hold their workspace snapshot across host I/O. A
+/// full-row save from that snapshot could erase a title or other field a
+/// concurrent request changed; this targeted write leaves every unrelated
+/// column untouched and loses cleanly if the workspace left the active tier.
+pub async fn set_active_workspace_pull_request(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: WorkspaceId,
+    pull_request: &PullRequestDigest,
+) -> Result<bool> {
+    let encoded = serde_json::to_value(pull_request)?;
+    let result = entities::code_workspace::Entity::update_many()
+        .col_expr(
+            entities::code_workspace::Column::Pr,
+            sea_orm::sea_query::Expr::value(Some(encoded)),
+        )
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// Set a workspace's title only while it still reads `expected`.
 ///
 /// The compare half is what lets background naming lose to a rename: a derived

@@ -20,9 +20,10 @@ use tidebreak_core::db::code::{
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
-    replace_session_execution_settings, save_repo, save_workspace, settle_approval_claim,
-    update_trigger_enabled, ClaimedApprovalSettlement, CodeSessionExecutionSettings,
-    PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
+    replace_session_execution_settings, save_repo, save_workspace,
+    set_active_workspace_pull_request, settle_approval_claim, update_trigger_enabled,
+    ClaimedApprovalSettlement, CodeSessionExecutionSettings, PermissionModeChangeIntent,
+    MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -2090,7 +2091,7 @@ impl CodeRuntime {
     /// refresh drives the forge REST API with a borrowed credential —
     /// same gate, same stored ETags, same 304-shaped traffic.
     pub(crate) async fn refresh_workspace_pr_row(&self, owner: &OwnerId, id: WorkspaceId) {
-        let Ok(mut workspace) = self.get_workspace(owner, id).await else {
+        let Ok(workspace) = self.get_workspace(owner, id).await else {
             return;
         };
         if workspace.status != CodeWorkspaceStatus::Active {
@@ -2126,8 +2127,21 @@ impl CodeRuntime {
             return;
         };
         if workspace.pr.as_ref() != Some(&digest) {
-            workspace.pr = Some(digest);
-            let _ = self.save_workspace(&workspace).await;
+            match set_active_workspace_pull_request(&self.db, owner, workspace.id, &digest).await {
+                Ok(true) => {
+                    super::attention::emit_workspace_digests(
+                        &self.db,
+                        &self.bus,
+                        owner,
+                        workspace.id,
+                    )
+                    .await;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::debug!(error = %err, "code-mode: workspace digest write failed");
+                }
+            }
         }
     }
 
@@ -2255,7 +2269,7 @@ impl CodeRuntime {
             ),
             None => (None, None, None, None),
         };
-        let pull = match pr_fetch::read_pull_request(
+        let (pull, fresh_pull) = match pr_fetch::read_pull_request(
             gate,
             transport,
             &host,
@@ -2268,9 +2282,11 @@ impl CodeRuntime {
         {
             Ok(EndpointRead::Fresh { value, etag }) => {
                 pull_etag = etag;
-                value
+                (value, true)
             }
-            Ok(EndpointRead::NotModified) => pr_fetch::rest_pull_from_fact(stored_fact.as_ref()?),
+            Ok(EndpointRead::NotModified) => {
+                (pr_fetch::rest_pull_from_fact(stored_fact.as_ref()?), false)
+            }
             Ok(EndpointRead::Missing) => return None,
             Err(failure) => {
                 tracing::debug!(error = %failure, "code-mode: pull-request read skipped");
@@ -2384,23 +2400,33 @@ impl CodeRuntime {
         } else {
             Some(false)
         };
+        let fresh_fact = if fresh_pull {
+            stored_fact.clone().map(|mut fact| {
+                pr_fetch::apply_fresh_pull_to_fact(&mut fact, &pull, Utc::now());
+                fact
+            })
+        } else {
+            None
+        };
+
         let digest = pr_fetch::digest_from_parts(&pull, &checks, review_decision, in_merge_queue);
         self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
             .await;
-        if let Err(err) = tidebreak_core::db::code::set_pull_request_etags(
+        if let Err(err) = tidebreak_core::db::code::set_pull_request_fetch_state(
             &self.db,
             owner,
             &host,
             &repo_owner,
             &repo_name,
             number,
+            fresh_fact.as_ref(),
             pull_etag.as_deref(),
             checks_etag.as_deref(),
             reviews_etag.as_deref(),
         )
         .await
         {
-            tracing::debug!(error = %err, "code-mode: etag write failed");
+            tracing::debug!(error = %err, "code-mode: fetch-state write failed");
         }
         Some(digest)
     }
@@ -2563,7 +2589,7 @@ impl CodeRuntime {
             Ok(workspaces) => workspaces,
             Err(_) => return,
         };
-        for mut workspace in workspaces {
+        for workspace in workspaces {
             if source == Some(workspace.id) || workspace.status != CodeWorkspaceStatus::Active {
                 continue;
             }
@@ -2575,13 +2601,24 @@ impl CodeRuntime {
             if !holds || workspace.pr.as_ref() == Some(digest) {
                 continue;
             }
-            workspace.pr = Some(digest.clone());
-            if let Err(err) = self.save_workspace(&workspace).await {
-                tracing::warn!(
-                    workspace = %workspace.id,
-                    error = %err.message(),
-                    "code-mode: pull-request write-through failed"
-                );
+            match set_active_workspace_pull_request(&self.db, owner, workspace.id, digest).await {
+                Ok(true) => {
+                    super::attention::emit_workspace_digests(
+                        &self.db,
+                        &self.bus,
+                        owner,
+                        workspace.id,
+                    )
+                    .await;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        workspace = %workspace.id,
+                        error = %err,
+                        "code-mode: pull-request write-through failed"
+                    );
+                }
             }
         }
     }
