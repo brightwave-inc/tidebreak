@@ -813,6 +813,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_codex_and_grok_recompose_permission_mode_on_relaunch() {
+        assert!(claude::ClaudeCodeAdapter::new().relaunch_composes_permission_mode());
+        assert!(codex::CodexAdapter::new().relaunch_composes_permission_mode());
+        assert!(grok::GrokAdapter::new().relaunch_composes_permission_mode());
+        assert!(!opencode::OpencodeAdapter::new().relaunch_composes_permission_mode());
+    }
+
+    #[test]
     fn harness_crate_does_not_depend_on_a_pty() {
         // Structural: the harness crate's own manifest must not name a
         // pseudo-terminal package. Auxiliary terminals live in the server.

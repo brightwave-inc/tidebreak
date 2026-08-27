@@ -163,6 +163,8 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 remediation,
                 stderr: probe.stderr,
                 unrecognized_event_count,
+                relaunch_composes_permission_mode: adapter
+                    .relaunch_composes_permission_mode(),
             }
         })
     }))

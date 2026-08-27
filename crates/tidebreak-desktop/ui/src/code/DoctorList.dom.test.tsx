@@ -104,6 +104,7 @@ describe("DoctorList", () => {
           remediation: "",
           stderr: "",
           unrecognized_event_count: 6,
+          relaunch_composes_permission_mode: true,
         },
       ],
     };
@@ -233,4 +234,5 @@ const notDownloaded: HarnessDoctorEntry = {
   remediation: "",
   stderr: "",
   unrecognized_event_count: 0,
+  relaunch_composes_permission_mode: false,
 };

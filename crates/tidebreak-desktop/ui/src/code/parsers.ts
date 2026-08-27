@@ -3066,6 +3066,7 @@ export function parseHarnessDoctorEntry(
       "remediation",
       "stderr",
       "unrecognized_event_count",
+      "relaunch_composes_permission_mode",
     ]) ||
     !isMember(value.kind, HARNESS_KINDS) ||
     typeof value.found !== "boolean" ||
@@ -3078,7 +3079,9 @@ export function parseHarnessDoctorEntry(
       !isMember(value.auth_mode, HARNESS_AUTH_MODES)) ||
     typeof value.remediation !== "string" ||
     typeof value.stderr !== "string" ||
-    !isFiniteNumber(value.unrecognized_event_count)
+    !isFiniteNumber(value.unrecognized_event_count) ||
+    (value.relaunch_composes_permission_mode !== undefined &&
+      typeof value.relaunch_composes_permission_mode !== "boolean")
   ) {
     return null;
   }
@@ -3095,6 +3098,10 @@ export function parseHarnessDoctorEntry(
     // Ditto the hosted doctor: a server that predates it knows only the
     // local sign-in probe, and that is the local answer.
     auth_mode: value.auth_mode ?? "local_sign_in",
+    // Engines historically recomposed the mode on relaunch; a server that
+    // predates the field still behaves that way.
+    relaunch_composes_permission_mode:
+      value.relaunch_composes_permission_mode !== false,
     tier: value.tier,
     caps,
     remediation: value.remediation,

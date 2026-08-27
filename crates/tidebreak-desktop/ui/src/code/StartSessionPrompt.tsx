@@ -19,6 +19,7 @@ import {
   useWarmHarnessInstall,
 } from "./useHarnessInstall";
 import {
+  CREATE_PERMISSION_MODE_FIXED,
   createPermissionModes,
   defaultCreatePermissionMode,
   effortLadder,
@@ -249,7 +250,16 @@ export function StartSessionPrompt({
               }}
             />
           }
-          footerNote={<HarnessInstallNote install={install} />}
+          footerNote={
+            <>
+              {selected?.relaunch_composes_permission_mode === false && (
+                <p className="text-muted-foreground text-xs">
+                  {CREATE_PERMISSION_MODE_FIXED}
+                </p>
+              )}
+              <HarnessInstallNote install={install} />
+            </>
+          }
           promptScope={workspaceId}
           workspaceFiles={workspaceFiles}
           onModelChange={(next) => {

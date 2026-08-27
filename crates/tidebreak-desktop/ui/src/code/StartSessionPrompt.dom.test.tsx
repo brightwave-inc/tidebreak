@@ -95,6 +95,7 @@ function entry(
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,
+    relaunch_composes_permission_mode: kind !== "opencode",
   };
 }
 
@@ -171,6 +172,31 @@ describe("StartSessionPrompt", () => {
       null,
       false,
     );
+    expect(
+      screen.queryByText("Mode is fixed once the session starts"),
+    ).toBeNull();
+  });
+
+  it("says opencode's mode is fixed once the session starts", async () => {
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("opencode", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={vi.fn()}
+        />,
+      ),
+    );
+
+    expect(
+      screen.getByText("Mode is fixed once the session starts"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Permissions: Allow all" }),
+    ).toBeEnabled();
   });
 
   it("falls back to Plan when structured approvals are not supported", async () => {

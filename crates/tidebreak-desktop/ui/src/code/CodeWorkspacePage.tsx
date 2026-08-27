@@ -2416,7 +2416,12 @@ function CodeSessionPane({
                 : undefined
             }
             onModelChange={setModel}
-            onModeChange={changePermissionMode}
+            onModeChange={
+              doctorEntry?.relaunch_composes_permission_mode === false &&
+              session.harness_resume_ref
+                ? undefined
+                : changePermissionMode
+            }
             onEffortChange={
               doctorEntry?.caps.reasoning_levels === "unsupported"
                 ? undefined

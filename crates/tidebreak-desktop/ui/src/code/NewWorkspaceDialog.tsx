@@ -62,6 +62,7 @@ import {
   harnessUnusableReason,
   preferredCodeModels,
   requiresHarnessModelIds,
+  CREATE_PERMISSION_MODE_FIXED,
   HARNESS_LABELS,
   type CodeModelOption,
 } from "./labels";
@@ -926,18 +927,26 @@ export function NewWorkspaceDialog({
                 }));
               }}
             />
-            <WithTooltip label={`Permissions · ${alt("P")}`}>
-              <span className="inline-flex min-w-0">
-                <PermissionModeMenu
-                  scopeKey="code-create"
-                  value={postedMode}
-                  disabled={availableModes.length === 0}
-                  availableModes={availableModes}
-                  onChange={(mode) => setPermissionMode(mode)}
-                  {...pickerProps("mode")}
-                />
-              </span>
-            </WithTooltip>
+            <div className="flex min-w-0 flex-col">
+              <WithTooltip label={`Permissions · ${alt("P")}`}>
+                <span className="inline-flex min-w-0">
+                  <PermissionModeMenu
+                    scopeKey="code-create"
+                    value={postedMode}
+                    disabled={availableModes.length === 0}
+                    availableModes={availableModes}
+                    onChange={(mode) => setPermissionMode(mode)}
+                    {...pickerProps("mode")}
+                  />
+                </span>
+              </WithTooltip>
+              {selectedHarness?.relaunch_composes_permission_mode === false && (
+                <p className="text-muted-foreground px-2 text-xs">
+                  {CREATE_PERMISSION_MODE_FIXED}
+                </p>
+              )}
+            </div>
+
             <div className="min-w-4 flex-1" />
             <WithTooltip label="Stay here after create to fire off another">
               <label

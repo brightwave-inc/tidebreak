@@ -2590,7 +2590,13 @@ installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: 
  * observation, which on a hosted machine is not what a session
  * authenticates with.
  */
-auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number, };
+auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number, 
+/**
+ * Whether relaunching a session applies a permission mode chosen after
+ * it started. False for engines that fix the mode on session create
+ * (opencode); true where a relaunch rebuilds the launch plan.
+ */
+relaunch_composes_permission_mode: boolean, };
 
 /**
  * Doctor report for every registered engine adapter.

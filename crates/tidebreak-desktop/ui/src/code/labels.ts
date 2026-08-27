@@ -95,11 +95,15 @@ export const PERMISSION_MODE_UNAVAILABLE_REASON =
 
 /**
  * Shown where the mode is fixed for the life of the surface — a create form
- * that has already posted, a read-only view of someone else's session. A live
- * session's picker is not locked: `POST /code/sessions/{id}/mode` moves it.
+ * that has already posted, a read-only view of someone else's session, or a
+ * live engine that fixes its posture when the session starts (opencode).
  */
 export const SESSION_PERMISSION_MODE_LOCKED =
   "Set when the session started — start a new session to change it";
+
+/** Create-time hint when the selected engine cannot change mode after start. */
+export const CREATE_PERMISSION_MODE_FIXED =
+  "Mode is fixed once the session starts";
 
 /** The capability flags the mode policy reads. */
 export type ModeCaps = Pick<

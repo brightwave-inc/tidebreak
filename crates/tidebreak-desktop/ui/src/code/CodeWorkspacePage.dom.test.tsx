@@ -212,6 +212,7 @@ const START_HARNESS: HarnessDoctorEntry = {
   remediation: "",
   stderr: "",
   unrecognized_event_count: 0,
+  relaunch_composes_permission_mode: true,
 };
 
 function enableStartHarness(client: ReturnType<typeof makeClient>) {
@@ -1114,6 +1115,66 @@ describe("CodeWorkspacePage", () => {
     );
     expect(screen.getByRole("switch", { name: "Fast mode on" })).toBeEnabled();
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("locks the permission picker once an opencode session has started", async () => {
+    const client = makeClient();
+    const started: CodeSessionSnapshot = {
+      ...SESSION,
+      harness_kind: "opencode",
+      harness_resume_ref: "ses_started",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([started]);
+    const opencodeDoctor = {
+      ...START_HARNESS,
+      kind: "opencode" as const,
+      relaunch_composes_permission_mode: false,
+    };
+    useCodeCatalogStore.setState({
+      doctor: { harnesses: [opencodeDoctor] },
+    });
+    client.getHarnessDoctor.mockResolvedValue({
+      harnesses: [opencodeDoctor],
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const trigger = await screen.findByRole("button", {
+      name: "Permissions: Ask",
+    });
+    expect(trigger).toBeDisabled();
+    await user.hover(trigger.parentElement!);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Set when the session started — start a new session to change it",
+    );
+    expect(client.setCodeSessionPermissionMode).not.toHaveBeenCalled();
+  });
+
+  it("keeps the permission picker live for a started Claude session", async () => {
+    const client = makeClient();
+    const started: CodeSessionSnapshot = {
+      ...SESSION,
+      harness_resume_ref: "ses_started",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([started]);
+    useCodeCatalogStore.setState({
+      doctor: { harnesses: [START_HARNESS] },
+    });
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const trigger = await screen.findByRole("button", {
+      name: "Permissions: Ask",
+    });
+    expect(trigger).toBeEnabled();
+    await user.click(trigger);
+    await user.click(screen.getByRole("menuitem", { name: /Auto/ }));
+    await waitFor(() =>
+      expect(client.setCodeSessionPermissionMode).toHaveBeenCalledWith(
+        SESSION.id,
+        "auto",
+      ),
+    );
   });
 
   it("rolls back only the failed session setting and clears the shared pending state", async () => {
