@@ -2420,6 +2420,51 @@ async fn a_signed_out_engine_refuses_at_create_not_on_turn_one() {
     );
 }
 
+/// Signing in after the doctor has cached a signed-out probe must not leave
+/// create stuck on that answer. Create re-probes a cached refusal rather
+/// than waiting for an explicit doctor refresh.
+#[tokio::test]
+async fn create_re_probes_a_cached_signed_out_observation() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_authenticated(Some(false));
+    let (router, token, _runtime, dir) = code_app_with(adapter.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let report = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(report["harnesses"][0]["authenticated"], false);
+    assert_eq!(adapter.probe_count(), 1);
+
+    adapter.set_authenticated(Some(true));
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    assert!(
+        adapter.probe_count() >= 2,
+        "create must re-probe a cached signed-out observation, not reuse it"
+    );
+}
+
 /// Only a definitive signed-out observation refuses. A probe that could not
 /// verify the sign-in state answers `None`, and a false refusal on a working
 /// machine is strictly worse than the first-turn failure it would prevent.

@@ -874,6 +874,38 @@ impl CodeRuntime {
         if let Some(probe) = cached {
             return probe;
         }
+        self.probe_uncached(adapter).await
+    }
+
+    /// The probe for session create: a cached signed-out observation that
+    /// would refuse is stale.
+    ///
+    /// Signing in or adding a provider override does not invalidate the
+    /// doctor's cache. Re-using that answer here would refuse a repaired
+    /// machine — the false refusal this path exists to avoid. A signed-in
+    /// or unverified cache, or a signed-out cache the relay or an override
+    /// already carries, still hits.
+    async fn probe_for_session_create(&self, adapter: &dyn HarnessAdapter) -> HarnessProbe {
+        let kind = adapter.kind();
+        let cached = self
+            .probes
+            .lock()
+            .expect("harness probes")
+            .get(&kind)
+            .cloned();
+        if let Some(probe) = cached {
+            let would_refuse =
+                Self::signed_out_harness_refusal(self.harness_llm.is_some(), kind, &probe).is_err();
+            if !would_refuse {
+                return probe;
+            }
+            self.probes.lock().expect("harness probes").remove(&kind);
+        }
+        self.probe(adapter).await
+    }
+
+    async fn probe_uncached(&self, adapter: &dyn HarnessAdapter) -> HarnessProbe {
+        let kind = adapter.kind();
         let mut host = self.host.clone();
         host.managed_node_root = match self.host_tool_broker.as_deref() {
             Some(broker) => {
@@ -3027,7 +3059,7 @@ impl CodeRuntime {
                 }
             }
         }
-        let probe = self.probe(adapter.as_ref()).await;
+        let probe = self.probe_for_session_create(adapter.as_ref()).await;
         if !probe.found {
             return Err(ServerError::unprocessable_kind(
                 "harness_not_found",
