@@ -505,10 +505,16 @@ export const PullRequestRunningCheckDetail: Story = {
     await expect(
       body.queryByText(/required review|review approval/i),
     ).not.toBeInTheDocument();
-    await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
+    const checksTab = await body.findByRole("tab", { name: /Checks/ });
+    await expect(checksTab).toHaveTextContent("0/1");
+    await userEvent.click(checksTab);
     await expect(
       await body.findByText("0 of 1 passed, 1 pending"),
     ).toBeVisible();
+    const pending = await body.findByRole("button", {
+      name: /Preview \/ Build preview image/,
+    });
+    await expect(pending.querySelector(".lucide-circle-dashed")).not.toBeNull();
   },
 };
 
@@ -820,6 +826,23 @@ export const PullRequestDetailChecks: Story = {
     await openPullRequest(canvasElement, "Build the delivery center");
     await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
     await expect(await body.findByText(/1 of 2 passed/)).toBeVisible();
+  },
+};
+
+/** Skipped checks are terminal, so a settled run reads complete in the tab. */
+export const PullRequestTerminalChecks: Story = {
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await openPullRequest(
+      canvasElement,
+      "Cache the workspace digest between polls",
+    );
+    const checksTab = await body.findByRole("tab", { name: /Checks/ });
+    await expect(checksTab).toHaveTextContent("3/3");
+    await userEvent.click(checksTab);
+    await expect(
+      await body.findByText("2 of 3 passed, 1 skipped"),
+    ).toBeVisible();
   },
 };
 

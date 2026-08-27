@@ -197,12 +197,34 @@ describe("PullRequestDetailSheet", () => {
 
   it("lists every check, failures first", async () => {
     await renderPanel(2251);
-    await userEvent.click(screen.getByRole("tab", { name: /Checks/ }));
+    const checksTab = screen.getByRole("tab", { name: /Checks/ });
+    expect(checksTab).toHaveTextContent("2/2");
+    await userEvent.click(checksTab);
     expect(
       await screen.findByText("1 of 2 passed, 1 failed"),
     ).toBeInTheDocument();
     const rows = screen.getAllByRole("button", { name: /desktop \// });
     expect(rows[0]).toHaveTextContent("desktop / storybook");
+  });
+
+  it("counts skipped checks as terminal tab progress", async () => {
+    await renderPanel(2240);
+    const checksTab = await screen.findByRole("tab", { name: /Checks/ });
+    expect(checksTab).toHaveTextContent("3/3");
+    await userEvent.click(checksTab);
+    expect(
+      await screen.findByText("2 of 3 passed, 1 skipped"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps pending checks out of progress and uses the running mark", async () => {
+    await renderPanel(2229);
+    const checksTab = await screen.findByRole("tab", { name: /Checks/ });
+    expect(checksTab).toHaveTextContent("1/2");
+    await userEvent.click(checksTab);
+    const pending = screen.getByRole("button", { name: /desktop \/ lint/ });
+    expect(pending.querySelector(".lucide-circle-dashed")).not.toBeNull();
+    expect(pending.querySelector(".lucide-play")).toBeNull();
   });
 
   it("posts a comment and clears the box", async () => {
