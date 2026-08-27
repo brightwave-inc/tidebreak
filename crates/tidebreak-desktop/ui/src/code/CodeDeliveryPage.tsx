@@ -530,7 +530,9 @@ function CodeDeliveryBody({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-semibold tracking-tight">Delivery</h1>
+              <h1 className="text-xl font-semibold tracking-tight">
+                {surface === "runs" ? "Runs & deployments" : "Pull requests"}
+              </h1>
               {!repositoriesLoading && (
                 <span className="text-xs text-muted-foreground">
                   {repositories.length} tracked
@@ -555,7 +557,7 @@ function CodeDeliveryBody({
         </div>
         <nav
           className="mt-4 flex items-center gap-1"
-          aria-label="Delivery views"
+          aria-label="Pull requests and runs"
         >
           <DeliveryTab
             active={surface === "pull_requests"}
@@ -2021,7 +2023,7 @@ function PullRequestRow({
         <MessageSquare className="size-3.5 shrink-0" />
         <span className="tabular-nums">
           {comments === undefined
-            ? "Unknown"
+            ? "—"
             : comments === 0
               ? "None"
               : `${comments} ${comments === 1 ? "comment" : "comments"}`}
@@ -3024,7 +3026,7 @@ function DeliveryRepositoriesDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Delivery repositories</DialogTitle>
+          <DialogTitle>Tracked repositories</DialogTitle>
         </DialogHeader>
         <div className="flex max-h-[65vh] flex-col gap-5 overflow-auto pr-1">
           <section>
@@ -3033,7 +3035,7 @@ function DeliveryRepositoriesDialog({
                 <h3 className="text-sm font-medium">Registered in Tidebreak</h3>
                 <p className="text-xs text-muted-foreground">
                   GitHub repos are tracked automatically. Disable any you do not
-                  want in Delivery.
+                  want listed here.
                 </p>
               </div>
               <Button
@@ -3474,7 +3476,7 @@ function InlineLoadError({
 function DeliveryListSkeleton() {
   return (
     <div className="flex min-h-0 flex-1 flex-col p-5" role="status">
-      <span className="sr-only">Loading delivery items</span>
+      <span className="sr-only">Loading</span>
       {Array.from({ length: 7 }, (_, index) => (
         <div
           key={index}

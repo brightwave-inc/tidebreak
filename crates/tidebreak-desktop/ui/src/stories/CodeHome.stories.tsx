@@ -157,7 +157,7 @@ function storyRouter() {
       codeRoute,
       stub("/settings", "Settings"),
       stub("/code/w/$workspaceId", "Workspace"),
-      stub("/code/delivery/pull-requests", "Delivery"),
+      stub("/code/delivery/pull-requests", "Pull requests"),
       stub("/code/archive", "Archive"),
     ]),
     history: createMemoryHistory({ initialEntries: ["/code"] }),

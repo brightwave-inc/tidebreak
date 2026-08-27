@@ -1770,7 +1770,28 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     >| async move {
         assert_borrowed_forge_credential(&headers);
         assert_eq!(query.get("state").map(String::as_str), Some("open"));
-        axum::Json(serde_json::json!([pull_request()]))
+        // GitHub's pull list omits `comments`; the issues list carries the
+        // integer count the overlay reads.
+        let mut listed = pull_request();
+        listed
+            .as_object_mut()
+            .expect("pull request fixture is an object")
+            .remove("comments");
+        axum::Json(serde_json::json!([listed]))
+    };
+    let issues = |headers: axum::http::HeaderMap,
+                  axum::extract::Query(query): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >| async move {
+        assert_borrowed_forge_credential(&headers);
+        assert_eq!(query.get("state").map(String::as_str), Some("open"));
+        axum::Json(serde_json::json!([{
+            "number": 17,
+            "comments": 2,
+            "pull_request": {
+                "url": "https://github.com/acme/demo/pull/17"
+            }
+        }]))
     };
     let pull = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
@@ -2009,6 +2030,7 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     let forge = axum::Router::new()
         .route("/repos/acme/demo", axum::routing::get(repository))
         .route("/repos/acme/demo/pulls", axum::routing::get(pulls))
+        .route("/repos/acme/demo/issues", axum::routing::get(issues))
         .route(
             "/repos/acme/demo/pulls/17",
             axum::routing::get(pull).patch(update_pull),

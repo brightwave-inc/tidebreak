@@ -2728,13 +2728,14 @@ async fn fetch_pull_requests(
             (repository, values, stacks)
         }
     };
+    let mut values = values;
+    overlay_issue_comment_counts(&api, target, plan.state, &mut values).await;
     // Host stacks ride along as observations; the shared fact pass applies
     // them so host edges and branch inference meet in one place.
     let memberships = stacks
         .as_ref()
         .map(parse_stack_memberships)
         .unwrap_or_default();
-    let mut values = values;
     attach_merge_queue_membership(&api, target, &mut values).await;
     Ok(values
         .iter()
@@ -2865,12 +2866,7 @@ fn parse_pull_request(
         Some(queued) => Some(queued),
         None => (merge_state_status.as_deref() == Some("queued")).then_some(true),
     };
-    let comment_count = value.get("comments").and_then(|comments| {
-        comments
-            .as_array()
-            .and_then(|comments| u64::try_from(comments.len()).ok())
-            .or_else(|| comments.as_u64())
-    });
+    let comment_count = parse_comment_count(value);
     let merged_at = datetime_field(value, "mergedAt");
     let closed_at = datetime_field(value, "closedAt");
     // `gh` reports MERGED as its own state, but a host that only reports
@@ -4380,6 +4376,108 @@ fn repository_key_ref(repository: &CodeGitHubRepositoryRef) -> String {
     )
 }
 
+/// Issue-comment count from a list payload.
+///
+/// GitHub answers this three ways: a number on a REST issue, an array of
+/// comment objects from `gh pr list --json comments`, or a connection with
+/// `totalCount`. Null and unknown shapes stay absent so the UI does not
+/// pretend the count is zero.
+fn parse_comment_count(value: &Value) -> Option<u64> {
+    let comments = value.get("comments")?;
+    if comments.is_null() {
+        return None;
+    }
+    if let Some(count) = comments.as_u64() {
+        return Some(count);
+    }
+    if let Some(items) = comments.as_array() {
+        return u64::try_from(items.len()).ok();
+    }
+    comments
+        .get("totalCount")
+        .or_else(|| comments.get("total_count"))
+        .and_then(Value::as_u64)
+}
+
+/// GitHub's pull-request list REST payload leaves `comments` null. The issues
+/// list uses the same numbers and carries an integer count. One page mixes
+/// ordinary issues in, so keep paging while listed PR numbers are still
+/// missing. Failures and leftover misses stay absent.
+const ISSUE_COMMENT_PAGE_SIZE: usize = 100;
+const ISSUE_COMMENT_MAX_PAGES: u32 = 10;
+
+fn absorb_issue_comment_counts(
+    issues: &[Value],
+    needed: &mut HashSet<u64>,
+    counts: &mut HashMap<u64, u64>,
+) {
+    for issue in issues {
+        let Some(number) = issue.get("number").and_then(Value::as_u64) else {
+            continue;
+        };
+        if !needed.contains(&number) {
+            continue;
+        }
+        let Some(comments) = issue.get("comments").and_then(Value::as_u64) else {
+            continue;
+        };
+        needed.remove(&number);
+        counts.insert(number, comments);
+    }
+}
+
+async fn overlay_issue_comment_counts(
+    api: &DeliveryApi,
+    target: &CodeGitHubRepositoryTarget,
+    state: &str,
+    values: &mut [Value],
+) {
+    let mut needed = HashSet::new();
+    for value in values.iter() {
+        if parse_comment_count(value).is_some() {
+            continue;
+        }
+        if let Some(number) = value.get("number").and_then(Value::as_u64) {
+            needed.insert(number);
+        }
+    }
+    if needed.is_empty() {
+        return;
+    }
+    let state = if state == "merged" { "closed" } else { state };
+    let mut counts = HashMap::new();
+    for page in 1..=ISSUE_COMMENT_MAX_PAGES {
+        let endpoint = format!(
+            "{}?state={state}&per_page={ISSUE_COMMENT_PAGE_SIZE}&page={page}",
+            api_endpoint(target, "issues")
+        );
+        let Ok(payload) = api.get(&endpoint).await else {
+            break;
+        };
+        let Some(issues) = payload.as_array() else {
+            break;
+        };
+        absorb_issue_comment_counts(issues, &mut needed, &mut counts);
+        if needed.is_empty() || issues.len() < ISSUE_COMMENT_PAGE_SIZE {
+            break;
+        }
+    }
+    for value in values {
+        if parse_comment_count(value).is_some() {
+            continue;
+        }
+        let Some(number) = value.get("number").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(count) = counts.get(&number) else {
+            continue;
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert("comments".to_owned(), Value::from(*count));
+        }
+    }
+}
+
 fn stack_repository_identity(repository: &CodeGitHubRepositoryRef) -> StackRepositoryIdentity {
     StackRepositoryIdentity::new(&repository.host, &repository.owner, &repository.name)
         .expect("a resolved GitHub repository has a complete identity")
@@ -4977,6 +5075,100 @@ mod tests {
         });
         let parsed = parse_pull_request(&repository_ref(), &host_queued, &[]).unwrap();
         assert_eq!(parsed.summary.in_merge_queue, Some(true));
+    }
+
+    #[test]
+    fn comment_count_reads_rest_numbers_gh_arrays_and_connections() {
+        let rest = serde_json::json!({
+            "number": 1,
+            "title": "count",
+            "state": "OPEN",
+            "url": "https://github.com/example/demo/pull/1",
+            "headRefName": "f",
+            "baseRefName": "main",
+            "comments": 4
+        });
+        assert_eq!(
+            parse_pull_request(&repository_ref(), &rest, &[])
+                .unwrap()
+                .summary
+                .comment_count,
+            Some(4)
+        );
+
+        let gh_list = serde_json::json!({
+            "number": 1,
+            "title": "count",
+            "state": "OPEN",
+            "url": "https://github.com/example/demo/pull/1",
+            "headRefName": "f",
+            "baseRefName": "main",
+            "comments": [{"body": "a"}, {"body": "b"}]
+        });
+        assert_eq!(
+            parse_pull_request(&repository_ref(), &gh_list, &[])
+                .unwrap()
+                .summary
+                .comment_count,
+            Some(2)
+        );
+
+        let connection = serde_json::json!({
+            "number": 1,
+            "title": "count",
+            "state": "OPEN",
+            "url": "https://github.com/example/demo/pull/1",
+            "headRefName": "f",
+            "baseRefName": "main",
+            "comments": {"totalCount": 7, "nodes": []}
+        });
+        assert_eq!(
+            parse_pull_request(&repository_ref(), &connection, &[])
+                .unwrap()
+                .summary
+                .comment_count,
+            Some(7)
+        );
+
+        let missing = serde_json::json!({
+            "number": 1,
+            "title": "count",
+            "state": "OPEN",
+            "url": "https://github.com/example/demo/pull/1",
+            "headRefName": "f",
+            "baseRefName": "main",
+            "comments": null
+        });
+        assert_eq!(
+            parse_pull_request(&repository_ref(), &missing, &[])
+                .unwrap()
+                .summary
+                .comment_count,
+            None
+        );
+    }
+
+    #[test]
+    fn issue_comment_overlay_skips_crowding_issues() {
+        let mut needed = HashSet::from([17, 19]);
+        let mut counts = HashMap::new();
+        absorb_issue_comment_counts(
+            &[
+                serde_json::json!({"number": 1, "comments": 9}),
+                serde_json::json!({"number": 17, "comments": 2}),
+            ],
+            &mut needed,
+            &mut counts,
+        );
+        assert_eq!(counts.get(&17), Some(&2));
+        assert!(!needed.contains(&17));
+        absorb_issue_comment_counts(
+            &[serde_json::json!({"number": 19, "comments": 4})],
+            &mut needed,
+            &mut counts,
+        );
+        assert!(needed.is_empty());
+        assert_eq!(counts.get(&19), Some(&4));
     }
 
     #[test]
