@@ -924,36 +924,41 @@ test("dependency policy covers advisories, licenses, sources, and the locked gra
   );
 });
 
-test("every workspace crate opts out of crates.io publication in its own manifest", () => {
-  const metadata = JSON.parse(
-    execFileSync(
-      "cargo",
-      ["metadata", "--format-version", "1", "--no-deps"],
-      { cwd: repositoryRoot, encoding: "utf8" },
-    ),
-  );
-  const workspaceMembers = new Set(metadata.workspace_members);
-  const missing = metadata.packages
-    .filter((pkg) => workspaceMembers.has(pkg.id))
-    .filter((pkg) => {
-      const manifest = readFileSync(pkg.manifest_path, "utf8");
-      const packageStart = manifest.indexOf("[package]");
-      if (packageStart === -1) return true;
-      const sectionEnd = manifest.indexOf("\n[", packageStart + 1);
-      const packageSection = manifest.slice(
-        packageStart + "[package]".length,
-        sectionEnd === -1 ? undefined : sectionEnd,
-      );
-      return !/^publish\s*=\s*false\s*$/m.test(packageSection);
-    })
-    .map((pkg) => pkg.manifest_path);
+test(
+  "every workspace crate opts out of crates.io publication in its own manifest",
+  // Mutation fixtures copy policy files, not the Cargo workspace.
+  { skip: !existsSync(repositoryFile("Cargo.toml")) },
+  () => {
+    const metadata = JSON.parse(
+      execFileSync(
+        "cargo",
+        ["metadata", "--format-version", "1", "--no-deps"],
+        { cwd: repositoryRoot, encoding: "utf8" },
+      ),
+    );
+    const workspaceMembers = new Set(metadata.workspace_members);
+    const missing = metadata.packages
+      .filter((pkg) => workspaceMembers.has(pkg.id))
+      .filter((pkg) => {
+        const manifest = readFileSync(pkg.manifest_path, "utf8");
+        const packageStart = manifest.indexOf("[package]");
+        if (packageStart === -1) return true;
+        const sectionEnd = manifest.indexOf("\n[", packageStart + 1);
+        const packageSection = manifest.slice(
+          packageStart + "[package]".length,
+          sectionEnd === -1 ? undefined : sectionEnd,
+        );
+        return !/^publish\s*=\s*false\s*$/m.test(packageSection);
+      })
+      .map((pkg) => pkg.manifest_path);
 
-  assert.deepEqual(
-    missing,
-    [],
-    "every workspace crate must set publish = false in its own [package] section",
-  );
-});
+    assert.deepEqual(
+      missing,
+      [],
+      "every workspace crate must set publish = false in its own [package] section",
+    );
+  },
+);
 
 test("E2B template pin provenance and writes share the validated source revision", () => {
   const pin = workflowJob(workflows["publish-e2b-template.yml"], "pin");
