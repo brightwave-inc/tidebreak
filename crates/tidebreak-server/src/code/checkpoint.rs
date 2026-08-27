@@ -434,8 +434,10 @@ pub(crate) async fn record_checkpoint(
 ///
 /// Files only. `HEAD`, the branch, the reflog, and the user's index are not
 /// written, so this is not a history rewrite and nothing the reader pushed
-/// moves. Ignored files are untouched: a checkpoint tree is built by `add -A`,
-/// which never sees them, so they are in neither side of the transition.
+/// moves. An ignored file keeps the content it holds now, even when the
+/// checkpoint names that path: `add -A` captured it before the ignore rule
+/// existed, so the tree carries the older bytes and the restore puts the live
+/// ones back.
 ///
 /// Nothing is destroyed on a failure. The worktree as it stands is snapshotted
 /// into a hidden safety ref before anything is written, the checkpoint's tree
@@ -557,10 +559,36 @@ async fn rollback_restore(
 /// `add -A` never sees them, so the safety snapshot omits them. `read-tree
 /// --reset -u` still overwrites them, which is why restore writes these bytes
 /// back after apply.
+///
+/// Gitignore governs untracked paths only, so one `ls-files --others
+/// --ignored` names every candidate and the tree listing says which of them
+/// the checkpoint holds. That is two processes rather than one per file in
+/// the tree.
 async fn live_ignored_files_in_tree(
     worktree: &Path,
     tree: &str,
 ) -> Result<Vec<(GitPath, Vec<u8>)>, CheckpointError> {
+    let listed = git_bytes(
+        worktree,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    let ignored: std::collections::HashSet<&[u8]> = listed
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if ignored.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let raw = git_bytes(
         worktree,
         &["ls-tree", "-r", "--name-only", "-z", tree],
@@ -570,7 +598,7 @@ async fn live_ignored_files_in_tree(
     .map_err(CheckpointError::internal)?;
     let mut backups = Vec::new();
     for part in raw.split(|byte| *byte == 0).filter(|part| !part.is_empty()) {
-        if part == b".git" || part.starts_with(b".git/") {
+        if !ignored.contains(part) {
             continue;
         }
         let path = GitPath::from_bytes(part);
@@ -585,31 +613,12 @@ async fn live_ignored_files_in_tree(
         if !full.is_file() {
             continue;
         }
-        if !path_is_ignored(worktree, &path).await? {
-            continue;
-        }
         let bytes = tokio::fs::read(&full).await.map_err(|err| {
             CheckpointError::internal(format!("could not read {}: {err}", path.to_wire()))
         })?;
         backups.push((path, bytes));
     }
     Ok(backups)
-}
-
-async fn path_is_ignored(worktree: &Path, path: &GitPath) -> Result<bool, CheckpointError> {
-    // `check-ignore` rejects `--literal-pathspecs`. `-q` is silent: exit 0
-    // means ignored, exit 1 means not, and both print nothing.
-    match git_text(
-        worktree,
-        &["check-ignore", "-q", "--", &path.to_wire()],
-        GIT_TIMEOUT,
-    )
-    .await
-    {
-        Ok(_) => Ok(true),
-        Err(err) if err.is_empty() => Ok(false),
-        Err(err) => Err(CheckpointError::internal(err)),
-    }
 }
 
 async fn restore_file_backups(
@@ -3595,19 +3604,8 @@ mod tests {
         std::fs::write(tree.join(".gitignore"), "secret.txt\n").unwrap();
         std::fs::write(tree.join("secret.txt"), "live ignored\n").unwrap();
         std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
-        // A cold index is the case the safety snapshot actually omits: the
-        // reusable checkpoint index still lists `secret.txt` from the earlier
-        // record, and `add -A` will not untrack it just because it is ignored
-        // now. Dropping that index matches a restore after a process restart.
-        if let Ok(index) = git_text(
-            &tree,
-            &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
-            GIT_TIMEOUT,
-        )
-        .await
-        {
-            let _ = std::fs::remove_file(tree.join(index));
-        }
+        // A cold index is the case the safety snapshot actually omits.
+        drop_reusable_index(&tree).await;
 
         let restored = restore_checkpoint(
             &tree,
@@ -3693,9 +3691,32 @@ mod tests {
         );
     }
 
+    /// Drop the reusable checkpoint index so the next snapshot is built cold.
+    ///
+    /// A warm index still lists a path from an earlier record, and `add -A`
+    /// does not untrack it just because it is ignored now, so the snapshot
+    /// holds it and the drift case cannot be reached. A restore after a
+    /// process restart is the cold case.
+    async fn drop_reusable_index(tree: &Path) {
+        if let Ok(index) = git_text(
+            tree,
+            &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
+            GIT_TIMEOUT,
+        )
+        .await
+        {
+            let _ = std::fs::remove_file(tree.join(index));
+        }
+    }
+
     /// A post-apply delete failure must not drop a live ignored file the
     /// checkpoint still names. That path is absent from the safety snapshot,
     /// so rollback's extra-delete would otherwise remove it.
+    ///
+    /// The rollback runs directly. Failing the delete from outside means
+    /// making a directory read-only, and `read-tree` cannot rewrite that
+    /// directory either, so the rollback stops at its own apply and never
+    /// reaches the delete pass this pins.
     #[tokio::test]
     async fn a_failed_restore_keeps_a_live_ignored_checkpoint_path() {
         let (_dir, repo) = init_repo();
@@ -3718,19 +3739,82 @@ mod tests {
         std::fs::write(tree.join(".gitignore"), "secret.txt\n").unwrap();
         std::fs::write(tree.join("secret.txt"), "live ignored\n").unwrap();
         std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
-        std::fs::create_dir_all(tree.join("later")).unwrap();
-        std::fs::write(tree.join("later/new.txt"), "postdates it\n").unwrap();
-        std::fs::set_permissions(tree.join("later"), std::fs::Permissions::from_mode(0o555))
+        drop_reusable_index(&tree).await;
+
+        let safety_ref = pre_restore_ref(workspace_id);
+        let before = write_snapshot_ref(&tree, &safety_ref, None, "pre-restore snapshot")
+            .await
             .unwrap();
-        if let Ok(index) = git_text(
+        let target = resolve_checkpoint_oid(&tree, &recorded.checkpoint_ref)
+            .await
+            .unwrap();
+        let ignored_live = live_ignored_files_in_tree(&tree, &target).await.unwrap();
+        apply_tree(&tree, &target).await.unwrap();
+        restore_file_backups(&tree, &ignored_live).await.unwrap();
+
+        let err = rollback_restore(
             &tree,
-            &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
-            GIT_TIMEOUT,
+            &target,
+            &before,
+            &safety_ref,
+            &ignored_live,
+            CheckpointError::internal("the delete failed"),
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(tree.join("secret.txt")).unwrap(),
+            "live ignored\n",
+            "rollback must not delete a live ignored file the checkpoint held"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap(),
+            "after the checkpoint\n",
+            "rollback must put the snapshot's files back"
+        );
+        assert!(
+            err.to_string().contains(&safety_ref),
+            "a rollback must name the safety ref: {err}"
+        );
+    }
+
+    /// The plan is read before the first write. A failure reading it has
+    /// changed nothing, so restore returns as it stands: a rollback there
+    /// would delete the checkpoint's paths from a worktree that still holds
+    /// the reader's own files.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failure_before_the_first_write_leaves_the_worktree_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "plan-fails");
+        let workspace_id = ws();
+        std::fs::write(tree.join("secret.txt"), "at the checkpoint\n").unwrap();
+        std::fs::write(tree.join("README.md"), "at the checkpoint\n").unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            workspace_id,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
         )
         .await
-        {
-            let _ = std::fs::remove_file(tree.join(index));
-        }
+        .unwrap();
+
+        std::fs::write(tree.join(".gitignore"), "secret.txt\n").unwrap();
+        std::fs::write(tree.join("secret.txt"), "live ignored\n").unwrap();
+        std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
+        drop_reusable_index(&tree).await;
+        // Reading the ignored bytes fails, and that read happens before the
+        // first write.
+        std::fs::set_permissions(
+            tree.join("secret.txt"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
 
         let err = restore_checkpoint(
             &tree,
@@ -3739,25 +3823,19 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let _ =
-            std::fs::set_permissions(tree.join("later"), std::fs::Permissions::from_mode(0o755));
-        let message = err.to_string();
+        let _ = std::fs::set_permissions(
+            tree.join("secret.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        );
+
         assert!(
-            message.contains("/pre-restore/"),
-            "a post-apply failure must name the safety ref: {message}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tree.join("secret.txt")).unwrap(),
-            "live ignored\n",
-            "rollback must not delete a live ignored file the checkpoint held"
-        );
-        assert_eq!(
-            std::fs::read_to_string(tree.join("later/new.txt")).unwrap(),
-            "postdates it\n"
+            tree.join("secret.txt").is_file(),
+            "a failure before the first write must not delete the reader's ignored file: {err}"
         );
         assert_eq!(
             std::fs::read_to_string(tree.join("README.md")).unwrap(),
-            "after the checkpoint\n"
+            "after the checkpoint\n",
+            "a failure before the first write must leave the worktree as it stands"
         );
     }
 
