@@ -89,7 +89,7 @@ export function ProjectsSection({ activeChatId }: { activeChatId?: string }) {
   const [creatingOpen, setCreatingOpen] = useState(false);
 
   return (
-    <div className="mt-4 flex shrink-0 flex-col">
+    <div className="mt-1 flex shrink-0 flex-col">
       <div className="flex shrink-0 items-center gap-0.5 pr-1">
         <span className="min-w-0 flex-1 px-2 py-1 text-sm font-medium text-muted-foreground">
           Projects

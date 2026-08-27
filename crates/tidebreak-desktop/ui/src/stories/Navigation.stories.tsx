@@ -192,7 +192,28 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const ActiveWork: Story = {};
+export const ActiveWork: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const destinations = canvas.getByRole("navigation", {
+      name: "Work destinations",
+    });
+    await expect(
+      within(destinations).getByRole("button", { name: "Inbox" }),
+    ).toBeVisible();
+    await expect(
+      within(destinations).getByRole("button", { name: "Plugins" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Settings" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", {
+        name: "Theme: system. Click to change.",
+      }),
+    ).toBeVisible();
+  },
+};
 
 export const LoadingLists: Story = {
   args: { scenario: "loading" },

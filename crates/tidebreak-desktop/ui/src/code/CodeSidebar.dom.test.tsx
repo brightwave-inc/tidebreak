@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
@@ -200,36 +206,23 @@ describe("CodeSidebar", () => {
     expect(
       screen.getByRole("button", { name: "Notifications" }),
     ).toBeInTheDocument();
+    const destinations = within(
+      screen.getByRole("navigation", { name: "Code destinations" }),
+    ).getAllByRole("button");
     expect(
-      await screen.findByRole("button", {
-        name: "Subscription usage, highest window 91% used",
-      }),
+      destinations.map(
+        (button) => button.getAttribute("aria-label") ?? button.textContent,
+      ),
+    ).toEqual(["Pull requests", "Notifications", "Analytics", "Archive"]);
+    expect(
+      screen.getByRole("button", { name: "Settings" }),
     ).toBeInTheDocument();
-  });
-
-  it("opens the subscription details from the fixed rail footer", async () => {
-    await renderWithRouter(
-      <AppContextProvider value={app}>
-        <CodeSidebar />
-      </AppContextProvider>,
-      { initialUrl: "/code" },
-    );
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Subscription usage, highest window 91% used",
-      }),
-    );
-    expect(await screen.findByText("Subscription usage")).toBeInTheDocument();
-    expect(screen.getByText("Model Gateway")).toBeInTheDocument();
-    expect(screen.getByText("Weekly (Fable)")).toBeInTheDocument();
-    expect(screen.getByTitle("91% used")).toHaveTextContent("91%");
     expect(
-      screen.getByRole("progressbar", { name: "Weekly (Fable) usage" }),
-    ).toHaveAttribute("aria-valuenow", "91");
+      screen.getByRole("button", { name: "Theme: system. Click to change." }),
+    ).toBeInTheDocument();
     expect(
-      screen.getByRole("progressbar", { name: "Weekly (Fable) usage" }),
-    ).toHaveAttribute("aria-valuetext", "91% used");
+      screen.queryByRole("button", { name: /Subscription usage/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("re-sorts and persists from the settings popover", async () => {

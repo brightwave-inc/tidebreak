@@ -40,7 +40,7 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
     <SidebarFrame>
       <CodeModeSwitch />
 
-      <div className="flex shrink-0 flex-col gap-0.5">
+      <nav aria-label="Work destinations" className="sidebar-primary-nav">
         <InboxButton />
         <NotificationBellButton />
 
@@ -64,7 +64,7 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
           active={pluginsActive}
           onClick={() => void navigate({ to: "/plugins" })}
         />
-      </div>
+      </nav>
 
       <ProjectsSection activeChatId={chat?.id} />
       <ChatsSection activeChatId={chat?.id} />

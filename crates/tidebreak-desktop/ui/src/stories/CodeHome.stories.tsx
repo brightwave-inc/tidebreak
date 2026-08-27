@@ -276,11 +276,28 @@ export const DenseSidebar: Story = {
   args: { scenario: "dense-sidebar" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const destinations = canvas.getByRole("navigation", {
+      name: "Code destinations",
+    });
+    const destinationButtons = within(destinations).getAllByRole("button");
+    await expect(
+      destinationButtons.map(
+        (button) => button.getAttribute("aria-label") ?? button.textContent,
+      ),
+    ).toEqual(["Pull requests", "Notifications", "Analytics", "Archive"]);
     await expect(
       await canvas.findByText("Audit Storybook coverage"),
     ).toBeVisible();
     await expect(
       await canvas.findByText("Recover provider errors"),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Settings" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", {
+        name: "Theme: system. Click to change.",
+      }),
     ).toBeVisible();
   },
 };

@@ -1,7 +1,7 @@
 import { getName } from "@tauri-apps/api/app";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { PanelLeftClose, RotateCw } from "lucide-react";
+import { Monitor, Moon, PanelLeftClose, Settings, Sun } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -9,13 +9,12 @@ import { hasNativeHost } from "@/host";
 import { Logomark } from "@/Logomark";
 import {
   Sidebar as SidebarRail,
-  SidebarButton,
   SidebarContent,
   SidebarFooter,
   SidebarHeader,
 } from "./primitives";
+import { useTheme } from "@/theme";
 import { useUiStore } from "@/UiStore";
-import { SidebarAccountMenu } from "./SidebarAccountMenu";
 
 /**
  * The parts of the rail that do not depend on where the reader is: the way
@@ -25,15 +24,10 @@ import { SidebarAccountMenu } from "./SidebarAccountMenu";
  * everywhere but settings, which has its own section list and no use for a
  * chat list beside it.
  */
-export function SidebarFrame({
-  children,
-  footer,
-}: {
-  children: ReactNode;
-  footer?: ReactNode;
-}) {
+export function SidebarFrame({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const { updateState, restartForUpdate } = useApp();
+  const { updateState } = useApp();
+  const { mode: themeMode, cycle: cycleTheme } = useTheme();
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
   const [appName, setAppName] = useState("Tidebreak");
 
@@ -91,21 +85,58 @@ export function SidebarFrame({
         {children}
       </SidebarContent>
 
-      <SidebarFooter className="flex flex-col gap-0.5">
-        {footer}
-        {updateReady && (
-          <SidebarButton onClick={restartForUpdate}>
-            <RotateCw className="text-success" />
-            <span>Restart to update</span>
-            {updateState.version && (
-              <span className="ml-auto text-xs text-muted-foreground">
-                v{updateState.version}
-              </span>
-            )}
-          </SidebarButton>
-        )}
-        <SidebarAccountMenu />
+      <SidebarFooter className="border-t border-border-subtle px-2 py-1.5">
+        <div className="flex items-center gap-1" aria-label="App controls">
+          <SidebarUtilityButton
+            label={updateReady ? "Settings, update ready" : "Settings"}
+            icon={Settings}
+            onClick={() => void navigate({ to: "/settings" })}
+            indicator={updateReady}
+          />
+          <SidebarUtilityButton
+            label={`Theme: ${themeMode}. Click to change.`}
+            icon={
+              themeMode === "light"
+                ? Sun
+                : themeMode === "dark"
+                  ? Moon
+                  : Monitor
+            }
+            onClick={cycleTheme}
+          />
+        </div>
       </SidebarFooter>
     </SidebarRail>
+  );
+}
+
+function SidebarUtilityButton({
+  label,
+  icon: Icon,
+  indicator = false,
+  onClick,
+}: {
+  label: string;
+  icon: ComponentType<{ size?: number }>;
+  indicator?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <WithTooltip label={label} side="top">
+      <button
+        type="button"
+        className="relative grid size-8 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/25"
+        aria-label={label}
+        onClick={onClick}
+      >
+        <Icon size={15} />
+        {indicator && (
+          <span
+            className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-success"
+            aria-hidden="true"
+          />
+        )}
+      </button>
+    </WithTooltip>
   );
 }
