@@ -5,7 +5,7 @@
 - Owners: code mode, delivery
 - Related: [`0042-user-initiated-pr-merge.md`](0042-user-initiated-pr-merge.md),
   [`0060-triggers-are-durable-rules-on-pull-request-facts.md`](0060-triggers-are-durable-rules-on-pull-request-facts.md),
-  [`0062-pull-request-facts-and-attribution.md`](0062-pull-request-facts-and-attribution.md)
+  [`0077-pull-request-facts-and-attribution.md`](0077-pull-request-facts-and-attribution.md)
 
 ## Context
 
@@ -61,7 +61,7 @@ row, and no surface calls GitHub on its own.** Two goals rank equally: every
 surface agrees, and Tidebreak stays a light GitHub citizen — a user running
 it all day must never notice it in their rate limit.
 
-1. **The fact row grows a live tier.** `code_pull_request` (decision 62)
+1. **The fact row grows a live tier.** `code_pull_request` (decision 77)
    gains the volatile fields the digest carries today: check rollup, review
    decision, mergeability, merge state, auto-merge, queue membership, and an
    `observed_at`. `PullRequestDigest` and `CodeDeliveryPullRequestSummary`

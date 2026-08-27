@@ -832,7 +832,7 @@ pub async fn list_fires_for_workspace(
 
 /// The head SHAs a trigger has already fired (or baselined) against for one
 /// pull request on one workspace. The fact-edge sweep reads this to tell a
-/// new head from one it has already handled (decision 62).
+/// new head from one it has already handled (decision 77).
 pub async fn trigger_fire_heads_for_pr(
     store: &DbStore,
     owner: &OwnerId,
@@ -857,7 +857,7 @@ pub async fn trigger_fire_heads_for_pr(
 }
 
 /// Record a fire that must never notify: the `pr_updated` baseline
-/// (decision 62). The first observed head of a pull request is not an
+/// (decision 77). The first observed head of a pull request is not an
 /// update, but a later head can only be recognized against a stored one, so
 /// the baseline lands as an already-delivered row with no payload — the
 /// outbox sweep never picks it up, and the conflict identity still

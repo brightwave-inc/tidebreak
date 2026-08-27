@@ -208,7 +208,7 @@ async fn sweep_owner(
     // Fact-edge conditions read only the local store — the reconcile sweep
     // keeps facts fresh — so they run before the remote-read gate below,
     // which would drop a repository whose workspaces carry facts but no
-    // persisted digest (decision 62).
+    // persisted digest (decision 77).
     sweep_fact_edges(runtime, owner, &repositories, &eligible).await;
 
     // An exact remote read needs both an eligible workspace and its persisted
@@ -298,7 +298,7 @@ async fn sweep_owner(
 /// head moves afterwards. The token cannot collide with a real SHA.
 const PR_OPENED_FINGERPRINT: &str = "opened";
 
-/// Fire the fact-edge conditions from the durable store (decision 62).
+/// Fire the fact-edge conditions from the durable store (decision 77).
 ///
 /// `pr_opened` fires once per pull request whose host `created_at` and local
 /// `first_seen_at` both postdate the trigger's arming — arming a trigger over
@@ -661,7 +661,7 @@ async fn claim_fires(
         return;
     };
     // A stacked child is behind or blocked *because of its parent* — the
-    // summary carries the parent from the durable fact set (decision 62).
+    // summary carries the parent from the durable fact set (decision 77).
     // Firing Behind or ReviewRequired at it would send an agent to rebase
     // onto a branch that moves with every parent push.
     if item.stack_parent_number.is_some()

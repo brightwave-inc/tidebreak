@@ -1522,7 +1522,7 @@ async fn a_hosted_machine_creates_and_reads_the_pull_request_over_rest() {
     );
 
     // The authored fact came straight from the creation answer — no `gh`
-    // exists here to re-read it (decision 62 meets decision 65).
+    // exists here to re-read it (decision 77 meets decision 65).
     let facts: serde_json::Value = client
         .get(format!("http://{addr}/code/workspaces/{id}/pull-requests"))
         .bearer_auth(&token)

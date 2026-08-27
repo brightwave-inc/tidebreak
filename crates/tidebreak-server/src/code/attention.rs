@@ -418,7 +418,7 @@ async fn build_digest(
     } else {
         None
     };
-    // One indexed count (decision 62). Zero stays absent so clients that
+    // One indexed count (decision 77). Zero stays absent so clients that
     // predate the field and workspaces that never shipped read the same.
     let pr_count =
         count_attributed_prs_for_workspace(db, &session.owner, session.workspace_id).await?;

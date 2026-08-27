@@ -1,4 +1,4 @@
-//! Reconcile sweep against a shimmed `gh` (decision 62).
+//! Reconcile sweep against a shimmed `gh` (decision 77).
 //!
 //! The sweep reads tracked repositories through the delivery path; these
 //! tests assert what that read persists — fact snapshots, exact-tier

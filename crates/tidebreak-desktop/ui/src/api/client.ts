@@ -2868,7 +2868,7 @@ export class ApiClient {
     return snapshot;
   }
 
-  /** Every pull request attributed to the workspace (decision 62). */
+  /** Every pull request attributed to the workspace (decision 77). */
   async getCodeWorkspacePullRequests(
     workspaceId: string,
   ): Promise<CodeWorkspacePullRequests> {

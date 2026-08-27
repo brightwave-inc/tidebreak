@@ -1270,7 +1270,7 @@ describe("parseFenceReason", () => {
   });
 });
 
-describe("pull request facts (decision 62)", () => {
+describe("pull request facts (decision 77)", () => {
   const fact = {
     host: "github.com",
     repo_owner: "acme",

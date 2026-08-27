@@ -1,4 +1,4 @@
-//! Reconcile sweep: keep pull-request facts fresh and complete (decision 62).
+//! Reconcile sweep: keep pull-request facts fresh and complete (decision 77).
 //!
 //! The post-turn detector catches the acts it can see. This sweep owns the
 //! rest: it re-reads every tracked repository through the delivery read path

@@ -6,7 +6,7 @@ import { useLiveResource, type LiveResource } from "./useLiveContent";
 
 /**
  * The workspace's attributed pull requests, from the durable fact store
- * (decision 62). The digest's `pr_count` is the cheap change signal: when it
+ * (decision 77). The digest's `pr_count` is the cheap change signal: when it
  * moves, the list re-reads; the list itself never touches the host.
  */
 export function useWorkspacePullRequests(

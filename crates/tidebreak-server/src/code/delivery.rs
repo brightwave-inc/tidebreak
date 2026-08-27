@@ -1006,7 +1006,7 @@ pub(crate) async fn query_pull_requests_by_number(
             .then_with(|| left.summary.id.cmp(&right.summary.id))
     });
     // The trigger sweep reads through here, and its stacked-child suppression
-    // keys on `stack_parent_number` (decision 62) — so this path persists and
+    // keys on `stack_parent_number` (decision 77) — so this path persists and
     // annotates the same way the list read does. Host stacks join first so
     // the shared pass sees the same host edges a list read would.
     attach_host_stacks(&apis, &mut items).await;
@@ -2132,7 +2132,7 @@ pub(crate) async fn repository_target_from_local(
 ///
 /// The pull-request fact detector calls this on a command's recorded cwd,
 /// which may be a worktree or a clone the agent made outside every
-/// registered repository (decision 62).
+/// registered repository (decision 77).
 pub(crate) async fn repository_target_from_path(
     path: &Path,
 ) -> Result<CodeGitHubRepositoryTarget, String> {
@@ -3598,7 +3598,7 @@ pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> Pull
 }
 
 /// Persist durable facts for the page's tracked pull requests and fold the
-/// stored attribution back into every item's workspace links (decision 62).
+/// stored attribution back into every item's workspace links (decision 77).
 ///
 /// Tracked means exact-linked to a workspace (the index's number or head-SHA
 /// tiers) or already holding a fact row — a pull request nobody here worked

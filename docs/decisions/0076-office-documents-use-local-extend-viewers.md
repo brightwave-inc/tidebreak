@@ -1,4 +1,4 @@
-# 23. Office documents use local Extend viewers
+# 76. Office documents use local Extend viewers
 
 - Status: Proposed
 - Date: 2026-08-14

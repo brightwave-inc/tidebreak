@@ -161,7 +161,7 @@ pub async fn mark_repo_removed(
 ///
 /// Written by the reconcile sweep whenever the resolved identity differs from
 /// what is stored, so a retargeted origin refreshes on its next resolve
-/// (decision 62).
+/// (decision 77).
 pub async fn set_repo_origin(
     store: &DbStore,
     owner: &OwnerId,

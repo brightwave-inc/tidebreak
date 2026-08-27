@@ -55,7 +55,7 @@ pub(crate) struct SessionDigest {
     pub activity: Option<CodeSessionActivity>,
     pub pr_state: Option<PullRequestDigest>,
     /// How many pull requests hold a durable attribution to this workspace
-    /// (decision 62). Absent when none do; a change is the client's cheap
+    /// (decision 77). Absent when none do; a change is the client's cheap
     /// signal to re-read the workspace's pull-request list.
     pub pr_count: Option<u64>,
     /// Watch progress, set only when `kind` is `Watch`. Lifecycle words

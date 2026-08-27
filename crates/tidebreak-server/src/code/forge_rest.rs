@@ -8,7 +8,7 @@
 //! parses — one JSON vocabulary, however the host was asked.
 //!
 //! Deliberately narrow: creation, the PR-card digest, the fact reads
-//! (decision 62), and Delivery's repository-scoped reads and actions. Auto-merge
+//! (decision 77), and Delivery's repository-scoped reads and actions. Auto-merge
 //! (and merge-queue enqueue) rides one pinned GitHub mutation because the
 //! REST merge endpoint cannot arm it. Mark-ready and admin merge stay
 //! explicit refusals. Host stacks ride the same generic GET the rest of
@@ -947,7 +947,7 @@ mod tests {
     use super::*;
 
     /// The REST shape lands byte-compatible with the `gh --json` vocabulary
-    /// the fact parser reads (decision 62): a merged REST answer must read
+    /// the fact parser reads (decision 77): a merged REST answer must read
     /// as merged through `closed` + `mergedAt`.
     #[test]
     fn a_rest_pull_request_restates_as_the_gh_fact_shape() {

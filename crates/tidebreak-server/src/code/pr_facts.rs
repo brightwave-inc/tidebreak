@@ -1,4 +1,4 @@
-//! Post-turn pull-request fact detection (decision 62).
+//! Post-turn pull-request fact detection (decision 77).
 //!
 //! After a turn closes, this module reads the turn's journaled shell
 //! commands, recognizes the two acts that mint attribution — `gh pr create`
@@ -399,7 +399,7 @@ async fn confirm_push(
 /// and upgrade an existing contributed row when the relation is authored.
 ///
 /// Shared with the user-initiated create and push paths, which confirm the
-/// same way (decision 62).
+/// same way (decision 77).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_confirmed_fact(
     db: &DbStore,

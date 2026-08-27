@@ -3,7 +3,7 @@
 //! A `code_pull_request` row is a confirmed observation of one pull request,
 //! keyed by full repository identity so a pull request in a repository with
 //! no local checkout is representable. An attribution row ties a workspace
-//! to a pull request it authored or contributed to (decision 62). GitHub
+//! to a pull request it authored or contributed to (decision 77). GitHub
 //! stays authoritative; these rows record what was observed and when.
 
 use sea_orm::sea_query::{Expr, OnConflict};

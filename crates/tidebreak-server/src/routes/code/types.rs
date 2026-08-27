@@ -775,7 +775,7 @@ pub struct CodeWorkspacePrSnapshot {
 }
 
 /// One pull request attributed to a workspace, from the durable fact store
-/// (decision 62). A projection of the stored snapshot — no live host read.
+/// (decision 77). A projection of the stored snapshot — no live host read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeWorkspacePullRequestFact {
     pub host: String,
@@ -1025,7 +1025,7 @@ pub struct CodeDeliveryWorkspaceLink {
     pub status: CodeWorkspaceStatus,
     pub exact: bool,
     /// Durable attribution behind this link, when one is stored: the
-    /// workspace authored or contributed to the pull request (decision 62).
+    /// workspace authored or contributed to the pull request (decision 77).
     /// Absent on links the live heuristic derived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1158,7 +1158,7 @@ pub struct CodeDeliveryPullRequestSummary {
     pub stack_size: Option<u64>,
     /// The pull request this one is stacked on. Host stack order wins when
     /// the host reported a stack; branch inference from the durable fact set
-    /// is the fallback (decision 62), so a parent outside the current page
+    /// is the fallback (decision 77), so a parent outside the current page
     /// or filter still resolves. Absent when the base is the default branch
     /// or nothing tracked owns it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1942,7 +1942,7 @@ pub struct CodeSessionDigest {
     #[ts(optional)]
     pub pr_state: Option<PullRequestDigest>,
     /// How many pull requests hold a durable attribution to this workspace
-    /// (decision 62). Absent when none do.
+    /// (decision 77). Absent when none do.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pr_count: Option<u64>,
@@ -2026,7 +2026,7 @@ pub enum CodeUpdateNotice {
         #[ts(optional)]
         pr_state: Option<Box<PullRequestDigest>>,
         /// How many pull requests hold a durable attribution to this
-        /// workspace (decision 62). Absent when none do.
+        /// workspace (decision 77). Absent when none do.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         pr_count: Option<u64>,

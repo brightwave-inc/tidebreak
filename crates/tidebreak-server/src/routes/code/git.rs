@@ -54,7 +54,7 @@ pub async fn get_workspace_pr(
     Ok(Json(pr_snapshot(status, watch)))
 }
 
-/// Every pull request attributed to the workspace (decision 62), from the
+/// Every pull request attributed to the workspace (decision 77), from the
 /// durable fact store — no live host read.
 pub async fn list_workspace_pull_requests(
     code: ScopedCode,

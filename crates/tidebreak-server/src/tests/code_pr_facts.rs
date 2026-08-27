@@ -1,4 +1,4 @@
-//! Post-turn pull-request fact detection against a shimmed `gh` (decision 62).
+//! Post-turn pull-request fact detection against a shimmed `gh` (decision 77).
 //!
 //! These tests drive `pr_facts::sweep_turn_for_pull_request_acts` directly
 //! over a seeded journal: the acts are journaled shell commands, the host is
