@@ -6,6 +6,7 @@ import type {
   HarnessDoctorEntry,
   HarnessKind,
   ModelInfo,
+  ReasoningEffort,
 } from "../api/types";
 import type { ComposerWorkspaceFiles } from "@/Composer";
 import { CodeComposer } from "./CodeComposer";
@@ -20,6 +21,7 @@ import {
 import {
   createPermissionModes,
   defaultCreatePermissionMode,
+  effortLadder,
   gatewayCodeModels,
   harnessCanStartNow,
   harnessUnusableReason,
@@ -27,6 +29,8 @@ import {
   requiresHarnessModelIds,
   type CodeModelOption,
 } from "./labels";
+
+const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
 
 const NO_CATALOG_MODELS: ModelInfo[] = [];
 
@@ -70,6 +74,8 @@ export function StartSessionPrompt({
     message: string,
     model?: string,
     draft?: string,
+    reasoningEffort?: ReasoningEffort | null,
+    fastMode?: boolean,
   ) => Promise<void> | void;
   client?: Pick<ApiClient, "listCodeHarnessModels"> &
     Partial<Pick<ApiClient, "startHarnessInstall" | "getHarnessDoctor">>;
@@ -85,6 +91,12 @@ export function StartSessionPrompt({
   const [modelsByHarness, setModelsByHarness] = useState<
     Partial<Record<HarnessKind, string>>
   >({ ...lastCreate?.modelsByHarness });
+  const [effortByHarness, setEffortByHarness] = useState<
+    Partial<Record<HarnessKind, ReasoningEffort>>
+  >({ ...lastCreate?.reasoningEffortByHarness });
+  const [fastByHarness, setFastByHarness] = useState<
+    Partial<Record<HarnessKind, boolean>>
+  >({ ...lastCreate?.fastModeByHarness });
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -109,6 +121,26 @@ export function StartSessionPrompt({
 
   const selectedKind = selected?.kind;
   const model = selectedKind ? modelsByHarness[selectedKind] : undefined;
+  const engineEfforts =
+    useCodeCatalogStore((state) =>
+      selectedKind ? state.effortsByHarness[selectedKind] : undefined,
+    ) ?? NO_ENGINE_EFFORTS;
+  const selectedOption =
+    modelOptions.find((option) => option.id === model) ??
+    modelOptions.find((option) => option.default) ??
+    modelOptions[0];
+  const effortLevels = effortLadder(selectedOption, engineEfforts);
+  const fastModeAvailable = selectedOption?.fast_mode ?? false;
+  const rememberedEffort = selectedKind
+    ? effortByHarness[selectedKind]
+    : undefined;
+  const postedEffort =
+    rememberedEffort && effortLevels.includes(rememberedEffort)
+      ? rememberedEffort
+      : null;
+  const postedFastMode = fastModeAvailable
+    ? Boolean(selectedKind && fastByHarness[selectedKind])
+    : false;
   const installed = Boolean(selected?.found);
   const install = useWarmHarnessInstall(
     canInstallHarnesses(client) ? client : undefined,
@@ -207,6 +239,9 @@ export function StartSessionPrompt({
           model={model}
           modelOptions={modelOptions}
           modelLoading={modelLoading}
+          reasoningEffort={postedEffort}
+          engineEfforts={engineEfforts}
+          fastMode={postedFastMode}
           harnessMenu={
             <HarnessPicker
               harnesses={harnesses}
@@ -230,6 +265,22 @@ export function StartSessionPrompt({
               [selectedKind]: next,
             }));
           }}
+          onEffortChange={(next) => {
+            if (!selectedKind) return;
+            setEffortByHarness((current) => {
+              const nextMap = { ...current };
+              if (next) nextMap[selectedKind] = next;
+              else delete nextMap[selectedKind];
+              return nextMap;
+            });
+          }}
+          onFastModeChange={(next) => {
+            if (!selectedKind) return;
+            setFastByHarness((current) => ({
+              ...current,
+              [selectedKind]: next,
+            }));
+          }}
           onModeChange={onSelectMode}
           onSubmitStart={(draft) => {
             submittedDraft.current = draft;
@@ -239,9 +290,25 @@ export function StartSessionPrompt({
             const draft = submittedDraft.current ?? message;
             try {
               if (draft === message) {
-                await onStart(selected.kind, mode, message, model);
+                await onStart(
+                  selected.kind,
+                  mode,
+                  message,
+                  model,
+                  undefined,
+                  postedEffort,
+                  postedFastMode,
+                );
               } else {
-                await onStart(selected.kind, mode, message, model, draft);
+                await onStart(
+                  selected.kind,
+                  mode,
+                  message,
+                  model,
+                  draft,
+                  postedEffort,
+                  postedFastMode,
+                );
               }
             } finally {
               submittedDraft.current = null;

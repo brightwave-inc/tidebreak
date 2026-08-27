@@ -10,7 +10,11 @@ import {
 } from "@tanstack/react-router";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import type { CodeRepoSnapshot, HarnessKind } from "@/api/types";
+import type {
+  CodeRepoSnapshot,
+  HarnessKind,
+  ReasoningEffort,
+} from "@/api/types";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "@/code/CodeUiStore";
 import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
@@ -24,8 +28,9 @@ import {
 
 /**
  * The new-workspace composer: the first message is the surface, and every
- * setting — repo, name, base ref, engine, model, permissions — is a pill with
- * its own chord. Enter creates; "Create more" keeps it open for the next one.
+ * setting — repo, name, base ref, engine, model, reasoning, fast mode,
+ * permissions — is a pill with its own chord. Enter creates; "Create more"
+ * keeps it open for the next one.
  */
 
 const repos: CodeRepoSnapshot[] = [
@@ -59,20 +64,76 @@ const repos: CodeRepoSnapshot[] = [
 ];
 
 const MODELS: Partial<
-  Record<HarnessKind, { id: string; label: string; default?: boolean }[]>
+  Record<
+    HarnessKind,
+    {
+      id: string;
+      label: string;
+      default?: boolean;
+      reasoning_efforts: ReasoningEffort[];
+      fast_mode: boolean;
+    }[]
+  >
 > = {
   claude_code: [
-    { id: "claude-opus-5", label: "Claude Opus 5", default: true },
-    { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+    {
+      id: "claude-opus-5",
+      label: "Claude Opus 5",
+      default: true,
+      reasoning_efforts: [],
+      fast_mode: true,
+    },
+    {
+      id: "claude-sonnet-5",
+      label: "Claude Sonnet 5",
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
   ],
   codex: [
-    { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
-    { id: "gpt-5.6-luna", label: "GPT 5.6 Luna" },
+    {
+      id: "gpt-5.6-sol",
+      label: "GPT 5.6 Sol",
+      default: true,
+      reasoning_efforts: ["low", "medium", "high"],
+      fast_mode: true,
+    },
+    {
+      id: "gpt-5.6-luna",
+      label: "GPT 5.6 Luna",
+      reasoning_efforts: ["low", "medium", "high"],
+      fast_mode: false,
+    },
   ],
   opencode: [
-    { id: "gpt-5.6-sol", label: "GPT 5.6 Sol", default: true },
-    { id: "claude-opus-5", label: "Claude Opus 5" },
-    { id: "grok-4.5", label: "Grok 4.5" },
+    {
+      id: "gpt-5.6-sol",
+      label: "GPT 5.6 Sol",
+      default: true,
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+    {
+      id: "claude-opus-5",
+      label: "Claude Opus 5",
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+    {
+      id: "grok-4.5",
+      label: "Grok 4.5",
+      reasoning_efforts: [],
+      fast_mode: false,
+    },
+  ],
+  grok: [
+    {
+      id: "grok-4.6",
+      label: "Grok 4.6",
+      default: true,
+      reasoning_efforts: ["low", "medium", "high", "xhigh"],
+      fast_mode: false,
+    },
   ],
 };
 
@@ -81,6 +142,15 @@ function appContext(): AppContextValue {
     listCodeHarnessModels: async (kind: HarnessKind) => ({
       kind,
       models: MODELS[kind] ?? [],
+      reasoning_efforts:
+        kind === "claude_code"
+          ? (["low", "medium", "high"] as ReasoningEffort[])
+          : kind === "codex"
+            ? (["low", "medium", "high"] as ReasoningEffort[])
+            : kind === "grok"
+              ? (["low", "medium", "high", "xhigh"] as ReasoningEffort[])
+              : [],
+      fast_mode: kind === "claude_code" || kind === "codex",
     }),
     startHarnessInstall: async (kind: HarnessKind) => ({
       kind,

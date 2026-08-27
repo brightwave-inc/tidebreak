@@ -2448,6 +2448,7 @@ export class ApiClient {
       permission_mode: PermissionMode;
       model?: string;
       reasoning_effort?: ReasoningEffort;
+      fast_mode?: boolean;
     },
   ): Promise<CodeSessionSnapshot> {
     return requireParsed(

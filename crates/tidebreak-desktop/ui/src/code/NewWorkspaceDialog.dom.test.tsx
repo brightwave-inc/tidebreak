@@ -311,6 +311,8 @@ describe("NewWorkspaceDialog", () => {
         opencode: "model-gateway/deepseek-v4-pro",
         claude_code: "claude-opus-5",
       },
+      reasoningEffortByHarness: {},
+      fastModeByHarness: {},
     });
   });
 
@@ -474,6 +476,8 @@ describe("NewWorkspaceDialog", () => {
         harness: "codex",
         modelsByHarness: { codex: "gpt-5.6-sol" },
         permissionMode: "allow",
+        reasoningEffortByHarness: {},
+        fastModeByHarness: { codex: false },
       }),
     );
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
@@ -1244,6 +1248,261 @@ describe("NewWorkspaceDialog", () => {
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("menuitem", { name: /GPT 5.6 Sol/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers reasoning effort and fast mode only when the engine and model honor them", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    const efforts: ReasoningEffort[] = ["low", "medium", "high"];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code"), harness("opencode")],
+        notices: [],
+      } as never,
+    });
+    const user = userEvent.setup();
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn((kind: HarnessKind) =>
+            Promise.resolve(
+              kind === "opencode"
+                ? {
+                    kind: "opencode" as const,
+                    models: [
+                      {
+                        id: "gpt-5.6-sol",
+                        label: "GPT 5.6 Sol",
+                        default: true,
+                        reasoning_efforts: [],
+                        fast_mode: false,
+                      },
+                    ],
+                    reasoning_efforts: [],
+                    fast_mode: false,
+                  }
+                : {
+                    kind: "claude_code" as const,
+                    models: [
+                      {
+                        id: "claude-opus-5",
+                        label: "Claude Opus 5",
+                        default: true,
+                        reasoning_efforts: [],
+                        fast_mode: true,
+                      },
+                      {
+                        id: "claude-sonnet-5",
+                        label: "Claude Sonnet 5",
+                        default: false,
+                        reasoning_efforts: [],
+                        fast_mode: false,
+                      },
+                    ],
+                    reasoning_efforts: efforts,
+                    fast_mode: true,
+                  },
+            ),
+          ),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reasoning: Default" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Fast mode off" }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Model: Claude Opus 5" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /Claude Sonnet 5/ }));
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Harness: Claude Code" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /opencode/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reasoning:/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("posts the chosen reasoning effort and fast mode on create", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    const efforts: ReasoningEffort[] = ["low", "medium", "high"];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const createCodeWorkspace = vi.fn(async () =>
+      workspace("ws-settings", "repo-new", "2026-08-20T00:00:00.000Z"),
+    );
+    const createCodeSession = vi.fn(async () =>
+      session("ws-settings", "claude_code", "2026-08-20T00:00:00.000Z"),
+    );
+    const user = userEvent.setup();
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          createCodeSession,
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "claude_code" as const,
+            models: [
+              {
+                id: "claude-opus-5",
+                label: "Claude Opus 5",
+                default: true,
+                reasoning_efforts: [],
+                fast_mode: true,
+              },
+            ],
+            reasoning_efforts: efforts,
+            fast_mode: true,
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Reasoning: Default" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "High" }));
+    await user.click(screen.getByRole("switch", { name: "Fast mode off" }));
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    await waitFor(() =>
+      expect(createCodeSession).toHaveBeenCalledWith("ws-settings", {
+        harness: "claude_code",
+        permission_mode: "allow",
+        model: "claude-opus-5",
+        reasoning_effort: "high",
+        fast_mode: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(useCodeUiStore.getState().lastCreate).toEqual({
+        repoId: "repo-new",
+        harness: "claude_code",
+        modelsByHarness: { claude_code: "claude-opus-5" },
+        permissionMode: "allow",
+        reasoningEffortByHarness: { claude_code: "high" },
+        fastModeByHarness: { claude_code: true },
+      }),
+    );
+  });
+
+  it("restores lastCreate effort and fast mode only when the engine still honors them", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    const efforts: ReasoningEffort[] = ["low", "medium", "high"];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("grok"), harness("opencode")],
+        notices: [],
+      } as never,
+    });
+    useCodeUiStore.setState({
+      lastCreate: {
+        harness: "grok",
+        modelsByHarness: { grok: "grok-4.6" },
+        reasoningEffortByHarness: { grok: "high", opencode: "high" },
+        fastModeByHarness: { grok: true, opencode: true },
+      },
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn((kind: HarnessKind) =>
+            Promise.resolve(
+              kind === "opencode"
+                ? {
+                    kind: "opencode" as const,
+                    models: [
+                      {
+                        id: "gpt-5.6-sol",
+                        label: "GPT 5.6 Sol",
+                        default: true,
+                        reasoning_efforts: [],
+                        fast_mode: false,
+                      },
+                    ],
+                    reasoning_efforts: [],
+                    fast_mode: false,
+                  }
+                : {
+                    kind: "grok" as const,
+                    models: [
+                      {
+                        id: "grok-4.6",
+                        label: "Grok 4.6",
+                        default: true,
+                        reasoning_efforts: efforts,
+                        fast_mode: false,
+                      },
+                    ],
+                    reasoning_efforts: efforts,
+                    fast_mode: false,
+                  },
+            ),
+          ),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Model: Grok 4.6" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reasoning: High" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
+    ).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Harness: Grok CLI" }));
+    await user.click(screen.getByRole("menuitem", { name: /opencode/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reasoning:/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
     ).not.toBeInTheDocument();
   });
 });

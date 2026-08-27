@@ -16,6 +16,7 @@ import type {
   CodeWorkspaceSnapshot,
   HarnessDoctorEntry,
   HarnessKind,
+  ReasoningEffort,
 } from "../api/types";
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
@@ -44,13 +45,18 @@ import {
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
-import { HarnessModelMenu } from "./CodeComposer";
+import {
+  FastModeToggle,
+  HarnessModelMenu,
+  ReasoningEffortMenu,
+} from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
 import { useWarmHarnessInstall } from "./useHarnessInstall";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
   createPermissionModes,
   defaultCreatePermissionMode,
+  effortLadder,
   gatewayCodeModels,
   harnessCanStartNow,
   harnessUnusableReason,
@@ -60,13 +66,16 @@ import {
   type CodeModelOption,
 } from "./labels";
 
+const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
+
 /**
  * Create a workspace, its first session, and — when a first message is typed —
  * its first turn, then open it.
  *
  * The dialog is a composer, not a form: the message is the surface, and every
  * setting is a pill that opens on what this reader used last (repo, engine,
- * model, and permission mode stick via `lastCreate`; the catalog covers a
+ * model, permission mode, reasoning effort, and fast mode stick via
+ * `lastCreate`; the catalog covers a
  * fresh window). Enter creates, Shift+Enter breaks a line, and Cmd+Enter
  * creates from anywhere in the dialog, pickers included. Each pill has its own
  * chord — Cmd+N again for the repo, and Alt+E / M / P / B / N for engine,
@@ -138,6 +147,10 @@ type CreateAttempt = {
   permissionMode: PermissionMode;
   model: string | undefined;
   modelsByHarness: Partial<Record<HarnessKind, string>>;
+  reasoningEffort: ReasoningEffort | null;
+  reasoningEffortByHarness: Partial<Record<HarnessKind, ReasoningEffort>>;
+  fastMode: boolean;
+  fastModeByHarness: Partial<Record<HarnessKind, boolean>>;
   createMore: boolean;
   originPath: string;
 };
@@ -186,6 +199,12 @@ export function NewWorkspaceDialog({
   const [modelsByHarness, setModelsByHarness] = useState<
     Partial<Record<HarnessKind, string>>
   >({});
+  const [effortByHarness, setEffortByHarness] = useState<
+    Partial<Record<HarnessKind, ReasoningEffort>>
+  >({});
+  const [fastByHarness, setFastByHarness] = useState<
+    Partial<Record<HarnessKind, boolean>>
+  >({});
   const [modelOptions, setModelOptions] = useState<CodeModelOption[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const [openPicker, setOpenPicker] = useState<PickerId | null>(null);
@@ -210,6 +229,23 @@ export function NewWorkspaceDialog({
     recentHarness(selectableHarnesses, sessions, lastCreate?.harness) ??
     "claude_code";
   const model = modelsByHarness[harness];
+  const engineEfforts =
+    useCodeCatalogStore((state) => state.effortsByHarness[harness]) ??
+    NO_ENGINE_EFFORTS;
+  const selectedOption =
+    modelOptions.find((option) => option.id === model) ??
+    modelOptions.find((option) => option.default) ??
+    modelOptions[0];
+  const effortLevels = effortLadder(selectedOption, engineEfforts);
+  const fastModeAvailable = selectedOption?.fast_mode ?? false;
+  const rememberedEffort = effortByHarness[harness];
+  const postedEffort =
+    rememberedEffort && effortLevels.includes(rememberedEffort)
+      ? rememberedEffort
+      : null;
+  const postedFastMode = fastModeAvailable
+    ? Boolean(fastByHarness[harness])
+    : false;
 
   useEffect(() => {
     if (!open) return;
@@ -238,6 +274,14 @@ export function NewWorkspaceDialog({
     setCreateMore(retry?.createMore ?? false);
     setModelsByHarness(
       retry?.modelsByHarness ?? { ...lastCreate?.modelsByHarness },
+    );
+    setEffortByHarness(
+      retry?.reasoningEffortByHarness ?? {
+        ...lastCreate?.reasoningEffortByHarness,
+      },
+    );
+    setFastByHarness(
+      retry?.fastModeByHarness ?? { ...lastCreate?.fastModeByHarness },
     );
     setModelOptions([]);
     setModelLoading(false);
@@ -396,6 +440,10 @@ export function NewWorkspaceDialog({
       permissionMode: postedMode,
       model,
       modelsByHarness: { ...modelsByHarness },
+      reasoningEffort: postedEffort,
+      reasoningEffortByHarness: { ...effortByHarness },
+      fastMode: postedFastMode,
+      fastModeByHarness: { ...fastByHarness },
       createMore,
       originPath: pathnameRef.current,
     };
@@ -491,6 +539,10 @@ export function NewWorkspaceDialog({
         harness: attempt.harness,
         permission_mode: attempt.permissionMode,
         model: posted,
+        ...(attempt.reasoningEffort
+          ? { reasoning_effort: attempt.reasoningEffort }
+          : {}),
+        ...(attempt.fastMode ? { fast_mode: true } : {}),
       });
       rememberSession(session);
       rememberCreate({
@@ -499,6 +551,10 @@ export function NewWorkspaceDialog({
         model: posted,
         modelsByHarness: attempt.modelsByHarness,
         permissionMode: attempt.permissionMode,
+        reasoningEffort: attempt.reasoningEffort,
+        reasoningEffortByHarness: attempt.reasoningEffortByHarness,
+        fastMode: attempt.fastMode,
+        fastModeByHarness: attempt.fastModeByHarness,
       });
       if (prompt) {
         try {
@@ -849,6 +905,30 @@ export function NewWorkspaceDialog({
                 </span>
               </WithTooltip>
             )}
+            {effortLevels.length > 0 && (
+              <ReasoningEffortMenu
+                levels={effortLevels}
+                value={postedEffort}
+                onChange={(next) => {
+                  setEffortByHarness((current) => {
+                    const nextMap = { ...current };
+                    if (next) nextMap[harness] = next;
+                    else delete nextMap[harness];
+                    return nextMap;
+                  });
+                }}
+              />
+            )}
+            <FastModeToggle
+              available={fastModeAvailable}
+              value={postedFastMode}
+              onChange={(next) => {
+                setFastByHarness((current) => ({
+                  ...current,
+                  [harness]: next,
+                }));
+              }}
+            />
             <WithTooltip label={`Permissions · ${alt("P")}`}>
               <span className="inline-flex min-w-0">
                 <PermissionModeMenu
