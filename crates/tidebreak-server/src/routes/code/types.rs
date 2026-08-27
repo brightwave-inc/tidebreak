@@ -646,6 +646,9 @@ pub struct CreateRepoBody {
     pub setup_script: Option<String>,
     #[serde(default)]
     pub archive_script: Option<String>,
+    /// Named commands the workspace surface offers. Omitted means none.
+    #[serde(default)]
+    pub quick_actions: Option<Vec<QuickAction>>,
 }
 
 /// Body of `PATCH /code/repos/{id}`.
@@ -662,6 +665,10 @@ pub struct PatchRepoBody {
     pub setup_script: Option<Option<String>>,
     #[serde(default)]
     pub archive_script: Option<Option<String>>,
+    /// The whole list, replaced. An empty list clears every quick action;
+    /// omitting the field leaves the stored list alone.
+    #[serde(default)]
+    pub quick_actions: Option<Vec<QuickAction>>,
 }
 
 /// Body of `POST /code/workspaces`.

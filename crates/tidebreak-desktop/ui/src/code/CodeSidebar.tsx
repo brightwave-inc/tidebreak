@@ -216,6 +216,7 @@ export function CodeSidebar() {
                             )?.state.type === "manual",
                           canOpenWorktree,
                           canUneff: Boolean(tidebreakProductRepo(repos)),
+                          setupFailed: workspace.status === "setup_failed",
                         })
                   }
                   childSessions={watchChildren(

@@ -345,6 +345,13 @@ impl ScopedCode {
         self.runtime.restore_workspace(&self.owner, id).await
     }
 
+    pub(crate) async fn retry_workspace_setup(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        self.runtime.retry_workspace_setup(&self.owner, id).await
+    }
+
     pub(crate) async fn workspace_tree(
         &self,
         id: WorkspaceId,

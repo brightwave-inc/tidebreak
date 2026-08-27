@@ -101,6 +101,7 @@ export type WorkspaceStatusRank =
   | "running"
   | "pr_open"
   | "done_unreviewed"
+  | "setup_failed"
   | "idle"
   | "archived";
 
@@ -109,6 +110,7 @@ export const WORKSPACE_STATUS_RANK_ORDER: readonly WorkspaceStatusRank[] = [
   "running",
   "pr_open",
   "done_unreviewed",
+  "setup_failed",
   "idle",
   "archived",
 ];
@@ -119,14 +121,20 @@ export const WORKSPACE_STATUS_RANK_LABELS: Record<WorkspaceStatusRank, string> =
     running: "Running",
     pr_open: "PR open",
     done_unreviewed: "Done",
+    setup_failed: "Setup failed",
     idle: "Idle",
     archived: "Archived",
   };
 
 /**
  * Rank a workspace for the by-status rail. Needs-you wins, then a running
- * engine, then an open PR, then done-unreviewed, then idle. Archived is last.
- * A digest may change the rank; viewing or selecting never does.
+ * engine, then an open PR, then done-unreviewed, then a workspace whose setup
+ * script failed, then idle. Archived is last. A digest may change the rank;
+ * viewing or selecting never does.
+ *
+ * A failed setup ranks below live work because the checkout survives and the
+ * engine can still run in it — but above idle, because nothing else on the
+ * card says the script never finished.
  */
 export function workspaceStatusRank(
   workspace: CodeWorkspaceSnapshot,
@@ -143,6 +151,7 @@ export function workspaceStatusRank(
   if (digest?.attention.state.type === "done_unreviewed") {
     return "done_unreviewed";
   }
+  if (workspace.status === "setup_failed") return "setup_failed";
   return "idle";
 }
 
@@ -415,6 +424,7 @@ export function workspaceCardLabel(input: {
 }): string {
   const parts = [input.title];
   if (input.workspaceStatus === "creating") parts.push("Creating workspace");
+  if (input.workspaceStatus === "setup_failed") parts.push("Setup failed");
   if (
     input.attention &&
     input.attention.state.type !== "working" &&

@@ -148,6 +148,7 @@ import {
   type CodeApprovalState as WireCodeApprovalState,
   type CodeEvent as WireCodeEvent,
   type CodeRepoSnapshot as WireCodeRepoSnapshot,
+  type QuickAction as WireQuickAction,
   type CodeSessionId as WireCodeSessionId,
   type CodeSessionKind as WireCodeSessionKind,
   type CodeSessionLifecycle as WireCodeSessionLifecycle,
@@ -1144,6 +1145,8 @@ export type FileDownloadProgress = {
 
 /** A registered local git repository. */
 export type CodeRepoSnapshot = WireCodeRepoSnapshot;
+/** A named command a workspace of that repository can run. */
+export type QuickAction = WireQuickAction;
 export type RepoId = WireRepoId;
 
 /** Local code activity and cost estimates. */

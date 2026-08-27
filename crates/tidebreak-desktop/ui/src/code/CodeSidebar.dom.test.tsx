@@ -382,4 +382,37 @@ describe("CodeSidebar", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
   });
+
+  /**
+   * Without this, a workspace whose setup script failed reads exactly like an
+   * idle one: the card has no session row and nothing else names the status.
+   */
+  it("says Setup failed on a card whose setup script did not finish", async () => {
+    client.listCodeWorkspaces.mockResolvedValueOnce([
+      {
+        id: "ws-broken",
+        repo_id: "repo-1",
+        title: "Broken setup",
+        worktree_path: "/tmp/app/.worktrees/broken",
+        branch_name: "tidebreak/broken",
+        base_ref: "main",
+        status: "setup_failed" as const,
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+    ] as never);
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(await screen.findByText("Setup failed")).toBeInTheDocument();
+    // The status reaches a screen reader too, not just the ink.
+    expect(
+      screen.getByRole("button", {
+        name: "Broken setup · Setup failed · app · tidebreak/broken",
+      }),
+    ).toBeInTheDocument();
+  });
 });

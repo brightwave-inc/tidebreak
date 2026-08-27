@@ -795,6 +795,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         canFork: session?.kind === "interactive",
         canUneff: Boolean(tidebreakProductRepo(catalog.repos)),
         quickActions: repo?.quick_actions ?? [],
+        setupFailed: workspace.status === "setup_failed",
       })
     : [];
 

@@ -87,6 +87,8 @@ import {
 } from "./CodeDeliveryStore";
 import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { RepositorySettings } from "./RepositorySettings";
 import { RepositoryTriggerRules } from "./RepositoryTriggerRules";
 import { GithubAvatar } from "./GithubAvatar";
 import {
@@ -3011,6 +3013,8 @@ function DeliveryRepositoriesDialog({
   const [error, setError] = useState<string | null>(null);
   const [triggerRepository, setTriggerRepository] =
     useState<CodeGitHubRepositoryRef | null>(null);
+  const [settingsRepository, setSettingsRepository] =
+    useState<CodeGitHubRepositoryRef | null>(null);
 
   const add = async () => {
     const repositories = input
@@ -3099,11 +3103,28 @@ function DeliveryRepositoriesDialog({
                           ? () => setTriggerRepository(repository)
                           : undefined
                       }
+                      onManageSettings={
+                        repository.tidebreak_repo_id
+                          ? () => setSettingsRepository(repository)
+                          : undefined
+                      }
                     />
                   );
                 })
               )}
             </div>
+            {settingsRepository && (
+              <div className="mt-4">
+                <RepositorySettings
+                  client={client}
+                  repoId={settingsRepository.tidebreak_repo_id ?? null}
+                  repoLabel={settingsRepository.name_with_owner}
+                  onSaved={(repo) =>
+                    useCodeCatalogStore.getState().upsertRepo(repo)
+                  }
+                />
+              </div>
+            )}
             {triggerRepository && (
               <div className="mt-4">
                 <RepositoryTriggerRules
@@ -3193,6 +3214,7 @@ function RepositorySettingRow({
   onPinnedChange,
   onRemove,
   onManageTriggers,
+  onManageSettings,
 }: {
   repository: CodeGitHubRepositoryRef;
   enabled: boolean;
@@ -3202,6 +3224,7 @@ function RepositorySettingRow({
   onPinnedChange: (pinned: boolean) => void;
   onRemove?: () => void;
   onManageTriggers?: () => void;
+  onManageSettings?: () => void;
 }) {
   return (
     <div className="flex items-center gap-3 border-b border-border-subtle px-3 py-2.5 last:border-b-0">
@@ -3229,6 +3252,16 @@ function RepositorySettingRow({
       >
         {pinned ? <PinOff /> : <Pin />}
       </Button>
+      {onManageSettings && (
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          onClick={onManageSettings}
+        >
+          Settings
+        </Button>
+      )}
       {onManageTriggers && (
         <Button
           type="button"

@@ -12,12 +12,87 @@ use super::types::{
     CloneRepoBody, CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories,
     CodeRepoSnapshot, CodeRepoSources, CreateRepoBody, PatchRepoBody, RemoveRepoQuery,
 };
-use tidebreak_core::RepoId;
+use tidebreak_core::{QuickAction, RepoId};
+
+/// How many quick actions one repository may carry.
+///
+/// Every entry renders in the workspace header menu and the command palette,
+/// so a list past this is unusable before it is expensive. The cap also keeps
+/// the request body from sizing anything the server allocates.
+const MAX_QUICK_ACTIONS: usize = 32;
+
+/// Longest quick-action name. It is a menu label, not prose.
+const MAX_QUICK_ACTION_NAME: usize = 64;
+
+/// Longest quick-action command. A quick action is one short command in the
+/// worktree, bounded by `ACTION_TIMEOUT`; anything longer belongs in a script
+/// the command calls.
+const MAX_QUICK_ACTION_COMMAND: usize = 1024;
+
+/// Trim a submitted quick-action list and refuse one a workspace could not run.
+///
+/// `run_named_action` looks an action up by name, so two actions sharing a name
+/// make one of them unreachable. Reject the pair here rather than store a list
+/// whose second entry never runs.
+///
+/// Lengths are counted in `char`s, so a limit means the same thing to a reader
+/// as it does to the check.
+fn normalize_quick_actions(actions: Vec<QuickAction>) -> Result<Vec<QuickAction>, ServerError> {
+    if actions.len() > MAX_QUICK_ACTIONS {
+        return Err(ServerError::bad_request(format!(
+            "a repository takes at most {MAX_QUICK_ACTIONS} quick actions; got {}",
+            actions.len()
+        )));
+    }
+    // Neither vector takes a capacity hint from the body. The cap above bounds
+    // the list, and growing a vector of at most 32 entries costs nothing worth
+    // sizing from untrusted input.
+    let mut seen: Vec<String> = Vec::new();
+    let mut normalized = Vec::new();
+    for action in actions {
+        let name = action.name.trim().to_owned();
+        let command = action.command.trim().to_owned();
+        if name.is_empty() {
+            return Err(ServerError::bad_request(
+                "quick action name must not be empty",
+            ));
+        }
+        if name.chars().count() > MAX_QUICK_ACTION_NAME {
+            return Err(ServerError::bad_request(format!(
+                "quick action name must be at most {MAX_QUICK_ACTION_NAME} characters"
+            )));
+        }
+        if command.is_empty() {
+            return Err(ServerError::bad_request(format!(
+                "quick action {name} must have a command"
+            )));
+        }
+        if command.chars().count() > MAX_QUICK_ACTION_COMMAND {
+            return Err(ServerError::bad_request(format!(
+                "quick action {name} must have a command of at most \
+                 {MAX_QUICK_ACTION_COMMAND} characters"
+            )));
+        }
+        if seen.iter().any(|existing| existing == &name) {
+            return Err(ServerError::bad_request(format!(
+                "quick action {name} is listed twice"
+            )));
+        }
+        seen.push(name.clone());
+        normalized.push(QuickAction {
+            name,
+            command,
+            auto_run_on_create: action.auto_run_on_create,
+        });
+    }
+    Ok(normalized)
+}
 
 pub async fn create_repo(
     code: ScopedCode,
     Json(body): Json<CreateRepoBody>,
 ) -> Result<impl IntoResponse, ServerError> {
+    let quick_actions = normalize_quick_actions(body.quick_actions.unwrap_or_default())?;
     let repo = code
         .register_repo(
             PathBuf::from(body.path),
@@ -31,6 +106,7 @@ pub async fn create_repo(
                 branch_prefix: body.branch_prefix,
                 setup_script: body.setup_script,
                 archive_script: body.archive_script,
+                quick_actions,
             },
         )
         .await?;
@@ -85,6 +161,9 @@ pub async fn patch_repo(
     }
     if let Some(script) = body.archive_script {
         repo.archive_script = script.filter(|value| !value.trim().is_empty());
+    }
+    if let Some(actions) = body.quick_actions {
+        repo.quick_actions = normalize_quick_actions(actions)?;
     }
     code.save_repo(&repo).await?;
     Ok(Json(CodeRepoSnapshot::from(repo)))

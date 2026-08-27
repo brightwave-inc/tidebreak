@@ -361,6 +361,7 @@ POST/GET        /code/workspaces           {repo_id, base_ref?, title?}
 GET/PATCH       /code/workspaces/{id}
 POST            /code/workspaces/{id}/archive | /release            {force?}
 POST            /code/workspaces/{id}/restore        back from a reclaim tier (0059)
+POST            /code/workspaces/{id}/retry-setup    run setup again on the same worktree
 POST            /code/workspaces/{id}/sessions       {harness, permission_mode,
                                                      model?, reasoning_effort?, fast_mode?}
 POST/GET        /code/sessions/{id}/turns            {message}  (queued while running —

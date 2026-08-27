@@ -44,7 +44,11 @@ import type {
 import { AttentionBadge } from "./AttentionBadge";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import { FOCUS_RING_INSET, HOVER_TINT } from "./interactive";
-import { HARNESS_LABELS, LIFECYCLE_LABELS } from "./labels";
+import {
+  HARNESS_LABELS,
+  LIFECYCLE_LABELS,
+  WORKSPACE_STATUS_LABELS,
+} from "./labels";
 import type { WorkspaceCommand } from "./workspaceActions";
 import {
   workspaceWorkflowActionLabel,
@@ -679,6 +683,23 @@ function WorkspaceActivityLine({
       >
         <LoaderCircle className="size-3 shrink-0 animate-spin" aria-hidden />
         <span className="min-w-0 flex-1 truncate">Creating workspace</span>
+      </div>
+    );
+  }
+  // The checkout survived, so the workspace is usable — but the setup script
+  // never finished, and nothing else on the card would say so.
+  if (workspace.status === "setup_failed") {
+    return (
+      <div
+        className={cn(
+          "flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-xs",
+          STATUS_TEXT.critical,
+        )}
+      >
+        <CircleAlert className="size-3 shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">
+          {WORKSPACE_STATUS_LABELS.setup_failed}
+        </span>
       </div>
     );
   }
