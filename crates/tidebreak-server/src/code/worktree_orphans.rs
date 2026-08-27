@@ -120,8 +120,11 @@ async fn scan(database: &Path) -> Result<Vec<OrphanedWorktree>, String> {
         Err(_) => query(&connection, "SELECT * FROM code_workspace").await,
     };
     // Close before returning either way: Windows refuses to delete a file this
-    // process still has open, and the caller deletes this one next.
+    // process still has open, and the caller deletes this one next. Yield so
+    // the current-thread runtime can finish dropping WAL mappings before that
+    // delete runs.
     let _ = connection.close().await;
+    tokio::task::yield_now().await;
 
     let recorded_at = Utc::now();
     let mut found = Vec::new();

@@ -225,7 +225,7 @@ async fn reset_pre_v1_state(database: &Path) -> Result<()> {
     // while the database still exists, so the trees are written down rather
     // than silently orphaned.
     crate::code::worktree_orphans::record_orphaned_worktrees(database, data_dir).await;
-    remove_sqlite_files(database)?;
+    remove_sqlite_files(database).await?;
     // Host-broker authority is durable beside SQLite, not inside it. An epoch
     // wipe throws away every conversation id the product will ever know; grants
     // and attachments keyed to those ids would otherwise keep authorizing work
@@ -234,17 +234,19 @@ async fn reset_pre_v1_state(database: &Path) -> Result<()> {
     remove_host_broker_durable_state(data_dir)
 }
 
-fn remove_sqlite_files(database: &Path) -> Result<()> {
+async fn remove_sqlite_files(database: &Path) -> Result<()> {
     for path in sqlite_files(database) {
-        remove_reset_file(&path, "local SQLite database file")?;
+        remove_reset_file(&path, "local SQLite database file").await?;
     }
     Ok(())
 }
 
 /// Delete one reset target. Windows can still hold the SQLite files for a
 /// beat after `close()` returns (WAL mapping), so a sharing violation retries
-/// instead of failing the epoch reset.
-fn remove_reset_file(path: &Path, kind: &str) -> Result<()> {
+/// instead of failing the epoch reset. The wait yields to the runtime so
+/// those mappings can drop; a blocking sleep would freeze the current-thread
+/// test runtime and keep the file locked.
+async fn remove_reset_file(path: &Path, kind: &str) -> Result<()> {
     let delays_ms: &[u64] = if cfg!(windows) {
         &[0, 10, 50, 100, 250]
     } else {
@@ -253,7 +255,7 @@ fn remove_reset_file(path: &Path, kind: &str) -> Result<()> {
     let mut last_error = None;
     for (attempt, delay_ms) in delays_ms.iter().enumerate() {
         if *delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(*delay_ms));
+            tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
         }
         match std::fs::remove_file(path) {
             Ok(()) => return Ok(()),
@@ -541,6 +543,37 @@ mod tests {
             .unwrap(),
             SchemaMarker::current()
         );
+    }
+
+    /// Windows refuses to delete a file another handle still has open. The
+    /// reset retries that sharing violation so a SQLite mapping that outlives
+    /// `close()` does not fail the boot. The wait must yield to the runtime:
+    /// a blocking sleep would freeze this current-thread test and keep the
+    /// handle.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn sqlite_file_removal_retries_while_another_handle_is_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join(DATABASE_FILE);
+        std::fs::write(&database, b"lock me").unwrap();
+        // SQLite opens without `FILE_SHARE_DELETE`, so `DeleteFile` fails
+        // with `ERROR_SHARING_VIOLATION` until that handle is gone. Default
+        // `File::open` shares delete and would not reproduce it.
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&database)
+            .unwrap();
+        let releaser = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            drop(held);
+        });
+        remove_sqlite_files(&database).await.unwrap();
+        releaser.await.unwrap();
+        assert!(!database.exists());
     }
 
     #[tokio::test]
