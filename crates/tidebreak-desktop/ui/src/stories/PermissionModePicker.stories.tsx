@@ -1,7 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { PermissionModePicker } from "@/code/CodeComposer";
-import { CREATE_PERMISSION_MODE_FIXED } from "@/code/labels";
+import {
+  ALLOW_ALL_NOTE,
+  CREATE_PERMISSION_MODE_FIXED,
+  UNSUPERVISED_AUTO_NOTE,
+} from "@/code/labels";
 
 /**
  * Permission mode in the composer footer.
@@ -56,6 +60,42 @@ export const FixedAtCreate: Story = {
       <PermissionModePicker {...args} />
       <p className="text-muted-foreground px-2 text-xs">
         {CREATE_PERMISSION_MODE_FIXED}
+      </p>
+    </div>
+  ),
+};
+
+/**
+ * Create states Allow under the picker (decision 0039). A live session
+ * carries the header chip instead of this line.
+ */
+export const AllowAllNote: Story = {
+  args: {
+    value: "allow",
+    onChange: () => {},
+  },
+  render: (args) => (
+    <div className="flex min-w-0 max-w-sm flex-col">
+      <PermissionModePicker {...args} />
+      <p className="text-muted-foreground px-2 text-xs">{ALLOW_ALL_NOTE}</p>
+    </div>
+  ),
+};
+
+/**
+ * Auto on an engine with no approval channel (decision 0038). Same placement
+ * as Allow: under the control, not inside the menu row.
+ */
+export const UnsupervisedAutoNote: Story = {
+  args: {
+    value: "auto",
+    onChange: () => {},
+  },
+  render: (args) => (
+    <div className="flex min-w-0 max-w-sm flex-col">
+      <PermissionModePicker {...args} />
+      <p className="text-muted-foreground px-2 text-xs">
+        {UNSUPERVISED_AUTO_NOTE}
       </p>
     </div>
   ),

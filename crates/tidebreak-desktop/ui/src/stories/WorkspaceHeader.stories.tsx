@@ -272,6 +272,22 @@ export const PlansOnly: Story = {
   },
 };
 
+/**
+ * The permission chip sits in the same muted row as lifecycle. At this width
+ * the title and status wrap; the chip truncates instead of overflowing.
+ */
+export const NarrowAskChip: Story = {
+  args: { snapshot: openPrGit, permissionMode: "ask" },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-[360px] overflow-hidden rounded-xl border border-border-subtle bg-background">
+        <Story />
+        <div className="h-24 bg-background" />
+      </div>
+    ),
+  ],
+};
+
 export const Loading: Story = {
   args: { snapshot: null, loading: true },
 };

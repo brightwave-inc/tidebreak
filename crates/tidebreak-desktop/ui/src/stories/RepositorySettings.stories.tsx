@@ -89,3 +89,17 @@ export const NotRegistered: Story = {
 export const LoadFailed: Story = {
   args: { client: client(null) as never },
 };
+
+/**
+ * The tracked-repos dialog is a dense column. Refs stack, quick-action rows
+ * wrap, and the error retry stays reachable instead of clipping the copy.
+ */
+export const Narrow: Story = {
+  decorators: [
+    (Story) => (
+      <div className="w-[320px] px-3 py-4">
+        <Story />
+      </div>
+    ),
+  ],
+};

@@ -167,7 +167,7 @@ export function WorkspaceHeader({
           {sessionStatus && (
             <div
               className={cn(
-                "flex min-w-0 shrink-0 items-center gap-1",
+                "flex min-w-0 items-center gap-1 overflow-hidden",
                 workflow && "ml-auto min-[1100px]:ml-0",
               )}
             >

@@ -32,11 +32,11 @@ export function SessionPermissionIndicator({ mode }: { mode: PermissionMode }) {
         data-testid="session-permission-indicator"
         tabIndex={0}
         className={cn(
-          "inline-flex items-center gap-1 rounded-sm text-xs text-muted-foreground",
+          "inline-flex min-w-0 max-w-full items-center gap-1 rounded-sm text-xs text-muted-foreground",
           FOCUS_RING,
         )}
       >
-        <Icon className="size-3 shrink-0" aria-hidden="true" />
+        <Icon className="size-3.5 shrink-0" aria-hidden="true" />
         <span className="truncate">{PERMISSION_MODE_LABELS[mode]}</span>
       </span>
     </WithTooltip>

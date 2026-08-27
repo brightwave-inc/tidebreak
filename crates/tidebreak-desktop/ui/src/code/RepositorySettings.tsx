@@ -5,7 +5,6 @@ import type { ApiClient } from "@/api/client";
 import type { CodeRepoSnapshot, QuickAction } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { friendlyErrorMessage } from "@/lib/utils";
@@ -223,18 +222,21 @@ export function RepositorySettings({
             checkout in place and marks the workspace Setup failed.
           </p>
         </div>
-        {(loading || busy) && <LoaderCircle className="size-4 animate-spin" />}
+        {(loading || busy) && (
+          <LoaderCircle className="size-3.5 shrink-0 animate-spin" />
+        )}
       </div>
       {error && (
-        <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-critical-border bg-critical-background px-3 py-2 text-xs text-critical-foreground-muted">
-          <span className="flex items-start gap-2">
+        <div className="mb-4 flex flex-col items-stretch gap-2 rounded-md border border-critical-border bg-critical-background px-3 py-2 text-xs text-critical-foreground-muted min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
+          <span className="flex min-w-0 items-start gap-2">
             <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-            {error}
+            <span className="min-w-0">{error}</span>
           </span>
           <Button
             type="button"
             size="xs"
             variant="outline"
+            className="shrink-0 self-end min-[480px]:self-auto"
             disabled={loading}
             onClick={() => void load()}
           >
@@ -244,16 +246,10 @@ export function RepositorySettings({
       )}
       {!loading && draft && (
         <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label
-                htmlFor="repo-settings-base-ref"
-                className="text-xs text-muted-foreground"
-              >
-                Base ref
-              </Label>
+          <div className="grid grid-cols-1 gap-3 min-[520px]:grid-cols-2">
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-xs text-muted-foreground">Base ref</span>
               <Input
-                id="repo-settings-base-ref"
                 className="font-mono"
                 value={draft.default_base_ref}
                 placeholder="main"
@@ -262,16 +258,12 @@ export function RepositorySettings({
                 }
                 onBlur={() => void commit(draft)}
               />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label
-                htmlFor="repo-settings-branch-prefix"
-                className="text-xs text-muted-foreground"
-              >
+            </label>
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-xs text-muted-foreground">
                 Branch prefix
-              </Label>
+              </span>
               <Input
-                id="repo-settings-branch-prefix"
                 className="font-mono"
                 value={draft.branch_prefix}
                 placeholder="tidebreak/"
@@ -280,48 +272,44 @@ export function RepositorySettings({
                 }
                 onBlur={() => void commit(draft)}
               />
-            </div>
+            </label>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <Label
-              htmlFor="repo-settings-setup-script"
-              className="text-xs text-muted-foreground"
-            >
-              Setup script
-            </Label>
-            <Textarea
-              id="repo-settings-setup-script"
-              className="min-h-16 font-mono"
-              rows={3}
-              value={draft.setup_script}
-              placeholder="pnpm install"
-              onChange={(event) =>
-                setDraft({ ...draft, setup_script: event.target.value })
-              }
-              onBlur={() => void commit(draft)}
-            />
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-xs text-muted-foreground">
+                Setup script
+              </span>
+              <Textarea
+                className="min-h-16 font-mono"
+                rows={3}
+                value={draft.setup_script}
+                placeholder="pnpm install"
+                onChange={(event) =>
+                  setDraft({ ...draft, setup_script: event.target.value })
+                }
+                onBlur={() => void commit(draft)}
+              />
+            </label>
             <p className="text-xs text-muted-foreground">
               Runs after a worktree is created or restored.
             </p>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <Label
-              htmlFor="repo-settings-archive-script"
-              className="text-xs text-muted-foreground"
-            >
-              Archive script
-            </Label>
-            <Textarea
-              id="repo-settings-archive-script"
-              className="min-h-16 font-mono"
-              rows={3}
-              value={draft.archive_script}
-              placeholder="./scripts/back-up.sh"
-              onChange={(event) =>
-                setDraft({ ...draft, archive_script: event.target.value })
-              }
-              onBlur={() => void commit(draft)}
-            />
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-xs text-muted-foreground">
+                Archive script
+              </span>
+              <Textarea
+                className="min-h-16 font-mono"
+                rows={3}
+                value={draft.archive_script}
+                placeholder="./scripts/back-up.sh"
+                onChange={(event) =>
+                  setDraft({ ...draft, archive_script: event.target.value })
+                }
+                onBlur={() => void commit(draft)}
+              />
+            </label>
             <p className="text-xs text-muted-foreground">
               Runs before the worktree is removed. A failure stops the archive.
             </p>
@@ -368,10 +356,10 @@ export function RepositorySettings({
                     // is the only stable identity it has.
                     // eslint-disable-next-line react/no-array-index-key
                     key={index}
-                    className="flex items-center gap-2"
+                    className="flex min-w-0 flex-wrap items-center gap-2"
                   >
                     <Input
-                      className="w-36"
+                      className="min-w-24 flex-1 basis-28"
                       value={action.name}
                       placeholder="Test"
                       aria-label={`Quick action ${index + 1} name`}
@@ -389,7 +377,7 @@ export function RepositorySettings({
                       onBlur={() => draft && void commit(draft)}
                     />
                     <Input
-                      className="flex-1 font-mono"
+                      className="min-w-0 flex-[2] basis-40 font-mono"
                       value={action.command}
                       placeholder="cargo test"
                       aria-label={`Quick action ${index + 1} command`}
@@ -408,8 +396,6 @@ export function RepositorySettings({
                     />
                     <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
                       <Switch
-                        className="h-4 w-7"
-                        thumbClassName="size-3 data-[state=checked]:translate-x-3"
                         checked={action.auto_run_on_create}
                         aria-label={`Run quick action ${index + 1} on create`}
                         onCheckedChange={(checked) =>

@@ -816,6 +816,23 @@ export const GroupedByStatus: Story = {
           })}
         />
       </StatusGroup>
+      <StatusGroup rank="setup_failed" count={1}>
+        <WorkspaceCard
+          {...args}
+          workspace={{
+            ...codeWorkspace,
+            id: "ws-setup-failed",
+            title: "Rework the credential exchange",
+            status: "setup_failed",
+          }}
+          visibleMeta={{ repoChip: true, branch: true }}
+          commands={workspaceCommands({
+            hasPr: false,
+            archived: false,
+            setupFailed: true,
+          })}
+        />
+      </StatusGroup>
       <StatusGroup rank="idle" count={1}>
         <WorkspaceCard
           {...args}
