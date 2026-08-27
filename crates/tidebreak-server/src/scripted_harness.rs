@@ -382,14 +382,6 @@ impl ScriptedAdapter {
         self
     }
 
-    /// Stand in for a different engine, so a surface that walks every kind —
-    /// the doctor — can be exercised with more than one row.
-    #[allow(dead_code)]
-    pub(crate) fn with_kind(mut self, kind: HarnessKind) -> Self {
-        self.kind = kind;
-        self
-    }
-
     /// Report this local sign-in state from the probe, for surfaces that
     /// branch on it — the doctor's hosted report among them.
     #[allow(dead_code)]
