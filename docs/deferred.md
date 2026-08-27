@@ -225,9 +225,6 @@ purpose:
   modelctl-managed gateway auth, and the hosted relay all work without
   pointing spawn at a different executable. Revisit when a machine has a
   real need to run a newer or custom binary than the pin.
-- **Checkpoint restore.** Per-turn checkpoints land with v1 as hidden refs
-  and power turn-scoped diffs; the surface that restores a workspace to an
-  earlier checkpoint waits until review flows have settled.
 - **Parallel turns in one worktree.** Several agents may share a workspace
   ([record 55](decisions/0055-multiple-sessions-per-workspace.md)), but their
   turns are serialized on the checkout: two harnesses editing one tree is

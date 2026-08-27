@@ -6446,6 +6446,237 @@ async fn a_completed_turn_records_a_checkpoint_and_serves_bounded_review() {
     );
 }
 
+/// The whole point of the hidden refs: a reader can put the files back.
+///
+/// The route restores an untracked file the checkpoint held, drops one
+/// created since, leaves an ignored build artifact alone, and leaves `HEAD`
+/// exactly where it was.
+#[tokio::test]
+async fn restoring_a_turn_checkpoint_rewinds_the_files_and_journals_it() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let worktree = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    std::fs::write(worktree.join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(worktree.join("scratch.txt"), "at the checkpoint\n").unwrap();
+    std::fs::write(worktree.join("README.md"), "at the checkpoint\n").unwrap();
+    std::fs::create_dir_all(worktree.join("build")).unwrap();
+    std::fs::write(worktree.join("build/out.bin"), "ignored output\n").unwrap();
+
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "edit the tree" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(turn["status"], "completed");
+    let head_before = git_head(&worktree);
+
+    std::fs::remove_file(worktree.join("scratch.txt")).unwrap();
+    std::fs::write(worktree.join("README.md"), "after the checkpoint\n").unwrap();
+    std::fs::create_dir_all(worktree.join("later")).unwrap();
+    std::fs::write(worktree.join("later/new.txt"), "postdates it\n").unwrap();
+    std::fs::write(worktree.join("build/out.bin"), "rebuilt\n").unwrap();
+
+    let restored = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/restore-checkpoint",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "turn_id": json_id(&turn) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = restored.json().await.unwrap();
+    assert_eq!(body["turn_id"], turn["id"]);
+    assert!(body["stat"]["files"].as_u64().unwrap() >= 3, "{body}");
+
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("scratch.txt")).unwrap(),
+        "at the checkpoint\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "at the checkpoint\n"
+    );
+    assert!(!worktree.join("later").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("build/out.bin")).unwrap(),
+        "rebuilt\n",
+        "a restore must not touch ignored files"
+    );
+    assert_eq!(
+        git_head(&worktree),
+        head_before,
+        "a restore never moves HEAD"
+    );
+
+    let refs = for_each_checkpoint_ref(&repo);
+    assert!(
+        refs.iter().any(|name| name.contains("/pre-restore/")),
+        "the pre-restore safety snapshot must survive the restore: {refs:?}"
+    );
+
+    let events = journaled_events(&runtime.db, json_id(&session).parse().unwrap()).await;
+    assert!(
+        events.iter().any(|framed| {
+            matches!(
+                framed.event,
+                tidebreak_core::CodeEvent::CheckpointRestored { .. }
+            )
+        }),
+        "expected CheckpointRestored in {events:?}"
+    );
+}
+
+/// The worktree takes one writer at a time (record 55). A restore that landed
+/// mid-turn would pull files out from under a running engine, so it answers
+/// the busy conflict instead of waiting for the lock.
+#[tokio::test]
+async fn a_running_turn_refuses_a_checkpoint_restore() {
+    let (router, token, runtime, dir) =
+        code_app_with(ScriptedAdapter::new(approval_script()).with_approvals(CapLevel::Supported))
+            .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let session_id = json_id(&session).to_owned();
+    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let (mut events, _) = runtime.bus.attach(parsed);
+
+    // Parking on an approval keeps the turn — and its hold on the worktree —
+    // open on an event the test can wait for, rather than a wall-clock race.
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        let session_id = session_id.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "edit the tree" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let running_turn_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let CodeEvent::TurnStarted { turn_id } = events.recv().await.unwrap().event {
+                break turn_id;
+            }
+        }
+    })
+    .await
+    .expect("turn never started");
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/restore-checkpoint",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "turn_id": running_turn_id.to_string() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "workspace_busy");
+
+    let _ = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id}/interrupt"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await;
+    let _ = turn.await;
+}
+
+fn git_head(worktree: &std::path::Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn for_each_checkpoint_ref(repo: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/tidebreak/checkpoints/",
+        ])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 #[tokio::test]
 async fn a_failed_checkpoint_does_not_fail_the_turn() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;

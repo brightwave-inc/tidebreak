@@ -413,6 +413,43 @@ describe("CodeTranscript", () => {
     ).not.toBeInTheDocument();
   });
 
+  /**
+   * Restore overwrites files, so it confirms first, and the copy has to say
+   * how far it reaches: ignored files stay, and the branch does not move.
+   * Nothing may reach the host before the reader says yes.
+   */
+  it("confirms before restoring the files to a turn", async () => {
+    const user = userEvent.setup();
+    const onRestoreToTurn = vi.fn();
+    render(<CodeTranscript items={items} onRestoreToTurn={onRestoreToTurn} />);
+
+    await user.click(screen.getByRole("button", { name: "Turn actions" }));
+    await user.click(
+      screen.getByRole("menuitem", { name: /Restore to this point/ }),
+    );
+
+    const description = await screen.findByText(/Ignored files/);
+    expect(description).toHaveTextContent("HEAD stays where it is");
+    expect(onRestoreToTurn).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Restore files" }));
+    expect(onRestoreToTurn).toHaveBeenCalledWith("t1");
+  });
+
+  it("restores nothing when the reader cancels", async () => {
+    const user = userEvent.setup();
+    const onRestoreToTurn = vi.fn();
+    render(<CodeTranscript items={items} onRestoreToTurn={onRestoreToTurn} />);
+
+    await user.click(screen.getByRole("button", { name: "Turn actions" }));
+    await user.click(
+      screen.getByRole("menuitem", { name: /Restore to this point/ }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(onRestoreToTurn).not.toHaveBeenCalled();
+  });
+
   it("says why a failed turn failed", () => {
     render(
       <CodeTranscript

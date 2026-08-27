@@ -35,6 +35,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use chrono::Utc;
 use tidebreak_harness::{spawn_process_tree, BoundedProcessOutput, OutputBudget};
 use tokio::process::Command;
 use tokio::time::{timeout, timeout_at, Instant};
@@ -64,6 +65,9 @@ pub(crate) const MAX_DIFF_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_DIFF_FILES: usize = 64;
 
 const REF_PREFIX: &str = "refs/tidebreak/checkpoints";
+/// Segment that separates a workspace's pre-restore safety snapshots from its
+/// per-session checkpoint chains. Never a session id, so the two cannot clash.
+const PRE_RESTORE_SEGMENT: &str = "pre-restore";
 const GIT_PATH_WIRE_PREFIX: &str = "tidebreak-path:v1:";
 
 /// Ordinal of a session's start baseline, one below its first turn.
@@ -171,6 +175,14 @@ pub(crate) struct BoundedDiff {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecordedCheckpoint {
     pub checkpoint_ref: String,
+    pub diffstat: Diffstat,
+}
+
+/// A completed restore: where the pre-restore worktree is kept, and what
+/// putting the checkpoint back changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RestoredCheckpoint {
+    pub safety_ref: String,
     pub diffstat: Diffstat,
 }
 
@@ -416,6 +428,165 @@ pub(crate) async fn record_checkpoint(
         checkpoint_ref: r#ref,
         diffstat: files.stat,
     })
+}
+
+/// Put the worktree back to what a turn's checkpoint holds.
+///
+/// Files only. `HEAD`, the branch, the reflog, and the user's index are not
+/// written, so this is not a history rewrite and nothing the reader pushed
+/// moves. Ignored files are untouched: a checkpoint tree is built by `add -A`,
+/// which never sees them, so they are in neither side of the transition.
+///
+/// The worktree as it stands is snapshotted into a hidden safety ref before
+/// anything is written, so a restore the reader did not mean is recoverable
+/// from the object database rather than gone.
+pub(crate) async fn restore_checkpoint(
+    worktree: &Path,
+    workspace_id: WorkspaceId,
+    turn: &CodeTurn,
+) -> Result<RestoredCheckpoint, CheckpointError> {
+    let target_ref = turn
+        .checkpoint_ref
+        .as_deref()
+        .ok_or_else(|| CheckpointError::user("this turn has no checkpoint"))?;
+    let target = resolve_checkpoint_oid(worktree, target_ref)
+        .await
+        .ok_or_else(|| CheckpointError::user("this turn's checkpoint is gone"))?;
+
+    let safety_ref = pre_restore_ref(workspace_id);
+    let before = write_snapshot_ref(
+        worktree,
+        &safety_ref,
+        None,
+        &format!("pre-restore snapshot for turn {}", turn.ordinal),
+    )
+    .await?;
+
+    // `read-tree -u` writes every path the checkpoint holds but knows nothing
+    // about the ones it does not, because the private index it transitions
+    // from starts empty. Files created since the checkpoint are therefore this
+    // function's own work.
+    for path in removed_by_restore(worktree, &before, &target).await? {
+        remove_restored_path(worktree, &path).await?;
+    }
+    apply_tree(worktree, &target).await?;
+
+    let changed = collect_changes(worktree, &before, &target, DiffBounds::default()).await?;
+    Ok(RestoredCheckpoint {
+        safety_ref,
+        diffstat: changed.stat,
+    })
+}
+
+/// Hidden ref for the worktree as it stood just before a restore.
+///
+/// It sits under the workspace's own prefix, so [`delete_workspace_refs`]
+/// reaps it with everything else the workspace holds. The segment is not a
+/// session id, and a restore holds the workspace's turn lock for far longer
+/// than a millisecond, so two of these cannot collide.
+fn pre_restore_ref(workspace_id: WorkspaceId) -> String {
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%3fZ");
+    format!("{REF_PREFIX}/{workspace_id}/{PRE_RESTORE_SEGMENT}/{stamp}")
+}
+
+/// Paths a restore has to delete: in the worktree now, absent at the
+/// checkpoint.
+///
+/// Rename detection is off on purpose. `--find-renames` folds "old is gone,
+/// new appeared" into one `R` record, and the path that has to disappear is
+/// then named only as a rename's source — the restore would write the
+/// checkpoint's copy and leave the newer one beside it.
+async fn removed_by_restore(
+    worktree: &Path,
+    from: &str,
+    to: &str,
+) -> Result<Vec<GitPath>, CheckpointError> {
+    let raw = git_bytes(
+        worktree,
+        &[
+            "diff",
+            "--no-renames",
+            "--diff-filter=D",
+            "--name-only",
+            "-z",
+            from,
+            to,
+            "--",
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    Ok(raw
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(GitPath::from_bytes)
+        .collect())
+}
+
+/// Delete one path the checkpoint predates, and any scaffolding it leaves.
+async fn remove_restored_path(worktree: &Path, path: &GitPath) -> Result<(), CheckpointError> {
+    let relative = PathBuf::from(path.to_os_string().map_err(CheckpointError::internal)?);
+    // Git reports repository-relative paths, so anything else is a bug or a
+    // hostile tree. Refuse rather than delete outside the worktree.
+    if !relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(CheckpointError::internal(format!(
+            "git reported a path outside the worktree: {}",
+            path.to_wire()
+        )));
+    }
+    let full = worktree.join(&relative);
+    match tokio::fs::remove_file(&full).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(CheckpointError::internal(format!(
+                "could not remove {}: {err}",
+                path.to_wire()
+            )))
+        }
+    }
+    // A directory that held only files the checkpoint predates is scaffolding
+    // the restore should not leave behind. `remove_dir` refuses a non-empty
+    // one, which is the stopping condition.
+    let mut parent = full.parent();
+    while let Some(dir) = parent {
+        if dir == worktree || tokio::fs::remove_dir(dir).await.is_err() {
+            break;
+        }
+        parent = dir.parent();
+    }
+    Ok(())
+}
+
+/// Write `tree` into the worktree through a private index.
+///
+/// `read-tree` needs an index and it must not be the user's, so this uses a
+/// temporary one and deletes it before returning. `--reset -u` overwrites
+/// whatever sits at those paths, untracked files included, and touches nothing
+/// the tree does not name.
+async fn apply_tree(worktree: &Path, tree: &str) -> Result<(), CheckpointError> {
+    let temp = tempfile::NamedTempFile::new().map_err(|err| {
+        CheckpointError::internal(format!("could not create temporary index: {err}"))
+    })?;
+    let index_path = temp.path().to_path_buf();
+    // `git read-tree` wants to create the index; an empty file can confuse it.
+    drop(temp);
+    let _ = tokio::fs::remove_file(&index_path).await;
+
+    let index = index_path.to_string_lossy().into_owned();
+    let result = git_text_env(
+        worktree,
+        &["read-tree", "--reset", "-u", tree],
+        &[("GIT_INDEX_FILE", index.as_str())],
+        GIT_SNAPSHOT_TIMEOUT,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&index_path).await;
+    result.map(|_| ()).map_err(CheckpointError::internal)
 }
 
 /// Snapshot the worktree, commit it, and move `r#ref` onto the commit.
@@ -3025,5 +3196,154 @@ mod tests {
         .await
         .unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    /// A turn row that only carries what a restore reads.
+    fn turn_at(ordinal: i64, checkpoint_ref: Option<String>) -> CodeTurn {
+        CodeTurn {
+            id: CodeTurnId::new(),
+            session_id: sess(),
+            ordinal,
+            status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
+            user_input: "edit the tree".into(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+        }
+    }
+
+    /// The round trip the whole feature rests on.
+    ///
+    /// An untracked file is the case a naive `git checkout` gets wrong twice
+    /// over: one that existed at the checkpoint has to come back, and one
+    /// created since has to go. An ignored file is in neither checkpoint tree,
+    /// so it has to survive both directions, and `HEAD` must not move.
+    #[tokio::test]
+    async fn a_restore_puts_untracked_files_back_and_keeps_a_safety_ref() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "restore");
+        let workspace_id = ws();
+        std::fs::write(tree.join(".gitignore"), "build/\n").unwrap();
+        std::fs::write(tree.join("scratch.txt"), "at the checkpoint\n").unwrap();
+        std::fs::write(tree.join("README.md"), "at the checkpoint\n").unwrap();
+        std::fs::create_dir_all(tree.join("build")).unwrap();
+        std::fs::write(tree.join("build/out.bin"), "ignored output\n").unwrap();
+
+        let recorded = record_checkpoint(
+            &tree,
+            workspace_id,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+        let head_before = git_text(&tree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // Everything the engine did after the turn ended.
+        std::fs::remove_file(tree.join("scratch.txt")).unwrap();
+        std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
+        std::fs::create_dir_all(tree.join("later/nested")).unwrap();
+        std::fs::write(tree.join("later/nested/new.txt"), "postdates it\n").unwrap();
+        std::fs::write(tree.join("build/out.bin"), "rebuilt\n").unwrap();
+
+        let turn = turn_at(1, Some(recorded.checkpoint_ref.clone()));
+        let restored = restore_checkpoint(&tree, workspace_id, &turn)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(tree.join("scratch.txt")).unwrap(),
+            "at the checkpoint\n",
+            "an untracked file the checkpoint held must come back"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap(),
+            "at the checkpoint\n"
+        );
+        assert!(
+            !tree.join("later/nested/new.txt").exists(),
+            "a file created after the checkpoint must be gone"
+        );
+        assert!(
+            !tree.join("later").exists(),
+            "the directory it created must go with it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("build/out.bin")).unwrap(),
+            "rebuilt\n",
+            "an ignored file is in neither tree, so a restore must not touch it"
+        );
+        assert_eq!(
+            git_text(&tree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+                .await
+                .unwrap(),
+            head_before,
+            "a restore moves files, never HEAD"
+        );
+        assert_eq!(
+            git_text(&tree, &["rev-parse", "--abbrev-ref", "HEAD"], GIT_TIMEOUT)
+                .await
+                .unwrap(),
+            "tidebreak/restore"
+        );
+        assert!(restored.diffstat.files >= 3, "{:?}", restored.diffstat);
+
+        // The safety ref holds the worktree the restore replaced, so the work
+        // it discarded is still in the object database.
+        assert!(
+            restored.safety_ref.starts_with(&format!(
+                "{REF_PREFIX}/{workspace_id}/{PRE_RESTORE_SEGMENT}/"
+            )),
+            "{}",
+            restored.safety_ref
+        );
+        let listed = git_text(
+            &tree,
+            &["ls-tree", "-r", "--name-only", &restored.safety_ref],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(listed.contains("later/nested/new.txt"), "{listed}");
+        assert!(!listed.contains("scratch.txt"), "{listed}");
+        assert!(
+            !listed.contains("build/out.bin"),
+            "the safety snapshot respects .gitignore: {listed}"
+        );
+        assert!(
+            list_checkpoint_refs(&tree)
+                .await
+                .unwrap()
+                .contains(&restored.safety_ref),
+            "the safety ref must be reapable with the workspace's other refs"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_a_checkpoint_cannot_be_restored() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "no-checkpoint");
+        let err = restore_checkpoint(&tree, ws(), &turn_at(1, None))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no checkpoint"), "{err}");
+
+        let missing = checkpoint_ref(ws(), sess(), 7);
+        let err = restore_checkpoint(&tree, ws(), &turn_at(7, Some(missing)))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("gone"), "{err}");
     }
 }

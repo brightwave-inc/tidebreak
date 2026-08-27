@@ -3,12 +3,14 @@ import {
   Check,
   CircleSlash,
   GitFork,
+  History,
   MoreHorizontal,
   TriangleAlert,
 } from "lucide-react";
 
 import type { Diffstat } from "../api/types";
 import { Badge } from "@/components/ui/badge";
+import { useConfirm } from "@/components/ConfirmDialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -57,6 +59,7 @@ export function TurnReviewCard({
   narrative,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreToTurn,
 }: {
   turn: TurnBoundary;
   /**
@@ -73,6 +76,8 @@ export function TurnReviewCard({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Hand everything up to this turn to a fresh agent, in a new tab. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Put the workspace's files back to what this turn left. */
+  onRestoreToTurn?: (turnId: string) => void;
 }) {
   const duration = formatTurnDuration(turn.durationMs);
   const diffstat = turn.diffstat && hasFileChanges(turn.diffstat) && (
@@ -82,8 +87,12 @@ export function TurnReviewCard({
       onOpenTurnDiff={onOpenTurnDiff}
     />
   );
-  const actions = turn.turnId && onForkFromTurn && (
-    <TurnActionsMenu turnId={turn.turnId} onForkFromTurn={onForkFromTurn} />
+  const actions = turn.turnId && (onForkFromTurn || onRestoreToTurn) && (
+    <TurnActionsMenu
+      turnId={turn.turnId}
+      onForkFromTurn={onForkFromTurn}
+      onRestoreToTurn={onRestoreToTurn}
+    />
   );
 
   if (turn.status === "failed") {
@@ -197,38 +206,69 @@ function SeamRow({
 /**
  * What the reader can do with a finished turn, behind one quiet trigger.
  *
- * Forking is the only entry today, but the seam is where per-turn actions
- * belong, so the affordance is a menu rather than a bare fork button.
+ * The seam is where per-turn actions belong, so the affordance is a menu
+ * rather than a row of buttons. Restore is destructive and confirms first: it
+ * overwrites files the reader may still want, and the copy has to say exactly
+ * how far it reaches, because "restore" reads like a history rewrite and this
+ * is not one.
  */
 function TurnActionsMenu({
   turnId,
   onForkFromTurn,
+  onRestoreToTurn,
 }: {
   turnId: string;
-  onForkFromTurn: (turnId: string) => void;
+  onForkFromTurn?: (turnId: string) => void;
+  onRestoreToTurn?: (turnId: string) => void;
 }) {
+  const { confirm, dialog } = useConfirm();
+
+  async function askThenRestore() {
+    if (!onRestoreToTurn) return;
+    const ok = await confirm({
+      title: "Restore the files to this point?",
+      description:
+        "Every file goes back to how this turn left it, and anything written since is lost. Ignored files — build output, .env — are untouched, and nothing moves the branch: this changes files only, and HEAD stays where it is.",
+      confirmLabel: "Restore files",
+      destructive: true,
+    });
+    if (!ok) return;
+    onRestoreToTurn(turnId);
+  }
+
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
-            FOCUS_RING_TIGHT,
-            HOVER_TINT,
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "text-muted-foreground hover:bg-muted hover:text-foreground grid size-5 shrink-0 cursor-pointer place-items-center rounded-md",
+              FOCUS_RING_TIGHT,
+              HOVER_TINT,
+            )}
+            aria-label="Turn actions"
+          >
+            <MoreHorizontal className="size-3.5" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-52">
+          {onForkFromTurn && (
+            <DropdownMenuItem onSelect={() => onForkFromTurn(turnId)}>
+              <GitFork />
+              Fork from here
+            </DropdownMenuItem>
           )}
-          aria-label="Turn actions"
-        >
-          <MoreHorizontal className="size-3.5" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-52">
-        <DropdownMenuItem onSelect={() => onForkFromTurn(turnId)}>
-          <GitFork />
-          Fork from here
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          {onRestoreToTurn && (
+            <DropdownMenuItem onSelect={() => void askThenRestore()}>
+              <History />
+              Restore to this point
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {dialog}
+    </>
   );
 }
 

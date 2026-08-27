@@ -908,6 +908,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::restore_workspace),
         )
         .route(
+            "/code/workspaces/{id}/restore-checkpoint",
+            post(routes::code::restore_workspace_checkpoint),
+        )
+        .route(
             "/code/workspaces/{id}/retry-setup",
             post(routes::code::retry_workspace_setup),
         )

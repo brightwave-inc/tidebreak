@@ -33,7 +33,10 @@ use super::checkpoint::ChangedFile;
 use super::clone::CloneRequest;
 use super::delivery;
 use super::gh::{self, ActionOutcome, CommitOutcome, PushOutcome, WorkspaceGitStatus};
-use super::runtime::{CodeRuntime, NewSessionSettings, RepoRegistration, SubmitTurnOutcome};
+use super::runtime::{
+    CodeRuntime, NewSessionSettings, RepoRegistration, RestoredWorkspaceCheckpoint,
+    SubmitTurnOutcome,
+};
 use super::worktree;
 use crate::error::ServerError;
 use crate::principal::AuthContext;
@@ -558,6 +561,16 @@ impl ScopedCode {
     ) -> Result<ActionOutcome, ServerError> {
         self.runtime
             .run_workspace_action(&self.owner, id, name)
+            .await
+    }
+
+    pub(crate) async fn restore_workspace_to_turn(
+        &self,
+        id: WorkspaceId,
+        turn_id: CodeTurnId,
+    ) -> Result<RestoredWorkspaceCheckpoint, ServerError> {
+        self.runtime
+            .restore_workspace_to_turn(&self.owner, id, turn_id)
             .await
     }
 

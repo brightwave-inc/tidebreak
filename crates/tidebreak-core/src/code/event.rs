@@ -370,6 +370,17 @@ pub enum CodeEvent {
         /// Bounded diffstat.
         diffstat: Diffstat,
     },
+    /// The worktree was put back to a per-turn checkpoint.
+    ///
+    /// Files only. The branch and `HEAD` do not move, and ignored files are
+    /// untouched, so the journal records what the reader actually asked for
+    /// rather than implying a history rewrite.
+    CheckpointRestored {
+        /// The turn whose checkpoint the worktree now holds.
+        turn_id: CodeTurnId,
+        /// Bounded diffstat of what the restore changed.
+        diffstat: Diffstat,
+    },
     /// Visible degradation or an engine-native notice.
     HarnessNotice {
         /// Severity.
@@ -431,8 +442,9 @@ mod tests {
             CodeEvent::TurnFailed { .. } => 12,
             CodeEvent::TurnInterrupted => 13,
             CodeEvent::CheckpointRecorded { .. } => 14,
-            CodeEvent::HarnessNotice { .. } => 15,
-            CodeEvent::AttentionChanged { .. } => 16,
+            CodeEvent::CheckpointRestored { .. } => 15,
+            CodeEvent::HarnessNotice { .. } => 16,
+            CodeEvent::AttentionChanged { .. } => 17,
         }
     }
 
@@ -527,6 +539,15 @@ mod tests {
                     insertions: 10,
                     deletions: 1,
                     truncated: true,
+                },
+            },
+            CodeEvent::CheckpointRestored {
+                turn_id: CodeTurnId(id(1)),
+                diffstat: Diffstat {
+                    files: 3,
+                    insertions: 1,
+                    deletions: 12,
+                    truncated: false,
                 },
             },
             CodeEvent::HarnessNotice {

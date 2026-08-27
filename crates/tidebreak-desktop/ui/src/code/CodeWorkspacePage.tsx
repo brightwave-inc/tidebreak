@@ -1039,6 +1039,29 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   }
 
   /**
+   * Put the workspace's files back to what one turn left.
+   *
+   * The seam already confirmed with the reader; this is the call. Files only:
+   * the branch and `HEAD` stay where they are, and the server snapshots the
+   * worktree into a hidden ref first, so the work this discards is still in
+   * the object database.
+   */
+  async function restoreToTurn(turnId: string) {
+    try {
+      const restored = await client.restoreCodeWorkspaceCheckpoint(
+        workspaceId,
+        turnId,
+      );
+      const files = restored.stat.files;
+      toast.success(
+        `Restored ${files} file${files === 1 ? "" : "s"} to this turn`,
+      );
+    } catch (err) {
+      toast.error(friendlyErrorMessage(err, "Could not restore the files"));
+    }
+  }
+
+  /**
    * Close a conversation tab.
    *
    * Only the draft closes here. A started agent holds a worktree and a running
@@ -1421,6 +1444,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                       ? (turnId) => void forkConversation(session.id, turnId)
                       : undefined
                   }
+                  onRestoreToTurn={(turnId) => void restoreToTurn(turnId)}
                   subagentCallId={subagentParam}
                   subagentSummary={digest?.subagents?.find(
                     (entry) => entry.call_id === subagentParam,
@@ -2016,6 +2040,7 @@ function CodeSessionPane({
   disabled,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreToTurn,
   subagentCallId,
   subagentSummary,
   onBackFromSubagent,
@@ -2031,6 +2056,8 @@ function CodeSessionPane({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Fork this conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Put the workspace's files back to what one turn left, from its seam row. */
+  onRestoreToTurn?: (turnId: string) => void;
   /** The spanning Task call to inspect inside this still-mounted session. */
   subagentCallId?: string;
   /** Current bounded rail summary, when the Task is still in the digest. */
@@ -2475,6 +2502,7 @@ function CodeSessionPane({
           approvalError={approvalError}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
+          onRestoreToTurn={subagentCallId ? undefined : onRestoreToTurn}
           onReveal={follow.pauseFollow}
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}

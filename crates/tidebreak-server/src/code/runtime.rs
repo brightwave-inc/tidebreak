@@ -11,12 +11,12 @@ use tokio::sync::oneshot;
 use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
-    abandon_pending_approval, arm_trigger, begin_permission_mode_change,
+    abandon_pending_approval, append_event, arm_trigger, begin_permission_mode_change,
     cancel_permission_mode_change, claim_approval, compare_and_set_workspace_status,
     complete_workspace_archive, confirm_permission_mode_change, delete_trigger, delete_workspace,
     discard_permission_mode_change, fence_permission_mode_change, get_approval, get_open_turn,
-    get_repo, get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
-    insert_workspace, list_approvals, list_events, list_fork_events,
+    get_repo, get_repo_by_root_path, get_session, get_turn, get_workspace, insert_repo,
+    insert_session, insert_workspace, list_approvals, list_events, list_fork_events,
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
@@ -29,9 +29,9 @@ use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
     CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
-    CodeTriggerId, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat,
-    FenceReason, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, QuickAction,
-    ReasoningEffort, RepoId, WorkspaceId,
+    CodeTriggerId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus,
+    DbStore, Diffstat, FenceReason, HarnessKind, OwnerId, PermissionMode, PullRequestDigest,
+    QuickAction, ReasoningEffort, RepoId, SequencedCodeEvent, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -44,7 +44,7 @@ use super::browser_channel::{BrowserSubject, BrowserTokenRegistry};
 use super::bus::CodeEventBus;
 use super::checkpoint::{
     delete_workspace_refs, list_changed_files, produce_diff, record_session_baseline,
-    resolve_diff_range, ChangedFile, CheckpointError, DiffBounds,
+    resolve_diff_range, restore_checkpoint, ChangedFile, CheckpointError, DiffBounds,
 };
 use super::ci_logs;
 use super::clone::CloneJobs;
@@ -277,6 +277,12 @@ pub(crate) struct WorkspaceMergeOutcome {
     pub target: CodeDeliveryPullRequestTarget,
     pub accepted_head_sha: String,
     pub status: WorkspaceGitStatus,
+}
+
+/// What a restore put back, for the reader who asked for it.
+pub(crate) struct RestoredWorkspaceCheckpoint {
+    pub turn_id: CodeTurnId,
+    pub diffstat: Diffstat,
 }
 
 struct DeliveryNudgeState {
@@ -3052,6 +3058,80 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)
+    }
+
+    /// Put the workspace's files back to what a turn's checkpoint holds.
+    ///
+    /// The workspace's turn lock is the reservation, exactly as it is for a
+    /// turn (record 55): a database read of "is anything running" cannot be,
+    /// because two callers both pass it before either takes the tree. This
+    /// path never waits on that lock — a restore landing mid-turn would pull
+    /// files out from under a running engine — so contention answers
+    /// `workspace_busy` and the reader retries when the turn ends.
+    ///
+    /// Files only. `HEAD` and the branch do not move, and ignored files are
+    /// untouched.
+    pub(crate) async fn restore_workspace_to_turn(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+        turn_id: CodeTurnId,
+    ) -> Result<RestoredWorkspaceCheckpoint, ServerError> {
+        let lock = self.worktree_turn_lock(id);
+        let Ok(_turn_guard) = lock.try_lock() else {
+            return Err(ServerError::conflict_kind(
+                "workspace_busy",
+                "a turn is running in this workspace; restore once it ends",
+            ));
+        };
+        let workspace = self.require_live_workspace(owner, id).await?;
+        let turn = get_turn(&self.db, owner, turn_id)
+            .await?
+            .ok_or_else(|| ServerError::not_found("turn not found"))?;
+        let session = get_session(&self.db, owner, turn.session_id)
+            .await?
+            .ok_or_else(|| ServerError::not_found("session not found"))?;
+        // Another workspace's turn is indistinguishable from a missing one.
+        if session.workspace_id != workspace.id {
+            return Err(ServerError::not_found("turn not found"));
+        }
+        if turn.status == CodeTurnStatus::Running {
+            return Err(ServerError::conflict_kind(
+                "turn_running",
+                "this turn has not finished, so it has no checkpoint yet",
+            ));
+        }
+
+        let restored = restore_checkpoint(
+            std::path::Path::new(&workspace.worktree_path),
+            workspace.id,
+            &turn,
+        )
+        .await
+        .map_err(map_checkpoint)?;
+
+        let event = CodeEvent::CheckpointRestored {
+            turn_id,
+            diffstat: restored.diffstat.clone(),
+        };
+        match append_event(&self.db, owner, session.id, session.spawn_epoch, &event).await {
+            Ok(seq) => self
+                .bus
+                .publish(session.id, SequencedCodeEvent { seq, event }),
+            // The worktree already holds the checkpoint. A journal row that
+            // could not land is worth a log line, not a failure the reader
+            // would read as "nothing happened".
+            Err(err) => tracing::warn!(
+                session = %session.id,
+                turn = %turn_id,
+                error = %err,
+                "restore succeeded but its journal row did not land"
+            ),
+        }
+        Ok(RestoredWorkspaceCheckpoint {
+            turn_id,
+            diffstat: restored.diffstat,
+        })
     }
 
     async fn require_live_workspace(

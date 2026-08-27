@@ -70,6 +70,7 @@ export function CodeTranscript({
   animateStreaming = true,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreToTurn,
   emptyState,
   sessionId,
   onReveal,
@@ -99,6 +100,8 @@ export function CodeTranscript({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Fork the conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Put the workspace's files back to what one turn left, from its seam row. */
+  onRestoreToTurn?: (turnId: string) => void;
   /** Copy for a filtered/read-only transcript with no captured rows. */
   emptyState?: { title: string; description: string };
   sessionId?: string;
@@ -216,6 +219,7 @@ export function CodeTranscript({
                   onDecide={onDecide}
                   onOpenTurnDiff={onOpenTurnDiff}
                   onForkFromTurn={onForkFromTurn}
+                  onRestoreToTurn={onRestoreToTurn}
                   sessionId={sessionId}
                   onReveal={onReveal}
                   recap={row.item.id === newestBoundaryId ? recap : undefined}
@@ -538,6 +542,7 @@ const TranscriptItem = memo(function TranscriptItem({
   onDecide,
   onOpenTurnDiff,
   onForkFromTurn,
+  onRestoreToTurn,
   sessionId,
   onReveal,
   recap,
@@ -558,6 +563,7 @@ const TranscriptItem = memo(function TranscriptItem({
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
   onForkFromTurn?: (turnId: string) => void;
+  onRestoreToTurn?: (turnId: string) => void;
   sessionId?: string;
   onReveal?: () => void;
   /**
@@ -678,6 +684,7 @@ const TranscriptItem = memo(function TranscriptItem({
           turn={item}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={onForkFromTurn}
+          onRestoreToTurn={onRestoreToTurn}
           narrative={
             recap ? (
               <span className="text-muted-foreground">{recap}</span>

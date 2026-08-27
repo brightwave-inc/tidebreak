@@ -31,6 +31,7 @@ import type {
   CodeWatchSnapshot,
   CodeWorkspaceSnapshot,
   CodeActionSnapshot,
+  CodeCheckpointRestore,
   CodeCommitSnapshot,
   CodePushSnapshot,
   Diffstat,
@@ -121,6 +122,7 @@ import type {
   CodeTriggerSnapshot as WireCodeTriggerSnapshot,
   CodeWatchSnapshot as WireCodeWatchSnapshot,
   CodeActionSnapshot as WireCodeActionSnapshot,
+  CodeCheckpointRestore as WireCodeCheckpointRestore,
   CodeCommitSnapshot as WireCodeCommitSnapshot,
   CodePushSnapshot as WireCodePushSnapshot,
   CodeFileChange as WireCodeFileChange,
@@ -2384,6 +2386,21 @@ export function parseCodeCommit(value: unknown): CodeCommitSnapshot | null {
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
   return { sha: value.sha, message: value.message, stat };
+}
+
+export function parseCodeCheckpointRestore(
+  value: unknown,
+): CodeCheckpointRestore | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireCodeCheckpointRestore>(value, ["turn_id", "stat"]) ||
+    !nonEmpty(value.turn_id)
+  ) {
+    return null;
+  }
+  const stat = parseDiffstat(value.stat);
+  if (!stat) return null;
+  return { turn_id: value.turn_id, stat };
 }
 
 export function parseCodePush(value: unknown): CodePushSnapshot | null {

@@ -8,11 +8,12 @@ use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
 use super::types::{
-    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceSearch, CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
-    CodeWorktreeRoot, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
-    SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
-    WorkspaceSearchQuery, WorkspaceTreeQuery,
+    ArchiveWorkspaceBody, CodeCheckpointRestore, CodeFileChange, CodeWorkspaceBlob,
+    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateWorkspaceBody,
+    ListWorkspacesQuery, PatchWorkspaceBody, RestoreCheckpointBody, SetCodeWorktreeRootBody,
+    WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery,
+    WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -141,6 +142,28 @@ pub async fn retry_workspace_setup(
 ) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
     let workspace = code.retry_workspace_setup(id).await?;
     Ok(Json(CodeWorkspaceSnapshot::from(workspace)))
+}
+
+/// `POST /code/workspaces/{id}/restore-checkpoint` — put the files back to a
+/// turn.
+///
+/// Not `/restore`, which reactivates an archived workspace. This one touches
+/// files: the worktree goes back to what the turn's checkpoint holds, the
+/// branch and `HEAD` stay where they are, and ignored files are left alone.
+/// The worktree as it stands is snapshotted into a hidden ref first. 409
+/// kinds: `workspace_busy` (a turn holds the workspace's checkout),
+/// `workspace_not_ready`, `turn_running`, and `no_checkpoint` (the turn ended
+/// before checkpoints, or its ref was reaped).
+pub async fn restore_workspace_checkpoint(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+    Json(body): Json<RestoreCheckpointBody>,
+) -> Result<Json<CodeCheckpointRestore>, ServerError> {
+    let restored = code.restore_workspace_to_turn(id, body.turn_id).await?;
+    Ok(Json(CodeCheckpointRestore {
+        turn_id: restored.turn_id,
+        stat: restored.diffstat,
+    }))
 }
 
 pub async fn list_workspace_tree(

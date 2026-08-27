@@ -849,6 +849,26 @@ impl From<CodeWatch> for CodeWatchSnapshot {
     }
 }
 
+/// Body of `POST /code/workspaces/{id}/restore-checkpoint`.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreCheckpointBody {
+    /// The turn whose checkpoint the worktree goes back to.
+    pub turn_id: CodeTurnId,
+}
+
+/// What restoring a workspace to a turn's checkpoint changed.
+///
+/// Files only: the branch and `HEAD` stayed where they were, and ignored
+/// files were not touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeCheckpointRestore {
+    /// The turn the worktree now matches.
+    pub turn_id: CodeTurnId,
+    /// Bounded diffstat of what the restore changed.
+    pub stat: Diffstat,
+}
+
 /// Body of `POST /code/workspaces/{id}/pr/merge`.
 #[derive(Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields)]

@@ -174,6 +174,7 @@ import {
   type CodeWatchSnapshot as WireCodeWatchSnapshot,
   type CodeWatchState as WireCodeWatchState,
   type CodeActionSnapshot as WireCodeActionSnapshot,
+  type CodeCheckpointRestore as WireCodeCheckpointRestore,
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
   type CodePushSnapshot as WireCodePushSnapshot,
   type CodeFileChange as WireCodeFileChange,
@@ -1240,6 +1241,8 @@ export type CodeSubagentStatus = WireCodeSubagentStatus;
 export type CodeCommitSnapshot = WireCodeCommitSnapshot;
 export type CodePushSnapshot = WireCodePushSnapshot;
 export type CodeActionSnapshot = WireCodeActionSnapshot;
+/** What restoring a workspace to a turn's checkpoint changed. */
+export type CodeCheckpointRestore = WireCodeCheckpointRestore;
 export type PullRequestDigest = WirePullRequestDigest;
 export type PullRequestCheck = WirePullRequestCheck;
 export type PullRequestCheckBucket = WirePullRequestCheckBucket;

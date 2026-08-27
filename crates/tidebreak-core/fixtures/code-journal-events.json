@@ -107,6 +107,16 @@
     }
   },
   {
+    "type": "checkpoint_restored",
+    "turn_id": "00000000-0000-0000-0000-000000000001",
+    "diffstat": {
+      "files": 3,
+      "insertions": 1,
+      "deletions": 12,
+      "truncated": false
+    }
+  },
+  {
     "type": "harness_notice",
     "level": "warning",
     "message": "unrecognized event type counted"

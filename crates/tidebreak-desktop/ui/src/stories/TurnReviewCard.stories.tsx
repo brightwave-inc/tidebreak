@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
@@ -59,6 +59,28 @@ export const Completed: Story = {};
  */
 export const CompletedWithTurnActions: Story = {
   args: { onForkFromTurn: fn() },
+};
+
+/**
+ * The full per-turn menu. "Restore to this point" puts the workspace's files
+ * back to what the turn left; it confirms first, and the confirmation says how
+ * far it reaches — ignored files stay, and the branch does not move.
+ */
+export const CompletedWithRestore: Story = {
+  args: { onForkFromTurn: fn(), onRestoreToTurn: fn() },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(document.body);
+    await userEvent.click(canvas.getByRole("button", { name: "Turn actions" }));
+    await userEvent.click(
+      await body.findByRole("menuitem", { name: /Restore to this point/ }),
+    );
+    await expect(
+      await body.findByRole("heading", {
+        name: "Restore the files to this point?",
+      }),
+    ).toBeInTheDocument();
+  },
 };
 
 /**

@@ -441,6 +441,10 @@ mod tests {
         // The merge request body, so the renderer sends exactly the accepted
         // method vocabulary.
         generate::collect_from::<crate::routes::code::MergeCodePrBody>(&cfg, &mut out);
+        // The restore request and its result: the renderer sends a turn id and
+        // reads back what putting that checkpoint back changed.
+        generate::collect_from::<crate::routes::code::RestoreCheckpointBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeCheckpointRestore>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeDeliveryRepositoriesSnapshot>(
             &cfg, &mut out,
         );

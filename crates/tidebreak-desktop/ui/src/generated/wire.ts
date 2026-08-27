@@ -944,6 +944,22 @@ export type CodeCheckLogsSnapshot = {
 head_sha?: string, logs: Array<CodeCheckLog>, errors: Array<CodeCheckLogError>, };
 
 /**
+ * What restoring a workspace to a turn's checkpoint changed.
+ *
+ * Files only: the branch and `HEAD` stayed where they were, and ignored
+ * files were not touched.
+ */
+export type CodeCheckpointRestore = { 
+/**
+ * The turn the worktree now matches.
+ */
+turn_id: CodeTurnId, 
+/**
+ * Bounded diffstat of what the restore changed.
+ */
+stat: Diffstat, };
+
+/**
  * Remembered clone destination plus observed `gh` status.
  */
 export type CodeCloneDefaults = { parent_dir?: string, gh_found: boolean, gh_authenticated?: boolean, gh_remediation: string, };
@@ -1298,6 +1314,14 @@ error: BoundedError, } | { "type": "turn_interrupted" } | { "type": "checkpoint_
 turn_id: CodeTurnId, 
 /**
  * Bounded diffstat.
+ */
+diffstat: Diffstat, } | { "type": "checkpoint_restored", 
+/**
+ * The turn whose checkpoint the worktree now holds.
+ */
+turn_id: CodeTurnId, 
+/**
+ * Bounded diffstat of what the restore changed.
  */
 diffstat: Diffstat, } | { "type": "harness_notice", 
 /**
@@ -3908,6 +3932,15 @@ export type ResolveCodeDeliveryRepositoriesBody = { repositories: Array<string>,
  * Whether a `rest_api` record's referenced credential currently resolves.
  */
 export type RestCredentialStatus = "none" | "configured" | "missing";
+
+/**
+ * Body of `POST /code/workspaces/{id}/restore-checkpoint`.
+ */
+export type RestoreCheckpointBody = { 
+/**
+ * The turn whose checkpoint the worktree goes back to.
+ */
+turn_id: CodeTurnId, };
 
 /**
  * One thing a call surfaced.

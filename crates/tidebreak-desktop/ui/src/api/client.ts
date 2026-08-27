@@ -88,6 +88,7 @@ import {
   type CodeSessionSnapshot,
   type CodeTurnSnapshot,
   type CodeActionSnapshot,
+  type CodeCheckpointRestore,
   type CodeCommitSnapshot,
   type CodePushSnapshot,
   type CodeTerminalRead,
@@ -169,6 +170,7 @@ import {
   type CodeTurnSubmission,
   parseQueuedCodeTurn,
   parseCodeAction,
+  parseCodeCheckpointRestore,
   parseCodeCommit,
   parseCodePush,
   parseCodeTerminal,
@@ -3111,6 +3113,33 @@ export class ApiClient {
         ),
       ),
       "code quick action",
+    );
+  }
+
+  /**
+   * Put the workspace's files back to what a turn's checkpoint holds.
+   *
+   * Not `restoreCodeWorkspace`, which reactivates an archived workspace. This
+   * one moves files only: the branch and `HEAD` stay where they are, and
+   * ignored files are left alone. A 409 `workspace_busy` means a turn holds
+   * the checkout; retry once it ends.
+   */
+  async restoreCodeWorkspaceCheckpoint(
+    workspaceId: string,
+    turnId: string,
+  ): Promise<CodeCheckpointRestore> {
+    return requireParsed(
+      parseCodeCheckpointRestore(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/restore-checkpoint`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ turn_id: turnId }),
+          },
+        ),
+      ),
+      "checkpoint restore",
     );
   }
 
