@@ -684,7 +684,7 @@ mod tests {
             resume_ref: None,
             prompt_file: &dir.path().join("prompt.txt"),
             mode: PermissionMode::Auto,
-            model: None,
+            model: Some("model-gateway-model-gateway/glm-5.3"),
             effort: None,
         })
         .unwrap();
@@ -712,6 +712,15 @@ mod tests {
             !env.contains_key("TIDEBREAK_LLM_KEY"),
             "the relay key never reaches the child's environment: {:?}",
             env
+        );
+        let model_flag = plan
+            .argv
+            .windows(2)
+            .find(|pair| pair[0] == "--model")
+            .expect("hosted Grok launch model");
+        assert_eq!(
+            model_flag[1], "model-gateway-model-gateway/glm-5.3",
+            "the captured custom-list id must reach --model unchanged while the listing and turns ride the OpenAI relay"
         );
     }
 

@@ -685,6 +685,22 @@ mod tests {
             "without a loader the CLI defaults to its OpenAI-compatible one and posts \
              chat completions, which the relay does not serve: {config}"
         );
+        for (listed, expected_base) in [
+            (
+                "anthropic/shared/model",
+                "http://0.0.0.0:8080/code/llm/anthropic/v1",
+            ),
+            (
+                "model-gateway/shared/model",
+                "http://0.0.0.0:8080/code/llm/openai/v1",
+            ),
+        ] {
+            let provider = listed.split_once('/').unwrap().0;
+            assert_eq!(
+                config["provider"][provider]["options"]["baseURL"], expected_base,
+                "the hosted picker prefix must select the relay surface that listed it: {listed}"
+            );
+        }
         let (argv, env) = spawn_wiring(HarnessKind::Grok, "http://0.0.0.0:8080/", "k4");
         assert!(argv.is_empty());
         assert_eq!(

@@ -140,7 +140,13 @@ pub(crate) struct ScriptedAdapter {
     /// an approval. Tests use this to exercise shutdown and ambiguous-delivery
     /// races without changing the approval itself.
     approval_ack_delay: Duration,
+    /// What the local discovery probe reports for this adapter.
+    probe_found: bool,
     probes: Arc<AtomicU64>,
+    model_lists: Arc<AtomicU64>,
+    /// Model each launched session was handed. This lets route tests prove a
+    /// picker token survives through the runtime's launch boundary.
+    launched_models: Arc<std::sync::Mutex<Vec<Option<String>>>>,
     /// Approval endpoint each launch was handed, `None` when it was handed no
     /// channel at all. Lets a test see how a session was wired.
     launched_approvals: Arc<std::sync::Mutex<Vec<Option<String>>>>,
@@ -183,7 +189,10 @@ impl ScriptedAdapter {
             park_approvals: true,
             approver: Arc::new(ScriptedApprover::default()),
             approval_ack_delay: Duration::ZERO,
+            probe_found: true,
             probes: Arc::new(AtomicU64::new(0)),
+            model_lists: Arc::new(AtomicU64::new(0)),
+            launched_models: Arc::new(std::sync::Mutex::new(Vec::new())),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
             authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
             writes: Vec::new(),
@@ -196,6 +205,21 @@ impl ScriptedAdapter {
     #[allow(dead_code)]
     pub(crate) fn probe_count(&self) -> u64 {
         self.probes.load(Ordering::SeqCst)
+    }
+
+    /// How many times the adapter's native model-listing path ran.
+    #[allow(dead_code)]
+    pub(crate) fn model_list_count(&self) -> u64 {
+        self.model_lists.load(Ordering::SeqCst)
+    }
+
+    /// Model each launched session was handed, in order.
+    #[allow(dead_code)]
+    pub(crate) fn launched_models(&self) -> Vec<Option<String>> {
+        self.launched_models
+            .lock()
+            .expect("scripted launch models")
+            .clone()
     }
 
     /// The approval endpoint each launched session was given, in order.
@@ -274,6 +298,12 @@ impl ScriptedAdapter {
     /// Publish an exact model catalog for capability-validation tests.
     pub(crate) fn with_models(mut self, models: Vec<ListedHarnessModel>) -> Self {
         self.models = models;
+        self
+    }
+
+    /// Report a missing local binary from discovery.
+    pub(crate) fn with_probe_found(mut self, found: bool) -> Self {
+        self.probe_found = found;
         self
     }
 
@@ -407,11 +437,18 @@ impl HarnessAdapter for ScriptedAdapter {
     async fn probe(&self, _host: &HostEnv) -> HarnessProbe {
         self.probes.fetch_add(1, Ordering::SeqCst);
         HarnessProbe {
-            found: true,
-            binary_path: Some(PathBuf::from("/scripted/engine")),
-            version: Some("scripted".into()),
-            authenticated: *self.authenticated.lock().expect("scripted auth"),
-            stderr: String::new(),
+            found: self.probe_found,
+            binary_path: self.probe_found.then(|| PathBuf::from("/scripted/engine")),
+            version: self.probe_found.then(|| "scripted".into()),
+            authenticated: self
+                .probe_found
+                .then(|| *self.authenticated.lock().expect("scripted auth"))
+                .flatten(),
+            stderr: if self.probe_found {
+                String::new()
+            } else {
+                "scripted engine is absent".into()
+            },
             env: Vec::new(),
             commands: Vec::new(),
         }
@@ -443,6 +480,7 @@ impl HarnessAdapter for ScriptedAdapter {
     }
 
     async fn list_models(&self, _probe: &HarnessProbe) -> Vec<ListedHarnessModel> {
+        self.model_lists.fetch_add(1, Ordering::SeqCst);
         self.models.clone()
     }
 
@@ -451,6 +489,10 @@ impl HarnessAdapter for ScriptedAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        self.launched_models
+            .lock()
+            .expect("scripted launch models")
+            .push(spec.model.clone());
         self.launched_approvals
             .lock()
             .expect("scripted launches")

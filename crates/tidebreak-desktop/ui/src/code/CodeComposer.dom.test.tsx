@@ -1002,6 +1002,39 @@ describe("HarnessModelMenu", () => {
       renderToStaticMarkup(<OpenAIIcon className="size-4 shrink-0" />),
     );
   });
+
+  it("searches hosted rows by model-gateway provenance", async () => {
+    const user = userEvent.setup();
+    renderComposer(
+      <HarnessModelMenu
+        harness="opencode"
+        options={[
+          {
+            id: "model-gateway/glm-5.3",
+            label: "Hosted GLM",
+            source: "opencode · model-gateway",
+          },
+          {
+            id: "anthropic/claude-opus-5",
+            label: "Native Claude",
+            source: "opencode",
+          },
+        ]}
+        value="model-gateway/glm-5.3"
+        onChange={() => {}}
+        variant="field"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Model: Hosted GLM" }));
+    const search = await screen.findByRole("searchbox", {
+      name: "Search models",
+    });
+    await user.type(search, "model-gateway");
+
+    expect(screen.getByText("Hosted GLM")).toBeInTheDocument();
+    expect(screen.queryByText("Native Claude")).not.toBeInTheDocument();
+  });
 });
 
 function pasteOn(target: Element, files: File[]) {

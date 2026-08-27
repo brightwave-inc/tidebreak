@@ -63,6 +63,31 @@ pub async fn list_harness_models(
     Path(kind): Path<HarnessKind>,
 ) -> Result<Json<HarnessModelList>, ServerError> {
     let adapter = code.adapter(kind)?;
+    if code.harness_llm_relay_active() {
+        let models = hosted_models(&code, kind).await?;
+        // Hosted listing must remain available while the lazy pin is absent
+        // or installing. The adapters' engine-wide ladders are static for the
+        // current four engines, so give that synchronous contract an empty
+        // context without running a discovery or catalog subprocess.
+        let effort_context = tidebreak_harness::HarnessProbe {
+            found: false,
+            binary_path: None,
+            version: None,
+            authenticated: None,
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        };
+        let reasoning_efforts =
+            model_list_reasoning_efforts(adapter.as_ref(), &effort_context, models.as_slice());
+        return Ok(Json(HarnessModelList {
+            kind,
+            models,
+            reasoning_efforts,
+            source: HarnessModelSource::ModelGateway,
+        }));
+    }
+
     let probe = code.probe(adapter.as_ref()).await;
     if !probe.found {
         return Err(ServerError::unprocessable_kind(
@@ -70,33 +95,37 @@ pub async fn list_harness_models(
             format!("{kind} is not installed"),
         ));
     }
-    let hosted = code.harness_llm_relay_active();
-    let (models, source) = if hosted {
-        (
-            hosted_models(&code, kind).await?,
-            HarnessModelSource::ModelGateway,
-        )
-    } else {
-        (
-            adapter
-                .list_models(&probe)
-                .await
-                .into_iter()
-                .map(|model| HarnessModel {
-                    id: model.id,
-                    label: model.label,
-                    default: model.default,
-                    reasoning_efforts: model.reasoning_efforts,
-                    fast_mode: model.fast_mode,
-                })
-                .collect(),
-            HarnessModelSource::Harness,
-        )
-    };
-    // An engine that states one ladder for every model says so directly. One
-    // that states a ladder per row — Codex — has no single answer, so the
-    // outer bound is the union of what its rows advertise.
-    let mut reasoning_efforts = adapter.reasoning_efforts(&probe);
+    let models = adapter
+        .list_models(&probe)
+        .await
+        .into_iter()
+        .map(|model| HarnessModel {
+            id: model.id,
+            label: model.label,
+            default: model.default,
+            reasoning_efforts: model.reasoning_efforts,
+            fast_mode: model.fast_mode,
+        })
+        .collect::<Vec<_>>();
+    let reasoning_efforts =
+        model_list_reasoning_efforts(adapter.as_ref(), &probe, models.as_slice());
+    Ok(Json(HarnessModelList {
+        kind,
+        models,
+        reasoning_efforts,
+        source: HarnessModelSource::Harness,
+    }))
+}
+
+/// An engine that states one ladder for every model says so directly. One
+/// that states a ladder per row — Codex — has no single answer, so the outer
+/// bound is the union of what its rows advertise.
+fn model_list_reasoning_efforts(
+    adapter: &dyn tidebreak_harness::HarnessAdapter,
+    probe: &tidebreak_harness::HarnessProbe,
+    models: &[HarnessModel],
+) -> Vec<tidebreak_core::ReasoningEffort> {
+    let mut reasoning_efforts = adapter.reasoning_efforts(probe);
     if reasoning_efforts.is_empty() {
         reasoning_efforts = models
             .iter()
@@ -105,12 +134,7 @@ pub async fn list_harness_models(
             .into_iter()
             .collect();
     }
-    Ok(Json(HarnessModelList {
-        kind,
-        models,
-        reasoning_efforts,
-        source,
-    }))
+    reasoning_efforts
 }
 
 /// The engine's hosted picker rows: the caller's per-protocol compat
@@ -119,15 +143,15 @@ pub async fn list_harness_models(
 ///
 /// Both listings are always fetched; `kind` only chooses which rows to
 /// keep. Claude Code posts to the Anthropic surface; Codex and Grok to the
-/// OpenAI one; opencode sees both. A one-protocol engine still succeeds
-/// when the unused listing is down. OpenCode ids are provider-qualified so
-/// its request body selects the provider wired to that listing:
-/// `anthropic/{raw}` for Anthropic and `model-gateway/{raw}` for OpenAI
-/// Responses. Duplicate raw ids prefer the Anthropic surface. Gateway rows
-/// carry no per-model effort ladder or fast-mode promise — the engine's
-/// own ladder above is the honest outer bound — and only the Anthropic
-/// surface's `is_family_default` annotation claims a default. The wiring
-/// per engine is [`crate::code::harness_llm::spawn_wiring`].
+/// OpenAI one; opencode sees both. A one-protocol engine still succeeds when
+/// the unused listing is down. Every id is the exact token its engine accepts:
+/// OpenCode rows are `anthropic/{raw}` or `model-gateway/{raw}`, preserving
+/// both routes when the surfaces share a raw id, and Grok's custom-list token
+/// is `model-gateway-model-gateway/{raw}`. Gateway rows carry no per-model
+/// effort ladder or fast-mode promise — the engine's own ladder above is the
+/// honest outer bound — and only the Anthropic surface's `is_family_default`
+/// annotation claims a default. The wiring per engine is
+/// [`crate::code::harness_llm::spawn_wiring`].
 async fn hosted_models(
     code: &ScopedCode,
     kind: HarnessKind,
@@ -141,24 +165,23 @@ async fn hosted_models(
             .into_iter()
             .map(|row| hosted_model(row, None))
             .collect()),
-        HarnessKind::Codex | HarnessKind::Grok => Ok(openai?
+        HarnessKind::Codex => Ok(openai?
             .into_iter()
             .map(|row| hosted_model(row, None))
+            .collect()),
+        HarnessKind::Grok => Ok(openai?
+            .into_iter()
+            .map(|row| hosted_model(row, Some("model-gateway-model-gateway")))
             .collect()),
         HarnessKind::Opencode => {
             let anthropic = anthropic?;
             let openai = openai?;
-            let mut seen = std::collections::HashSet::new();
             let mut models = Vec::with_capacity(anthropic.len() + openai.len());
             for row in anthropic {
-                if seen.insert(row.id.clone()) {
-                    models.push(hosted_model(row, Some("anthropic")));
-                }
+                models.push(hosted_model(row, Some("anthropic")));
             }
             for row in openai {
-                if seen.insert(row.id.clone()) {
-                    models.push(hosted_model(row, Some("model-gateway")));
-                }
+                models.push(hosted_model(row, Some("model-gateway")));
             }
             Ok(models)
         }

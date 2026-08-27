@@ -1361,6 +1361,27 @@ mod tests {
         assert_eq!(body["parts"][0]["text"], "inspect the failure");
     }
 
+    /// Hosted listings can carry the same raw id on both compat surfaces.
+    /// The surface prefix must survive both OpenCode POST shapes so each row
+    /// selects the provider that the server wired to that surface.
+    #[test]
+    fn hosted_picker_ids_post_the_matching_provider_on_create_and_turn() {
+        for (listed, provider) in [
+            ("anthropic/shared/model", "anthropic"),
+            ("model-gateway/shared/model", "model-gateway"),
+        ] {
+            let created = session_create_body(PermissionMode::Plan, Some(listed));
+            assert_eq!(created["model"]["providerID"], provider, "{created}");
+            assert_eq!(created["model"]["id"], "shared/model", "{created}");
+            assert!(created["model"].get("modelID").is_none(), "{created}");
+
+            let prompt = turn_prompt_body("run it", Some(listed));
+            assert_eq!(prompt["model"]["providerID"], provider, "{prompt}");
+            assert_eq!(prompt["model"]["modelID"], "shared/model", "{prompt}");
+            assert!(prompt["model"].get("id").is_none(), "{prompt}");
+        }
+    }
+
     #[test]
     fn browser_present_adds_opencode_config_with_tb_browser() {
         let spec = BrowserChannelSpec::new(

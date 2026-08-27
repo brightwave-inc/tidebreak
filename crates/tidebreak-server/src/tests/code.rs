@@ -8445,18 +8445,30 @@ impl FakeModelGateway {
 async fn hosted_model_app(
     gateway: Arc<crate::obo_gateway::OboGateway>,
     record_caller: bool,
-) -> (Router, Arc<str>, tempfile::TempDir) {
+    local_binary_found: bool,
+) -> (
+    Router,
+    Arc<str>,
+    Arc<CodeRuntime>,
+    tempfile::TempDir,
+    Vec<(HarnessKind, ScriptedAdapter)>,
+) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = AdapterRegistry::new();
+    let mut adapters = Vec::new();
     for &kind in HarnessKind::ALL {
         let mut adapter = ScriptedAdapter::new(plain_text_script())
             .with_kind(kind)
+            .with_probe_found(local_binary_found)
             .with_models(vec![listed_model("local-only-model", true, &[], true)]);
         if kind == HarnessKind::ClaudeCode {
             adapter = adapter.with_reasoning_levels(CapLevel::Supported);
+        } else if kind == HarnessKind::Grok {
+            adapter = adapter.with_auto_mode(CapLevel::Supported);
         }
+        adapters.push((kind, adapter.clone()));
         registry.register(Arc::new(adapter));
     }
     if record_caller {
@@ -8478,9 +8490,9 @@ async fn hosted_model_app(
             ..AgentConfig::default()
         },
     );
-    state.code = Some(runtime);
+    state.code = Some(runtime.clone());
     let token = state.token.clone();
-    (app(state), token, dir)
+    (app(state), token, runtime, dir, adapters)
 }
 
 async fn fetch_harness_models(
@@ -8508,14 +8520,15 @@ fn model_ids(listing: &serde_json::Value) -> Vec<&str> {
 
 /// Issue 2755: all four hosted engines list the caller-usable gateway rows
 /// their relay wiring can run. OpenCode's ids name the configured provider,
-/// duplicate raw ids prefer the Anthropic surface, malformed rows disappear,
-/// and no engine's local-only row leaks into the hosted picker.
+/// duplicate raw ids preserve both protocol routes, Grok gets its captured
+/// custom-list token, malformed rows disappear, and no local probe or listing
+/// stands between a lazy install and the picker.
 #[tokio::test]
 async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
     let fake = FakeModelGateway::full();
     let observed = fake.clone();
     let (gateway, gateway_server) = fake.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let (router, token, _runtime, _dir, adapters) = hosted_model_app(gateway, true, false).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
 
@@ -8569,7 +8582,15 @@ async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    assert_eq!(model_ids(&grok), model_ids(&codex));
+    assert_eq!(
+        model_ids(&grok),
+        [
+            "model-gateway-model-gateway/glm-5.3",
+            "model-gateway-model-gateway/shared/model",
+            "model-gateway-model-gateway/trim-me",
+        ],
+        "Grok's custom listing qualifies the caller-usable gateway rows exactly as its launch flag expects: {grok}"
+    );
 
     let opencode = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::Opencode)
         .await
@@ -8582,10 +8603,13 @@ async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
             "anthropic/claude-opus-5",
             "anthropic/shared/model",
             "model-gateway/glm-5.3",
+            "model-gateway/shared/model",
             "model-gateway/trim-me",
         ],
         "OpenCode must post every pick through the provider wired to the listing surface: {opencode}"
     );
+    assert_eq!(opencode["models"][1]["label"], "Shared via Anthropic");
+    assert_eq!(opencode["models"][3]["label"], "shared/model");
     for listing in [&claude, &codex, &grok, &opencode] {
         assert_eq!(
             listing["source"], "model_gateway",
@@ -8606,6 +8630,144 @@ async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
         4,
         "every hosted picker reads both listings; four engines, four OpenAI reads"
     );
+    for (kind, adapter) in adapters {
+        assert_eq!(
+            adapter.probe_count(),
+            0,
+            "hosted {kind} listing must not wait for local binary discovery"
+        );
+        assert_eq!(
+            adapter.model_list_count(),
+            0,
+            "hosted {kind} listing must not execute the native catalog command"
+        );
+    }
+    gateway_server.abort();
+}
+
+/// A picker token is not useful unless the runtime launches and turns the
+/// selected engine with that exact token. This follows both OpenCode routes
+/// for one shared raw id and Grok's captured custom-list shape from the hosted
+/// response through session creation and the first turn.
+#[tokio::test]
+async fn hosted_opencode_and_grok_picker_ids_reach_the_engine_launch() {
+    let fake = FakeModelGateway::full();
+    let (gateway, gateway_server) = fake.start().await;
+    let (router, token, runtime, dir, adapters) = hosted_model_app(gateway, true, true).await;
+    let addr = serve(router).await;
+    runtime.start(format!("http://{addr}")).await.unwrap();
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let opencode_listing =
+        fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::Opencode)
+            .await
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+    let opencode_picks = ["anthropic/shared/model", "model-gateway/shared/model"];
+    for pick in opencode_picks {
+        assert!(
+            model_ids(&opencode_listing).contains(&pick),
+            "{opencode_listing}"
+        );
+        let created = client
+            .post(format!(
+                "http://{addr}/code/workspaces/{}/sessions",
+                json_id(&workspace)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "harness": "opencode",
+                "permission_mode": "plan",
+                "model": pick,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), reqwest::StatusCode::CREATED, "{pick}");
+        let session = created.json::<serde_json::Value>().await.unwrap();
+        let turn = client
+            .post(format!(
+                "http://{addr}/code/sessions/{}/turns",
+                json_id(&session)
+            ))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "run the selected hosted model" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED, "{pick}");
+    }
+
+    let grok_listing = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::Grok)
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let grok_pick = "model-gateway-model-gateway/glm-5.3";
+    assert!(
+        model_ids(&grok_listing).contains(&grok_pick),
+        "{grok_listing}"
+    );
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "grok",
+            "permission_mode": "auto",
+            "model": grok_pick,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session = created.json::<serde_json::Value>().await.unwrap();
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "run the selected hosted model" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+
+    let opencode = adapters
+        .iter()
+        .find(|(kind, _)| *kind == HarnessKind::Opencode)
+        .map(|(_, adapter)| adapter)
+        .unwrap();
+    let grok = adapters
+        .iter()
+        .find(|(kind, _)| *kind == HarnessKind::Grok)
+        .map(|(_, adapter)| adapter)
+        .unwrap();
+    wait_until(|| opencode.turn_inputs().len() == 2 && grok.turn_inputs().len() == 1).await;
+    assert_eq!(
+        opencode.launched_models(),
+        opencode_picks.map(|model| Some(model.to_owned()))
+    );
+    assert_eq!(
+        opencode
+            .turn_inputs()
+            .into_iter()
+            .map(|input| input.model)
+            .collect::<Vec<_>>(),
+        opencode_picks.map(|model| Some(model.to_owned()))
+    );
+    assert_eq!(grok.launched_models(), vec![Some(grok_pick.to_owned())]);
+    assert_eq!(
+        grok.turn_inputs()[0].model.as_deref(),
+        Some(grok_pick),
+        "the custom-list id must survive unchanged to Grok's --model launch token"
+    );
     gateway_server.abort();
 }
 
@@ -8621,7 +8783,7 @@ async fn a_hosted_engine_does_not_require_an_unrelated_gateway_listing() {
     );
     let observed_anthropic = anthropic_only.clone();
     let (gateway, gateway_server) = anthropic_only.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let (router, token, _runtime, _dir, _adapters) = hosted_model_app(gateway, true, false).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let claude = fetch_harness_models(&client, addr, token.as_ref(), HarnessKind::ClaudeCode).await;
@@ -8639,7 +8801,7 @@ async fn a_hosted_engine_does_not_require_an_unrelated_gateway_listing() {
     );
     let observed_openai = openai_only.clone();
     let (gateway, gateway_server) = openai_only.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, true).await;
+    let (router, token, _runtime, _dir, _adapters) = hosted_model_app(gateway, true, false).await;
     let addr = serve(router).await;
     for kind in [HarnessKind::Codex, HarnessKind::Grok] {
         let response = fetch_harness_models(&client, addr, token.as_ref(), kind).await;
@@ -8658,7 +8820,7 @@ async fn a_hosted_model_listing_without_caller_ownership_fails_closed() {
     let fake = FakeModelGateway::full();
     let observed = fake.clone();
     let (gateway, gateway_server) = fake.start().await;
-    let (router, token, _dir) = hosted_model_app(gateway, false).await;
+    let (router, token, _runtime, _dir, adapters) = hosted_model_app(gateway, false, false).await;
     let addr = serve(router).await;
     let response = fetch_harness_models(
         &reqwest::Client::new(),
@@ -8679,6 +8841,10 @@ async fn a_hosted_model_listing_without_caller_ownership_fails_closed() {
     );
     assert_eq!(observed.anthropic_reads.load(Ordering::SeqCst), 0);
     assert_eq!(observed.openai_reads.load(Ordering::SeqCst), 0);
+    for (_, adapter) in adapters {
+        assert_eq!(adapter.probe_count(), 0);
+        assert_eq!(adapter.model_list_count(), 0);
+    }
     gateway_server.abort();
 }
 
@@ -8692,6 +8858,7 @@ async fn a_local_machine_keeps_the_engine_own_model_listing() {
             listed_model("fast-thinker", true, &[ReasoningEffort::High], true),
             listed_model("steady", false, &[ReasoningEffort::Low], false),
         ]);
+    let observed = adapter.clone();
     let (router, token, _runtime, _dir) = code_app_with(adapter).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
@@ -8717,6 +8884,8 @@ async fn a_local_machine_keeps_the_engine_own_model_listing() {
         listed["reasoning_efforts"],
         serde_json::to_value(ReasoningEffort::ALL).unwrap()
     );
+    assert_eq!(observed.probe_count(), 1);
+    assert_eq!(observed.model_list_count(), 1);
 }
 
 /// A session restored at boot comes back supervised. Recovery re-attaches its
