@@ -108,6 +108,7 @@ function appendRecoveredDraft(current: string, recovered: string): string {
 export function PermissionModePicker({
   value,
   availableModes = MODES,
+  unavailableReason,
   disabled,
   pending,
   onChange,
@@ -127,7 +128,7 @@ export function PermissionModePicker({
       scopeKey={scopeKey}
       value={value}
       clampDisplay={false}
-      disabled={locked || disabled || pending}
+      disabled={locked || Boolean(unavailableReason) || disabled || pending}
       availableModes={availableModes}
       onChange={async (mode: PermissionMode) => {
         if (!availableModes.includes(mode)) {
@@ -143,6 +144,13 @@ export function PermissionModePicker({
         <span className="inline-flex" aria-busy="true">
           {menu}
         </span>
+      </WithTooltip>
+    );
+  }
+  if (unavailableReason) {
+    return (
+      <WithTooltip label={unavailableReason}>
+        <span className="inline-flex">{menu}</span>
       </WithTooltip>
     );
   }
@@ -659,6 +667,7 @@ export function CodeComposer({
   running,
   permissionMode,
   availableModes = MODES,
+  unavailableReason,
   harness,
   model,
   modelOptions,
@@ -690,6 +699,7 @@ export function CodeComposer({
   running: boolean;
   permissionMode: PermissionMode;
   availableModes?: readonly PermissionMode[];
+  /** Why no permission mode can start this session. */
   unavailableReason?: string;
   harness?: HarnessKind;
   model?: string;
@@ -1086,10 +1096,12 @@ export function CodeComposer({
   // carries it in the workspace header instead of under every draft.
   const unsupervisedNote = sessionId
     ? null
-    : unsupervisedModeStatement(
-        permissionMode,
-        availableModes.includes("auto") && !availableModes.includes("ask"),
-      );
+    : unavailableReason
+      ? null
+      : unsupervisedModeStatement(
+          permissionMode,
+          availableModes.includes("auto") && !availableModes.includes("ask"),
+        );
 
   return (
     <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
@@ -1150,6 +1162,7 @@ export function CodeComposer({
           <PermissionModePicker
             value={permissionMode}
             availableModes={availableModes}
+            unavailableReason={unavailableReason}
             pending={settingsPending}
             onChange={onModeChange}
             scopeKey={sessionId ?? "code-create"}
@@ -1218,6 +1231,11 @@ export function CodeComposer({
             {unsupervisedNote && (
               <p className="text-muted-foreground text-xs">
                 {unsupervisedNote}
+              </p>
+            )}
+            {unavailableReason && (
+              <p className="text-muted-foreground text-xs">
+                {unavailableReason}
               </p>
             )}
             {footerNote}

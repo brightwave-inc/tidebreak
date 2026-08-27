@@ -86,6 +86,10 @@ it("clamps a requested mode down to a managed ceiling", () => {
   expect(clampPermissionMode("plan", "ask")).toBe("plan");
   expect(clampPermissionMode("allow", null)).toBe("allow");
   expect(clampPermissionMode("allow", undefined)).toBe("allow");
+  expect(clampPermissionMode("allow", "ask", ["plan", "auto", "allow"])).toBe(
+    "plan",
+  );
+  expect(clampPermissionMode("allow", "ask", ["auto", "allow"])).toBeNull();
 });
 
 /**

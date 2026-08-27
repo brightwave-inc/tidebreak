@@ -9,11 +9,17 @@ import {
 } from "@tanstack/react-router";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import type { CodeForkTranscript, HarnessKind } from "@/api/types";
+import type {
+  CodeForkTranscript,
+  HarnessKind,
+  ManagedPolicy,
+  PermissionMode,
+} from "@/api/types";
 import { useCodeUiStore } from "@/code/CodeUiStore";
 import { forkFraming, forkTranscriptFile } from "@/code/fork";
 import type { ParsedHarnessModel } from "@/code/parsers";
 import { StartSessionPrompt } from "@/code/StartSessionPrompt";
+import { ManagedPolicyContext } from "@/managedPolicy";
 import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 
 /**
@@ -128,10 +134,12 @@ function StartSession({
   harnesses,
   starting = false,
   fork,
+  permissionModeCeiling,
 }: {
   harnesses: typeof harnessDoctor.harnesses;
   starting?: boolean;
   fork?: CodeForkTranscript;
+  permissionModeCeiling?: PermissionMode;
 }) {
   // A fork seeds the framing lines the same way the workspace page does, so
   // the story shows the state the reader actually lands in.
@@ -139,25 +147,34 @@ function StartSession({
     if (!fork) return;
     useCodeUiStore.getState().offerComposerPrompt("ws-1", forkFraming(fork));
   }, [fork]);
+  const policy: ManagedPolicy = {
+    managed: Boolean(permissionModeCeiling),
+    source: permissionModeCeiling ? "os" : "unmanaged",
+    misconfigured: false,
+    allow_local_mcp_servers: false,
+    permission_mode_ceiling: permissionModeCeiling,
+  };
   return (
-    <AppContextProvider value={appContext()}>
-      <div className="flex h-full flex-col">
-        <StartSessionPrompt
-          workspaceId="ws-1"
-          harnesses={harnesses}
-          starting={starting}
-          selectedMode={null}
-          onSelectMode={fn()}
-          onStart={fn()}
-          client={client}
-          workspaceFiles={
-            fork
-              ? { items: [forkTranscriptFile(fork)], onRemove: fn() }
-              : undefined
-          }
-        />
-      </div>
-    </AppContextProvider>
+    <ManagedPolicyContext.Provider value={policy}>
+      <AppContextProvider value={appContext()}>
+        <div className="flex h-full flex-col">
+          <StartSessionPrompt
+            workspaceId="ws-1"
+            harnesses={harnesses}
+            starting={starting}
+            selectedMode={null}
+            onSelectMode={fn()}
+            onStart={fn()}
+            client={client}
+            workspaceFiles={
+              fork
+                ? { items: [forkTranscriptFile(fork)], onRemove: fn() }
+                : undefined
+            }
+          />
+        </div>
+      </AppContextProvider>
+    </ManagedPolicyContext.Provider>
   );
 }
 
@@ -184,6 +201,16 @@ export const Starting: Story = {
 /** Engines that need install or sign-in before a session can start. */
 export const NeedsSetup: Story = {
   args: { harnesses: harnessDoctorDegraded.harnesses },
+};
+
+/** Managed policy blocks engines that cannot honor any mode under its ceiling. */
+export const BlockedByManagedCeiling: Story = {
+  args: {
+    harnesses: harnessDoctor.harnesses
+      .filter((entry) => entry.kind === "grok")
+      .map((entry) => ({ ...entry, authenticated: true, remediation: "" })),
+    permissionModeCeiling: "ask",
+  },
 };
 
 /**

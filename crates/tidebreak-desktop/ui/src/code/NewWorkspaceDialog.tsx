@@ -62,6 +62,7 @@ import {
   gatewayCodeModels,
   harnessCanStartNow,
   harnessUnusableReason,
+  PERMISSION_MODE_POLICY_BLOCKED,
   preferredCodeModels,
   requiresHarnessModelIds,
   unsupervisedModeStatement,
@@ -316,28 +317,38 @@ export function NewWorkspaceDialog({
   const honors = (mode: PermissionMode | null | undefined) =>
     mode && availableModes.includes(mode) ? mode : undefined;
   const ceiling = useManagedPolicy().permission_mode_ceiling;
-  const postedMode = clampPermissionMode(
+  const requestedMode =
     honors(permissionMode) ??
-      honors(lastCreate?.permissionMode) ??
-      (selectedHarness
-        ? defaultCreatePermissionMode(selectedHarness.caps)
-        : "plan"),
+    honors(lastCreate?.permissionMode) ??
+    (selectedHarness
+      ? defaultCreatePermissionMode(selectedHarness.caps)
+      : "plan");
+  const permittedMode = clampPermissionMode(
+    requestedMode,
     ceiling,
+    availableModes,
   );
+  const postedMode = permittedMode ?? requestedMode;
+  const policyBlocksCreate = Boolean(selectedHarness && permittedMode === null);
   // The posture create is about to post is never silent: a mode that runs
   // with nobody to ask says so next to the control (decisions 0038, 0039).
-  const unsupervisedNote = selectedHarness
-    ? unsupervisedModeStatement(
-        postedMode,
-        autoIsUnsupervised(selectedHarness.caps),
-      )
-    : null;
+  const unsupervisedNote =
+    selectedHarness && !policyBlocksCreate
+      ? unsupervisedModeStatement(
+          postedMode,
+          autoIsUnsupervised(selectedHarness.caps),
+        )
+      : null;
   // An engine still downloading is a legal pick, not a legal start: create
   // would sit on the same npm install with nothing but a spinner. The install
   // note under the pills says what the wait is, and any engine already on
   // disk is one pick away.
   const canCreate = Boolean(
-    repoId && selectedRepo && selectedHarness && installed,
+    repoId &&
+      selectedRepo &&
+      selectedHarness &&
+      installed &&
+      !policyBlocksCreate,
   );
   const installNote = install && (!install.done || install.error);
 
@@ -961,7 +972,9 @@ export function NewWorkspaceDialog({
                       scopeKey="code-create"
                       value={postedMode}
                       clampDisplay={false}
-                      disabled={availableModes.length === 0}
+                      disabled={
+                        availableModes.length === 0 || policyBlocksCreate
+                      }
                       availableModes={availableModes}
                       onChange={(mode) => setPermissionMode(mode)}
                       {...pickerProps("mode")}
@@ -977,6 +990,11 @@ export function NewWorkspaceDialog({
                 {unsupervisedNote && (
                   <p className="text-muted-foreground px-2 text-xs">
                     {unsupervisedNote}
+                  </p>
+                )}
+                {policyBlocksCreate && (
+                  <p className="text-muted-foreground px-2 text-xs">
+                    {PERMISSION_MODE_POLICY_BLOCKED}
                   </p>
                 )}
               </div>
