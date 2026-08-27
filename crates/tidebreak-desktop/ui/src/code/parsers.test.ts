@@ -162,18 +162,15 @@ describe("parseHarnessModelList", () => {
     reasoning_efforts: [],
   };
 
-  it(
-    "preserves hosted catalog provenance and defaults old servers to native",
-    () => {
-      expect(
-        parseHarnessModelList({ ...listing, source: "model_gateway" }),
-      ).toEqual({ ...listing, source: "model_gateway" });
-      expect(parseHarnessModelList(listing)).toEqual({
-        ...listing,
-        source: "harness",
-      });
-    },
-  );
+  it("preserves hosted catalog provenance and defaults old servers to native", () => {
+    expect(
+      parseHarnessModelList({ ...listing, source: "model_gateway" }),
+    ).toEqual({ ...listing, source: "model_gateway" });
+    expect(parseHarnessModelList(listing)).toEqual({
+      ...listing,
+      source: "harness",
+    });
+  });
 
   it("rejects an unknown catalog source", () => {
     expect(parseHarnessModelList({ ...listing, source: "shared" })).toBeNull();
