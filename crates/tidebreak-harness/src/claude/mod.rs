@@ -158,7 +158,8 @@ fn claude_settings_models(
                 default: current == Some(id),
                 fast_mode: model_serves_fast_mode(id),
                 id: id.to_owned(),
-                reasoning_efforts: EFFORT_LADDER.to_vec(),
+                // The caller stamps the probed ladder over every row.
+                reasoning_efforts: Vec::new(),
             });
         }
     }
@@ -170,7 +171,7 @@ fn claude_settings_models(
                     label: crate::display_model_label(current),
                     id: current.to_owned(),
                     default: true,
-                    reasoning_efforts: EFFORT_LADDER.to_vec(),
+                    reasoning_efforts: Vec::new(),
                     fast_mode: model_serves_fast_mode(current),
                 },
             );
@@ -245,14 +246,27 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         caps
     }
 
-    fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
-        EFFORT_LADDER.to_vec()
+    fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        // The ladder reads off the pinned 2.1.234 `--help`. When
+        // `capabilities` degrades `reasoning_levels` for an engine off that
+        // line, session create refuses every level, so advertising the
+        // pinned ladder would offer a control that only fails. The empty
+        // ladder hides the picker instead.
+        if self.capabilities(probe).reasoning_levels == CapLevel::Supported {
+            EFFORT_LADDER.to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     async fn list_models(&self, probe: &HarnessProbe) -> Vec<crate::ListedHarnessModel> {
         // `claude models` is not a catalog command — it starts a session
-        // with that prompt. Read the user's Claude settings instead.
-        claude_settings_models(&probe.env)
+        // with that prompt. Read the user's Claude settings instead. Every
+        // row takes the probed ladder so the listing agrees with the picker.
+        crate::with_reasoning_efforts(
+            claude_settings_models(&probe.env),
+            &self.reasoning_efforts(probe),
+        )
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
@@ -786,6 +800,48 @@ mod tests {
         assert_eq!(caps.plan_mode, CapLevel::Supported);
         assert_eq!(caps.auto_mode, CapLevel::Supported);
         assert_eq!(caps.allow_mode, CapLevel::Supported);
+    }
+
+    /// A degraded `reasoning_levels` empties the advertised ladder with it.
+    /// Session create refuses every level once the flag is not `Supported`,
+    /// so a probe or listing that kept the pinned ladder would offer a
+    /// picker whose every choice fails.
+    #[tokio::test]
+    async fn a_degraded_reasoning_flag_empties_the_advertised_ladder() {
+        let home = tempfile::tempdir().unwrap();
+        let settings_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({"model": "claude-declared-next"})).unwrap(),
+        )
+        .unwrap();
+        let probe = |version: &str| HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some(version.to_owned()),
+            authenticated: None,
+            stderr: String::new(),
+            env: vec![("HOME".into(), home.path().as_os_str().to_owned())],
+            commands: Vec::new(),
+        };
+        let adapter = ClaudeCodeAdapter::new();
+
+        let pinned = probe("2.1.234 (Claude Code)");
+        assert_eq!(adapter.reasoning_efforts(&pinned), EFFORT_LADDER);
+        let models = adapter.list_models(&pinned).await;
+        assert!(!models.is_empty());
+        assert!(models
+            .iter()
+            .all(|model| model.reasoning_efforts == EFFORT_LADDER));
+
+        let declared = probe("3.0.1 (Claude Code)");
+        assert!(adapter.reasoning_efforts(&declared).is_empty());
+        let models = adapter.list_models(&declared).await;
+        assert!(!models.is_empty());
+        assert!(models
+            .iter()
+            .all(|model| model.reasoning_efforts.is_empty()));
     }
 
     #[test]
