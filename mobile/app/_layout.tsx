@@ -48,6 +48,7 @@ export default function RootLayout() {
           />
           <Stack.Screen name="chats" options={{ title: "Chats" }} />
           <Stack.Screen name="chat/[id]" options={{ title: "Chat" }} />
+          <Stack.Screen name="delivery" options={{ title: "Delivery" }} />
           <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
           <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
           <Stack.Screen name="approvals" options={{ title: "Approvals" }} />

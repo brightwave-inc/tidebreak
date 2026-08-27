@@ -49,6 +49,7 @@ describe("machineWsUrl", () => {
 describe("MachineClient requests", () => {
   it("mints the attached resource and sends JSON without following redirects", async () => {
     const getAccessToken = vi.fn(async () => "machine-token");
+    const abort = new AbortController();
     const fetchImpl = vi.fn(
       async (_url: string, _init?: RequestInit) =>
         new Response(JSON.stringify({ accepted: true }), { status: 202 }),
@@ -65,6 +66,7 @@ describe("MachineClient requests", () => {
         method: "POST",
         body: { message: "continue" },
         expectedStatus: 202,
+        signal: abort.signal,
       }),
     ).resolves.toEqual({ accepted: true });
     expect(getAccessToken).toHaveBeenCalledWith("tidebreak:attached");
@@ -76,6 +78,7 @@ describe("MachineClient requests", () => {
       method: "POST",
       redirect: "manual",
       body: JSON.stringify({ message: "continue" }),
+      signal: abort.signal,
       headers: {
         Authorization: "Bearer machine-token",
         "Content-Type": "application/json",

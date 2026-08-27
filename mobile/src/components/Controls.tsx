@@ -86,7 +86,7 @@ export function StatusPill({
   tone = "neutral",
 }: {
   children: ReactNode;
-  tone?: "neutral" | "live" | "warning" | "info";
+  tone?: "neutral" | "live" | "warning" | "info" | "success" | "critical";
 }) {
   const style = {
     neutral: {
@@ -104,6 +104,14 @@ export function StatusPill({
     info: {
       container: "border-info-border bg-info-background",
       text: "text-info-foreground",
+    },
+    success: {
+      container: "border-success-border bg-success-background",
+      text: "text-success-foreground",
+    },
+    critical: {
+      container: "border-critical-border bg-critical-background",
+      text: "text-critical-foreground",
     },
   }[tone];
   return (

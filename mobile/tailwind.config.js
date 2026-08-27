@@ -20,6 +20,7 @@ module.exports = {
         success: "var(--success)",
         "success-foreground": "var(--success-foreground)",
         "success-background": "var(--success-background)",
+        "success-border": "var(--success-border)",
         info: "var(--info)",
         "info-foreground": "var(--info-foreground)",
         "info-background": "var(--info-background)",
