@@ -6586,8 +6586,7 @@ async fn a_running_turn_refuses_a_checkpoint_restore() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
     let (mut events, _) = runtime.bus.attach(parsed);
 
     // Parking on an approval keeps the turn — and its hold on the worktree —
@@ -6595,10 +6594,13 @@ async fn a_running_turn_refuses_a_checkpoint_restore() {
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
-        let session_id = session_id.clone();
+        let session = session.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!(
+                    "http://{addr}/code/sessions/{}/turns",
+                    json_id(&session)
+                ))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "edit the tree" }))
                 .send()
@@ -6632,7 +6634,8 @@ async fn a_running_turn_refuses_a_checkpoint_restore() {
 
     let _ = client
         .post(format!(
-            "http://{addr}/code/sessions/{session_id}/interrupt"
+            "http://{addr}/code/sessions/{}/interrupt",
+            json_id(&session)
         ))
         .bearer_auth(&token)
         .send()
