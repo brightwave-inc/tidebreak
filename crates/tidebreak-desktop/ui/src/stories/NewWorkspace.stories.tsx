@@ -140,7 +140,7 @@ const MODELS: Partial<
   ],
 };
 
-function appContext(): AppContextValue {
+function appContext(overrides: Record<string, unknown> = {}): AppContextValue {
   const client = {
     listCodeHarnessModels: async (kind: HarnessKind) => ({
       kind,
@@ -162,6 +162,21 @@ function appContext(): AppContextValue {
       done: false,
     }),
     getHarnessDoctor: async () => harnessDoctor,
+    // What the add-repo field reads before it can offer a source.
+    getCodeRepoSources: async () => ({
+      sources: [
+        { kind: "local", available: true },
+        { kind: "git_url", available: true },
+        { kind: "github", available: true },
+      ],
+      chooses_destination: false,
+    }),
+    getCodeCloneDefaults: async () => ({
+      parent_dir: "/Users/sam/src",
+      gh_found: true,
+      gh_authenticated: true,
+      gh_remediation: "",
+    }),
     // The story has no server: create reports itself as stubbed rather than
     // handing the dialog an empty snapshot.
     createCodeWorkspace: async () => {
@@ -169,6 +184,7 @@ function appContext(): AppContextValue {
     },
     createCodeSession: fn(),
     submitCodeTurn: fn(),
+    ...overrides,
   };
   return {
     client: client as never,
@@ -237,17 +253,22 @@ function NewWorkspace({
   installs,
   initialHarness,
   permissionModeCeiling,
+  catalog = repos,
+  client,
 }: {
   doctor?: typeof harnessDoctor;
   installs?: typeof harnessInstallsInFlight;
   initialHarness?: HarnessKind;
   permissionModeCeiling?: PermissionMode;
+  /** The registered repos. Empty is a first run, which the dialog now serves. */
+  catalog?: CodeRepoSnapshot[];
+  client?: Record<string, unknown>;
 }) {
   // Seed the catalog before the dialog mounts: its defaults read the store.
   const [seeded, setSeeded] = useState(false);
   useEffect(() => {
     useCodeCatalogStore.setState({
-      repos,
+      repos: catalog,
       doctor,
       sessionsByWorkspace: {},
       workspaces: [],
@@ -260,7 +281,7 @@ function NewWorkspace({
       newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
     });
     setSeeded(true);
-  }, [doctor, initialHarness, installs]);
+  }, [catalog, doctor, initialHarness, installs]);
   if (!seeded) return null;
   const policy: ManagedPolicy = {
     managed: Boolean(permissionModeCeiling),
@@ -271,8 +292,8 @@ function NewWorkspace({
   };
   return (
     <ManagedPolicyContext.Provider value={policy}>
-      <AppContextProvider value={appContext()}>
-        <NewWorkspaceDialog open onOpenChange={fn()} repos={repos} />
+      <AppContextProvider value={appContext(client)}>
+        <NewWorkspaceDialog open onOpenChange={fn()} repos={catalog} />
       </AppContextProvider>
     </ManagedPolicyContext.Provider>
   );
@@ -430,5 +451,148 @@ export const BlockedByManagedCeiling: Story = {
       ),
     ).resolves.toBeVisible();
     await expect(page.getByRole("button", { name: /Create/ })).toBeDisabled();
+  },
+};
+
+/**
+ * A first run, with nothing registered. The repo pill is the add-repo field
+ * rather than a dead menu, and one field takes a path, a Git URL, or
+ * `owner/repo` — so the message stays typed and the next submit creates.
+ */
+export const FirstRepo: Story = {
+  args: { catalog: [] },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.type(
+      await page.findByRole("textbox", { name: "First message" }),
+      "Add a health endpoint",
+    );
+    const pill = page.getByRole("button", { name: "Repo" });
+    await expect(pill).toHaveTextContent("Add a repo");
+    await userEvent.click(pill);
+    await expect(
+      await page.findByRole("textbox", { name: "Repository path or URL" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Add and create/ }),
+    ).toBeDisabled();
+  },
+};
+
+/**
+ * A remote takes a destination, seeded from what the machine remembers, and
+ * the submit says what it finishes with rather than what it starts.
+ */
+export const FirstRepoFromRemote: Story = {
+  args: { catalog: [] },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
+    await userEvent.type(
+      await page.findByRole("textbox", { name: "Repository path or URL" }),
+      "acme/app",
+    );
+    await expect(
+      await page.findByRole("textbox", { name: "Destination folder" }),
+    ).toHaveValue("/Users/sam/src");
+    await expect(
+      page.getByRole("button", { name: /Add and create/ }),
+    ).toBeEnabled();
+  },
+};
+
+/** A clone is minutes of work, so the field reports it and keeps running. */
+export const FirstRepoCloning: Story = {
+  args: {
+    catalog: [],
+    client: {
+      startCodeClone: async () => ({
+        id: "job-story",
+        phase: "Receiving objects",
+        percent: 42,
+        done: false,
+      }),
+      getCodeCloneJob: async () => ({
+        id: "job-story",
+        phase: "Receiving objects",
+        percent: 42,
+        done: false,
+      }),
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
+    await userEvent.type(
+      await page.findByRole("textbox", { name: "Repository path or URL" }),
+      "https://example.com/acme/app.git",
+    );
+    await userEvent.click(page.getByRole("button", { name: /Add and create/ }));
+    await expect(
+      await page.findByTestId("add-repo-clone-phase"),
+    ).toHaveTextContent("Receiving objects");
+  },
+};
+
+/**
+ * A refused registration is answered where it was typed. The message and the
+ * path both survive, because the fix is an edit rather than a retype.
+ */
+export const FirstRepoRefused: Story = {
+  args: {
+    catalog: [],
+    client: {
+      createCodeRepo: async () => {
+        throw new Error("/Users/sam/notes is not a git repository");
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.type(
+      await page.findByRole("textbox", { name: "First message" }),
+      "Add a health endpoint",
+    );
+    await userEvent.click(page.getByRole("button", { name: "Repo" }));
+    await userEvent.type(
+      await page.findByRole("textbox", { name: "Repository path or URL" }),
+      "/Users/sam/notes",
+    );
+    await userEvent.click(page.getByRole("button", { name: /Add and create/ }));
+    await expect(await page.findByTestId("add-repo-error")).toBeVisible();
+    await expect(
+      page.getByRole("textbox", { name: "First message" }),
+    ).toHaveValue("Add a health endpoint");
+  },
+};
+
+/**
+ * With the engine still downloading there is nothing to create on yet, so the
+ * submit only adds the repo and says so. The dialog stays put with the new
+ * repo picked and the message intact.
+ */
+export const FirstRepoWhileEngineDownloads: Story = {
+  args: {
+    catalog: [],
+    doctor: harnessDoctorCold,
+    installs: {
+      claude_code: {
+        kind: "claude_code",
+        version: "2.1.234",
+        phase: "installing",
+        done: false,
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
+    await userEvent.type(
+      await page.findByRole("textbox", { name: "Repository path or URL" }),
+      "/Users/sam/src/app",
+    );
+    await expect(
+      page.getByRole("button", { name: /Add repo/ }),
+    ).toBeInTheDocument();
   },
 };
