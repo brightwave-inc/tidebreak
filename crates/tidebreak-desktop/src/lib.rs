@@ -24,6 +24,7 @@ mod broker;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_control;
+mod browser_profile;
 mod browser_runtime_adapter;
 #[allow(
     dead_code,
@@ -915,6 +916,7 @@ pub fn run() {
             let browser_registry = browser_control::BrowserRegistry::default();
             browser_registry.initialize_private_state(&data)?;
             app.manage(browser_registry);
+            app.manage(browser_profile::BrowserProfileStore::open(&data)?);
             let home = home_dir(&handle)?;
             // Built before anything that reaches the host: `server_info`
             // consults the attachment first, because a remote client must not

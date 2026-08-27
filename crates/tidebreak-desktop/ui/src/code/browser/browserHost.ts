@@ -61,6 +61,7 @@ export type BrowserHostAction =
   | { type: "take_human_control" }
   | { type: "set_inspect"; enabled: boolean }
   | { type: "remove_inspect" }
+  | { type: "reset_profile" }
   | { type: "close" };
 
 export type BrowserHostSnapshot = {
@@ -205,6 +206,22 @@ export function browserUnavailableMessage(): string {
     : "The in-app browser is available in the Tidebreak desktop app";
 }
 
+/**
+ * Reset the one managed profile selected by this trusted native session.
+ * Renderer code never supplies a profile id, engine handle, or filesystem path.
+ */
+export async function resetCodeBrowserProfile(
+  workspaceId: string,
+  browserId: string,
+  host: CodeBrowserHost = nativeCodeBrowserHost,
+): Promise<void> {
+  if (!host.available()) {
+    throw new Error(
+      "The managed browser profile is available only on this computer",
+    );
+  }
+  await host.command(workspaceId, browserId, { type: "reset_profile" });
+}
 /** Explicit tab close. Tab switches only hide the native child webview. */
 export async function closeCodeBrowser(
   workspaceId: string,

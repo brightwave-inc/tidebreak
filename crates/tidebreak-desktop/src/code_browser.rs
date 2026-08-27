@@ -14,18 +14,19 @@ use tauri_plugin_dialog::{
 };
 use tidebreak_core::{
     BrowserGrantCapability, BrowserNavigateArgs, BrowserNavigateResult, BrowserOrigin,
-    BrowserOriginScope,
+    BrowserOriginScope, OwnerId,
 };
 use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
-#[cfg(target_os = "macos")]
-use crate::browser_control::BROWSER_DATA_STORE_IDENTIFIER;
 use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
     BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot,
 };
+#[cfg(any(target_os = "macos", test))]
+use crate::browser_profile::normalize_website_host;
+use crate::browser_profile::{BrowserProfileStore, ManagedBrowserProfile};
 use crate::browser_semantics::{
     browser_inject_inspect_overlay, browser_install_same_document_navigation_observer,
     browser_read_same_document_navigation_observer, browser_remove_inspect_overlay,
@@ -40,6 +41,10 @@ const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration:
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 const SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(100);
+#[cfg(target_os = "macos")]
+const PROFILE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const PROFILE_CLOSE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +84,7 @@ enum CodeBrowserAction {
         enabled: bool,
     },
     RemoveInspect,
+    ResetProfile,
     Close,
 }
 
@@ -119,12 +125,14 @@ struct CodeBrowserEvent {
 pub(crate) async fn code_browser_command(
     app: AppHandle,
     registry: tauri::State<'_, BrowserRegistry>,
+    profiles: tauri::State<'_, BrowserProfileStore>,
     request: CodeBrowserCommandRequest,
 ) -> Result<BrowserSnapshot, String> {
     validated_workspace_id(&request.workspace_id)?;
     let label = browser_label(&request.browser_id)?;
     let existing = app.get_webview(&label);
     let registry = registry.inner().clone();
+    let profiles = profiles.inner().clone();
 
     match request.action {
         CodeBrowserAction::Create {
@@ -132,6 +140,8 @@ pub(crate) async fn code_browser_command(
             bounds,
             visible,
         } => {
+            let _lifecycle = profiles.lock_lifecycle().await;
+            let existing = app.get_webview(&label);
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
                 set_bounds(&webview, bounds)?;
@@ -144,9 +154,13 @@ pub(crate) async fn code_browser_command(
             // allocating a fresh native instance; a cross-workspace record is
             // deliberately rejected rather than rebound.
             registry.remove(&request.browser_id, &request.workspace_id)?;
+            let owner_id = OwnerId::local();
+            let profile = profiles.get_or_create(&owner_id)?;
             create_browser(
                 &app,
                 &registry,
+                &profiles,
+                profile,
                 &request.workspace_id,
                 &request.browser_id,
                 &label,
@@ -154,6 +168,21 @@ pub(crate) async fn code_browser_command(
                 bounds,
                 visible,
             )
+        }
+        CodeBrowserAction::ResetProfile => {
+            let _lifecycle = profiles.lock_lifecycle().await;
+            reset_browser_profile(
+                &app,
+                &registry,
+                &profiles,
+                &request.browser_id,
+                &request.workspace_id,
+            )
+            .await?;
+            Ok(BrowserSnapshot::missing(
+                &request.browser_id,
+                &request.workspace_id,
+            ))
         }
         CodeBrowserAction::Snapshot => match existing {
             Some(_) => registry.snapshot(&request.browser_id, &request.workspace_id),
@@ -395,6 +424,8 @@ pub(crate) async fn navigate_browser_for_agent(
 fn create_browser(
     app: &AppHandle,
     registry: &BrowserRegistry,
+    profiles: &BrowserProfileStore,
+    profile: ManagedBrowserProfile,
     workspace_id: &str,
     browser_id: &str,
     label: &str,
@@ -411,14 +442,27 @@ fn create_browser(
     let renderer_url = main.url().ok();
     let target = validated_url(url, renderer_url.as_ref())?;
     let safe_bounds = validated_bounds(bounds)?;
+    let owner_id = profile.owner_id().clone();
+    let profile_id = profile.profile_id();
+    profiles.record_url(&owner_id, &profile_id, &target)?;
 
-    let instance_id = registry.register(browser_id, workspace_id, target.to_string(), visible)?;
+    let instance_id = registry.register_managed(
+        browser_id,
+        workspace_id,
+        owner_id.clone(),
+        profile_id.clone(),
+        target.to_string(),
+        visible,
+    )?;
 
     let navigation_main = main.clone();
     let navigation_browser = browser_id.to_owned();
     let navigation_workspace = workspace_id.to_owned();
     let navigation_renderer_url = renderer_url.clone();
     let navigation_registry = registry.clone();
+    let navigation_profiles = profiles.clone();
+    let navigation_owner = owner_id;
+    let navigation_profile = profile_id;
     let popup_main = main.clone();
     let popup_browser = browser_id.to_owned();
     let popup_workspace = workspace_id.to_owned();
@@ -436,7 +480,7 @@ fn create_browser(
 
     let builder = WebviewBuilder::new(label, WebviewUrl::External(target));
     #[cfg(target_os = "macos")]
-    let builder = builder.data_store_identifier(BROWSER_DATA_STORE_IDENTIFIER);
+    let builder = builder.data_store_identifier(profile.data_store_identifier());
     let builder = builder
         .on_navigation(move |url| {
             let Ok(safe_url) = validated_url(url.as_str(), navigation_renderer_url.as_ref()) else {
@@ -470,7 +514,35 @@ fn create_browser(
                 safe_url.as_str(),
                 &origin,
             ) {
-                BrowserNavigationDecision::Allow => true,
+                BrowserNavigationDecision::Allow => {
+                    if navigation_profiles
+                        .record_url(&navigation_owner, &navigation_profile, &safe_url)
+                        .is_err()
+                    {
+                        emit_event(
+                            &navigation_main,
+                            CodeBrowserEvent {
+                                workspace_id: navigation_workspace.clone(),
+                                browser_id: navigation_browser.clone(),
+                                kind: "navigation_blocked",
+                                url: Some(url.to_string()),
+                                title: None,
+                                message: Some(
+                                    "This site could not be added to the managed browser profile"
+                                        .to_owned(),
+                                ),
+                                load_state: None,
+                                document_epoch: None,
+                                controller: None,
+                                agent_access: None,
+                                origin: None,
+                            },
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
                 BrowserNavigationDecision::Pause { origin, snapshot } => {
                     emit_event(
                         &navigation_main,
@@ -841,6 +913,224 @@ async fn native_loopback_share_choice(
     }
 }
 
+#[cfg(target_os = "macos")]
+async fn reset_browser_profile(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    profiles: &BrowserProfileStore,
+    browser_id: &str,
+    workspace_id: &str,
+) -> Result<(), String> {
+    let reset = registry
+        .begin_profile_reset(browser_id, workspace_id)
+        .await?;
+    let profile = profiles.resolve(reset.owner_id(), reset.profile_id())?;
+    let owner_id = reset.owner_id().clone();
+    let profile_id = reset.profile_id().to_owned();
+    close_before_delete(
+        || close_profile_sessions(app, reset.sessions()),
+        || delete_managed_profile(app, &profile),
+    )
+    .await?;
+    reset.finish();
+    profiles.forget(&owner_id, &profile_id)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn reset_browser_profile(
+    _app: &AppHandle,
+    _registry: &BrowserRegistry,
+    _profiles: &BrowserProfileStore,
+    _browser_id: &str,
+    _workspace_id: &str,
+) -> Result<(), String> {
+    Err("browser profile reset is not available on this platform".to_owned())
+}
+
+#[cfg(any(target_os = "macos", test))]
+async fn close_before_delete<C, CloseFuture, D, DeleteFuture>(
+    close: C,
+    delete: D,
+) -> Result<(), String>
+where
+    C: FnOnce() -> CloseFuture,
+    CloseFuture: std::future::Future<Output = Result<(), String>>,
+    D: FnOnce() -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = Result<(), String>>,
+{
+    close().await?;
+    delete().await
+}
+
+#[cfg(target_os = "macos")]
+async fn close_profile_sessions(
+    app: &AppHandle,
+    sessions: &[crate::browser_control::BrowserProfileResetSession],
+) -> Result<(), String> {
+    let labels = sessions
+        .iter()
+        .map(|session| browser_label(&session.browser_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    for label in &labels {
+        if let Some(webview) = app.get_webview(label) {
+            webview.close().map_err(browser_error)?;
+        }
+    }
+
+    let deadline = tokio::time::Instant::now() + PROFILE_CLOSE_TIMEOUT;
+    loop {
+        if labels.iter().all(|label| app.get_webview(label).is_none()) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("browser sessions did not close before profile reset".to_owned());
+        }
+        tokio::time::sleep(PROFILE_CLOSE_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn delete_managed_profile(
+    app: &AppHandle,
+    profile: &ManagedBrowserProfile,
+) -> Result<(), String> {
+    if macos_major_version() >= 14 {
+        let identifier = profile.data_store_identifier();
+        let identifiers = app
+            .fetch_data_store_identifiers()
+            .await
+            .map_err(browser_error)?;
+        if identifiers.contains(&identifier) {
+            app.remove_data_store(identifier)
+                .await
+                .map_err(browser_error)?;
+        }
+        Ok(())
+    } else {
+        remove_legacy_website_data(app, profile.website_hosts()).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> isize {
+    objc2_foundation::NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+}
+
+#[cfg(target_os = "macos")]
+async fn remove_legacy_website_data(
+    app: &AppHandle,
+    website_hosts: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    use std::{
+        ptr::NonNull,
+        sync::{Arc, Mutex},
+    };
+
+    use block2::RcBlock;
+    use objc2::{msg_send, rc::Retained, runtime::AnyObject, MainThreadMarker};
+    use objc2_foundation::{NSArray, NSString};
+    use objc2_web_kit::WKWebsiteDataStore;
+
+    if website_hosts.is_empty() {
+        return Ok(());
+    }
+
+    let website_hosts = Arc::new(website_hosts.clone());
+    let (sender, receiver) = oneshot::channel();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let callback_sender = Arc::clone(&sender);
+    app.run_on_main_thread(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                let _ = sender.send(Err(
+                    "browser profile reset requires the main thread".to_owned()
+                ));
+            }
+            return;
+        };
+        unsafe {
+            let store = WKWebsiteDataStore::defaultDataStore(mtm);
+            let data_types = WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+            let removal_store = store.clone();
+            let removal_types = data_types.clone();
+            let fetch_sender = Arc::clone(&callback_sender);
+            let fetch_hosts = Arc::clone(&website_hosts);
+            let fetch = RcBlock::new(move |records: NonNull<NSArray<AnyObject>>| {
+                let matching = records
+                    .as_ref()
+                    .to_vec()
+                    .into_iter()
+                    .filter(|record| {
+                        let display_name: Retained<NSString> = msg_send![&**record, displayName];
+                        website_record_matches(&display_name.to_string(), &fetch_hosts)
+                    })
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    if let Some(sender) = fetch_sender
+                        .lock()
+                        .ok()
+                        .and_then(|mut sender| sender.take())
+                    {
+                        let _ = sender.send(Ok(()));
+                    }
+                    return;
+                }
+
+                let records = NSArray::from_retained_slice(&matching);
+                let retained_records = records.clone();
+                let removal_sender = Arc::clone(&fetch_sender);
+                let removed = RcBlock::new(move || {
+                    let _keep_records_alive = &retained_records;
+                    if let Some(sender) = removal_sender
+                        .lock()
+                        .ok()
+                        .and_then(|mut sender| sender.take())
+                    {
+                        let _ = sender.send(Ok(()));
+                    }
+                });
+                let _: () = msg_send![
+                    &*removal_store,
+                    removeDataOfTypes: &*removal_types,
+                    forDataRecords: &*records,
+                    completionHandler: &*removed
+                ];
+            });
+            let _: () = msg_send![
+                &*store,
+                fetchDataRecordsOfTypes: &*data_types,
+                completionHandler: &*fetch
+            ];
+        }
+    })
+    .map_err(browser_error)?;
+
+    tokio::time::timeout(PROFILE_CLOSE_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "browser website data reset timed out".to_owned())?
+        .map_err(|_| "browser website data reset was interrupted".to_owned())?
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn website_record_matches(
+    record_display_name: &str,
+    website_hosts: &std::collections::BTreeSet<String>,
+) -> bool {
+    let Some(record) = normalize_website_host(record_display_name) else {
+        return false;
+    };
+    website_hosts.iter().any(|host| {
+        host == &record
+            || ((record == "localhost" || record.contains('.'))
+                && host
+                    .strip_suffix(&record)
+                    .is_some_and(|prefix| prefix.ends_with('.')))
+    })
+}
+
 fn run_action(
     app: &AppHandle,
     browser_id: &str,
@@ -870,6 +1160,7 @@ fn run_action(
         | CodeBrowserAction::TakeHumanControl
         | CodeBrowserAction::SetInspect { .. }
         | CodeBrowserAction::RemoveInspect
+        | CodeBrowserAction::ResetProfile
         | CodeBrowserAction::Close => Err(format!(
             "browser action is not valid for the open session {browser_id}"
         )),
@@ -1130,5 +1421,60 @@ mod tests {
             height: 500.0,
         })
         .is_err());
+    }
+    #[tokio::test]
+    async fn profile_reset_closes_sessions_before_deleting_profile_data() {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let close_events = std::sync::Arc::clone(&events);
+        let delete_events = std::sync::Arc::clone(&events);
+
+        close_before_delete(
+            move || async move {
+                close_events.lock().unwrap().push("close");
+                Ok(())
+            },
+            move || async move {
+                delete_events.lock().unwrap().push("delete");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*events.lock().unwrap(), ["close", "delete"]);
+    }
+
+    #[tokio::test]
+    async fn profile_reset_never_deletes_when_a_session_does_not_close() {
+        let deleted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let delete_probe = std::sync::Arc::clone(&deleted);
+
+        assert!(close_before_delete(
+            || async { Err("close failed".to_owned()) },
+            move || async move {
+                delete_probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .is_err());
+
+        assert!(!deleted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn legacy_webkit_reset_selects_only_records_for_managed_browser_hosts() {
+        let hosts = std::collections::BTreeSet::from([
+            "docs.example.com".to_owned(),
+            "localhost".to_owned(),
+        ]);
+
+        assert!(website_record_matches("example.com", &hosts));
+        assert!(website_record_matches("docs.example.com", &hosts));
+        assert!(website_record_matches("localhost", &hosts));
+        assert!(!website_record_matches("ample.com", &hosts));
+        assert!(!website_record_matches("evil-example.com", &hosts));
+        assert!(!website_record_matches("com", &hosts));
+        assert!(!website_record_matches("tidebreak.invalid", &hosts));
     }
 }
