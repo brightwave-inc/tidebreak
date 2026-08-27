@@ -54,6 +54,10 @@ pub async fn save_pull_request_fact(
         closed_at: Set(fact.closed_at),
         first_seen_at: Set(fact.first_seen_at),
         last_seen_at: Set(fact.last_seen_at),
+        // This snapshot did not arrive with a pull endpoint validator. Clear
+        // any existing validator in the same upsert so a concurrent refresh
+        // cannot leave its ETag naming this writer's unrelated snapshot.
+        pull_etag: Set(None),
         // The live tier (decision 66) is written by its own setter and never
         // by a snapshot upsert, so a confirmation cannot blank it.
         ..Default::default()
@@ -80,6 +84,7 @@ pub async fn save_pull_request_fact(
             entities::code_pull_request::Column::MergedAt,
             entities::code_pull_request::Column::ClosedAt,
             entities::code_pull_request::Column::LastSeenAt,
+            entities::code_pull_request::Column::PullEtag,
         ])
         .to_owned(),
     )

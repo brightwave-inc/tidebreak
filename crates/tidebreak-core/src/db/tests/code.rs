@@ -3763,6 +3763,72 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
+    use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
+    use crate::db::code::{
+        get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let observed = now();
+    let stale = CodePullRequestFact {
+        id: CodePullRequestId::new(),
+        owner: owner.clone(),
+        host: "github.com".into(),
+        repo_owner: "acme".into(),
+        repo_name: "tools".into(),
+        number: 99,
+        url: "https://github.com/acme/tools/pull/99".into(),
+        title: "Stale".into(),
+        state: CodePullRequestState::Open,
+        draft: false,
+        author: None,
+        head_branch: "feature".into(),
+        base_branch: "main".into(),
+        head_sha: Some("old".into()),
+        created_at: observed,
+        updated_at: observed,
+        merged_at: None,
+        closed_at: None,
+        first_seen_at: observed,
+        last_seen_at: observed,
+        live: None,
+    };
+    save_pull_request_fact(&store, &stale).await.unwrap();
+
+    let fresh = CodePullRequestFact {
+        title: "Fresh".into(),
+        head_sha: Some("new".into()),
+        ..stale.clone()
+    };
+    assert!(set_pull_request_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        99,
+        Some(&fresh),
+        Some("W/\"fresh\""),
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+
+    save_pull_request_fact(&store, &stale).await.unwrap();
+
+    let stored = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 99)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.fact.title, "Stale");
+    assert_eq!(stored.fact.head_sha.as_deref(), Some("old"));
+    assert_eq!(stored.pull_etag, None);
+}
+
 /// A whole-row turn save cannot blank a recap that landed while it was held.
 ///
 /// The two writers genuinely overlap. A recap is derived after the turn ends
