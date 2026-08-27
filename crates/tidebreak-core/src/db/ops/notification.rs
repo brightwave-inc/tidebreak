@@ -171,8 +171,8 @@ pub(in crate::db) async fn list_notifications(
     if let Some(cursor) = cursor {
         query = query.filter(
             Expr::tuple([
-                Expr::col(entities::notification::Column::CreatedAt).into(),
-                Expr::col(entities::notification::Column::Id).into(),
+                Expr::col(entities::notification::Column::CreatedAt),
+                Expr::col(entities::notification::Column::Id),
             ])
             .lt(Expr::tuple([cursor.created_at.into(), cursor.id.0.into()])),
         );
@@ -237,7 +237,7 @@ pub(in crate::db) async fn mark_all_notifications_read(
 }
 
 fn notification_from_row(row: entities::notification::Model) -> Result<Notification> {
-    let kind = NotificationKind::from_str(&row.kind).ok_or_else(|| {
+    let kind = NotificationKind::from_storage_str(&row.kind).ok_or_else(|| {
         AgentError::Store(format!(
             "notification {} has unknown kind {}",
             row.id, row.kind

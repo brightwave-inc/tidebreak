@@ -173,7 +173,7 @@ impl NotificationKind {
     }
 
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn from_storage_str(value: &str) -> Option<Self> {
         match value {
             "agent_completed" => Some(Self::AgentCompleted),
             "agent_failed" => Some(Self::AgentFailed),
