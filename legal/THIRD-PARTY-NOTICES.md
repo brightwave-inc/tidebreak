@@ -25,9 +25,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 845
+- Rust crates: 849
 - Desktop UI production packages: 515
-- Distinct license texts: 581
+- Distinct license texts: 583
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
