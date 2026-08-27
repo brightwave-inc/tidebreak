@@ -792,9 +792,7 @@ pub(crate) async fn merge_queue_state(
         if !status.is_success() {
             return None;
         }
-        let Some(page_events) = value.as_array() else {
-            return None;
-        };
+        let page_events = value.as_array()?;
         let page_len = page_events.len();
         events.extend(page_events.iter().cloned());
         if page_len < TIMELINE_PAGE_SIZE as usize {
