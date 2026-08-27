@@ -186,6 +186,22 @@ impl CodexStreamParser {
     }
 
     fn push_inbound(&mut self, value: &Value) -> Vec<HarnessEvent> {
+        let events = self.dispatch_inbound(value);
+        // Anything transcript-visible that is not itself a notice proves the
+        // engine got through again, so a later flap is a new degradation
+        // episode and must re-announce. Silent state notifications (token
+        // usage, rate limits) emit nothing and could plausibly interleave a
+        // single storm, so they leave the window open.
+        if events
+            .iter()
+            .any(|event| !matches!(event, HarnessEvent::HarnessNotice { .. }))
+        {
+            self.open_reconnect = None;
+        }
+        events
+    }
+
+    fn dispatch_inbound(&mut self, value: &Value) -> Vec<HarnessEvent> {
         if value.get("error").is_some() && value.get("id").is_some() {
             return self.parse_rpc_error(value);
         }
@@ -236,7 +252,6 @@ impl CodexStreamParser {
                     return self.ensure_subagent_started(&params);
                 }
                 self.parent_turn_active = true;
-                self.open_reconnect = None;
                 self.turn_usage_baseline = self.last_usage.clone();
                 self.turn_first_call_context_tokens = None;
                 vec![HarnessEvent::TurnStarted]
@@ -1629,6 +1644,65 @@ mod tests {
                 (HarnessNoticeLevel::Warning, "Reconnecting websocket..."),
             ]
         );
+    }
+
+    /// A storm that recovers — assistant text streams again — and then flaps
+    /// a second time is two degradation episodes, not one. Every attempt
+    /// strips to the same text, so only real engine activity in between can
+    /// distinguish them; silent telemetry like a token-usage update must not.
+    #[test]
+    fn a_recovered_stream_reannounces_the_next_reconnect_storm() {
+        let reconnect = |attempt: u64| {
+            serde_json::json!({
+                "method": "error",
+                "params": {"error": {
+                    "message": format!("Reconnecting websocket... attempt {attempt}/5")
+                }}
+            })
+            .to_string()
+        };
+        let usage = serde_json::json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 1}}}
+        })
+        .to_string();
+        let delta = serde_json::json!({
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "back online"}
+        })
+        .to_string();
+
+        let mut parser = CodexStreamParser::new();
+        let mut events = Vec::new();
+        for line in [
+            reconnect(1),
+            usage.clone(),
+            reconnect(2),
+            delta,
+            reconnect(1),
+            reconnect(2),
+        ] {
+            events.extend(parser.push_line(&line));
+        }
+
+        assert_eq!(parser.unrecognized(), 0);
+        let notices = events
+            .iter()
+            .filter(|event| matches!(event, HarnessEvent::HarnessNotice { .. }))
+            .count();
+        assert_eq!(
+            notices, 2,
+            "the storm after recovery must announce itself; the usage update \
+             inside the first storm must not split it"
+        );
+        assert!(matches!(
+            &events[..],
+            [
+                HarnessEvent::HarnessNotice { .. },
+                HarnessEvent::AssistantDelta { .. },
+                HarnessEvent::HarnessNotice { .. },
+            ]
+        ));
     }
 
     #[test]
