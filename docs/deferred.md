@@ -39,11 +39,11 @@ a remote deployment.
 The first member client is now specified:
 [decision 47](decisions/0047-gateway-linked-hosting.md) is a desktop remote
 connection mode (URL, token, TLS except on loopback) with host authority
-degrading on a remote machine. A hosted web UI and a supervision-first
-mobile client remain later surfaces on that same wire. Auth beyond the
-static token file is sequenced there too: roster-provisioned tokens first,
-a gateway authenticator behind decision 6's credential-to-principal seam as
-the end state.
+degrading on a remote machine. A hosted web UI remains a later surface on
+that same wire. The supervision-first mobile client is unparked as #2644.
+Auth beyond the static token file is sequenced there too:
+roster-provisioned tokens first, a gateway authenticator behind decision 6's
+credential-to-principal seam as the end state.
 
 ## A coworker that can work later
 
@@ -218,6 +218,12 @@ purpose:
   existence would sap the pressure to keep adapters honest, and it forfeits
   approvals, resume, and durable history. Reconsider only if a harness's
   machine-readable surface proves genuinely unusable over time.
+- **A custom or system harness binary.** Every engine runs the bundled pin
+  ([record 41](decisions/0041-pinned-harness-binaries.md)). The pin shares
+  HOME-scoped config and credentials with a system install, so vendor login,
+  modelctl-managed gateway auth, and the hosted relay all work without
+  pointing spawn at a different executable. Revisit when a machine has a
+  real need to run a newer or custom binary than the pin.
 - **Checkpoint restore.** Per-turn checkpoints land with v1 as hidden refs
   and power turn-scoped diffs; the surface that restores a workspace to an
   earlier checkpoint waits until review flows have settled.
