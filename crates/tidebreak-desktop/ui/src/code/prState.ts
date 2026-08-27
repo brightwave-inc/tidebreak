@@ -516,16 +516,17 @@ export function prStateChips(pr: PrStateInput): PrStateChip[] {
  * glance.
  */
 export function prCompactStatusLabel(pr: PrStateInput): string {
-  if (prIsQueued(pr) && pullRequestLifecycle(pr) === "open") {
-    return "In merge queue";
-  }
-  return PULL_REQUEST_LIFECYCLE_LABEL[pullRequestLifecycle(pr)];
+  const lifecycle = pullRequestLifecycle(pr);
+  if (lifecycle === "open" && prIsQueued(pr)) return "In merge queue";
+  if (lifecycle === "open" && pr.auto_merge_enabled) return "Auto-merge on";
+  return PULL_REQUEST_LIFECYCLE_LABEL[lifecycle];
 }
 
 /** The tone that word paints with on a compact surface. */
 export function prCompactStatusTone(pr: PrStateInput): StatusTone {
-  if (prIsQueued(pr) && pullRequestLifecycle(pr) === "open") {
+  const lifecycle = pullRequestLifecycle(pr);
+  if (lifecycle === "open" && (prIsQueued(pr) || pr.auto_merge_enabled)) {
     return "pending";
   }
-  return PULL_REQUEST_LIFECYCLE_TONE[pullRequestLifecycle(pr)];
+  return PULL_REQUEST_LIFECYCLE_TONE[lifecycle];
 }

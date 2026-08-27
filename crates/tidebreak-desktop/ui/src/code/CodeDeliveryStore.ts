@@ -6,6 +6,7 @@ import type {
   CodeDeliveryRepositoriesSnapshot,
   CodeDeliveryRunKind,
   CodeDeliveryRunSummary,
+  CodeDeliverySourceError,
   CodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget,
 } from "../api/types";
@@ -17,6 +18,7 @@ const MAX_KNOWN_AUTHORS = 50;
 const MAX_SEEN_FINGERPRINTS = 5_000;
 const MAX_NOTIFICATION_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const REPOSITORY_CACHE_MS = 2 * 60 * 1_000;
+const MAX_PULL_REQUEST_PAGE_CACHE = 8;
 
 export type CodeDeliverySurface = "pull_requests" | "runs";
 
@@ -40,6 +42,15 @@ export type CodeDeliveryPrViewFilters = {
   attentionOnly: boolean;
   readyOnly: boolean;
   tidebreakLinked?: boolean;
+};
+
+/** Last successful pull-request page for one query, kept for a fast first paint. */
+export type CodeDeliveryPullRequestPageCache = {
+  key: string;
+  items: CodeDeliveryPullRequestSummary[];
+  fetchedAt: string;
+  nextCursor?: string;
+  errors: CodeDeliverySourceError[];
 };
 
 export type CodeDeliveryRunViewFilters = {
@@ -157,6 +168,8 @@ type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
   repositoryError: string | null;
   repositoryFetchedAt: number | null;
   persistenceError: string | null;
+  lastPullRequestPages: CodeDeliveryPullRequestPageCache[];
+  rememberPullRequestPage: (page: CodeDeliveryPullRequestPageCache) => void;
   loadRepositories: (
     client: Pick<ApiClient, "getCodeDeliveryRepositories">,
     options?: { force?: boolean },
@@ -265,6 +278,17 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
     repositoryError: null,
     repositoryFetchedAt: null,
     persistenceError: null,
+    lastPullRequestPages: [],
+    rememberPullRequestPage: (page) => {
+      set({
+        lastPullRequestPages: [
+          page,
+          ...get().lastPullRequestPages.filter(
+            (candidate) => candidate.key !== page.key,
+          ),
+        ].slice(0, MAX_PULL_REQUEST_PAGE_CACHE),
+      });
+    },
     loadRepositories: async (client, options = {}) => {
       const current = get();
       if (
@@ -468,6 +492,7 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
         repositoryError: null,
         repositoryFetchedAt: null,
         persistenceError: null,
+        lastPullRequestPages: [],
       });
       persistCurrent();
     },
@@ -486,7 +511,32 @@ export function resetCodeDeliveryHostState(): void {
     repositoryLoading: false,
     repositoryError: null,
     repositoryFetchedAt: null,
+    lastPullRequestPages: [],
   });
+}
+
+export function deliveryPullRequestPageKey(
+  repositoryKeys: readonly string[],
+  filters: CodeDeliveryPrViewFilters,
+): string {
+  return JSON.stringify({
+    repositories: [...repositoryKeys].sort(),
+    search: filters.search.trim(),
+    states: [...filters.states].sort(),
+    reviewStates: [...filters.reviewStates].sort(),
+    checkStates: [...filters.checkStates].sort(),
+    authors: [...filters.authors].sort(),
+    attentionOnly: filters.attentionOnly,
+    readyOnly: filters.readyOnly,
+    tidebreakLinked: filters.tidebreakLinked ?? false,
+  });
+}
+
+export function rememberedPullRequestPage(
+  pages: readonly CodeDeliveryPullRequestPageCache[],
+  key: string,
+): CodeDeliveryPullRequestPageCache | undefined {
+  return pages.find((page) => page.key === key);
 }
 
 function buildDeliveryPoll(

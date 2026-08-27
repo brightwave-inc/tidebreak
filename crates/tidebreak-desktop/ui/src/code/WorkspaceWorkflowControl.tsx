@@ -1,10 +1,9 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import {
+  ArrowUpRight,
   ChevronDown,
   CircleDotDashed,
-  ExternalLink,
   GitBranch,
-  GitPullRequest,
   RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -40,7 +39,11 @@ import {
 } from "./prActions";
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
-import { checkSummaryText } from "./prState";
+import {
+  checkSummaryText,
+  prCompactStatusLabel,
+  prCompactStatusTone,
+} from "./prState";
 import {
   composePrPrompt,
   resolveWorkflowShortcut,
@@ -67,6 +70,7 @@ export function WorkspaceWorkflowControl({
   fallbackPr,
   resource,
   onOpenSourceControl,
+  onOpenPr,
   onOpenWatchTask,
 }: {
   client: Pick<
@@ -85,6 +89,8 @@ export function WorkspaceWorkflowControl({
   fallbackPr?: PullRequestDigest;
   resource: CodeWorkspacePrResource;
   onOpenSourceControl: () => void;
+  /** Open the pull request as a workspace center tab. */
+  onOpenPr?: () => void;
   /** Open the watch task's transcript; the segment is a link to the fork. */
   onOpenWatchTask?: () => void;
 }) {
@@ -393,6 +399,10 @@ export function WorkspaceWorkflowControl({
         return;
       case "open_pr": {
         setDetailsOpen(false);
+        if (onOpenPr) {
+          onOpenPr();
+          return;
+        }
         const url = model.pr?.url;
         if (url) void openExternal(url).catch(() => undefined);
         return;
@@ -460,218 +470,198 @@ export function WorkspaceWorkflowControl({
         data-stage={model.stage}
         data-tone={model.tone}
       >
-        <Popover open={detailsOpen} onOpenChange={setDetailsOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              className={cn(
-                "hover:bg-background focus-visible:ring-ring/25 flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-3",
-              )}
-              aria-label={`Workspace status: ${model.summary}`}
-            >
-              {model.pr ? (
-                <GitPullRequest
-                  className={cn("size-3.5 shrink-0", STATUS_MARK[model.tone])}
-                  aria-hidden
-                />
-              ) : (
+        {model.pr ? (
+          <PullRequestChip
+            number={model.pr.number}
+            label={prCompactStatusLabel(model.pr)}
+            tone={prCompactStatusTone(model.pr)}
+            url={model.pr.url}
+            mutationError={resource.mutationError}
+            showRefresh={Boolean(resource.mutationError) || detailsOpen}
+            refreshing={resource.refreshing}
+            onOpen={onOpenPr ?? (() => void run("open_pr"))}
+            onOpenExternal={() => {
+              const url = model.pr?.url;
+              if (url) void openExternal(url).catch(() => undefined);
+            }}
+            onRefresh={() => void resource.refresh()}
+          />
+        ) : (
+          <Popover open={detailsOpen} onOpenChange={setDetailsOpen}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "hover:bg-background focus-visible:ring-ring/25 flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-3",
+                )}
+                aria-label={`Workspace status: ${model.summary}`}
+              >
                 <GitBranch
                   className={cn("size-3.5 shrink-0", STATUS_MARK[model.tone])}
                   aria-hidden
                 />
-              )}
-              {model.pr ? (
-                <span className="shrink-0 font-semibold tabular-nums">
-                  #{model.pr.number}
-                </span>
-              ) : null}
-              {model.pr ? (
                 <span
-                  className="text-foreground-subtle max-[640px]:hidden"
-                  aria-hidden
+                  className="text-foreground-subtle min-w-0 truncate tabular-nums max-[640px]:hidden"
+                  aria-live="polite"
                 >
-                  ·
+                  {statusLabel}
                 </span>
-              ) : null}
-              <span
-                className="text-foreground-subtle min-w-0 truncate tabular-nums max-[640px]:hidden"
-                aria-live="polite"
-              >
-                {statusLabel}
-              </span>
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            align="end"
-            sideOffset={7}
-            className="w-[min(21rem,calc(100vw-24px))] overflow-hidden p-0"
-            data-testid="workspace-workflow-popover"
-            role="dialog"
-            aria-labelledby={popoverTitleId}
-          >
-            <div className="flex items-start gap-2.5 border-b border-border-subtle px-3 py-3">
-              <span
-                className={cn(
-                  "mt-0.5 grid size-6 shrink-0 place-items-center",
-                  STATUS_MARK[model.tone],
-                )}
-              >
-                {model.pr ? (
-                  <GitPullRequest className="size-3.5" aria-hidden />
-                ) : (
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              sideOffset={7}
+              className="w-[min(21rem,calc(100vw-24px))] overflow-hidden p-0"
+              data-testid="workspace-workflow-popover"
+              role="dialog"
+              aria-labelledby={popoverTitleId}
+            >
+              <div className="flex items-start gap-2.5 border-b border-border-subtle px-3 py-3">
+                <span
+                  className={cn(
+                    "mt-0.5 grid size-6 shrink-0 place-items-center",
+                    STATUS_MARK[model.tone],
+                  )}
+                >
                   <GitBranch className="size-3.5" aria-hidden />
-                )}
-              </span>
-              <div className="min-w-0 flex-1">
-                <h2
-                  id={popoverTitleId}
-                  className="text-md font-semibold leading-5"
-                >
-                  {detailsTitle}
-                </h2>
-                <p className="text-foreground-subtle mt-0.5 text-xs leading-4">
-                  {resource.mutationError ?? resource.error ?? model.detail}
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Refresh workspace status"
-                disabled={resource.refreshing || busy !== null}
-                onClick={() => void resource.refresh()}
-              >
-                {resource.refreshing ? (
-                  <Spinner aria-hidden />
-                ) : (
-                  <RefreshCw aria-hidden />
-                )}
-              </Button>
-            </div>
-
-            <dl className="divide-y divide-border-subtle px-3 text-xs">
-              <div className="flex items-center gap-3 py-2.5">
-                <dt className="text-foreground-subtle shrink-0">Branch</dt>
-                <dd
-                  className="min-w-0 flex-1 truncate text-right font-mono text-xs"
-                  title={branchName}
-                >
-                  {branchName}
-                </dd>
-              </div>
-              {(model.pr?.base_branch ?? baseRef) ? (
-                <div className="flex items-center gap-3 py-2.5">
-                  <dt className="text-foreground-subtle shrink-0">Base</dt>
-                  <dd className="min-w-0 flex-1 truncate text-right font-mono text-xs">
-                    {model.pr?.base_branch ?? baseRef}
-                  </dd>
-                </div>
-              ) : null}
-              {model.checks && model.checks.total > 0 ? (
-                <div className="flex items-center gap-3 py-2.5">
-                  <dt className="text-foreground-subtle shrink-0">Checks</dt>
-                  <dd className="min-w-0 flex-1 truncate text-right tabular-nums">
-                    {checkSummaryText(model.checks)}
-                  </dd>
-                </div>
-              ) : null}
-              {watch ? (
-                <div className="flex items-center gap-3 py-2.5">
-                  <dt className="text-foreground-subtle shrink-0">Watch</dt>
-                  <dd
-                    className="min-w-0 flex-1 truncate text-right"
-                    title={watch.detail}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <h2
+                    id={popoverTitleId}
+                    className="text-md font-semibold leading-5"
                   >
-                    {watchStatusLabel(watch)}
+                    {detailsTitle}
+                  </h2>
+                  <p className="text-foreground-subtle mt-0.5 text-xs leading-4">
+                    {resource.mutationError ?? resource.error ?? model.detail}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="Refresh workspace status"
+                  disabled={resource.refreshing || busy !== null}
+                  onClick={() => void resource.refresh()}
+                >
+                  {resource.refreshing ? (
+                    <Spinner aria-hidden />
+                  ) : (
+                    <RefreshCw aria-hidden />
+                  )}
+                </Button>
+              </div>
+
+              <dl className="divide-y divide-border-subtle px-3 text-xs">
+                <div className="flex items-center gap-3 py-2.5">
+                  <dt className="text-foreground-subtle shrink-0">Branch</dt>
+                  <dd
+                    className="min-w-0 flex-1 truncate text-right font-mono text-xs"
+                    title={branchName}
+                  >
+                    {branchName}
                   </dd>
                 </div>
-              ) : null}
-            </dl>
-
-            {activeChecks.length > 0 ? (
-              <div className="border-t border-border-subtle px-3 py-2.5">
-                <p className="text-foreground-subtle mb-1.5 text-xs font-medium">
-                  Active checks
-                </p>
-                <ul className="flex flex-col gap-1.5">
-                  {activeChecks.slice(0, 4).map((check, index) => (
-                    <li
-                      key={`${check.name}-${index}`}
-                      className="flex min-w-0 items-center gap-2 text-xs"
-                      title={check.detail}
-                    >
-                      <span
-                        className={cn(
-                          "size-1.5 shrink-0 rounded-full",
-                          check.bucket === "fail"
-                            ? "bg-critical"
-                            : "bg-info-foreground",
-                        )}
-                        aria-hidden
-                      />
-                      <span className="min-w-0 flex-1 truncate">
-                        {check.name}
-                      </span>
-                      <span
-                        className={cn(
-                          "shrink-0 text-xs font-medium",
-                          check.bucket === "fail"
-                            ? STATUS_TEXT.critical
-                            : STATUS_TEXT.pending,
-                        )}
-                      >
-                        {check.bucket === "fail" ? "Failed" : "Pending"}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                {activeChecks.length > 4 ? (
-                  <p className="text-foreground-subtle mt-1.5 text-xs">
-                    +{activeChecks.length - 4} more
-                  </p>
+                {baseRef ? (
+                  <div className="flex items-center gap-3 py-2.5">
+                    <dt className="text-foreground-subtle shrink-0">Base</dt>
+                    <dd className="min-w-0 flex-1 truncate text-right font-mono text-xs">
+                      {baseRef}
+                    </dd>
+                  </div>
                 ) : null}
-              </div>
-            ) : null}
+                {model.checks && model.checks.total > 0 ? (
+                  <div className="flex items-center gap-3 py-2.5">
+                    <dt className="text-foreground-subtle shrink-0">Checks</dt>
+                    <dd className="min-w-0 flex-1 truncate text-right tabular-nums">
+                      {checkSummaryText(model.checks)}
+                    </dd>
+                  </div>
+                ) : null}
+                {watch ? (
+                  <div className="flex items-center gap-3 py-2.5">
+                    <dt className="text-foreground-subtle shrink-0">Watch</dt>
+                    <dd
+                      className="min-w-0 flex-1 truncate text-right"
+                      title={watch.detail}
+                    >
+                      {watchStatusLabel(watch)}
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
 
-            <div className="flex items-center gap-1 border-t border-border-subtle p-1.5">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="justify-start"
-                onClick={() => void run("open_source")}
-              >
-                <GitBranch aria-hidden />
-                Source control
-              </Button>
-              {watchActive && (
+              {activeChecks.length > 0 ? (
+                <div className="border-t border-border-subtle px-3 py-2.5">
+                  <p className="text-foreground-subtle mb-1.5 text-xs font-medium">
+                    Active checks
+                  </p>
+                  <ul className="flex flex-col gap-1.5">
+                    {activeChecks.slice(0, 4).map((check, index) => (
+                      <li
+                        key={`${check.name}-${index}`}
+                        className="flex min-w-0 items-center gap-2 text-xs"
+                        title={check.detail}
+                      >
+                        <span
+                          className={cn(
+                            "size-1.5 shrink-0 rounded-full",
+                            check.bucket === "fail"
+                              ? "bg-critical"
+                              : "bg-info-foreground",
+                          )}
+                          aria-hidden
+                        />
+                        <span className="min-w-0 flex-1 truncate">
+                          {check.name}
+                        </span>
+                        <span
+                          className={cn(
+                            "shrink-0 text-xs font-medium",
+                            check.bucket === "fail"
+                              ? STATUS_TEXT.critical
+                              : STATUS_TEXT.pending,
+                          )}
+                        >
+                          {check.bucket === "fail" ? "Failed" : "Pending"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  {activeChecks.length > 4 ? (
+                    <p className="text-foreground-subtle mt-1.5 text-xs">
+                      +{activeChecks.length - 4} more
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="flex items-center gap-1 border-t border-border-subtle p-1.5">
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  disabled={busy !== null}
-                  onClick={() => void stopWatch()}
+                  className="justify-start"
+                  onClick={() => void run("open_source")}
                 >
-                  {busy === "stop_watch" ? "Stopping…" : "Stop watching"}
+                  <GitBranch aria-hidden />
+                  Source control
                 </Button>
-              )}
-              {model.pr?.url ? (
-                <Button asChild variant="ghost" size="sm" className="ml-auto">
-                  <a
-                    href={model.pr.url}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      void run("open_pr");
-                    }}
+                {watchActive && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy !== null}
+                    onClick={() => void stopWatch()}
                   >
-                    <ExternalLink aria-hidden />
-                    View PR
-                  </a>
-                </Button>
-              ) : null}
-            </div>
-          </PopoverContent>
-        </Popover>
+                    {busy === "stop_watch" ? "Stopping…" : "Stop watching"}
+                  </Button>
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+        )}
 
         {watchActive && watch ? (
           <Button
@@ -813,6 +803,80 @@ export function WorkspaceWorkflowControl({
         ) : null}
       </div>
     </>
+  );
+}
+
+function PullRequestChip({
+  number,
+  label,
+  tone,
+  url,
+  mutationError,
+  showRefresh,
+  refreshing,
+  onOpen,
+  onOpenExternal,
+  onRefresh,
+}: {
+  number: number;
+  label: string;
+  tone: ReturnType<typeof prCompactStatusTone>;
+  url?: string | null;
+  mutationError: string | null;
+  showRefresh: boolean;
+  refreshing: boolean;
+  onOpen: () => void;
+  onOpenExternal: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5">
+      <div
+        className="flex h-7 overflow-hidden rounded-md border border-border-subtle"
+        data-testid="workspace-pr-chip"
+      >
+        <button
+          type="button"
+          className="hover:bg-background focus-visible:ring-ring/25 cursor-pointer px-2 text-xs font-semibold tabular-nums outline-none focus-visible:ring-3"
+          aria-label={`Open pull request #${number}`}
+          onClick={onOpen}
+        >
+          #{number}
+        </button>
+        {url ? (
+          <button
+            type="button"
+            className="hover:bg-background focus-visible:ring-ring/25 cursor-pointer border-l border-border-subtle px-1.5 outline-none focus-visible:ring-3"
+            aria-label={`Open pull request #${number} on GitHub`}
+            onClick={onOpenExternal}
+          >
+            <ArrowUpRight className="size-3.5" aria-hidden />
+          </button>
+        ) : null}
+      </div>
+      <span
+        className={cn(
+          "min-w-0 truncate text-xs font-medium",
+          STATUS_TEXT[tone],
+        )}
+        title={mutationError ?? undefined}
+        aria-live="polite"
+      >
+        {label}
+      </span>
+      {showRefresh ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Refresh workspace status"
+          disabled={refreshing}
+          onClick={onRefresh}
+        >
+          {refreshing ? <Spinner aria-hidden /> : <RefreshCw aria-hidden />}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 

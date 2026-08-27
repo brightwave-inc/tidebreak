@@ -54,6 +54,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
@@ -77,6 +82,8 @@ import {
   codeDeliveryRepositoryKey,
   codeDeliveryRepositoryTarget,
   deliveryAuthorSightings,
+  deliveryPullRequestPageKey,
+  rememberedPullRequestPage,
   trackedCodeDeliveryRepositories,
   useCodeDeliveryStore,
   type CodeDeliveryAuthor,
@@ -96,7 +103,7 @@ import {
   DetailSheet,
   DetailSkeleton,
   PrLifecycleIcon,
-  PullRequestDetailSheet,
+  PullRequestDetailPane,
   relativeTime,
 } from "./PullRequestDetail";
 import {
@@ -845,6 +852,10 @@ function PullRequestsSurface({
   const forceRefresh = useRef(false);
   const generation = useRef(0);
   const routeSelectionFenced = useRef(false);
+  const skipQueryDebounce = useRef(true);
+  const adoptedSummaries = useRef(
+    new Map<string, CodeDeliveryPullRequestSummary>(),
+  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
@@ -863,6 +874,27 @@ function PullRequestsSurface({
   const targetKey = target
     ? `${codeDeliveryRepositoryKey(target.repository)}:pull-request:${target.number}`
     : null;
+  const pageKey = deliveryPullRequestPageKey(
+    selectedRepositories.map(codeDeliveryRepositoryKey),
+    filters,
+  );
+  const displayIds = useMemo(
+    () => pullRequestIdsInDisplayOrder(items, grouping),
+    [grouping, items],
+  );
+
+  useEffect(() => {
+    adoptedSummaries.current.clear();
+    const remembered = rememberedPullRequestPage(
+      useCodeDeliveryStore.getState().lastPullRequestPages,
+      pageKey,
+    );
+    setItems(remembered?.items ?? []);
+    setErrors(remembered?.errors ?? []);
+    setNextCursor(remembered?.nextCursor);
+    setFetchedAt(remembered?.fetchedAt ?? null);
+    setLoading(true);
+  }, [pageKey]);
 
   const refreshList = () => {
     forceRefresh.current = true;
@@ -936,18 +968,28 @@ function PullRequestsSurface({
     setSelectedId(null);
   };
 
+  const applyAdopted = (rows: CodeDeliveryPullRequestSummary[]) =>
+    rows.map((item) => adoptedSummaries.current.get(item.id) ?? item);
+
+  const adoptSummary = (summary: CodeDeliveryPullRequestSummary) => {
+    adoptedSummaries.current.set(summary.id, summary);
+    setItems((current) => applyAdopted(current));
+  };
+
   const query = async (cursor?: string, append = false) => {
     const token = ++generation.current;
     // Paging never rereads: renumbering the aggregate under a cursor would
     // skip or repeat rows.
     const refresh = !append && !cursor && forceRefresh.current;
-    if (refresh) forceRefresh.current = false;
+    if (refresh) {
+      forceRefresh.current = false;
+      adoptedSummaries.current.clear();
+    }
     if (append) setLoadingMore(true);
     else setLoading(true);
     setError(null);
     try {
       if (selectedRepositories.length === 0) {
-        if (!append) setItems([]);
         setNextCursor(undefined);
         setErrors([]);
         return;
@@ -972,7 +1014,10 @@ function PullRequestsSurface({
                 pending: false,
                 detail,
               });
-              setItems((current) => dedupeRows([detail.summary, ...current]));
+              adoptedSummaries.current.set(detail.summary.id, detail.summary);
+              setItems((current) =>
+                applyAdopted(dedupeRows([detail.summary, ...current])),
+              );
               if (!routeSelectionFenced.current) {
                 setSelectedId(detail.summary.id);
               }
@@ -1008,13 +1053,22 @@ function PullRequestsSurface({
       useCodeDeliveryStore
         .getState()
         .rememberDeliveryAuthors(deliveryAuthorSightings(page.items, []));
+      let nextItems: CodeDeliveryPullRequestSummary[] = [];
       setItems((current) => {
-        let nextItems = append ? [...current, ...page.items] : page.items;
+        nextItems = append ? [...current, ...page.items] : page.items;
         const exactItem = target
           ? current.find((item) => pullRequestMatchesTarget(item, target))
           : undefined;
         if (exactItem) nextItems = [exactItem, ...nextItems];
-        return dedupeRows(nextItems);
+        nextItems = applyAdopted(dedupeRows(nextItems));
+        return nextItems;
+      });
+      useCodeDeliveryStore.getState().rememberPullRequestPage({
+        key: pageKey,
+        items: nextItems,
+        fetchedAt: page.fetched_at,
+        nextCursor: page.next_cursor,
+        errors: page.errors,
       });
       setNextCursor(page.next_cursor);
       setErrors(page.errors);
@@ -1052,7 +1106,9 @@ function PullRequestsSurface({
   };
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void query(), 180);
+    const delay = skipQueryDebounce.current ? 0 : 180;
+    skipQueryDebounce.current = false;
+    const timer = window.setTimeout(() => void query(), delay);
     return () => {
       window.clearTimeout(timer);
       generation.current += 1;
@@ -1066,6 +1122,40 @@ function PullRequestsSurface({
     deliveryRevision,
     targetKey,
   ]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.metaKey ||
+        event.ctrlKey
+      ) {
+        return;
+      }
+      if (isEditableKeyboardTarget(event.target)) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDetail();
+        return;
+      }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const index = displayIds.indexOf(selectedId);
+      if (index < 0) return;
+      const nextIndex = event.key === "ArrowDown" ? index + 1 : index - 1;
+      if (nextIndex < 0) return;
+      event.preventDefault();
+      if (nextIndex >= displayIds.length) {
+        if (nextCursor && !loadingMore) void query(nextCursor, true);
+        return;
+      }
+      const nextId = displayIds[nextIndex];
+      if (nextId) selectItem(nextId);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [displayIds, loadingMore, nextCursor, selectedId]);
 
   if (loadingRepositories) return <DeliveryListSkeleton />;
   if (!repositoryLoaded && repositoryError) {
@@ -1081,99 +1171,124 @@ function PullRequestsSurface({
   }
   if (repositories.length === 0) return <NoDeliveryRepositories />;
 
+  const pendingTargetDetail =
+    selected &&
+    target &&
+    targetDetailState?.key === targetKey &&
+    targetDetailState.pending &&
+    !targetDetailState.detail &&
+    pullRequestMatchesTarget(selected, target);
+
+  const list = (
+    <div ref={scrollRef} className="min-h-0 h-full overflow-auto">
+      {error && (
+        <InlineLoadError message={error} onRetry={() => void query()} />
+      )}
+      {errors.length > 0 && <PartialErrorBanner errors={errors} compact />}
+      <FreshnessBar
+        fetchedAt={fetchedAt}
+        loading={loading}
+        count={items.length}
+        noun="pull request"
+        onRefresh={refreshList}
+      />
+      {loading && items.length === 0 ? (
+        <DeliveryListSkeleton />
+      ) : items.length === 0 ? (
+        <Empty className="min-h-72">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <GitPullRequest />
+            </EmptyMedia>
+            <EmptyTitle>No pull requests match</EmptyTitle>
+            <EmptyDescription>
+              Change the saved view, repositories, or filters above.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <>
+          <PullRequestList
+            items={items}
+            grouping={grouping}
+            selectedId={selectedId}
+            busyId={busyId}
+            onSelect={selectItem}
+            onMerge={runListMerge}
+            scrollRef={scrollRef}
+          />
+          {nextCursor && (
+            <div className="flex justify-center border-t border-border-subtle p-4">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={loadingMore}
+                onClick={() => void query(nextCursor, true)}
+              >
+                {loadingMore && <LoaderCircle className="animate-spin" />}
+                Load more
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  const detail = pendingTargetDetail ? (
+    <PendingDetailPane
+      context={`${selected.repository.name_with_owner} #${selected.number}`}
+      title={selected.title}
+      closeLabel="Close pull request details"
+      onClose={closeDetail}
+    />
+  ) : selected ? (
+    <PullRequestDetailPane
+      key={selected.id}
+      client={client}
+      summary={selected}
+      hasMergeQueue={deliveryRepositoryHasMergeQueue(
+        items,
+        selected.repository,
+      )}
+      initialDetail={
+        targetDetailState?.detail?.summary.id === selected.id
+          ? targetDetailState.detail
+          : undefined
+      }
+      onClose={closeDetail}
+      onChanged={refreshList}
+      onSummary={adoptSummary}
+      onOpenWorkspace={(workspaceId) =>
+        void navigate({
+          to: "/code/w/$workspaceId",
+          params: { workspaceId },
+        })
+      }
+    />
+  ) : null;
+
   return (
     <div className="flex min-h-0 flex-1">
       {dialog}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
-        {error && (
-          <InlineLoadError message={error} onRetry={() => void query()} />
-        )}
-        {errors.length > 0 && <PartialErrorBanner errors={errors} compact />}
-        <FreshnessBar
-          fetchedAt={fetchedAt}
-          loading={loading}
-          count={items.length}
-          noun="pull request"
-          onRefresh={refreshList}
-        />
-        {loading && items.length === 0 ? (
-          <DeliveryListSkeleton />
-        ) : items.length === 0 ? (
-          <Empty className="min-h-72">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <GitPullRequest />
-              </EmptyMedia>
-              <EmptyTitle>No pull requests match</EmptyTitle>
-              <EmptyDescription>
-                Change the saved view, repositories, or filters above.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        ) : (
-          <>
-            <PullRequestList
-              items={items}
-              grouping={grouping}
-              selectedId={selectedId}
-              busyId={busyId}
-              onSelect={selectItem}
-              onMerge={runListMerge}
-              scrollRef={scrollRef}
-            />
-            {nextCursor && (
-              <div className="flex justify-center border-t border-border-subtle p-4">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={loadingMore}
-                  onClick={() => void query(nextCursor, true)}
-                >
-                  {loadingMore && <LoaderCircle className="animate-spin" />}
-                  Load more
-                </Button>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-      {selected &&
-      target &&
-      targetDetailState?.key === targetKey &&
-      targetDetailState.pending &&
-      !targetDetailState.detail &&
-      pullRequestMatchesTarget(selected, target) ? (
-        <PendingDetailSheet
-          context={`${selected.repository.name_with_owner} #${selected.number}`}
-          title={selected.title}
-          closeLabel="Close pull request details"
-          onClose={closeDetail}
-        />
-      ) : selected ? (
-        <PullRequestDetailSheet
-          key={selected.id}
-          client={client}
-          summary={selected}
-          hasMergeQueue={deliveryRepositoryHasMergeQueue(
-            items,
-            selected.repository,
-          )}
-          initialDetail={
-            targetDetailState?.detail?.summary.id === selected.id
-              ? targetDetailState.detail
-              : undefined
-          }
-          onClose={closeDetail}
-          onChanged={refreshList}
-          onOpenWorkspace={(workspaceId) =>
-            void navigate({
-              to: "/code/w/$workspaceId",
-              params: { workspaceId },
-            })
-          }
-        />
-      ) : null}
+      {detail ? (
+        <ResizablePanelGroup
+          key="with-detail"
+          orientation="horizontal"
+          className="min-h-0 min-w-0 flex-1"
+        >
+          <ResizablePanel defaultSize={50} minSize={28} className="min-h-0">
+            {list}
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel defaultSize={50} minSize={28} className="min-h-0">
+            {detail}
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        list
+      )}
     </div>
   );
 }
@@ -1498,6 +1613,39 @@ function RunsSurface({
  * followed a deep link, so the frame opens immediately with what the link
  * already knew — repository, number, title — and the body fills in.
  */
+function PendingDetailPane({
+  context,
+  title,
+  closeLabel,
+  onClose,
+}: {
+  context: string;
+  title: string;
+  closeLabel: string;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="flex h-full min-h-0 flex-col overflow-hidden bg-background"
+      data-testid="pull-request-detail-pane"
+    >
+      <div className="flex shrink-0 items-start gap-3 border-b border-border-subtle px-5 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-muted-foreground">{context}</div>
+          <h2 className="mt-1 text-base font-semibold leading-snug">{title}</h2>
+        </div>
+        <Button type="button" size="icon-xs" variant="ghost" onClick={onClose}>
+          <X />
+          <span className="sr-only">{closeLabel}</span>
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-5">
+        <DetailSkeleton />
+      </div>
+    </div>
+  );
+}
+
 function PendingDetailSheet({
   context,
   title,
@@ -1554,11 +1702,13 @@ function VirtualRows<T extends { id: string }>({
   items,
   scrollRef,
   estimateSize,
+  scrollToId,
   children,
 }: {
   items: readonly T[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   estimateSize: number | ((item: T) => number);
+  scrollToId?: string | null;
   children: (item: T) => React.ReactNode;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -1599,6 +1749,13 @@ function VirtualRows<T extends { id: string }>({
     scrollMargin,
     getItemKey: (index) => items[index]?.id ?? index,
   });
+
+  useEffect(() => {
+    if (!scrollToId) return;
+    const index = items.findIndex((item) => item.id === scrollToId);
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
+  }, [items, scrollToId, virtualizer]);
+
   const rows = virtualizer.getVirtualItems();
   const paddingTop = (rows[0]?.start ?? scrollMargin) - scrollMargin;
   const paddingBottom =
@@ -1733,6 +1890,7 @@ function PullRequestList({
       <VirtualRows
         items={rows}
         scrollRef={scrollRef}
+        scrollToId={selectedId}
         estimateSize={(item) =>
           item.kind === "group" ? PR_GROUP_HEIGHT : PR_ROW_HEIGHT
         }
@@ -1943,6 +2101,7 @@ function PullRequestRow({
       role="listitem"
       tabIndex={0}
       data-active={active || undefined}
+      data-pull-request-id={item.id}
       data-depth={depth}
       data-status-group={status.group}
       className={cn(
@@ -3657,6 +3816,25 @@ function selectedRepositoryTargets(
     targets.push(required);
   }
   return targets;
+}
+
+function pullRequestIdsInDisplayOrder(
+  items: readonly CodeDeliveryPullRequestSummary[],
+  grouping: PullRequestGrouping,
+): string[] {
+  return groupedPullRequestRows(items, grouping)
+    .filter(
+      (row): row is Extract<PullRequestListItem, { kind: "pull_request" }> =>
+        row.kind === "pull_request",
+    )
+    .map((row) => row.row.item.id);
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
 function pullRequestMatchesTarget(

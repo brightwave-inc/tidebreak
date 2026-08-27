@@ -78,7 +78,14 @@ export function prDirectMergeAction(
 ): PrDirectMergeAction | null {
   const { state } = prWorkflowStatus(pr);
   const controls = prMergeControls(state);
-  if (state === "queued" || state === "auto_merge") return null;
+  if (
+    state === "queued" ||
+    state === "auto_merge" ||
+    pr.auto_merge_enabled === true ||
+    pr.in_merge_queue === true
+  ) {
+    return null;
+  }
   if (options?.hasMergeQueue) {
     if (!controls.canMerge && !controls.canEnableAutoMerge) return null;
     return {

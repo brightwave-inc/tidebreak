@@ -63,8 +63,13 @@ import {
 } from "./prActions";
 import { useWorkspaceDigest } from "./CodeUpdatesStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
+import { PullRequestDetailPane } from "./PullRequestDetail";
 import { useWorkspacePullRequests } from "./useWorkspacePullRequests";
 import { digestFromFact, factKey, WorkspacePrList } from "./WorkspacePrList";
+import {
+  deliverySummaryFromWorkspacePr,
+  workspacePullRequestTarget,
+} from "./workspaceWorkflow";
 import { STATUS_MARK } from "./statusTone";
 import {
   PULL_REQUEST_LIFECYCLE_TONE,
@@ -407,6 +412,47 @@ function WorkspacePrTab({
         prResource={selected ? undefined : prResource}
       />
     </>
+  );
+}
+
+/**
+ * Center-tab host for a workspace pull request: the shared delivery pane when
+ * the digest names a GitHub target, otherwise the compact digest view.
+ */
+export function WorkspaceDeliveryPrTab({
+  client,
+  workspaceId,
+  pr,
+  branch,
+  prResource,
+}: {
+  client: ApiClient;
+  workspaceId: string;
+  pr?: PullRequestDigest;
+  branch?: string;
+  prResource?: CodeWorkspacePrResource;
+}) {
+  const target = pr ? workspacePullRequestTarget(pr) : null;
+  if (pr && target) {
+    return (
+      <PullRequestDetailPane
+        client={client}
+        summary={deliverySummaryFromWorkspacePr(pr, target)}
+        onChanged={() => {
+          void prResource?.refreshFromHost();
+        }}
+        onOpenWorkspace={() => undefined}
+      />
+    );
+  }
+  return (
+    <PrTab
+      client={client}
+      workspaceId={workspaceId}
+      pr={pr}
+      branch={branch}
+      prResource={prResource}
+    />
   );
 }
 

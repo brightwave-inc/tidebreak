@@ -126,7 +126,7 @@ const CodeBrowserTab = lazy(async () => {
   return { default: module.CodeBrowserTab };
 });
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeInspector, PrTab } from "./CodeInspector";
+import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
 import { forkFraming, forkTranscriptFile } from "./fork";
@@ -1241,7 +1241,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             className="flex min-h-0 flex-1 flex-col overflow-hidden"
             data-testid="pr-details-panel"
           >
-            <PrTab
+            <WorkspaceDeliveryPrTab
               client={client}
               workspaceId={workspaceId}
               pr={prResource.data?.pr ?? workspace?.pr}
@@ -1616,6 +1616,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   openCodeEditor(
                     layoutRef.current,
                     { type: "source_control" },
+                    splitFocused ? "secondary" : "primary",
+                  ),
+                )
+              }
+              onOpenPr={() =>
+                setWorkspaceLayout(
+                  openCodeEditor(
+                    layoutRef.current,
+                    { type: "pr" },
                     splitFocused ? "secondary" : "primary",
                   ),
                 )

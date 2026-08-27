@@ -8,7 +8,9 @@ import type {
 } from "../api/types";
 import {
   codeDeliveryRepositoryKey,
+  deliveryPullRequestPageKey,
   mergeKnownAuthors,
+  rememberedPullRequestPage,
   resetCodeDeliveryHostState,
   trackedCodeDeliveryRepositories,
   unreadCodeDeliveryNotifications,
@@ -121,7 +123,35 @@ describe("trackedCodeDeliveryRepositories", () => {
       repositoryLoading: false,
       repositoryError: null,
       repositoryFetchedAt: null,
+      lastPullRequestPages: [],
     });
+  });
+
+  it("keeps the last successful pull-request page for a query key", () => {
+    const repo = repository("brightwave-inc", "tidebreak", "repo-1");
+    const key = deliveryPullRequestPageKey([codeDeliveryRepositoryKey(repo)], {
+      search: "",
+      repositoryKeys: [],
+      states: ["open"],
+      reviewStates: [],
+      checkStates: [],
+      authors: ["mara"],
+      attentionOnly: false,
+      readyOnly: false,
+    });
+    const item = pullRequest(41, repo);
+    useCodeDeliveryStore.getState().rememberPullRequestPage({
+      key,
+      items: [item],
+      fetchedAt: NOW,
+      errors: [],
+    });
+    expect(
+      rememberedPullRequestPage(
+        useCodeDeliveryStore.getState().lastPullRequestPages,
+        key,
+      )?.items,
+    ).toEqual([item]);
   });
 
   it("combines registered and manual repositories, excludes opted-out rows, and pins first", () => {

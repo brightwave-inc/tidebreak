@@ -632,8 +632,6 @@ export const PullRequestStackDetail: Story = {
 
 export const PullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
-    // The detail is a sheet portaled to the document body, so its content
-    // lives outside the story canvas.
     const body = within(canvasElement.ownerDocument.body);
     await openPullRequest(canvasElement, "Make workspace deep links durable");
     await expect(
@@ -977,6 +975,20 @@ export const RunDetail: Story = {
       await body.findByRole("button", { name: "Rerun failed" }),
     ).toBeVisible();
     await expect(await body.findByText("Build static Storybook")).toBeVisible();
+  },
+};
+
+export const PullRequestKeyboard: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await openPullRequest(canvasElement, "Build the delivery center");
+    await expect(
+      await canvas.findByTestId("pull-request-detail-pane"),
+    ).toHaveTextContent("Build the delivery center");
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(
+      await canvas.findByTestId("pull-request-detail-pane"),
+    ).toHaveTextContent("Adopt the shared status tone map");
   },
 };
 

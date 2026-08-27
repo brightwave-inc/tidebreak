@@ -34,7 +34,11 @@ import {
   RunDetailSheet,
   codeDeliverySearchFrom,
 } from "./CodeDeliveryPage";
-import { useCodeDeliveryStore } from "./CodeDeliveryStore";
+import {
+  codeDeliveryRepositoryKey,
+  deliveryPullRequestPageKey,
+  useCodeDeliveryStore,
+} from "./CodeDeliveryStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 afterEach(() => {
@@ -324,6 +328,116 @@ describe("delivery pull request list", () => {
     );
   });
 
+  it("paints the last successful page before the live query returns", async () => {
+    const held = deferred<{
+      capability: typeof deliveryRepositoriesSnapshot.capability;
+      items: typeof deliveryPullRequests;
+      errors: never[];
+      fetched_at: string;
+    }>();
+    const repoKeys = deliveryRepositoriesSnapshot.repositories.map(
+      codeDeliveryRepositoryKey,
+    );
+    const baseFilters = {
+      search: "",
+      repositoryKeys: [] as string[],
+      states: ["open"],
+      reviewStates: [] as string[],
+      checkStates: [] as string[],
+      authors: [] as string[],
+      attentionOnly: false,
+      readyOnly: false,
+    };
+    useCodeDeliveryStore.setState({
+      repositorySnapshot: deliveryRepositoriesSnapshot,
+      repositoryFetchedAt: Date.now(),
+    });
+    for (const authors of [[], ["mara"]]) {
+      useCodeDeliveryStore.getState().rememberPullRequestPage({
+        key: deliveryPullRequestPageKey(repoKeys, {
+          ...baseFilters,
+          authors,
+        }),
+        items: [deliveryPullRequests[0]!],
+        fetchedAt: "2026-08-20T14:00:00.000Z",
+        errors: [],
+      });
+    }
+    const query = vi.fn(async () => held.promise);
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: query,
+    } as unknown as ApiClient);
+
+    expect(
+      await screen.findByText("Build the delivery center"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Make workspace deep links durable")).toBeNull();
+    held.resolve({
+      capability: deliveryRepositoriesSnapshot.capability,
+      items: deliveryPullRequests,
+      errors: [],
+      fetched_at: "2026-08-20T15:20:00.000Z",
+    });
+    expect(
+      await screen.findByText("Make workspace deep links durable"),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a selected pull request in a side pane", async () => {
+    const user = userEvent.setup();
+    await renderDeliveryRoute(
+      "pull_requests",
+      deliveryClient(),
+      "/code/delivery/pull-requests?view=all",
+    );
+    await user.click(await rowFor("Build the delivery center"));
+    const pane = await screen.findByTestId("pull-request-detail-pane");
+    expect(pane).toHaveTextContent("Build the delivery center");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("moves the open pane with ArrowDown and ArrowUp", async () => {
+    const user = userEvent.setup();
+    await renderDeliveryRoute(
+      "pull_requests",
+      deliveryClient(),
+      "/code/delivery/pull-requests?view=all",
+    );
+    await user.click(await rowFor("Build the delivery center"));
+    await screen.findByTestId("pull-request-detail-pane");
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(screen.getByTestId("pull-request-detail-pane")).toHaveTextContent(
+        "Adopt the shared status tone map",
+      ),
+    );
+    await user.keyboard("{ArrowUp}");
+    await waitFor(() =>
+      expect(screen.getByTestId("pull-request-detail-pane")).toHaveTextContent(
+        "Build the delivery center",
+      ),
+    );
+  });
+
+  it("leaves the open pane alone while typing a comment", async () => {
+    const user = userEvent.setup();
+    await renderDeliveryRoute(
+      "pull_requests",
+      deliveryClient(),
+      "/code/delivery/pull-requests?view=all",
+    );
+    await user.click(await rowFor("Build the delivery center"));
+    const comment = await screen.findByRole("textbox", {
+      name: "Comment on this pull request",
+    });
+    await user.click(comment);
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByTestId("pull-request-detail-pane")).toHaveTextContent(
+      "Build the delivery center",
+    );
+  });
+
   it("names the author on every row, with a face beside it", async () => {
     renderList();
     const mara = await rowFor("Build the delivery center");
@@ -520,6 +634,55 @@ describe("delivery pull request list", () => {
         name: /Merge|Enable auto-merge|Merge when ready/,
       }),
     ).toBeNull();
+    expect(
+      within(
+        await rowFor("Apply reasoning effort changes to the next turn"),
+      ).queryByRole("button", {
+        name: /Merge|Enable auto-merge|Merge when ready/,
+      }),
+    ).toBeNull();
+  });
+
+  it("drops Enable auto-merge when the open pane reports auto-merge is on", async () => {
+    const user = userEvent.setup();
+    const listItem = {
+      ...deliveryPullRequests[0]!,
+      auto_merge_enabled: false,
+      checks: [{ name: "ci", bucket: "pending" as const }],
+      attention_reasons: [],
+    };
+    const client = deliveryClient({
+      queryCodeDeliveryPullRequests: async () => ({
+        capability: deliveryRepositoriesSnapshot.capability,
+        items: [listItem],
+        errors: [],
+        fetched_at: "2026-08-20T15:20:00.000Z",
+      }),
+      getCodeDeliveryPullRequestDetail: async () => ({
+        ...deliveryPullRequestDetails[2251]!,
+        summary: {
+          ...listItem,
+          auto_merge_enabled: true,
+        },
+      }),
+    });
+    await renderDeliveryRoute(
+      "pull_requests",
+      client,
+      "/code/delivery/pull-requests?view=all",
+    );
+    const row = await rowFor("Build the delivery center");
+    expect(
+      within(row).getByRole("button", { name: "Enable auto-merge" }),
+    ).toBeInTheDocument();
+    await user.click(row);
+    await screen.findByTestId("pull-request-detail-pane");
+    await waitFor(async () => {
+      const next = await rowFor("Build the delivery center");
+      expect(
+        within(next).queryByRole("button", { name: "Enable auto-merge" }),
+      ).toBeNull();
+    });
   });
 
   it("merges a ready row through the delivery API after confirm", async () => {
