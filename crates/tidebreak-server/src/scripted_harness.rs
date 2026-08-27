@@ -105,6 +105,7 @@ pub(crate) struct ScriptedAdapter {
     steering_delay: Duration,
     steering_rejection: Option<String>,
     structured_approvals: CapLevel,
+    plan_mode: CapLevel,
     auto_mode: CapLevel,
     allow_mode: CapLevel,
     image_input: CapLevel,
@@ -163,6 +164,7 @@ impl ScriptedAdapter {
             steering_delay: Duration::ZERO,
             steering_rejection: None,
             structured_approvals: CapLevel::Unsupported,
+            plan_mode: CapLevel::Supported,
             auto_mode: CapLevel::Unsupported,
             allow_mode: CapLevel::Unsupported,
             image_input: CapLevel::Unknown,
@@ -244,6 +246,12 @@ impl ScriptedAdapter {
     /// for exercising the mode gate's per-flag refusals.
     pub(crate) fn with_auto_mode(mut self, level: CapLevel) -> Self {
         self.auto_mode = level;
+        self
+    }
+
+    /// Overrides plan independently of the other postures.
+    pub(crate) fn with_plan_mode(mut self, level: CapLevel) -> Self {
+        self.plan_mode = level;
         self
     }
 
@@ -423,7 +431,7 @@ impl HarnessAdapter for ScriptedAdapter {
             streaming_deltas: CapLevel::Supported,
             structured_approvals: self.structured_approvals,
             mid_turn_steering: self.mid_turn_steering,
-            plan_mode: CapLevel::Supported,
+            plan_mode: self.plan_mode,
             auto_mode: self.auto_mode,
             allow_mode: self.allow_mode,
             reasoning_levels: self.reasoning_levels,

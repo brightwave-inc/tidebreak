@@ -329,6 +329,7 @@ impl CodeRuntime {
                     // conversation someone is watching, and a watch task runs
                     // unattended where nobody is waiting on the tokens.
                     fast_mode: false,
+                    permission_mode_ceiling: None,
                 },
             )
             .await?;

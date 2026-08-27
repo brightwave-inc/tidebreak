@@ -27,7 +27,10 @@ pub async fn create_session(
     Path(workspace_id): Path<WorkspaceId>,
     Json(body): Json<CreateSessionBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    refuse_permission_mode_over_ceiling(&state, Some(body.permission_mode)).await?;
+    // Ceiling vs. engine intersection is decided after probe, inside create:
+    // an empty intersection must name the conflict instead of looking like a
+    // single over-ceiling pick.
+    let permission_mode_ceiling = state.managed_policy()?.permission_mode_ceiling;
     let session = code
         .create_session(
             workspace_id,
@@ -37,6 +40,7 @@ pub async fn create_session(
                 model: body.model,
                 reasoning_effort: body.reasoning_effort,
                 fast_mode: body.fast_mode,
+                permission_mode_ceiling,
             },
         )
         .await?;

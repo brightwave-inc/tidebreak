@@ -162,6 +162,17 @@ impl ManagedPolicy {
         self.permission_mode_ceiling
             .is_none_or(|ceiling| mode <= ceiling)
     }
+
+    /// True when an asserted ceiling leaves `offered` empty.
+    pub(crate) fn permission_mode_ceiling_excludes_all(
+        ceiling: Option<PermissionMode>,
+        offered: impl IntoIterator<Item = PermissionMode>,
+    ) -> bool {
+        let Some(ceiling) = ceiling else {
+            return false;
+        };
+        offered.into_iter().all(|mode| mode > ceiling)
+    }
 }
 
 /// An OS-managed policy reader. One per platform — macOS managed preferences,
@@ -1677,6 +1688,25 @@ mod tests {
             plan_capped.clamp_permission_mode(None),
             Some(PermissionMode::Plan)
         );
+
+        // A Plan-only ceiling against Auto/Allow offered modes is empty:
+        // the clamp still has a number, but create has nothing to post.
+        assert!(ManagedPolicy::permission_mode_ceiling_excludes_all(
+            Some(PermissionMode::Plan),
+            [PermissionMode::Auto, PermissionMode::Allow],
+        ));
+        assert!(!ManagedPolicy::permission_mode_ceiling_excludes_all(
+            Some(PermissionMode::Ask),
+            [
+                PermissionMode::Plan,
+                PermissionMode::Ask,
+                PermissionMode::Auto
+            ],
+        ));
+        assert!(!ManagedPolicy::permission_mode_ceiling_excludes_all(
+            None,
+            [PermissionMode::Auto],
+        ));
     }
 
     /// The channel-fallthrough decision, end to end through resolution: a
