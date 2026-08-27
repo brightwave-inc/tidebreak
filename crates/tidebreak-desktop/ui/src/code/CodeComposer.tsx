@@ -126,6 +126,7 @@ export function PermissionModePicker({
     <PermissionModeMenu
       scopeKey={scopeKey}
       value={value}
+      clampDisplay={false}
       disabled={locked || disabled || pending}
       availableModes={availableModes}
       onChange={async (mode: PermissionMode) => {

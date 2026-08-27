@@ -12,7 +12,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ReactNode } from "react";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import type { HarnessDoctorEntry } from "../api/types";
+import type { HarnessDoctorEntry, ManagedPolicy } from "../api/types";
+import { ManagedPolicyContext } from "../managedPolicy";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -177,6 +178,50 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.queryByText("Mode is fixed once the session starts"),
     ).toBeNull();
+  });
+
+  it("starts under the managed ceiling instead of the engine's Allow default", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const capped: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+      allow_local_mcp_servers: false,
+      permission_mode_ceiling: "ask",
+    };
+    await renderWithRouter(
+      wrap(
+        <ManagedPolicyContext.Provider value={capped}>
+          <StartSessionPrompt
+            workspaceId="workspace-1"
+            harnesses={[entry("claude_code", {})]}
+            starting={false}
+            selectedMode={null}
+            onSelectMode={vi.fn()}
+            onStart={onStart}
+          />
+        </ManagedPolicyContext.Provider>,
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Permissions: Ask" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(ALLOW_ALL_NOTE)).not.toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "ask",
+      "list the files",
+      undefined,
+      undefined,
+      null,
+      false,
+    );
   });
 
   it("says opencode's mode is fixed once the session starts", async () => {

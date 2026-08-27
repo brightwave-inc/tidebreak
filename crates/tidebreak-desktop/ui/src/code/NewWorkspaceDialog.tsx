@@ -38,7 +38,8 @@ import {
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { shouldSubmitComposerKey } from "../Composer";
-import { PermissionModeMenu } from "../PermissionModeMenu";
+import { clampPermissionMode, PermissionModeMenu } from "../PermissionModeMenu";
+import { useManagedPolicy } from "../managedPolicy";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import {
   OPTIMISTIC_WORKSPACE_ID_PREFIX,
@@ -314,12 +315,15 @@ export function NewWorkspaceDialog({
     : [];
   const honors = (mode: PermissionMode | null | undefined) =>
     mode && availableModes.includes(mode) ? mode : undefined;
-  const postedMode =
+  const ceiling = useManagedPolicy().permission_mode_ceiling;
+  const postedMode = clampPermissionMode(
     honors(permissionMode) ??
-    honors(lastCreate?.permissionMode) ??
-    (selectedHarness
-      ? defaultCreatePermissionMode(selectedHarness.caps)
-      : "plan");
+      honors(lastCreate?.permissionMode) ??
+      (selectedHarness
+        ? defaultCreatePermissionMode(selectedHarness.caps)
+        : "plan"),
+    ceiling,
+  );
   // The posture create is about to post is never silent: a mode that runs
   // with nobody to ask says so next to the control (decisions 0038, 0039).
   const unsupervisedNote = selectedHarness
@@ -949,6 +953,7 @@ export function NewWorkspaceDialog({
                     <PermissionModeMenu
                       scopeKey="code-create"
                       value={postedMode}
+                      clampDisplay={false}
                       disabled={availableModes.length === 0}
                       availableModes={availableModes}
                       onChange={(mode) => setPermissionMode(mode)}
