@@ -4,8 +4,9 @@
 //! bound, a cancel — and whatever sits uncommitted in its clones would die
 //! with the pod. So after every successful turn and once more at stop, the
 //! agent snapshots each cloned tree to a per-sandbox ref on the origin
-//! remote, then restores the task branch so the engine never sees the
-//! snapshot commit.
+//! remote. Dirty state is snapshotted with plumbing (`write-tree` +
+//! `commit-tree`) that never moves HEAD, so the engine cannot observe the
+//! snapshot commit on its branch no matter where the checkpoint fails.
 //!
 //! The ref names follow the supervising environment's published convention —
 //! `mg-wip/<sandbox-id>-i<incarnation>` for the first repository, with an
@@ -208,88 +209,8 @@ async fn checkpoint_tree(tree: &mut TreeState, job: &TreeJob<'_>) -> Option<Even
             return Some(failure_after_head_push(tree, job, "status_failed", &error).await)
         }
     };
-    let dirty = !status.trim().is_empty();
-
-    let mut base = None;
-    let mut fingerprint = None;
-    if dirty {
-        // The base head is what the task branch is restored to after the
-        // snapshot commit; without it there is nothing safe to restore, so
-        // this failure has no fallback push.
-        let base_head = match git(
-            job.trust,
-            &directory,
-            PLUMBING_BOUND,
-            job.share,
-            &["rev-parse", "HEAD"],
-        )
-        .await
-        {
-            Ok(head) => head.trim().to_owned(),
-            Err(error) => {
-                return Some(failure_event(
-                    tree,
-                    job,
-                    "head_unavailable",
-                    &error,
-                    None,
-                    None,
-                    None,
-                ))
-            }
-        };
-        if let Err(error) = git(
-            job.trust,
-            &directory,
-            TREE_WALK_BOUND,
-            job.share,
-            &["add", "-A", "--"],
-        )
-        .await
-        {
-            return Some(failure_after_head_push(tree, job, "stage_failed", &error).await);
-        }
-        // Best-effort fingerprint: the same dirty state pushed once need
-        // not be pushed again every turn.
-        fingerprint = git(
-            job.trust,
-            &directory,
-            PLUMBING_BOUND,
-            job.share,
-            &["write-tree"],
-        )
-        .await
-        .ok()
-        .map(|id| id.trim().to_owned());
-        if let Some(tree_id) = &fingerprint {
-            if tree.last_pushed_dirty.as_ref() == Some(&(tree_id.clone(), base_head.clone())) {
-                let _ = restore_task_branch(job, &directory, &base_head).await;
-                return None;
-            }
-        }
-        if let Err(error) = git(
-            job.trust,
-            &directory,
-            MUTATION_BOUND,
-            job.share,
-            &[
-                "-c",
-                "user.name=Tidebreak WIP",
-                "-c",
-                "user.email=tidebreak-wip@invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--no-verify",
-                "--message",
-                &job.message,
-            ],
-        )
-        .await
-        {
-            return Some(failure_after_head_push(tree, job, "commit_failed", &error).await);
-        }
-        base = Some(base_head);
+    if !status.trim().is_empty() {
+        return checkpoint_dirty_tree(tree, job, &directory).await;
     }
 
     let head = match git(
@@ -316,7 +237,9 @@ async fn checkpoint_tree(tree: &mut TreeState, job: &TreeJob<'_>) -> Option<Even
     };
 
     let mut inspection_warning = None;
-    let should_push = if dirty {
+    let should_push = if tree.last_pushed_dirty.is_some() {
+        // The remote ref still names a synthetic dirty snapshot. A later
+        // clean tree supersedes that work even when HEAD itself never moved.
         true
     } else if tree.last_pushed_head.as_deref() == Some(head.as_str()) {
         false
@@ -369,19 +292,11 @@ async fn checkpoint_tree(tree: &mut TreeState, job: &TreeJob<'_>) -> Option<Even
         Ok(_) => {
             let mut payload = base_payload(tree, job);
             payload["commit"] = serde_json::json!(head);
-            payload["created_commit"] = serde_json::json!(dirty);
+            payload["created_commit"] = serde_json::json!(false);
             if let Some(warning) = inspection_warning {
                 payload["inspection_warning"] = serde_json::json!(warning);
             }
-            if let Some(base_head) = base {
-                let restored = restore_task_branch(job, &directory, &base_head)
-                    .await
-                    .is_ok();
-                payload["task_branch_restored"] = serde_json::json!(restored);
-                if restored {
-                    tree.last_pushed_dirty = fingerprint.map(|tree_id| (tree_id, base_head));
-                }
-            }
+            tree.last_pushed_dirty = None;
             tree.last_pushed_head = Some(head);
             Some(("wip_pushed".to_owned(), payload))
         }
@@ -397,18 +312,147 @@ async fn checkpoint_tree(tree: &mut TreeState, job: &TreeJob<'_>) -> Option<Even
     }
 }
 
-/// Unstages the snapshot so the engine's next turn sees its own state.
-async fn restore_task_branch(
+/// Snapshots a dirty tree without ever moving HEAD.
+///
+/// The staged state becomes a tree object, `commit-tree` wraps it in a
+/// commit parented on the current head, and the commit's sha is pushed
+/// directly to the checkpoint ref. The task branch is untouched on every
+/// path — success and failure alike — and the index is restored before the
+/// push, so no push outcome can leave the engine's next turn looking at
+/// staged state it did not stage.
+async fn checkpoint_dirty_tree(
+    tree: &mut TreeState,
     job: &TreeJob<'_>,
     directory: &Path,
-    base_head: &str,
-) -> Result<String, String> {
+) -> Option<Event> {
+    let base_head = match git(
+        job.trust,
+        directory,
+        PLUMBING_BOUND,
+        job.share,
+        &["rev-parse", "HEAD"],
+    )
+    .await
+    {
+        Ok(head) => head.trim().to_owned(),
+        Err(error) => {
+            return Some(failure_event(
+                tree,
+                job,
+                "head_unavailable",
+                &error,
+                None,
+                None,
+                None,
+            ))
+        }
+    };
+    if let Err(error) = git(
+        job.trust,
+        directory,
+        TREE_WALK_BOUND,
+        job.share,
+        &["add", "-A", "--"],
+    )
+    .await
+    {
+        return Some(failure_after_head_push(tree, job, "stage_failed", &error).await);
+    }
+    // The tree id is both the snapshot's content and the dedup fingerprint:
+    // the same dirty state pushed once need not be pushed again every turn.
+    let tree_id = match git(
+        job.trust,
+        directory,
+        PLUMBING_BOUND,
+        job.share,
+        &["write-tree"],
+    )
+    .await
+    {
+        Ok(id) => id.trim().to_owned(),
+        Err(error) => {
+            let _ = restore_index(job, directory).await;
+            return Some(failure_after_head_push(tree, job, "snapshot_failed", &error).await);
+        }
+    };
+    if tree.last_pushed_dirty.as_ref() == Some(&(tree_id.clone(), base_head.clone())) {
+        let _ = restore_index(job, directory).await;
+        return None;
+    }
+    let snapshot = match git(
+        job.trust,
+        directory,
+        MUTATION_BOUND,
+        job.share,
+        &[
+            "-c",
+            "user.name=Tidebreak WIP",
+            "-c",
+            "user.email=tidebreak-wip@invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit-tree",
+            "-p",
+            &base_head,
+            "-m",
+            &job.message,
+            &tree_id,
+        ],
+    )
+    .await
+    {
+        Ok(sha) => sha.trim().to_owned(),
+        Err(error) => {
+            let _ = restore_index(job, directory).await;
+            return Some(failure_after_head_push(tree, job, "commit_failed", &error).await);
+        }
+    };
+    let restored = restore_index(job, directory).await.is_ok();
+    match git(
+        job.trust,
+        directory,
+        PUSH_BOUND,
+        job.share,
+        &[
+            "push",
+            "--force",
+            "--no-verify",
+            "origin",
+            &format!("{snapshot}:refs/heads/{}", job.reference),
+        ],
+    )
+    .await
+    {
+        Ok(_) => {
+            let mut payload = base_payload(tree, job);
+            payload["commit"] = serde_json::json!(snapshot);
+            payload["created_commit"] = serde_json::json!(true);
+            payload["task_branch_restored"] = serde_json::json!(restored);
+            tree.last_pushed_dirty = Some((tree_id, base_head));
+            tree.last_pushed_head = Some(snapshot);
+            Some(("wip_pushed".to_owned(), payload))
+        }
+        Err(error) => Some(failure_event(
+            tree,
+            job,
+            "push_failed",
+            &error,
+            Some(&snapshot),
+            Some(false),
+            None,
+        )),
+    }
+}
+
+/// Unstages the snapshot staging so the engine's next turn sees the index it
+/// left behind. HEAD never moved, so this is an index-only reset.
+async fn restore_index(job: &TreeJob<'_>, directory: &Path) -> Result<String, String> {
     git(
         job.trust,
         directory,
         MUTATION_BOUND,
         job.share,
-        &["reset", "--mixed", "--quiet", base_head],
+        &["reset", "--mixed", "--quiet"],
     )
     .await
 }
@@ -709,6 +753,39 @@ mod tests {
         assert_eq!(third[0].1["terminal_reason"], "expired");
     }
 
+    #[tokio::test]
+    async fn a_clean_tree_supersedes_the_last_dirty_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let clone = fixture(root.path());
+        let mut context = context(root.path(), &clone).await;
+        let head = run(&clone, &["rev-parse", "HEAD"]);
+        std::fs::write(clone.join("draft.txt"), "discard me\n").unwrap();
+
+        let dirty = context
+            .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 1 })
+            .await;
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].1["created_commit"], true);
+        std::fs::remove_file(clone.join("draft.txt")).unwrap();
+
+        let clean = context
+            .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 2 })
+            .await;
+        assert_eq!(clean.len(), 1);
+        assert_eq!(clean[0].1["created_commit"], false);
+        assert_eq!(clean[0].1["commit"], head);
+
+        let origin = root.path().join("origin");
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/mg-wip/sb-1-i1"]),
+            head
+        );
+        assert!(context
+            .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 3 })
+            .await
+            .is_empty());
+    }
+
     /// A clean tree whose head moved — the engine committed — still pushes,
     /// without creating a snapshot commit.
     #[tokio::test]
@@ -751,6 +828,7 @@ mod tests {
             &["remote", "set-url", "origin", "/nonexistent/origin"],
         );
         let mut context = context(root.path(), &clone).await;
+        let base = run(&clone, &["rev-parse", "HEAD"]);
         std::fs::write(clone.join("draft.txt"), "unfinished\n").unwrap();
         let events = context
             .checkpoint(&CheckpointPoint::Terminal {
@@ -763,5 +841,11 @@ mod tests {
         assert_eq!(payload["reason"], "push_failed");
         assert_eq!(payload["head_pushed"], false);
         assert!(payload["error"].as_str().unwrap().contains("git exited"));
+
+        // The failed push must not leave the engine on the snapshot commit,
+        // and the staging done for the snapshot must be undone.
+        assert_eq!(run(&clone, &["rev-parse", "HEAD"]), base);
+        assert!(clone.join("draft.txt").is_file());
+        assert!(run(&clone, &["status", "--porcelain"]).contains("?? draft.txt"));
     }
 }
