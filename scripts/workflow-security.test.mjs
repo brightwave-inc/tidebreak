@@ -445,8 +445,9 @@ test("PR lanes are scope-gated, never label-gated", () => {
     /cp "\$trusted" "\$GITHUB_WORKSPACE\/scripts\/workflow-security\.test\.mjs"/,
   );
   // A pull request's green checks must prove the same commits stay green on
-  // main: no platform-neutral lane may hide behind an opt-in label. The
-  // `windows-ci` opt-in below is the one deliberate exception.
+  // main: no platform-neutral lane may hide behind an opt-in label. Native
+  // Windows tests stay behind `windows-ci` / the windows scope; Windows
+  // `cargo check` is rust-scoped like clippy.
   assert.doesNotMatch(ci, /full-ci/);
   assert.doesNotMatch(fmt, /github\.event_name/);
   assert.match(postgres, /TIDEBREAK_REQUIRE_POSTGRES_TEST: "true"/);
@@ -462,6 +463,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
   for (const [job, scope] of [
     [workflowJob(ci, "lint"), "rust"],
     [workflowJob(ci, "desktop"), "rust"],
+    [workflowJob(ci, "windows-check"), "rust"],
     [testJob, "workspace"],
     [postgres, "workspace"],
     [workflowJob(ci, "ui"), "ui"],
@@ -604,9 +606,7 @@ function skipsSupersededPush(job) {
   return (
     steps.length > 0 &&
     steps.every((step) =>
-      /\n {8}if: \$\{\{ steps\.tip\.outputs\.superseded != 'true' \}\}/.test(
-        step,
-      ),
+      /\n {8}if: \$\{\{ steps\.tip\.outputs\.superseded != 'true'/.test(step),
     )
   );
 }
@@ -615,18 +615,22 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
   const ci = workflows["ci.yml"];
   const windows = workflowJob(ci, "windows-check");
   const changes = workflowJob(ci, "changes");
-  const windowsCiGate =
-    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\)/;
-
-  assert.match(windows, windowsCiGate);
-  // The label was the only trigger until two Windows-only breaks reached
-  // main from unlabeled pull requests (#2307, #2403). A change to a path this
-  // lane tests must now run it without anyone remembering to ask.
+  const nativeTests = windows.match(
+    /- name: Record native Windows test gate[\s\S]*?(?=\n {6}- name: Host broker Windows tests)/,
+  )?.[0];
+  assert.ok(nativeTests, "missing native Windows test gate step");
   assert.match(
-    windows,
-    /\|\| needs\.changes\.outputs\.windows == 'true'/,
-    "a Windows-boundary change must trigger the lane on its own",
+    nativeTests,
+    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\) \|\| needs\.changes\.outputs\.windows == 'true'/,
   );
+  assert.match(nativeTests, /"\$EVENT_NAME" == merge_group/);
+  assert.match(windows, /NATIVE_RUN: \$\{\{ steps\.native\.outputs\.run \}\}/);
+  assert.match(windows, /Skipping native Windows tests\./);
+  assert.match(windows, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
+  assert.match(windows, /CARGO_PROFILE_TEST_DEBUG: 0/);
+  assert.match(windows, /-p tidebreak-cli/);
+  assert.match(windows, /Stage sidecar placeholders for cargo check/);
+  assert.doesNotMatch(windows, /prepare-sidecar\.mjs/);
   assert.match(changes, /windows: \$\{\{ steps\.scope\.outputs\.windows \}\}/);
   assert.match(changes, /echo "windows=\$windows"/);
   assert.match(changes, /echo "windows=true"/);
@@ -673,6 +677,14 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
   assert.match(windows, /\$attempts = 3/);
   assert.match(windows, /tidebreak-server", "--lib", "code::"/);
   assert.match(windows, /failed on attempt/);
+  assert.match(
+    windows,
+    /cargo check --target x86_64-pc-windows-msvc/,
+  );
+  assert.match(
+    windows,
+    /cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked/,
+  );
 });
 
 test("UI tests and production build each gate the UI lane", () => {

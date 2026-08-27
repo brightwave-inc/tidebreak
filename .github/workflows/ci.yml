@@ -249,10 +249,10 @@ jobs:
             esac
             # A second, independent question about the same file: can it
             # break on Windows in a way no Linux lane can see? These are the
-            # paths the Windows lane runs tests for. NTFS path shapes, the
-            # Windows process APIs, and the native credential store decide
-            # those results, and a cross-target `cargo check` proves none of
-            # them.
+            # paths the Windows lane runs native tests for. NTFS path shapes,
+            # the Windows process APIs, and the native credential store decide
+            # those results. `cargo check` on the native runner is rust-scoped
+            # and does not prove them.
             case "$file" in
               # This file decides what every lane runs, including this one.
               .github/workflows/ci.yml) windows=true ;;
@@ -525,16 +525,19 @@ jobs:
     name: Windows cargo check
     needs: changes
     # A native runner keeps the Windows SDK and MSVC available for native
-    # dependencies such as ring and SQLite. This lane is expensive, so it
-    # stays off the default pull-request path. Asking authors to remember the
-    # label did not hold: two Windows-only breaks reached main from unlabeled
-    # pull requests (#2307, #2403). The `windows` scope now runs the lane for
-    # the paths it tests. The label stays as the manual override for a change
-    # the scope cannot see. Main, scheduled, and manual runs retain the
-    # automatic backstop.
-    #
-    if: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci') || needs.changes.outputs.windows == 'true') }}
-    runs-on: windows-latest
+    # dependencies such as ring and SQLite. `cargo check` is rust-scoped like
+    # clippy: a Windows compile break on main blocks the desktop release, so
+    # every Rust-scoped pull request has to catch it. Native tests stay behind
+    # the `windows` scope, the `windows-ci` label, or a non-PR run — they need
+    # NTFS and the Windows process APIs, and they retry a PowerShell startup
+    # race that should not gate unrelated Rust changes.
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    # Prefer an 8 vCPU / 32 GB Windows larger runner. Standard windows-latest
+    # is 4 cores and spends most of this lane in rustc; 16 cores is not worth
+    # the extra cost for cargo check. Set CI_WINDOWS_RUNNER to the provisioned
+    # label. If the variable is unset, the job uses windows-latest so a missing
+    # larger runner cannot stall the merge queue.
+    runs-on: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
     # The persistence steps below compile tidebreak-server's test target, which
     # is the heaviest codegen this lane pays; leave headroom over the
     # check-plus-broker baseline.
@@ -542,6 +545,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
@@ -577,10 +581,6 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        if: ${{ steps.tip.outputs.superseded != 'true' }}
-        with:
-          node-version: 22
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         with:
@@ -591,24 +591,23 @@ jobs:
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      # `build.rs` deliberately removes `externalBin` when a plain check starts
-      # from a clean checkout. Prepare the real Windows artifact first so the
-      # desktop check exercises Tauri's target-suffixed sidecar resolution.
-      - name: Prepare target-named sidecar binaries
+      # `build.rs` drops `externalBin` when the target-suffixed sidecar files
+      # are missing, so a clean `cargo check` never exercises Tauri's sidecar
+      # path. A two-byte MZ placeholder is enough for compilation; a full
+      # `prepare-sidecar` cargo build is a release concern, not this check.
+      - name: Stage sidecar placeholders for cargo check
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         shell: pwsh
         env:
           TAURI_ENV_TARGET_TRIPLE: x86_64-pc-windows-msvc
         run: |
-          node crates/tidebreak-desktop/scripts/prepare-sidecar.mjs
-          $broker = "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
-          $cli = "crates/tidebreak-desktop/binaries/tidebreak-$env:TAURI_ENV_TARGET_TRIPLE.exe"
-          if (!(Test-Path -LiteralPath $broker -PathType Leaf)) {
-            throw "prepare-sidecar did not produce $broker"
-          }
-          if (!(Test-Path -LiteralPath $cli -PathType Leaf)) {
-            throw "prepare-sidecar did not produce $cli"
-          }
+          $dir = "crates/tidebreak-desktop/binaries"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $broker = Join-Path $dir "tidebreak-host-broker-$env:TAURI_ENV_TARGET_TRIPLE.exe"
+          $cli = Join-Path $dir "tidebreak-$env:TAURI_ENV_TARGET_TRIPLE.exe"
+          $mz = [byte[]](0x4D, 0x5A)
+          [System.IO.File]::WriteAllBytes($broker, $mz)
+          [System.IO.File]::WriteAllBytes($cli, $mz)
       - name: Check Windows-gated crates
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: >-
@@ -616,9 +615,30 @@ jobs:
           -p tidebreak-core
           -p tidebreak-code-execution
           -p tidebreak-host-broker
+          -p tidebreak-cli
           -p tidebreak-server
           -p tidebreak-desktop
           --locked
+      - name: Record native Windows test gate
+        id: native
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WINDOWS_CI_GATE: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'windows-ci') || needs.changes.outputs.windows == 'true' }}
+          WINDOWS_SCOPE: ${{ needs.changes.outputs.windows }}
+        run: |
+          # Merge groups are not pull requests, so WINDOWS_CI_GATE is true for
+          # every rust-scoped group. Keep the native suites on the windows
+          # scope there so the required cargo check does not compile test
+          # binaries on unrelated Rust changes.
+          if [[ "$EVENT_NAME" == merge_group ]]; then
+            if [[ "$WINDOWS_SCOPE" == true ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            fi
+          elif [[ "$WINDOWS_CI_GATE" == true ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
       # The host broker suite covers both real NTFS containment and the stdio
       # sidecar boundary: private state/audit placement, exclusive ownership of
       # the state directory, restart persistence, and exit when the desktop pipe
@@ -626,7 +646,15 @@ jobs:
       # native host, not a second copy of the workspace suite.
       - name: Host broker Windows tests
         if: ${{ steps.tip.outputs.superseded != 'true' }}
-        run: cargo test -p tidebreak-host-broker --locked
+        env:
+          NATIVE_RUN: ${{ steps.native.outputs.run }}
+        shell: pwsh
+        run: |
+          if ($env:NATIVE_RUN -ne "true") {
+            Write-Host "Skipping native Windows tests."
+            exit 0
+          }
+          cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked
       # Code mode crosses Windows-native executable, environment, PowerShell,
       # path-identity, and process-tree boundaries. A cross-target check cannot
       # prove those behaviors; run the harness suite and the server's code-mode
@@ -635,15 +663,21 @@ jobs:
       # Three attempts cover that without dropping the Windows contract.
       - name: Code mode Windows lifecycle tests
         if: ${{ steps.tip.outputs.superseded != 'true' }}
+        env:
+          NATIVE_RUN: ${{ steps.native.outputs.run }}
         shell: pwsh
         run: |
+          if ($env:NATIVE_RUN -ne "true") {
+            Write-Host "Skipping native Windows tests."
+            exit 0
+          }
           $ErrorActionPreference = "Continue"
           $PSNativeCommandUseErrorActionPreference = $false
           $attempts = 3
           $suites = @(
-            @("test", "-p", "tidebreak-code-execution", "--locked"),
-            @("test", "-p", "tidebreak-harness", "--locked"),
-            @("test", "-p", "tidebreak-server", "--lib", "code::", "--locked")
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-code-execution", "--locked"),
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-harness", "--locked"),
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-server", "--lib", "code::", "--locked")
           )
           foreach ($suite in $suites) {
             $passed = $false
@@ -667,14 +701,30 @@ jobs:
       # second copy of the workspace suite.
       - name: SQLite profile open and migrations
         if: ${{ steps.tip.outputs.superseded != 'true' }}
-        run: cargo test -p tidebreak-server --lib desktop_schema --locked
+        env:
+          NATIVE_RUN: ${{ steps.native.outputs.run }}
+        shell: pwsh
+        run: |
+          if ($env:NATIVE_RUN -ne "true") {
+            Write-Host "Skipping native Windows tests."
+            exit 0
+          }
+          cargo test --target x86_64-pc-windows-msvc -p tidebreak-server --lib desktop_schema --locked
       # `-- --ignored` runs the native round trip alone, so the process-global
       # in-memory keyring mock installed by the ordinary unit test never
       # activates and the test reaches the real Credential Manager available
       # under the hosted runner session.
       - name: Credential Manager round trip
         if: ${{ steps.tip.outputs.superseded != 'true' }}
-        run: cargo test -p tidebreak-core --lib keychain --locked -- --ignored
+        env:
+          NATIVE_RUN: ${{ steps.native.outputs.run }}
+        shell: pwsh
+        run: |
+          if ($env:NATIVE_RUN -ne "true") {
+            Write-Host "Skipping native Windows tests."
+            exit 0
+          }
+          cargo test --target x86_64-pc-windows-msvc -p tidebreak-core --lib keychain --locked -- --ignored
 
   test:
     name: test
