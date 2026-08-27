@@ -346,9 +346,12 @@ export type CodeUiStore = {
    * what keeps a later remount from repeating it.
    */
   quickOpenPending: boolean;
+  newTabMenuPending: boolean;
   filesSearchPending: boolean;
   requestQuickOpen: () => void;
   takeQuickOpen: () => boolean;
+  requestNewTabMenu: () => void;
+  takeNewTabMenu: () => boolean;
   /** Opens the review sidebar too: search is dead while that rail is hidden. */
   requestFilesSearch: () => void;
   takeFilesSearch: () => boolean;
@@ -425,11 +428,18 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   pendingComposerPrompt: null,
   composerActionScope: null,
   quickOpenPending: false,
+  newTabMenuPending: false,
   filesSearchPending: false,
   requestQuickOpen: () => set({ quickOpenPending: true }),
   takeQuickOpen: () => {
     if (!get().quickOpenPending) return false;
     set({ quickOpenPending: false });
+    return true;
+  },
+  requestNewTabMenu: () => set({ newTabMenuPending: true }),
+  takeNewTabMenu: () => {
+    if (!get().newTabMenuPending) return false;
+    set({ newTabMenuPending: false });
     return true;
   },
   requestFilesSearch: () => {
@@ -584,6 +594,7 @@ export function resetCodeUiHostState(): void {
     pendingComposerPrompt: null,
     composerActionScope: null,
     quickOpenPending: false,
+    newTabMenuPending: false,
     filesSearchPending: false,
     workflowShortcutPending: null,
     archivePending: false,

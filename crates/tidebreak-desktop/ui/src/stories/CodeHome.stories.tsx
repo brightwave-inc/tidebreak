@@ -234,6 +234,9 @@ export const FirstRepository: Story = {
     await expect(
       await canvas.findByRole("heading", { name: "Start with a repository" }),
     ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Workspaces" }),
+    ).toBeVisible();
   },
 };
 

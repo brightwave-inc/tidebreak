@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { stepWorkspaceId } from "./railNavigation";
+import { nextWorkspaceAfterLeaving, stepWorkspaceId } from "./railNavigation";
 
 describe("stepWorkspaceId", () => {
   const rail = ["a", "b", "c"];
@@ -27,5 +27,17 @@ describe("stepWorkspaceId", () => {
   it("has nowhere to go on an empty rail", () => {
     expect(stepWorkspaceId([], undefined, 1)).toBeNull();
     expect(stepWorkspaceId([], "a", -1)).toBeNull();
+  });
+});
+
+describe("nextWorkspaceAfterLeaving", () => {
+  it("opens the next live card, wrapping at the end of the rail", () => {
+    expect(nextWorkspaceAfterLeaving(["a", "b", "c"], "a")).toBe("b");
+    expect(nextWorkspaceAfterLeaving(["a", "b", "c"], "c")).toBe("a");
+  });
+
+  it("falls through to the code home when nothing else is live", () => {
+    expect(nextWorkspaceAfterLeaving(["a"], "a")).toBeNull();
+    expect(nextWorkspaceAfterLeaving([], "a")).toBeNull();
   });
 });

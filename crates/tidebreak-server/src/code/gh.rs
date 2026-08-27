@@ -1438,7 +1438,18 @@ fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    None
+    if search_path.is_some() {
+        return None;
+    }
+    // Packaged apps inherit a GUI PATH that often omits Homebrew. Login-shell
+    // probing still runs after this; these are the install locations `gh`
+    // actually uses when that probe cannot run.
+    [
+        PathBuf::from("/opt/homebrew/bin/gh"),
+        PathBuf::from("/usr/local/bin/gh"),
+    ]
+    .into_iter()
+    .find(|candidate| is_executable(candidate))
 }
 
 #[cfg(windows)]

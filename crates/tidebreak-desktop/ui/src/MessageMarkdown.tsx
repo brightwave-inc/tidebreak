@@ -1,8 +1,11 @@
 import {
+  createContext,
   isValidElement,
   memo,
+  useContext,
   useMemo,
   useRef,
+  type MouseEvent,
   type ReactElement,
   type ReactNode,
   type Ref,
@@ -39,13 +42,9 @@ import { InlineCitation } from "./InlineCitation";
 import { splitMarkdownBlocks } from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
 import { slugify } from "./markdownHeadings";
+import { openInBrowser } from "./openInBrowser";
+import { usesCommandModifier } from "./ShellShortcuts";
 
-/**
- * Keep model-generated navigation deliberately narrow. `react-markdown` does
- * not render raw HTML unless a raw HTML plugin is opted into (we do not), and
- * this allowlist keeps rendered links from opening local files or executable
- * schemes.
- */
 /**
  * Convert single newlines to Markdown hard breaks (two trailing spaces + newline)
  * so a model's intended line breaks render, while double+ newlines stay paragraph
@@ -145,15 +144,114 @@ export function rawCodeText(node: {
     .join("");
 }
 
+/**
+ * Keep model-generated navigation on http(s). `react-markdown` does not render
+ * raw HTML unless a raw HTML plugin is opted into (we do not), and this
+ * allowlist keeps rendered links from opening local files or executable
+ * schemes. Localhost http is allowed so a Storybook or dev-server URL stays a
+ * link.
+ */
 export function safeMarkdownUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
 
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "https:" ? parsed.href : undefined;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return undefined;
+    }
+    if (parsed.username || parsed.password) return undefined;
+    return parsed.href;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Rejoin an autolink the model broke across a line.
+ *
+ * GFM stops an autolink at a newline, and {@link preserveLineBreaks} would
+ * otherwise turn that newline into a hard break. A URL that wrapped after `?`
+ * would then render as dead text. Fenced code is left alone.
+ */
+export function joinWrappedMarkdownUrls(input: string): string {
+  const parts: string[] = [];
+  for (const segment of input.split(/(```[\s\S]*?(?:```|$))/)) {
+    parts.push(
+      segment.startsWith("```") ? segment : joinUrlLineBreaks(segment),
+    );
+  }
+  return parts.join("");
+}
+
+const URL_LINE_WRAP =
+  /(https?:\/\/[^\s]+)\n(?!\n)([/?#&%][^\s]*|[A-Za-z0-9._~%-]+=[^\s]*)/gi;
+
+function joinUrlLineBreaks(input: string): string {
+  let result = input;
+  for (let i = 0; i < 8; i += 1) {
+    const next = result.replace(URL_LINE_WRAP, "$1$2");
+    if (next === result) break;
+    result = next;
+  }
+  return result;
+}
+
+const MarkdownLinkOpenContext = createContext<((url: string) => void) | null>(
+  null,
+);
+
+/** How transcript links open the in-app browser. Absent, they leave the app. */
+export function MarkdownLinkProvider({
+  onOpenInApp,
+  children,
+}: {
+  onOpenInApp?: (url: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <MarkdownLinkOpenContext.Provider value={onOpenInApp ?? null}>
+      {children}
+    </MarkdownLinkOpenContext.Provider>
+  );
+}
+
+function isCommandClick(event: {
+  metaKey: boolean;
+  ctrlKey: boolean;
+}): boolean {
+  return usesCommandModifier(
+    typeof navigator === "undefined" ? "" : navigator.userAgent,
+  )
+    ? event.metaKey
+    : event.ctrlKey;
+}
+
+function MarkdownLink({
+  children,
+  href,
+}: {
+  children?: ReactNode;
+  href?: string;
+}) {
+  const openInApp = useContext(MarkdownLinkOpenContext);
+  const safeHref = safeMarkdownUrl(href);
+  if (!safeHref) return <span>{children}</span>;
+  const url = safeHref;
+
+  function onClick(event: MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    if (isCommandClick(event) || !openInApp) {
+      void openInBrowser(url);
+      return;
+    }
+    openInApp(url);
+  }
+
+  return (
+    <a href={url} rel="noreferrer noopener" onClick={onClick}>
+      {children}
+    </a>
+  );
 }
 
 /**
@@ -218,16 +316,7 @@ const components: Components = {
   h4: ({ children }) => <h4>{children}</h4>,
   h5: ({ children }) => <h5>{children}</h5>,
   h6: ({ children }) => <h6>{children}</h6>,
-  a: ({ children, href }) => {
-    const safeHref = safeMarkdownUrl(href);
-    if (!safeHref) return <span>{children}</span>;
-
-    return (
-      <a href={safeHref} target="_blank" rel="noreferrer noopener">
-        {children}
-      </a>
-    );
-  },
+  a: MarkdownLink,
   // Do not let assistant Markdown initiate unrequested network loads. The alt
   // text remains available as a small, readable indication of omitted media.
   img: ({ alt }) => (
@@ -364,7 +453,9 @@ const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
  * Markdown twice.
  */
 export function processMarkdownContent(input: string): string {
-  return preserveLineBreaks(escapeLatexText(decodeUnicodeEscapes(input)));
+  return preserveLineBreaks(
+    escapeLatexText(decodeUnicodeEscapes(joinWrappedMarkdownUrls(input))),
+  );
 }
 
 /**
@@ -432,6 +523,7 @@ function blockRehypePlugins(
 ): NonNullable<Options["rehypePlugins"]> {
   if (start == null || end == null || end <= start) return rehypePlugins;
   if (decodeUnicodeEscapes(block) !== block) return rehypePlugins;
+  if (joinWrappedMarkdownUrls(block) !== block) return rehypePlugins;
   if (escapeLatexText(block) !== block) return rehypePlugins;
   // A block carrying a citation is left alone too: the mark would split the
   // text the citation is read out of, leaving the two passes to argue over the

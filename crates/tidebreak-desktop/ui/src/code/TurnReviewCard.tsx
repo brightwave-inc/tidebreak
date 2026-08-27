@@ -75,7 +75,7 @@ export function TurnReviewCard({
   onForkFromTurn?: (turnId: string) => void;
 }) {
   const duration = formatTurnDuration(turn.durationMs);
-  const diffstat = turn.diffstat && (
+  const diffstat = turn.diffstat && hasFileChanges(turn.diffstat) && (
     <TurnDiffstat
       stat={turn.diffstat}
       turnId={turn.turnId}
@@ -230,6 +230,11 @@ function TurnActionsMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** A recorded zero-stat is still a diffstat; the seam only shows real changes. */
+function hasFileChanges(stat: Diffstat): boolean {
+  return stat.files > 0 || stat.insertions > 0 || stat.deletions > 0;
 }
 
 /**

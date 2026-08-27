@@ -96,6 +96,18 @@ describe("shell shortcut resolution", () => {
     ).toBe("toggle-code-terminal");
     expect(
       resolveShellShortcut(
+        keyEvent({ key: "t", code: "KeyT" }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("code-new-tab");
+    expect(
+      resolveShellShortcut(
+        keyEvent({ key: "p", code: "KeyP" }),
+        context({ mode: "code" }),
+      )?.id,
+    ).toBe("code-quick-open");
+    expect(
+      resolveShellShortcut(
         keyEvent({ key: "i", code: "KeyI" }),
         context({ mode: "chat" }),
       ),

@@ -595,27 +595,27 @@ it("gives the active inspector tab a selected fill idle tabs do not share", asyn
 
   const files = screen.getByRole("tab", { name: "Files" });
   const source = screen.getByRole("tab", { name: "Source control" });
-  const pr = screen.getByRole("tab", { name: "Pull request" });
 
   expect(files).toHaveAttribute("data-state", "active");
   expect(files).toHaveClass("bg-background");
   expect(source).toHaveAttribute("data-state", "inactive");
-  expect(pr).toHaveAttribute("data-state", "inactive");
   expect(source).not.toHaveClass("bg-background");
-  expect(pr).not.toHaveClass("bg-background");
+  expect(
+    screen.queryByRole("tab", { name: "Pull request" }),
+  ).not.toBeInTheDocument();
 
   await userEvent.setup().click(source);
 
   expect(source).toHaveAttribute("data-state", "active");
   expect(source).toHaveClass("bg-background");
   expect(files).not.toHaveClass("bg-background");
-  expect(pr).not.toHaveClass("bg-background");
 
-  // Radix drives the arrows; this pins that the inspector still gets them.
+  // Radix drives the arrows; with no pull request the strip is Files and
+  // Changes, so right from Changes wraps to Files.
   source.focus();
   await userEvent.setup().keyboard("{ArrowRight}");
-  expect(pr).toHaveAttribute("data-state", "active");
-  expect(pr).toHaveFocus();
+  expect(files).toHaveAttribute("data-state", "active");
+  expect(files).toHaveFocus();
 });
 
 it("shows the changed-file count in the Changes tab", async () => {

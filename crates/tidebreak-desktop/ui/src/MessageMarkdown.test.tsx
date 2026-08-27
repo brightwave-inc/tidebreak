@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { stripCitationDirectives } from "./citationDirectives";
 import {
   decodeUnicodeEscapes,
+  joinWrappedMarkdownUrls,
   MessageMarkdown,
   preserveLineBreaks,
   safeMarkdownUrl,
@@ -50,16 +51,44 @@ describe("citation directives", () => {
 });
 
 describe("safeMarkdownUrl", () => {
-  it("permits only secure external links", () => {
+  it("permits http and https, and rejects executable or local schemes", () => {
     expect(safeMarkdownUrl("https://tidebreak.io/docs")).toBe(
       "https://tidebreak.io/docs",
     );
-    expect(safeMarkdownUrl("http://tidebreak.io")).toBeUndefined();
+    expect(safeMarkdownUrl("http://127.0.0.1:6031/?path=/story/card")).toBe(
+      "http://127.0.0.1:6031/?path=/story/card",
+    );
     expect(safeMarkdownUrl("javascript:alert(1)")).toBeUndefined();
     expect(safeMarkdownUrl("data:text/html,unsafe")).toBeUndefined();
     expect(
       safeMarkdownUrl("file:///Users/example/private.txt"),
     ).toBeUndefined();
+    expect(
+      safeMarkdownUrl("https://user:secret@tidebreak.io/docs"),
+    ).toBeUndefined();
+  });
+});
+
+describe("joinWrappedMarkdownUrls", () => {
+  it("rejoins a URL the model broke after the query marker", () => {
+    expect(
+      joinWrappedMarkdownUrls(
+        "Storybook is still at http://127.0.0.1:6031/?\npath=/story/code-workspace-card--hover-idle-session if you want another look.",
+      ),
+    ).toBe(
+      "Storybook is still at http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session if you want another look.",
+    );
+  });
+
+  it("does not join a URL to the next sentence", () => {
+    expect(
+      joinWrappedMarkdownUrls("See http://127.0.0.1:6031/\nThe hover card."),
+    ).toBe("See http://127.0.0.1:6031/\nThe hover card.");
+  });
+
+  it("leaves fenced code untouched", () => {
+    const fenced = "```\nhttp://127.0.0.1:6031/?\npath=/story/x\n```";
+    expect(joinWrappedMarkdownUrls(fenced)).toBe(fenced);
   });
 });
 

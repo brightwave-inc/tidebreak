@@ -76,9 +76,20 @@ export const CompletedWithRecap: Story = {
   },
 };
 
-/** A turn that changed nothing still says it finished. */
+/** A turn that changed nothing still says it finished, without a zero-stat chip. */
 export const CompletedNoChanges: Story = {
-  args: { turn: boundary({ diffstat: null }) },
+  args: {
+    turn: boundary({
+      diffstat: { files: 0, insertions: 0, deletions: 0, truncated: false },
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("group", { name: "Turn finished" }),
+    ).toBeInTheDocument();
+    await expect(canvas.queryByText("0 files")).not.toBeInTheDocument();
+  },
 };
 
 export const Failed: Story = {

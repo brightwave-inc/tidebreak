@@ -58,6 +58,9 @@ import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
  * draws is the reader's `railPrefs` choice; what each card *says* (the
  * aria-label) never shrinks with those choices.
  *
+ * The "Workspaces" heading is the way back to `/code`, the same home that
+ * greets a machine with nothing on the rail yet.
+ *
  * It also hosts code mode's two dialogs. The rail is on screen for every
  * `/code` route, so mounting them here is what makes them reachable from the
  * keyboard anywhere in the mode without a second instance per page.
@@ -126,9 +129,21 @@ export function CodeSidebar() {
       <CodeModeSwitch />
 
       <div className="flex shrink-0 items-center gap-0.5 px-1 pt-1 pb-1.5">
-        <span className="min-w-0 flex-1 px-2 py-1 text-sm font-medium text-muted-foreground">
+        <button
+          type="button"
+          className={cn(
+            "min-w-0 flex-1 cursor-pointer rounded-md px-2 py-1 text-left text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground",
+            FOCUS_RING,
+            HOVER_TINT,
+          )}
+          aria-current={pathname === "/code" ? "page" : undefined}
+          onClick={() => {
+            if (pathname === "/code") return;
+            void navigate({ to: "/code" });
+          }}
+        >
           Workspaces
-        </span>
+        </button>
         <RailSettingsMenu />
         <button
           type="button"

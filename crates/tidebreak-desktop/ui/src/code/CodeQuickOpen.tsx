@@ -26,9 +26,10 @@ const VISIBLE_RESULTS = 12;
 /**
  * Centered, keyboard-first filename quick open.
  *
- * The chords that reach it — Cmd+T and Cmd+P — are in the shell keymap rather
- * than a listener here, so they appear in the shortcuts dialog and respect the
- * guard that keeps every shell chord out of an open dialog.
+ * The chord that reaches it — Cmd+P — is in the shell keymap rather than a
+ * listener here, so it appears in the shortcuts dialog and respects the guard
+ * that keeps every shell chord out of an open dialog. Cmd+T opens the New tab
+ * menu instead.
  */
 export function CodeQuickOpen({
   client,

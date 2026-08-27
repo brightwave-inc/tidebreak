@@ -20,7 +20,7 @@ type QuickOpenProps = ComponentProps<typeof CodeQuickOpen>;
  * Render the picker with a request counter the test can bump.
  *
  * The chords that reach it live in the shell keymap, so the component's only
- * entry point is this counter — the one the New tab control increments and the
+ * entry point is this counter — the one Open file… increments and the
  * one the keymap raises. `open()` stands in for either.
  */
 function mountQuickOpen(props: Omit<QuickOpenProps, "openRequest">) {

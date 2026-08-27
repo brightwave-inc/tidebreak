@@ -46,6 +46,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import { foregroundBrowserScope } from "./code/browser/foregroundBrowserScope";
 import { seedBrowserSession } from "./code/browser/browserPersistence";
+import { MarkdownLinkProvider } from "./MessageMarkdown";
 
 import { friendlyErrorMessage } from "./lib/utils";
 import {
@@ -689,18 +690,21 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * per chat, seeded with a fresh browser id and a foreground workspace
    * scope the native executor derives identically from the chat id.
    */
-  function openBrowser() {
-    const existingIndex = layout.tabs.findIndex(
-      (tab) => tab.type === "browser",
-    );
-    if (existingIndex !== -1) {
-      openPanel(layout.tabs[existingIndex]);
-      return;
+  function openBrowser(url?: string) {
+    if (!url) {
+      const existingIndex = layout.tabs.findIndex(
+        (tab) => tab.type === "browser",
+      );
+      if (existingIndex !== -1) {
+        openPanel(layout.tabs[existingIndex]);
+        return;
+      }
     }
     const browserId = crypto.randomUUID();
     const session = seedBrowserSession({
       browserId,
       workspaceId: foregroundBrowserScope(chatId),
+      initialUrl: url,
     });
     setBrowserTitles((current) => ({
       ...current,
@@ -1093,14 +1097,20 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         />
         {/* Citations live in the transcript but open into the panel beside it,
             so the way there is provided above both slots. */}
-        <SourceNavProvider value={sourceNav}>
-          <PanelLayout
-            layout={layout}
-            tabLabel={tabLabel}
-            renderChat={renderChat}
-            renderPanel={renderPanel}
-          />
-        </SourceNavProvider>
+        <MarkdownLinkProvider
+          onOpenInApp={
+            hasLocalHostAuthority() ? (url) => openBrowser(url) : undefined
+          }
+        >
+          <SourceNavProvider value={sourceNav}>
+            <PanelLayout
+              layout={layout}
+              tabLabel={tabLabel}
+              renderChat={renderChat}
+              renderPanel={renderPanel}
+            />
+          </SourceNavProvider>
+        </MarkdownLinkProvider>
       </div>
     </RouteFrame>
   );

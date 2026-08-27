@@ -115,11 +115,7 @@ export function CodeInspector({
   onClose?: () => void;
 }) {
   const digest = useWorkspaceDigest(workspaceId);
-  const pr = prResource
-    ? prResource.data === null
-      ? (digest?.pr_state ?? workspace?.pr)
-      : prResource.data.pr
-    : (digest?.pr_state ?? workspace?.pr);
+  const pr = prResource?.data?.pr ?? digest?.pr_state ?? workspace?.pr;
   const scope = useCodeUiStore((state) => state.inspectorScope);
   const setInspectorScope = useCodeUiStore((state) => state.setInspectorScope);
   const filesSearchPending = useCodeUiStore(
@@ -153,6 +149,10 @@ export function CodeInspector({
   useEffect(() => {
     if (filesSearchPending) setTab("files");
   }, [filesSearchPending]);
+
+  useEffect(() => {
+    if (!pr && tab === "pr") setTab("source");
+  }, [pr, tab]);
 
   function openFile(next: string, line?: number) {
     if (onOpenFile) {
@@ -202,23 +202,23 @@ export function CodeInspector({
             >
               <GitBranch className="size-3.5" />
             </InspectorTabTrigger>
-            <InspectorTabTrigger
-              value="pr"
-              label="Pull request"
-              displayLabel="Review"
-              selected={tab === "pr"}
-            >
-              <GitPullRequest
-                className={cn(
-                  "size-3.5",
-                  pr
-                    ? STATUS_MARK[
-                        PULL_REQUEST_LIFECYCLE_TONE[pullRequestLifecycle(pr)]
-                      ]
-                    : undefined,
-                )}
-              />
-            </InspectorTabTrigger>
+            {pr && (
+              <InspectorTabTrigger
+                value="pr"
+                label="Pull request"
+                displayLabel="Review"
+                selected={tab === "pr"}
+              >
+                <GitPullRequest
+                  className={cn(
+                    "size-3.5",
+                    STATUS_MARK[
+                      PULL_REQUEST_LIFECYCLE_TONE[pullRequestLifecycle(pr)]
+                    ],
+                  )}
+                />
+              </InspectorTabTrigger>
+            )}
           </TabsList>
           <div className="ml-auto flex min-w-0 items-center gap-1">
             {scope && (

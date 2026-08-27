@@ -49,3 +49,18 @@ export function stepRailWorkspace(
 ): string | null {
   return stepWorkspaceId(railWorkspaceIds(), current, delta);
 }
+
+/**
+ * The workspace to open after `leftId` leaves the rail, or `null` for `/code`.
+ *
+ * Archiving the open workspace must not leave the reader on a page the rail
+ * no longer draws. The next live card is the replacement; an empty rail falls
+ * through to the code home.
+ */
+export function nextWorkspaceAfterLeaving(
+  ids: readonly string[],
+  leftId: string,
+): string | null {
+  const next = stepWorkspaceId(ids, leftId, 1);
+  return next && next !== leftId ? next : null;
+}

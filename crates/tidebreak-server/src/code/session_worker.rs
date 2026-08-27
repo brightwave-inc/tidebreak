@@ -33,7 +33,7 @@ use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
-    CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
+    CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
     HarnessNoticeLevel, OwnerId, PermissionMode, ToolOutcome,
 };
 use tidebreak_harness::{
@@ -42,9 +42,6 @@ use tidebreak_harness::{
 };
 
 use super::bus::CodeEventBus;
-
-const HIGH_FIRST_CALL_CONTEXT_TOKENS: u64 = 20_000;
-const SHORT_FIRST_TURN_INPUT_CHARS: usize = 2_000;
 
 pub(crate) enum WorkerCommand {
     RunTurn {
@@ -582,26 +579,6 @@ impl HarnessEventSink for LiveSink {
             return;
         }
         let turn_id = *self.turn_id.lock().unwrap();
-        if let (Some(turn_id), HarnessEvent::TurnCompleted { usage }) = (turn_id, &event) {
-            if let Ok(Some(turn)) =
-                tidebreak_core::db::code::get_turn(&self.db, &self.owner, turn_id).await
-            {
-                if let Some(message) = high_first_call_context_warning(&turn, usage) {
-                    let _ = persist_and_publish(
-                        &self.db,
-                        &self.bus,
-                        &self.owner,
-                        self.session_id,
-                        self.spawn_epoch,
-                        CodeEvent::HarnessNotice {
-                            level: HarnessNoticeLevel::Warning,
-                            message,
-                        },
-                    )
-                    .await;
-                }
-            }
-        }
         let Some(code_event) = map_event(event, turn_id) else {
             return;
         };
@@ -697,20 +674,6 @@ impl HarnessEventSink for LiveSink {
             recap.spawn(self.owner.clone(), self.session_id, turn_id);
         }
     }
-}
-
-fn high_first_call_context_warning(turn: &CodeTurn, usage: &CodeUsage) -> Option<String> {
-    let context_tokens = usage.first_call_context_tokens?;
-    let input_chars = turn.user_input.chars().count();
-    if turn.ordinal != 1
-        || input_chars > SHORT_FIRST_TURN_INPUT_CHARS
-        || context_tokens < HIGH_FIRST_CALL_CONTEXT_TOKENS
-    {
-        return None;
-    }
-    Some(format!(
-        "The first model call used {context_tokens} context tokens for a {input_chars}-character first-turn prompt. Check harness startup instructions and injected context for duplication."
-    ))
 }
 
 /// Start the worker for a session.
@@ -2764,47 +2727,6 @@ mod tests {
             CodeSubagentStatus::Failed
         ));
         assert_eq!(failed[0].status, CodeSubagentStatus::Failed);
-    }
-
-    #[test]
-    fn high_first_call_context_warns_only_for_short_first_turns() {
-        let mut turn = CodeTurn {
-            id: CodeTurnId::new(),
-            session_id: CodeSessionId::new(),
-            ordinal: 1,
-            status: CodeTurnStatus::Completed,
-            model: None,
-            fast_mode: false,
-            user_input: "fix the parser".into(),
-            user_input_blob_id: None,
-            attachments: Vec::new(),
-            checkpoint_ref: None,
-            diffstat: None,
-            usage: None,
-            narrative: None,
-            started_at: Utc::now(),
-            ended_at: Some(Utc::now()),
-        };
-        let usage = CodeUsage {
-            first_call_context_tokens: Some(HIGH_FIRST_CALL_CONTEXT_TOKENS),
-            ..CodeUsage::default()
-        };
-
-        assert!(high_first_call_context_warning(&turn, &usage).is_some());
-        turn.ordinal = 2;
-        assert!(high_first_call_context_warning(&turn, &usage).is_none());
-        turn.ordinal = 1;
-        turn.user_input = "x".repeat(SHORT_FIRST_TURN_INPUT_CHARS + 1);
-        assert!(high_first_call_context_warning(&turn, &usage).is_none());
-        turn.user_input = "short".into();
-        assert!(high_first_call_context_warning(
-            &turn,
-            &CodeUsage {
-                first_call_context_tokens: Some(HIGH_FIRST_CALL_CONTEXT_TOKENS - 1),
-                ..CodeUsage::default()
-            }
-        )
-        .is_none());
     }
 
     #[tokio::test]

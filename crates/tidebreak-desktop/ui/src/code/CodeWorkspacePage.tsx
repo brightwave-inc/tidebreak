@@ -65,6 +65,8 @@ import { followScrollBehavior } from "@/ChatScroll";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { ErrorBoundary } from "@/ErrorBoundary";
+import { MarkdownLinkProvider } from "@/MessageMarkdown";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import {
   SHELL_SHORTCUTS,
@@ -317,6 +319,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     (state) => state.setReviewSidebarOpen,
   );
   const quickOpenPending = useCodeUiStore((state) => state.quickOpenPending);
+  const newTabMenuPending = useCodeUiStore((state) => state.newTabMenuPending);
   const openFilePending = useCodeUiStore((state) => state.openFilePending);
   const archivePending = useCodeUiStore((state) => state.archivePending);
   const terminalPending = useCodeUiStore((state) => state.terminalPending);
@@ -387,6 +390,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [reloadToken, setReloadToken] = useState(0);
   const [quickOpenRequest, setQuickOpenRequest] = useState(0);
   const [quickOpenTarget, setQuickOpenTarget] =
+    useState<CodeEditorRegion>("primary");
+  const [newTabMenuRequest, setNewTabMenuRequest] = useState(0);
+  const [newTabMenuRegion, setNewTabMenuRegion] =
     useState<CodeEditorRegion>("primary");
   const [inspectorTabRequest, setInspectorTabRequest] = useState<{
     tab: InspectorTab;
@@ -594,7 +600,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         setWorkspace(next);
         const catalogState = useCodeCatalogStore.getState();
         catalogState.upsertWorkspace(next);
-        setSessions(listed);
+        // Create navigates as soon as the workspace exists, so a session the
+        // dialog just started can land in the catalog before this list does.
+        const remembered = catalogState.sessionsByWorkspace[workspaceId];
+        setSessions(
+          remembered && !listed.some((entry) => entry.id === remembered.id)
+            ? [remembered, ...listed]
+            : listed,
+        );
         setSessionsLoaded(true);
         // The card and the rail show one agent per workspace, so the catalog
         // remembers the first — the one the workspace was started with.
@@ -856,6 +869,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     setQuickOpenRequest((request) => request + 1);
   }
 
+  function showNewTabMenu(region: CodeEditorRegion) {
+    setNewTabMenuRegion(region);
+    setNewTabMenuRequest((request) => request + 1);
+  }
+
   // The shell keymap raises the ask above the route; the workspace is what can
   // answer it. Taking the flag is what stops a remount from reopening the
   // picker over whatever the reader moved on to.
@@ -866,6 +884,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     if (!useCodeUiStore.getState().takeQuickOpen()) return;
     requestNewTab(splitFocused ? "secondary" : "primary");
   }, [quickOpenPending, splitFocused]);
+
+  useEffect(() => {
+    if (!newTabMenuPending) return;
+    if (!useCodeUiStore.getState().takeNewTabMenu()) return;
+    showNewTabMenu(splitFocused ? "secondary" : "primary");
+  }, [newTabMenuPending, splitFocused]);
 
   // The palette ranks worktree files but has nowhere to put one; the tabs live
   // here, so it names a path and this opens it.
@@ -1229,6 +1253,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         }
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("primary")}
+        openMenuRequest={newTabMenuRegion === "primary" ? newTabMenuRequest : 0}
         onNewBrowser={
           canNewBrowser ? () => openBrowser(undefined, "primary") : undefined
         }
@@ -1237,14 +1262,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             openCodeEditor(layout, { type: "diff" }, "primary"),
           )
         }
-        onNewSourceControl={() =>
-          setWorkspaceLayout(
-            openCodeEditor(layout, { type: "source_control" }, "primary"),
-          )
-        }
-        onNewPr={() =>
-          setWorkspaceLayout(openCodeEditor(layout, { type: "pr" }, "primary"))
-        }
+        onNewSourceControl={() => openInspectorTab("source")}
+        onNewPr={pr ? () => openInspectorTab("pr") : undefined}
         onNewTerminal={() => void openTerminal("primary")}
         canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
@@ -1414,6 +1433,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         }
         onCopyPath={copyEditorPath}
         onNewTab={() => requestNewTab("secondary")}
+        openMenuRequest={
+          newTabMenuRegion === "secondary" ? newTabMenuRequest : 0
+        }
         onNewBrowser={
           canNewBrowser ? () => openBrowser(undefined, "secondary") : undefined
         }
@@ -1422,16 +1444,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             openCodeEditor(layout, { type: "diff" }, "secondary"),
           )
         }
-        onNewSourceControl={() =>
-          setWorkspaceLayout(
-            openCodeEditor(layout, { type: "source_control" }, "secondary"),
-          )
-        }
-        onNewPr={() =>
-          setWorkspaceLayout(
-            openCodeEditor(layout, { type: "pr" }, "secondary"),
-          )
-        }
+        onNewSourceControl={() => openInspectorTab("source")}
+        onNewPr={pr ? () => openInspectorTab("pr") : undefined}
         onNewTerminal={() => void openTerminal("secondary")}
         canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
@@ -1511,7 +1525,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
 
   return (
-    <>
+    <MarkdownLinkProvider
+      onOpenInApp={canNewBrowser ? (url) => openBrowser(url) : undefined}
+    >
       {dialogs}
       <CodeQuickOpen
         client={client}
@@ -1612,10 +1628,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         </div>
       ) : reviewSidebarOpen ? (
         <ResizablePanelGroup
-          defaultLayout={inspectorLayout.defaultLayout}
+          defaultLayout={usableInspectorLayout(inspectorLayout.defaultLayout)}
           onLayoutChanged={inspectorLayout.onLayoutChanged}
           orientation="horizontal"
-          className="min-h-0 flex-1"
+          className="h-full min-h-0 flex-1"
         >
           <ResizablePanel
             id="workspace"
@@ -1632,19 +1648,29 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             minSize="22"
             className="min-w-0 bg-page-background"
           >
-            <CodeInspector
-              key={workspaceId}
-              client={client}
-              workspaceId={workspaceId}
-              workspace={workspace}
-              contentRevision={contentRevision}
-              prResource={prResource}
-              requestedTab={inspectorTabRequest}
-              onRequestedTabHandled={handleInspectorTabRequest}
-              onOpenFile={openFile}
-              onOpenDiff={openFileDiff}
-              onClose={() => setReviewSidebarOpen(false)}
-            />
+            <ErrorBoundary
+              resetKey={workspaceId}
+              fallback={
+                <p className="text-muted-foreground p-4 text-sm">
+                  The review sidebar could not load. Git and pull-request
+                  details stay here when they are available.
+                </p>
+              }
+            >
+              <CodeInspector
+                key={workspaceId}
+                client={client}
+                workspaceId={workspaceId}
+                workspace={workspace}
+                contentRevision={contentRevision}
+                prResource={prResource}
+                requestedTab={inspectorTabRequest}
+                onRequestedTabHandled={handleInspectorTabRequest}
+                onOpenFile={openFile}
+                onOpenDiff={openFileDiff}
+                onClose={() => setReviewSidebarOpen(false)}
+              />
+            </ErrorBoundary>
           </ResizablePanel>
         </ResizablePanelGroup>
       ) : (
@@ -1652,7 +1678,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           {workspaceMain}
         </div>
       )}
-    </>
+    </MarkdownLinkProvider>
   );
 }
 
@@ -2697,6 +2723,32 @@ function WatchTaskBar({
       </Button>
     </div>
   );
+}
+
+/**
+ * Ignore a stored inspector split that would collapse the conversation.
+ *
+ * react-resizable-panels v4 remembers `{ [panelId]: percent }`. A leftover
+ * v3 payload, or a drag that parked the workspace pane at zero, would hide
+ * the chat the moment the review sidebar opened.
+ */
+function usableInspectorLayout(
+  layout: Record<string, number> | undefined,
+): Record<string, number> | undefined {
+  if (!layout) return undefined;
+  const workspace = layout.workspace;
+  const inspector = layout.inspector;
+  if (
+    typeof workspace !== "number" ||
+    typeof inspector !== "number" ||
+    !Number.isFinite(workspace) ||
+    !Number.isFinite(inspector) ||
+    workspace < 40 ||
+    inspector < 18
+  ) {
+    return undefined;
+  }
+  return { workspace, inspector };
 }
 
 /**

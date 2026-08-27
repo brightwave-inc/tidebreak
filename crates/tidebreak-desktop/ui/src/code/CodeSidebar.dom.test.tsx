@@ -149,7 +149,9 @@ describe("CodeSidebar", () => {
     // One header over one list: the by-repo group header is a label, and the
     // three actions beside "Workspaces" are the whole toolbar.
     expect(await screen.findByTitle("app")).toBeInTheDocument();
-    expect(screen.getByText("Workspaces")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Workspaces" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Workspace list settings" }),
     ).toBeInTheDocument();
@@ -366,5 +368,18 @@ describe("CodeSidebar", () => {
       });
       expect(router.state.location.search).not.toHaveProperty("task");
     });
+  });
+
+  it("opens the code home from the Workspaces heading", async () => {
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code/w/ws-1" },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Workspaces" }));
+
+    await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
   });
 });

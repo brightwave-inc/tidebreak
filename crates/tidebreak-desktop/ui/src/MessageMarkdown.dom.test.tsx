@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssistantSource } from "./AssistantSources";
 import { MessageCitationsProvider } from "./InlineCitation";
-import { MessageMarkdown } from "./MessageMarkdown";
+import { MarkdownLinkProvider, MessageMarkdown } from "./MessageMarkdown";
 
-afterEach(cleanup);
+const openInBrowser = vi.hoisted(() => vi.fn());
+vi.mock("./openInBrowser", () => ({
+  openInBrowser: (...args: unknown[]) => openInBrowser(...args),
+}));
+
+afterEach(() => {
+  cleanup();
+  openInBrowser.mockReset();
+});
 
 describe("code block copy", () => {
   it("copies the raw source, not the highlighted markup", async () => {
@@ -85,5 +93,52 @@ describe("inline citations", () => {
     expect(screen.queryByRole("button")).toBeNull();
     expect(container).toHaveTextContent("The reef grows slowly.");
     expect(container.textContent).not.toContain("citation_id");
+  });
+});
+
+describe("markdown links", () => {
+  const LOCAL =
+    "Storybook is still at http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session if you want another look.";
+
+  it("keeps a localhost URL as one link after a model line wrap", () => {
+    render(
+      <MessageMarkdown>
+        {
+          "Storybook is still at http://127.0.0.1:6031/?\npath=/story/code-workspace-card--hover-idle-session if you want another look."
+        }
+      </MessageMarkdown>,
+    );
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute(
+      "href",
+      "http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session",
+    );
+    expect(link).toHaveTextContent(
+      "http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session",
+    );
+  });
+
+  it("opens the in-app browser on click, and the system browser on a command click", async () => {
+    const user = userEvent.setup();
+    const onOpenInApp = vi.fn();
+    render(
+      <MarkdownLinkProvider onOpenInApp={onOpenInApp}>
+        <MessageMarkdown>{LOCAL}</MessageMarkdown>
+      </MarkdownLinkProvider>,
+    );
+    const link = screen.getByRole("link");
+    await user.click(link);
+    expect(onOpenInApp).toHaveBeenCalledWith(
+      "http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session",
+    );
+    expect(openInBrowser).not.toHaveBeenCalled();
+
+    onOpenInApp.mockClear();
+    const command = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+    fireEvent.click(link, { metaKey: command, ctrlKey: !command });
+    expect(onOpenInApp).not.toHaveBeenCalled();
+    expect(openInBrowser).toHaveBeenCalledWith(
+      "http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session",
+    );
   });
 });

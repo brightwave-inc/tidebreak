@@ -360,6 +360,36 @@ describe("CodeTranscript", () => {
     expect(within(seam).queryByText(/in \//)).not.toBeInTheDocument();
   });
 
+  it("omits the diffstat when a completed turn changed no files", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "turn_boundary",
+            id: "b-empty",
+            turnId: "t-empty",
+            status: "completed",
+            durationMs: 8_000,
+            usage: USAGE,
+            error: null,
+            diffstat: {
+              files: 0,
+              insertions: 0,
+              deletions: 0,
+              truncated: false,
+            },
+          },
+        ]}
+      />,
+    );
+    const seam = screen.getByRole("group", { name: "Turn finished" });
+    expect(within(seam).getByText("· 8.0s")).toBeInTheDocument();
+    expect(within(seam).queryByText("0 files")).not.toBeInTheDocument();
+    expect(
+      within(seam).queryByLabelText("0 files, 0 additions, 0 deletions"),
+    ).not.toBeInTheDocument();
+  });
+
   /**
    * The seam is the fork point: "Fork from here" must hand the host this
    * boundary's turn id, and the affordance must not render at all for a
