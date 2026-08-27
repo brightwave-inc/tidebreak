@@ -23,6 +23,7 @@ import {
 import { codeWorkspaceIdFromPath, shellShortcutMode } from "./code/routes";
 import { arrangeWorkspaces } from "./code/workspaceCards";
 import { useWorkspaceCardCommands } from "./code/workspaceActions";
+import { tidebreakProductRepo } from "./code/uneffMe";
 import {
   chatNavigationPaletteRows,
   chatPaletteRows,
@@ -70,6 +71,7 @@ export function CommandPaletteDialog() {
 
   const workspaces = useCodeCatalogStore((state) => state.workspaces);
   const repos = useCodeCatalogStore((state) => state.repos);
+  const sessions = useCodeCatalogStore((state) => state.sessionsByWorkspace);
   const digests = useWorkspaceDigests();
   const railPrefs = useCodeUiStore((state) => state.railPrefs);
   const suggestion = useCodeUiStore((state) => state.workflowSuggestion);
@@ -150,14 +152,17 @@ export function CommandPaletteDialog() {
         ? workspaceActionPaletteRows({
             workspace,
             hasPr: Boolean(workspace.pr),
-            hasSession: Boolean(digest),
+            hasSession: Boolean(digest) || Boolean(sessions[workspace.id]),
             attentionPinned: digest?.attention.state.type === "manual",
             quickActions: repo?.quick_actions ?? [],
+            canUneff: Boolean(tidebreakProductRepo(repos)),
             onCommand: (command) =>
               workspaceRunner.run(command.id, {
                 workspace,
                 title: workspace.title,
                 pr: workspace.pr,
+                session: sessions[workspace.id],
+                sessionId: digest?.session,
                 actionName: command.actionName,
               }),
           })
@@ -192,6 +197,7 @@ export function CommandPaletteDialog() {
     workspaceId,
     workspaces,
     repos,
+    sessions,
     digests,
     railPrefs,
     suggestion,

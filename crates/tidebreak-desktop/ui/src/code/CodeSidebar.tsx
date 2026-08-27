@@ -39,6 +39,7 @@ import {
   useWorkspaceCardCommands,
   workspaceCommands,
 } from "./workspaceActions";
+import { tidebreakProductRepo } from "./uneffMe";
 import { WorkspaceCard } from "./WorkspaceCard";
 import {
   arrangeWorkspaces,
@@ -204,6 +205,7 @@ export function CodeSidebar() {
                               sessions[workspace.id]?.attention
                             )?.state.type === "manual",
                           canOpenWorktree,
+                          canUneff: Boolean(tidebreakProductRepo(repos)),
                         })
                   }
                   childSessions={watchChildren(

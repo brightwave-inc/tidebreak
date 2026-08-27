@@ -39,6 +39,7 @@ import {
 } from "./codeWorktreeHost";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { startUneffMeWorkspace } from "./uneffMe";
 
 /**
  * Workspace commands shared by the card context menu and the workspace
@@ -52,6 +53,7 @@ export type WorkspaceCommandId =
   | "open-worktree"
   | "copy-worktree"
   | "copy-debug-json"
+  | "uneff-me"
   | "open-pr"
   | "toggle-terminal"
   | "pin-attention"
@@ -78,8 +80,16 @@ export type WorkspaceCommandContext = {
   title: string;
   pr?: PullRequestDigest;
   session?: CodeSessionSnapshot;
+  /** Session id when the snapshot is not loaded — the palette has a digest. */
+  sessionId?: string;
   actionName?: string;
 };
+
+function contextSessionId(
+  context: WorkspaceCommandContext,
+): string | undefined {
+  return context.session?.id ?? context.sessionId;
+}
 
 export function workspaceCommands(input: {
   hasPr: boolean;
@@ -87,6 +97,8 @@ export function workspaceCommands(input: {
   hasSession?: boolean;
   attentionPinned?: boolean;
   canOpenWorktree?: boolean;
+  /** Tidebreak's own checkout is connected, so a debug dump can become a fix. */
+  canUneff?: boolean;
 }): WorkspaceCommand[] {
   // An archived workspace has no worktree: nothing to open a terminal in,
   // no session to steer. What is left is reading, copying the branch that
@@ -117,6 +129,9 @@ export function workspaceCommands(input: {
         : { id: "pin-attention", label: "Pin attention" },
     );
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
+    if (input.canUneff) {
+      items.push({ id: "uneff-me", label: "Uneff me" });
+    }
   }
   items.push({
     id: "archive",
@@ -144,6 +159,7 @@ export function workspaceHeaderCommands(input: {
   canOpenWorktree?: boolean;
   /** The shown agent has a transcript worth handing to a sibling. */
   canFork?: boolean;
+  canUneff?: boolean;
 }): WorkspaceCommand[] {
   const items: WorkspaceCommand[] = [
     worktreePathCommand(
@@ -161,6 +177,9 @@ export function workspaceHeaderCommands(input: {
       items.push({ id: "fork-agent", label: "Fork this agent" });
     }
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
+    if (input.canUneff) {
+      items.push({ id: "uneff-me", label: "Uneff me" });
+    }
   }
   if (!input.archived) {
     for (const action of input.quickActions) {
@@ -419,6 +438,43 @@ export function useWorkspaceCardCommands(): {
     }
   }
 
+  async function runUneffMe(context: WorkspaceCommandContext) {
+    const sessionId = contextSessionId(context);
+    if (!sessionId) return;
+    if (useCodeUiStore.getState().composerActionScope !== null) {
+      toast.error("Another agent action is already running");
+      return;
+    }
+    const sourceRepo =
+      useCodeCatalogStore
+        .getState()
+        .repos.find((repo) => repo.id === context.workspace.repo_id)
+        ?.display_name ?? context.workspace.repo_id;
+    try {
+      const { workspace, prompt } = await startUneffMeWorkspace({
+        repos: useCodeCatalogStore.getState().repos,
+        sessionId,
+        sourceTitle: context.title,
+        sourceBranch: context.workspace.branch_name,
+        sourceRepo,
+        getDebug: (id) => client.getCodeSessionDebug(id),
+        createWorkspace: (body) => client.createCodeWorkspace(body),
+      });
+      upsertWorkspace(workspace);
+      if (!useCodeUiStore.getState().runComposerPrompt(workspace.id, prompt)) {
+        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+      }
+      await navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: workspace.id },
+      });
+    } catch (error) {
+      toast.error(
+        friendlyErrorMessage(error, "Could not start a Tidebreak fix"),
+      );
+    }
+  }
+
   /**
    * True restore first; when the branch is gone that is impossible, so the
    * fallback offer is a fresh workspace on the same repo. A failed setup
@@ -504,9 +560,10 @@ export function useWorkspaceCardCommands(): {
           .catch(() => toast.error("Could not copy worktree path"));
         return;
       case "copy-debug-json": {
-        if (!context.session) return;
+        const sessionId = contextSessionId(context);
+        if (!sessionId) return;
         void client
-          .getCodeSessionDebug(context.session.id)
+          .getCodeSessionDebug(sessionId)
           .then((bundle) => copyPlainText(JSON.stringify(bundle, null, 2)))
           .then(() =>
             toast.success("Debug JSON copied", {
@@ -519,6 +576,10 @@ export function useWorkspaceCardCommands(): {
               friendlyErrorMessage(error, "Could not copy debug JSON"),
             ),
           );
+        return;
+      }
+      case "uneff-me": {
+        void runUneffMe(context);
         return;
       }
       case "open-pr": {

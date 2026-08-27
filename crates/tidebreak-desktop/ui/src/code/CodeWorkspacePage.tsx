@@ -168,6 +168,7 @@ import {
   useWorkspaceCardCommands,
   workspaceHeaderCommands,
 } from "./workspaceActions";
+import { tidebreakProductRepo } from "./uneffMe";
 import { sessionActivityLabel, isPutAway } from "./workspaceCards";
 import {
   createPermissionModes,
@@ -743,6 +744,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         // A watch child is the harness's own run, not a conversation to
         // continue, so only an interactive agent offers a fork.
         canFork: session?.kind === "interactive",
+        canUneff: Boolean(tidebreakProductRepo(catalog.repos)),
         quickActions: repo?.quick_actions ?? [],
       })
     : [];
