@@ -575,9 +575,12 @@ printf 'TIDEBREAK_WHISPER_BYTES=8\n helper transcript '
         let model = dir.path().join("model.bin");
         std::fs::write(&model, b"model").expect("model");
         let helper = dir.path().join("truncating-whisper-helper");
+        // Drain stdin first. A helper that exits without reading races the
+        // parent's write_all and reports "Could not send audio" instead of
+        // the incomplete-receipt error this test is for.
         std::fs::write(
             &helper,
-            "#!/bin/sh\nprintf 'TIDEBREAK_WHISPER_BYTES=0\\npartial transcript'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf 'TIDEBREAK_WHISPER_BYTES=0\\npartial transcript'\n",
         )
         .expect("helper");
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
