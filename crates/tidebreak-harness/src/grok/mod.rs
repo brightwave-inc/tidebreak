@@ -56,7 +56,10 @@ impl HarnessAdapter for GrokAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "grok").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let version = match host.declared_version(HarnessKind::Grok) {
+                    Some(declared) => Some(declared.to_owned()),
+                    None => observe_version(&capture.binary, &capture.env).await.ok(),
+                };
                 let authenticated = observe_login(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,

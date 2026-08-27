@@ -188,7 +188,10 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "claude").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let version = match host.declared_version(HarnessKind::ClaudeCode) {
+                    Some(declared) => Some(declared.to_owned()),
+                    None => observe_version(&capture.binary, &capture.env).await.ok(),
+                };
                 let authenticated = observe_auth(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,

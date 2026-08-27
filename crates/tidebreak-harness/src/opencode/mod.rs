@@ -47,7 +47,10 @@ impl HarnessAdapter for OpencodeAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "opencode").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary, &capture.env).await.ok();
+                let version = match host.declared_version(HarnessKind::Opencode) {
+                    Some(declared) => Some(declared.to_owned()),
+                    None => observe_version(&capture.binary, &capture.env).await.ok(),
+                };
                 let authenticated = observe_auth(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,
@@ -168,6 +171,40 @@ mod tests {
 
     fn fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/opencode/1.18.18")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_reports_the_declared_version_without_asking_the_binary() {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("opencode");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(&binary)
+            .unwrap();
+        // A binary that fails every invocation: only a skipped `--version`
+        // can produce the declared version below.
+        file.write_all(b"#!/bin/sh\nexit 1\n").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+            declared_binaries: Vec::new(),
+        }
+        .with_declared_binary(tidebreak_core::HarnessKind::Opencode, &binary, "1.19.2");
+        let probe = OpencodeAdapter::new().probe(&host).await;
+        assert!(probe.found);
+        assert_eq!(probe.binary_path.as_deref(), Some(binary.as_path()));
+        assert_eq!(probe.version.as_deref(), Some("1.19.2"));
     }
 
     fn replay(name: &str) -> (Vec<HarnessEvent>, u64) {

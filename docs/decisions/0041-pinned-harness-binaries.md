@@ -82,3 +82,29 @@ managed deployment needs the binary image baked in.
 - A probe with no data directory (tests) still uses the login-shell shim.
 - A marker for the wrong version hides the tree.
 - Claude 2.1.234 reports Ask, Auto, and Allow as supported.
+
+## Amendment (2026-08-27): declared preinstalled binaries
+
+The pinned install exists to control provenance: Tidebreak must know exactly
+which engine version it drives. An embedding environment that already controls
+provenance — a controlled image or an embedded environment that installs the
+engine itself — satisfies the same goal by a different route. Forcing a second
+npm download inside such an environment adds cost without adding certainty.
+
+Two clauses gain a scoped exception:
+
+- **"Tidebreak installs and launches a pinned copy of each harness."** An
+  embedding environment that controls the binary's provenance may instead
+  declare a preinstalled engine: an absolute executable path plus the exact
+  installed version. A declared binary wins over both the pinned install and
+  login-shell resolution. Everywhere else — the desktop, headless profiles on
+  a user machine — the pinned install remains the only path; there is no
+  ambient-`PATH` fallback.
+- **"Capability flags describe the pin."** For a declared binary, the flags
+  describe the declared version. The declaration is an assertion of
+  provenance, so probe trusts the declared version rather than running
+  `--version`.
+
+The exception is a declaration API, not discovery: nothing scans for
+preinstalled engines, and a declared path that is relative or not executable
+is a probe error, not a fall-through.
