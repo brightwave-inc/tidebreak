@@ -1,6 +1,10 @@
 import { create } from "zustand";
 
-import type { HarnessKind, PermissionMode } from "../api/types";
+import type {
+  HarnessKind,
+  PermissionMode,
+  ReasoningEffort,
+} from "../api/types";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import type { StatusTone } from "./statusTone";
 import type { WorkflowShortcut } from "./workspaceWorkflow";
@@ -20,6 +24,15 @@ const HARNESS_KINDS: readonly HarnessKind[] = [
   "codex",
   "opencode",
   "grok",
+];
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
 ];
 
 /**
@@ -48,6 +61,10 @@ export type CodeCreateDefaults = {
   harness?: HarnessKind;
   modelsByHarness: Partial<Record<HarnessKind, string>>;
   permissionMode?: PermissionMode;
+  /** Last honored reasoning effort per engine; omitted when the engine has none. */
+  reasoningEffortByHarness?: Partial<Record<HarnessKind, ReasoningEffort>>;
+  /** Last fast-mode pick per engine; only restored when the model still serves it. */
+  fastModeByHarness?: Partial<Record<HarnessKind, boolean>>;
 };
 
 /** What one successful create adds to the remembered defaults. */
@@ -58,6 +75,10 @@ export type CodeCreateSelection = {
   /** Picks made before the final harness, kept for the next switch back. */
   modelsByHarness?: Partial<Record<HarnessKind, string>>;
   permissionMode?: PermissionMode;
+  reasoningEffort?: ReasoningEffort | null;
+  reasoningEffortByHarness?: Partial<Record<HarnessKind, ReasoningEffort>>;
+  fastMode?: boolean;
+  fastModeByHarness?: Partial<Record<HarnessKind, boolean>>;
 };
 
 /**
@@ -124,11 +145,39 @@ function readStoredCreateDefaults(): CodeCreateDefaults | null {
     ) {
       modelsByHarness[rememberedHarness] = legacyModel;
     }
+    const reasoningEffortByHarness: Partial<
+      Record<HarnessKind, ReasoningEffort>
+    > = {};
+    const storedEfforts = record.reasoningEffortByHarness;
+    if (storedEfforts && typeof storedEfforts === "object") {
+      const effortRecord = storedEfforts as Record<string, unknown>;
+      for (const kind of HARNESS_KINDS) {
+        const effort = effortRecord[kind];
+        if (
+          typeof effort === "string" &&
+          REASONING_EFFORTS.includes(effort as ReasoningEffort)
+        ) {
+          reasoningEffortByHarness[kind] = effort as ReasoningEffort;
+        }
+      }
+    }
+    const fastModeByHarness: Partial<Record<HarnessKind, boolean>> = {};
+    const storedFast = record.fastModeByHarness;
+    if (storedFast && typeof storedFast === "object") {
+      const fastRecord = storedFast as Record<string, unknown>;
+      for (const kind of HARNESS_KINDS) {
+        if (typeof fastRecord[kind] === "boolean") {
+          fastModeByHarness[kind] = fastRecord[kind];
+        }
+      }
+    }
     return {
       repoId: text(record.repoId),
       harness: rememberedHarness,
       modelsByHarness,
       permissionMode: mode(record.permissionMode),
+      reasoningEffortByHarness,
+      fastModeByHarness,
     };
   } catch {
     return null;
@@ -480,18 +529,37 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
       return { railPrefs };
     }),
   rememberCreate: (selection) => {
+    const previous = get().lastCreate;
     const modelsByHarness = {
-      ...get().lastCreate?.modelsByHarness,
+      ...previous?.modelsByHarness,
       ...selection.modelsByHarness,
     };
     if (selection.model) {
       modelsByHarness[selection.harness] = selection.model;
+    }
+    const reasoningEffortByHarness = {
+      ...previous?.reasoningEffortByHarness,
+      ...selection.reasoningEffortByHarness,
+    };
+    if (selection.reasoningEffort) {
+      reasoningEffortByHarness[selection.harness] = selection.reasoningEffort;
+    } else if (selection.reasoningEffort === null) {
+      delete reasoningEffortByHarness[selection.harness];
+    }
+    const fastModeByHarness = {
+      ...previous?.fastModeByHarness,
+      ...selection.fastModeByHarness,
+    };
+    if (selection.fastMode !== undefined) {
+      fastModeByHarness[selection.harness] = selection.fastMode;
     }
     const defaults: CodeCreateDefaults = {
       repoId: selection.repoId,
       harness: selection.harness,
       modelsByHarness,
       permissionMode: selection.permissionMode,
+      reasoningEffortByHarness,
+      fastModeByHarness,
     };
     storeCreateDefaults(defaults);
     set({ lastCreate: defaults });

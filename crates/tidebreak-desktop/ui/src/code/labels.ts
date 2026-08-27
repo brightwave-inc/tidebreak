@@ -360,13 +360,41 @@ export function requiresHarnessModelIds(kind: HarnessKind): boolean {
  * engines keep the gateway catalog when it exists because their adapters
  * accept those ids directly and the catalog carries the entitled display rows.
  */
+/**
+ * Copy engine-owned caps from the harness listing onto gateway display rows.
+ *
+ * Gateway catalog rows never carry `fast_mode` (or a code-engine effort
+ * ladder). The in-workspace picker still fetches the harness listing for
+ * those fields and joins by model id, so a gateway-selected claude-opus-5
+ * can show the fast toggle.
+ */
+function overlayHarnessModelCaps(
+  gateway: readonly CodeModelOption[],
+  native: readonly CodeModelOption[],
+): CodeModelOption[] {
+  if (native.length === 0) return [...gateway];
+  const byId = new Map(native.map((option) => [option.id, option]));
+  return gateway.map((row) => {
+    const listed = byId.get(row.id);
+    if (!listed) return row;
+    return {
+      ...row,
+      ...(listed.reasoning_efforts && listed.reasoning_efforts.length > 0
+        ? { reasoning_efforts: listed.reasoning_efforts }
+        : {}),
+      ...(listed.fast_mode ? { fast_mode: true } : {}),
+    };
+  });
+}
+
 export function preferredCodeModels(
   kind: HarnessKind,
   native: readonly CodeModelOption[],
   gateway: readonly CodeModelOption[],
 ): CodeModelOption[] {
   if (requiresHarnessModelIds(kind) && native.length > 0) return [...native];
-  return gateway.length > 0 ? [...gateway] : [...native];
+  if (gateway.length > 0) return overlayHarnessModelCaps(gateway, native);
+  return [...native];
 }
 
 /** One rail section of the code-mode picker: a vendor and its rows. */

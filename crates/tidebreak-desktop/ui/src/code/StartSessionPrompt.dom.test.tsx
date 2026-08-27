@@ -5,6 +5,7 @@ import {
   createEvent,
   fireEvent,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -166,6 +167,9 @@ describe("StartSessionPrompt", () => {
       "allow",
       "list the files",
       undefined,
+      undefined,
+      null,
+      false,
     );
   });
 
@@ -203,6 +207,9 @@ describe("StartSessionPrompt", () => {
       "plan",
       "list the files",
       undefined,
+      undefined,
+      null,
+      false,
     );
   });
 
@@ -245,6 +252,9 @@ describe("StartSessionPrompt", () => {
       "auto",
       "list the files",
       undefined,
+      undefined,
+      null,
+      false,
     );
   });
 
@@ -293,6 +303,9 @@ describe("StartSessionPrompt", () => {
       "allow",
       "list the files",
       "claude-opus-5",
+      undefined,
+      null,
+      false,
     );
   });
 
@@ -361,6 +374,9 @@ describe("StartSessionPrompt", () => {
       "allow",
       "list the files",
       "model-gateway-model-gateway/grok-4.6",
+      undefined,
+      null,
+      false,
     );
   });
 
@@ -490,5 +506,269 @@ describe("StartSessionPrompt", () => {
     );
     await user.click(screen.getByRole("menuitem", { name: /Ask/ }));
     expect(onSelectMode).toHaveBeenCalledWith("ask");
+  });
+
+  it("offers reasoning effort and fast mode only when the engine and model honor them", async () => {
+    const user = userEvent.setup();
+    const efforts: ReasoningEffort[] = ["low", "medium", "high"];
+    const client = {
+      listCodeHarnessModels: vi.fn((kind: HarnessDoctorEntry["kind"]) =>
+        Promise.resolve(
+          kind === "opencode"
+            ? {
+                kind: "opencode" as const,
+                models: [
+                  {
+                    id: "gpt-5.6-sol",
+                    label: "GPT 5.6 Sol",
+                    default: true,
+                    reasoning_efforts: [],
+                    fast_mode: false,
+                  },
+                ],
+                reasoning_efforts: [],
+                fast_mode: false,
+              }
+            : {
+                kind: "claude_code" as const,
+                models: [
+                  {
+                    id: "claude-opus-5",
+                    label: "Claude Opus 5",
+                    default: true,
+                    reasoning_efforts: [],
+                    fast_mode: true,
+                  },
+                  {
+                    id: "claude-sonnet-5",
+                    label: "Claude Sonnet 5",
+                    default: false,
+                    reasoning_efforts: [],
+                    fast_mode: false,
+                  },
+                ],
+                reasoning_efforts: efforts,
+                fast_mode: true,
+              },
+        ),
+      ),
+    };
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("claude_code", {}), entry("opencode", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={vi.fn()}
+          client={client}
+        />,
+      ),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reasoning: Default" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Fast mode off" }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Model: Claude Opus 5" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: /Claude Sonnet 5/ }));
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Harness" }));
+    await user.click(screen.getByRole("option", { name: /opencode/ }));
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reasoning:/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows fast mode on a gateway catalog row the harness listing marks as fast", async () => {
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "claude_code" as const,
+        models: [
+          {
+            id: "claude-opus-5",
+            label: "Claude Opus 5",
+            default: true,
+            reasoning_efforts: [],
+            fast_mode: true,
+          },
+        ],
+        reasoning_efforts: ["low", "medium", "high"] as ReasoningEffort[],
+        fast_mode: true,
+      })),
+    };
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={vi.fn()}
+          client={client}
+          catalogModels={[
+            {
+              key: "model_gateway::claude-opus-5",
+              id: "claude-opus-5",
+              display_name: "Claude Opus 5",
+              provider: "model_gateway",
+              vendor: "anthropic",
+              available: true,
+            } as never,
+          ]}
+          defaultModelKey="model_gateway::claude-opus-5"
+        />,
+      ),
+    );
+
+    expect(client.listCodeHarnessModels).toHaveBeenCalledWith("claude_code");
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Fast mode off" }),
+    ).toBeInTheDocument();
+  });
+
+  it("posts the chosen reasoning effort and fast mode on start", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const efforts: ReasoningEffort[] = ["low", "medium", "high"];
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "claude_code" as const,
+        models: [
+          {
+            id: "claude-opus-5",
+            label: "Claude Opus 5",
+            default: true,
+            reasoning_efforts: [],
+            fast_mode: true,
+          },
+        ],
+        reasoning_efforts: efforts,
+        fast_mode: true,
+      })),
+    };
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+          client={client}
+        />,
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Reasoning: Default" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "High" }));
+    await user.click(screen.getByRole("switch", { name: "Fast mode off" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "allow",
+      "list the files",
+      "claude-opus-5",
+      undefined,
+      "high",
+      true,
+    );
+  });
+
+  it("restores lastCreate effort and fast mode only when the engine still honors them", async () => {
+    useCodeUiStore.setState({
+      lastCreate: {
+        harness: "opencode",
+        modelsByHarness: { opencode: "gpt-5.6-sol" },
+        reasoningEffortByHarness: { opencode: "high" },
+        fastModeByHarness: { opencode: true },
+      },
+    });
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "opencode" as const,
+        models: [
+          {
+            id: "gpt-5.6-sol",
+            label: "GPT 5.6 Sol",
+            default: true,
+            reasoning_efforts: [],
+            fast_mode: false,
+          },
+        ],
+        reasoning_efforts: [],
+        fast_mode: false,
+      })),
+    };
+    const onStart = vi.fn();
+    const user = userEvent.setup();
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("opencode", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+          client={client}
+        />,
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reasoning:/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /Fast mode/ }),
+    ).not.toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "opencode",
+      "allow",
+      "list the files",
+      "gpt-5.6-sol",
+      undefined,
+      null,
+      false,
+    );
+    await waitFor(() => expect(onStart).toHaveBeenCalled());
   });
 });

@@ -619,6 +619,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     message: string,
     model?: string,
     draft = message,
+    reasoningEffort?: ReasoningEffort | null,
+    fastMode = false,
   ) {
     const request = startRequestRef.current + 1;
     startRequestRef.current = request;
@@ -650,6 +652,8 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           harness,
           permission_mode: permissionMode,
           model: posted,
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+          ...(fastMode ? { fast_mode: true } : {}),
         });
       } catch (err) {
         if (isCurrent()) {
@@ -1305,8 +1309,24 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   client={client}
                   catalogModels={models}
                   defaultModelKey={defaultModelKey}
-                  onStart={(harness, mode, message, model, draft) =>
-                    startSession(harness, mode, message, model, draft)
+                  onStart={(
+                    harness,
+                    mode,
+                    message,
+                    model,
+                    draft,
+                    reasoningEffort,
+                    fastMode,
+                  ) =>
+                    startSession(
+                      harness,
+                      mode,
+                      message,
+                      model,
+                      draft,
+                      reasoningEffort,
+                      fastMode,
+                    )
                   }
                   workspaceFiles={
                     forkSource

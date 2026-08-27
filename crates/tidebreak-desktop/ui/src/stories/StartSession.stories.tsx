@@ -18,8 +18,10 @@ import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 
 /**
  * The session-start surface: harness picker, caps-driven permission modes,
- * and the first message. Mode lists must follow each engine's declared
- * capabilities — Grok's honest refusals leave it Auto-only.
+ * reasoning effort, fast mode, and the first message. Mode lists follow each
+ * engine's declared capabilities — Grok's honest refusals leave it Auto-only.
+ * Effort chrome appears only when the engine lists a ladder; fast mode only
+ * when the selected model serves it.
  */
 const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
   claude_code: [
@@ -28,7 +30,7 @@ const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
       label: "Claude Fable 5",
       default: true,
       reasoning_efforts: [],
-      fast_mode: false,
+      fast_mode: true,
     },
   ],
   codex: [
@@ -36,8 +38,8 @@ const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
       id: "gpt-5.6",
       label: "GPT 5.6",
       default: true,
-      reasoning_efforts: [],
-      fast_mode: false,
+      reasoning_efforts: ["low", "medium", "high"],
+      fast_mode: true,
     },
   ],
   opencode: [
@@ -54,17 +56,27 @@ const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
       id: "grok-4.6",
       label: "Grok 4.6",
       default: true,
-      reasoning_efforts: [],
+      reasoning_efforts: ["low", "medium", "high", "xhigh"],
       fast_mode: false,
     },
   ],
+};
+
+const ENGINE_EFFORTS: Partial<
+  Record<HarnessKind, ParsedHarnessModel["reasoning_efforts"]>
+> = {
+  claude_code: ["low", "medium", "high"],
+  codex: ["low", "medium", "high"],
+  grok: ["low", "medium", "high", "xhigh"],
+  opencode: [],
 };
 
 const client = {
   listCodeHarnessModels: async (kind: HarnessKind) => ({
     kind,
     models: models[kind] ?? [],
-    reasoning_efforts: [],
+    reasoning_efforts: ENGINE_EFFORTS[kind] ?? [],
+    fast_mode: kind === "claude_code" || kind === "codex",
   }),
 };
 
