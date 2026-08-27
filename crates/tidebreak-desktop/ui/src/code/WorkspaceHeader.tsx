@@ -29,6 +29,7 @@ export function WorkspaceHeader({
   sessionStatus,
   terminalOpen,
   reviewOpen,
+  reviewUnavailableReason,
   terminalShortcut,
   reviewShortcut,
   onToggleTerminal,
@@ -47,6 +48,8 @@ export function WorkspaceHeader({
   sessionStatus?: ReactNode;
   terminalOpen: boolean;
   reviewOpen: boolean;
+  /** Why the review sidebar cannot open here, when it cannot. */
+  reviewUnavailableReason?: string;
   terminalShortcut?: string;
   reviewShortcut?: string;
   onToggleTerminal: () => void;
@@ -130,19 +133,22 @@ export function WorkspaceHeader({
         </WithTooltip>
         <WithTooltip
           label={
-            reviewOpen
-              ? `Hide review sidebar${shortcutSuffix(reviewShortcut)}`
-              : `Review sidebar${shortcutSuffix(reviewShortcut)}`
+            reviewUnavailableReason
+              ? reviewUnavailableReason
+              : reviewOpen
+                ? `Hide review sidebar${shortcutSuffix(reviewShortcut)}`
+                : `Review sidebar${shortcutSuffix(reviewShortcut)}`
           }
         >
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="rounded-lg"
+            className="rounded-lg aria-disabled:cursor-default aria-disabled:opacity-50"
             aria-pressed={reviewOpen}
             aria-label="Review sidebar"
-            onClick={onToggleReview}
+            aria-disabled={reviewUnavailableReason ? true : undefined}
+            onClick={reviewUnavailableReason ? undefined : onToggleReview}
           >
             {reviewOpen ? <PanelRightClose /> : <PanelRight />}
           </Button>

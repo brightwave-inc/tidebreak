@@ -10,6 +10,35 @@ export const MIN_WORKSPACE_SIZE = 58;
 export const MIN_INSPECTOR_SIZE = 22;
 export const MAX_INSPECTOR_SIZE = 42;
 
+/**
+ * The narrowest workspace column that still carries its own furniture: the
+ * center tab strip with Source control and Pull request on it, the journal,
+ * and the composer with a readable model pill.
+ */
+export const MIN_WORKSPACE_WIDTH_PX = 480;
+
+/**
+ * The narrowest pane worth splitting at all.
+ *
+ * The bounds above are percentages, so a narrow window shrinks both panels
+ * together and no drag can win the workspace its floor back. Below this the
+ * inspector stands down and the workspace takes the whole pane; Source
+ * control and Pull request stay reachable as center tabs.
+ */
+export const MIN_INSPECTOR_PANE_WIDTH_PX = Math.ceil(
+  (MIN_WORKSPACE_WIDTH_PX * 100) / MIN_WORKSPACE_SIZE,
+);
+
+/**
+ * Whether a pane of this width can carry the split.
+ *
+ * An unmeasured pane counts as roomy, so the first paint on a wide window
+ * never flashes the inspector away before the observer reports.
+ */
+export function fitsInspectorSplit(paneWidth: number | null): boolean {
+  return paneWidth === null || paneWidth >= MIN_INSPECTOR_PANE_WIDTH_PX;
+}
+
 export type InspectorLayout = {
   workspace: number;
   inspector: number;

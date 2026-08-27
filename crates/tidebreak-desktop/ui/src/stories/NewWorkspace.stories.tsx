@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -267,6 +267,13 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+/** One CSS rem, which the interface zoom moves. Sizes below scale with it. */
+function rem(element: HTMLElement): number {
+  return Number.parseFloat(
+    getComputedStyle(element.ownerDocument.documentElement).fontSize,
+  );
+}
+
 /**
  * Sticky defaults answered, message focused, one Enter from a running task.
  * Every pill has a chord: Cmd+N repo, Alt+E engine, Alt+M model, Alt+P
@@ -277,9 +284,13 @@ export const Default: Story = {
     const page = within(canvasElement.ownerDocument.body);
     const dialog = await page.findByRole("dialog");
     const prompt = page.getByRole("textbox", { name: "First message" });
+    const unit = rem(dialog);
     await expect(dialog).toBeVisible();
-    expect(dialog.getBoundingClientRect().width).toBeGreaterThan(800);
-    expect(prompt.getBoundingClientRect().height).toBeGreaterThanOrEqual(200);
+    // `max-w-4xl` on the dialog and `sm:min-h-52` on the prompt, in pixels.
+    expect(dialog.getBoundingClientRect().width).toBeCloseTo(56 * unit, 0);
+    expect(prompt.getBoundingClientRect().height).toBeGreaterThanOrEqual(
+      13 * unit,
+    );
   },
 };
 
@@ -289,8 +300,56 @@ export const MinimumWindow: Story = {
   play: async ({ canvasElement }) => {
     const page = within(canvasElement.ownerDocument.body);
     const dialog = await page.findByRole("dialog");
-    await expect(page.getByRole("button", { name: /Create/ })).toBeVisible();
+    const create = page.getByRole("button", { name: /Create/ });
+    await expect(create).toBeVisible();
     expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth);
+    // The wrapped footer is the row a short window used to cut off.
+    expect(dialog.scrollHeight).toBeLessThanOrEqual(dialog.clientHeight);
+    expect(create.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      dialog.getBoundingClientRect().bottom,
+    );
+  },
+};
+
+/** Picking the repo is the one setting above the message, and it has a chord. */
+export const RepoPicker: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
+    const menu = await page.findByRole("menu");
+    await expect(within(menu).getByText("toronto")).toBeVisible();
+    await expect(menu.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      window.innerHeight,
+    );
+  },
+};
+
+/** The model list belongs to the engine, so it opens upward from the footer. */
+export const ModelPicker: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await page.findByRole("button", { name: /Claude Opus 5/ }),
+    );
+    const menu = await page.findByRole("menu");
+    await expect(within(menu).getByText("Claude Sonnet 5")).toBeVisible();
+    await expect(menu.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+  },
+};
+
+/** The base ref is a free-text field, not a branch list: tags and commits count. */
+export const BaseRefPicker: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await page.findByRole("button", { name: "Base ref" }),
+    );
+    await expect(
+      await page.findByRole("textbox", { name: "Base ref" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("The branch, tag, or commit the worktree is cut from."),
+    ).toBeVisible();
   },
 };
 
@@ -300,6 +359,15 @@ export const MinimumWindow: Story = {
  */
 export const EnginesNeedSetup: Story = {
   args: { doctor: harnessDoctorDegraded },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      await page.findByRole("button", { name: /^Harness:/ }),
+    );
+    const menu = await page.findByRole("menu");
+    await expect(within(menu).getByText("Coding harnesses…")).toBeVisible();
+    await expect(menu.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+  },
 };
 
 /**

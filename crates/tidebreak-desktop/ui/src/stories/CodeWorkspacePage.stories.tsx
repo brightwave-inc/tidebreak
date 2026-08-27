@@ -32,8 +32,11 @@ import {
 } from "@/code/CodeUpdatesStore";
 import { CodeWorkspacePage } from "@/code/CodeWorkspacePage";
 import {
+  DEFAULT_INSPECTOR_LAYOUT,
   INSPECTOR_LAYOUT_STORAGE_ID,
   INSPECTOR_PANEL_IDS,
+  MAX_INSPECTOR_SIZE,
+  MIN_WORKSPACE_WIDTH_PX,
 } from "@/code/inspectorLayout";
 import type { LayoutState } from "@/panel/panelTypes";
 import {
@@ -1041,9 +1044,52 @@ export const SettingsPending: Story = {
   },
 };
 
+/**
+ * The center tab strip survives the split: it is on screen, and every tab on
+ * it is reachable without scrolling sideways.
+ *
+ * Scrolled-out tabs are how the workspace used to lose Source control and
+ * Pull request whenever the inspector opened.
+ */
+async function expectCenterTabsReachable(canvasElement: HTMLElement) {
+  const canvas = within(canvasElement);
+  await expect(
+    await canvas.findByRole("tab", { name: "Main agent" }),
+  ).toBeVisible();
+  const strip = canvasElement.querySelector<HTMLElement>(
+    ".workspace-pane-tabs",
+  );
+  await expect(strip).toBeVisible();
+  expect(strip?.scrollWidth ?? 0).toBeLessThanOrEqual(
+    (strip?.clientWidth ?? 0) + 1,
+  );
+}
+
+/** The journal and the composer keep a workable column beside the inspector. */
+async function expectConversationIntact(canvasElement: HTMLElement) {
+  const canvas = within(canvasElement);
+  const journal = canvasElement.querySelector<HTMLElement>(".chat-pane");
+  await expect(journal).toBeVisible();
+  await expect(
+    await canvas.findByRole("textbox", { name: "Message" }),
+  ).toBeVisible();
+  expect(journal?.getBoundingClientRect().width ?? 0).toBeGreaterThanOrEqual(
+    MIN_WORKSPACE_WIDTH_PX,
+  );
+}
+
+/** The inspector's share of the pane, as a percentage. */
+function inspectorShare(canvasElement: HTMLElement): number {
+  const canvas = within(canvasElement);
+  const workspace = canvas.getByTestId("workspace").getBoundingClientRect();
+  const inspector = canvas.getByTestId("inspector").getBoundingClientRect();
+  return (inspector.width / (workspace.width + inspector.width)) * 100;
+}
+
 /** Review is an optional working pane, not a replacement for the conversation. */
 export const ConversationWithReview: Story = {
   args: { reviewOpen: true },
+  globals: { viewport: { value: "desktop", isRotated: false } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(
@@ -1061,6 +1107,31 @@ export const ConversationWithReview: Story = {
     expect(workspacePanel.getBoundingClientRect().width).toBeGreaterThan(
       inspectorPanel.getBoundingClientRect().width,
     );
+    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
+      MAX_INSPECTOR_SIZE,
+    );
+    await expectCenterTabsReachable(canvasElement);
+    await expectConversationIntact(canvasElement);
+  },
+};
+
+/** A saved split inside the bounds comes back exactly as the reader left it. */
+export const RestoredInspectorSplit: Story = {
+  args: {
+    reviewOpen: true,
+    storedInspectorLayout: { workspace: 60, inspector: 40 },
+  },
+  globals: { viewport: { value: "desktop", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    await expect(
+      await within(canvasElement).findByTestId("inspector"),
+    ).toBeVisible();
+    expect(inspectorShare(canvasElement)).toBeCloseTo(40, 0);
+    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
+      MAX_INSPECTOR_SIZE,
+    );
+    await expectCenterTabsReachable(canvasElement);
+    await expectConversationIntact(canvasElement);
   },
 };
 
@@ -1070,6 +1141,7 @@ export const InvalidStoredInspectorLayout: Story = {
     reviewOpen: true,
     storedInspectorLayout: { workspace: 0, inspector: 100 },
   },
+  globals: { viewport: { value: "desktop", isRotated: false } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const workspacePanel = await canvas.findByTestId("workspace");
@@ -1080,6 +1152,13 @@ export const InvalidStoredInspectorLayout: Story = {
     expect(workspacePanel.getBoundingClientRect().width).toBeGreaterThan(
       inspectorPanel.getBoundingClientRect().width,
     );
+    // The rejected payload falls back to the shipped split, not to a clamp.
+    expect(inspectorShare(canvasElement)).toBeCloseTo(
+      DEFAULT_INSPECTOR_LAYOUT.inspector,
+      0,
+    );
+    await expectCenterTabsReachable(canvasElement);
+    await expectConversationIntact(canvasElement);
   },
 };
 
@@ -1095,6 +1174,30 @@ export const SourceControlTab: Story = {
   },
 };
 
+/** Source control and the inspector are two views of the same work, side by side. */
+export const SourceControlTabWithReview: Story = {
+  args: {
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "source_control" }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: true,
+  },
+  globals: { viewport: { value: "desktop", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("tab", { name: "Source control" }),
+    ).toBeVisible();
+    await expect(await canvas.findByTestId("inspector")).toBeVisible();
+    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
+      MAX_INSPECTOR_SIZE,
+    );
+    await expectCenterTabsReachable(canvasElement);
+  },
+};
+
 /** Pull-request status and comments remain a peer center tab. */
 export const PullRequestTab: Story = {
   args: {
@@ -1104,6 +1207,61 @@ export const PullRequestTab: Story = {
       fullscreen: false,
     }),
     reviewOpen: false,
+  },
+};
+
+/** The pull-request tab and the inspector coexist; neither crowds the strip. */
+export const PullRequestTabWithReview: Story = {
+  args: {
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "pr" }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: true,
+  },
+  globals: { viewport: { value: "desktop", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("tab", { name: "Pull request" }),
+    ).toBeVisible();
+    await expect(await canvas.findByTestId("inspector")).toBeVisible();
+    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
+      MAX_INSPECTOR_SIZE,
+    );
+    await expectCenterTabsReachable(canvasElement);
+  },
+};
+
+/**
+ * Too narrow to split: the inspector stands down rather than squeezing the
+ * journal, and the header control says why. Source control and Pull request
+ * stay reachable as center tabs.
+ */
+export const MinimumWindowWithReview: Story = {
+  args: { reviewOpen: true },
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("tab", { name: "Main agent" }),
+    ).toBeVisible();
+    await expect(canvas.queryByTestId("inspector")).toBeNull();
+    await expect(
+      canvas.getByRole("button", { name: "Review sidebar" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    const journal = canvasElement.querySelector<HTMLElement>(".chat-pane");
+    const pane = canvas.getByTestId("workspace-pane");
+    await expect(journal).toBeVisible();
+    await expect(
+      await canvas.findByRole("textbox", { name: "Message" }),
+    ).toBeVisible();
+    // The journal takes the whole pane, not a fraction of it.
+    expect(journal?.getBoundingClientRect().width ?? 0).toBeGreaterThan(
+      pane.getBoundingClientRect().width - 16,
+    );
+    await expectCenterTabsReachable(canvasElement);
   },
 };
 
