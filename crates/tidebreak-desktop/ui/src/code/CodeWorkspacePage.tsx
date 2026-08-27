@@ -141,6 +141,7 @@ import { CodeQuickOpen } from "./CodeQuickOpen";
 import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
 import {
   acquireCodeSessionFromClient,
+  noteCodeSessionWorktreeChanged,
   releaseCodeSession,
 } from "./CodeSessionRegistry";
 import { submitAcceptedTurn } from "./CodeSessionSend";
@@ -1043,18 +1044,28 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
    *
    * The seam already confirmed with the reader; this is the call. Files only:
    * the branch and `HEAD` stay where they are, and the server snapshots the
-   * worktree into a hidden ref first, so the work this discards is still in
-   * the object database.
+   * worktree into a hidden ref first, so the work this replaces is still in
+   * the object database — the toast names the ref so the reader can reach it.
+   *
+   * The refresh does not wait for the journal. A restore answers over HTTP
+   * and journals separately, and a journal row that fails to land is
+   * deliberately not fatal, so the worktree-derived views are told here too.
+   * The `checkpoint_restored` frame bumps the same revision when it arrives;
+   * the refresh is debounced, so both together cost one reload.
    */
-  async function restoreToTurn(turnId: string) {
+  async function restoreToTurn(sessionId: string, turnId: string) {
     try {
       const restored = await client.restoreCodeWorkspaceCheckpoint(
         workspaceId,
         turnId,
       );
+      noteCodeSessionWorktreeChanged(sessionId);
       const files = restored.stat.files;
       toast.success(
         `Restored ${files} file${files === 1 ? "" : "s"} to this turn`,
+        {
+          description: `What the worktree held is saved at ${restored.safety_ref}`,
+        },
       );
     } catch (err) {
       toast.error(friendlyErrorMessage(err, "Could not restore the files"));
@@ -1444,7 +1455,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                       ? (turnId) => void forkConversation(session.id, turnId)
                       : undefined
                   }
-                  onRestoreToTurn={(turnId) => void restoreToTurn(turnId)}
+                  onRestoreToTurn={(turnId) =>
+                    void restoreToTurn(session.id, turnId)
+                  }
                   subagentCallId={subagentParam}
                   subagentSummary={digest?.subagents?.find(
                     (entry) => entry.call_id === subagentParam,

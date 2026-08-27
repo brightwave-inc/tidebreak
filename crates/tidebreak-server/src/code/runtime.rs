@@ -282,6 +282,8 @@ pub(crate) struct WorkspaceMergeOutcome {
 /// What a restore put back, for the reader who asked for it.
 pub(crate) struct RestoredWorkspaceCheckpoint {
     pub turn_id: CodeTurnId,
+    /// Hidden ref holding the worktree the restore replaced.
+    pub safety_ref: String,
     pub diffstat: Diffstat,
 }
 
@@ -3130,6 +3132,7 @@ impl CodeRuntime {
         }
         Ok(RestoredWorkspaceCheckpoint {
             turn_id,
+            safety_ref: restored.safety_ref,
             diffstat: restored.diffstat,
         })
     }

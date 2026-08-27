@@ -745,6 +745,21 @@ export function hydrateCodeTurns(
   return reconcilePendingCodeTurns(state, turns);
 }
 
+/**
+ * Something outside the journal rewrote the worktree.
+ *
+ * A restore answers over HTTP and journals separately, and the journal row is
+ * allowed to fail without failing the restore. The views that watch
+ * `contentRevision` must not depend on a row that may never arrive, so the
+ * caller bumps it from the success itself. Applying both is harmless: the
+ * refresh is debounced and idempotent.
+ */
+export function noteCodeWorktreeChanged(
+  state: CodeSessionState,
+): CodeSessionState {
+  return { ...state, contentRevision: state.contentRevision + 1 };
+}
+
 export function reduceCodeSessionEvent(
   state: CodeSessionState,
   framed: SequencedCodeEventFrame,
@@ -1028,6 +1043,20 @@ export function reduceCodeSessionEvent(
           items: applyDiffstat(state.items, event.turn_id, event.diffstat),
           contentRevision: state.contentRevision + 1,
         },
+        effects,
+      };
+    }
+
+    /**
+     * A restore rewrote the worktree, so every worktree-derived view is stale.
+     *
+     * The seam's diffstat is left alone on purpose: it says what that turn
+     * changed, which the restore did not alter. Only the revision moves, and
+     * that is what git status, the file list, and the diff watch.
+     */
+    case "checkpoint_restored": {
+      return {
+        state: { ...state, contentRevision: state.contentRevision + 1 },
         effects,
       };
     }

@@ -430,6 +430,9 @@ describe("CodeTranscript", () => {
 
     const description = await screen.findByText(/Ignored files/);
     expect(description).toHaveTextContent("HEAD stays where it is");
+    // The server snapshots first, so the copy must not tell the reader their
+    // work is gone.
+    expect(description).toHaveTextContent("stays recoverable from git");
     expect(onRestoreToTurn).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Restore files" }));

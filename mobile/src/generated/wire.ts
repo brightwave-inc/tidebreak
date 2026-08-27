@@ -955,6 +955,14 @@ export type CodeCheckpointRestore = {
  */
 turn_id: CodeTurnId, 
 /**
+ * Hidden ref holding the worktree the restore replaced.
+ *
+ * Nothing is lost by a restore: this ref is a full snapshot of what the
+ * worktree held a moment before, so the desktop can name it and the
+ * reader can recover from it with git.
+ */
+safety_ref: string, 
+/**
  * Bounded diffstat of what the restore changed.
  */
 stat: Diffstat, };

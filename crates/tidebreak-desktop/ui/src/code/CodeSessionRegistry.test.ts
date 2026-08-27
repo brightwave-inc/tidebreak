@@ -4,6 +4,7 @@ import {
   acquireCodeSession,
   acquireCodeSessionFromClient,
   MAX_RETAINED_CODE_SESSIONS,
+  noteCodeSessionWorktreeChanged,
   peekCodeSession,
   releaseCodeSession,
   resetCodeSessionRegistry,
@@ -1075,5 +1076,26 @@ describe("CodeSessionRegistry", () => {
     expect(store.getState().assistantBuffer).toBe("oldlive");
     expect(listener).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  /**
+   * A checkpoint restore answers over HTTP and journals separately, and the
+   * journal row is allowed to fail without failing the restore. The
+   * worktree-derived views must not wait on a row that may never arrive.
+   */
+  it("bumps a mounted session's content revision from outside the journal", () => {
+    const openSocket = (
+      after: number,
+      onFrame: (frame: SequencedCodeEventFrame) => void,
+    ) => new FakeSocket(after, onFrame) as unknown as WebSocket;
+    const store = acquireCodeSession("s1", openSocket);
+    const before = store.getState().contentRevision;
+
+    noteCodeSessionWorktreeChanged("s1");
+
+    expect(store.getState().contentRevision).toBe(before + 1);
+    // A session nobody holds refreshes on its next mount, so this is a no-op
+    // rather than a throw.
+    expect(() => noteCodeSessionWorktreeChanged("not-mounted")).not.toThrow();
   });
 });

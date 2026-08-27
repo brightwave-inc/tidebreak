@@ -2088,6 +2088,51 @@ describe("file_changed", () => {
     });
     expect(state.contentRevision).toBe(3);
   });
+
+  /**
+   * A restore rewrites the worktree, so git status, the file list, and the
+   * diff are all stale the moment it lands. `contentRevision` is the only
+   * signal those views watch: without this the frame falls through the
+   * reducer's default branch and every one of them keeps the pre-restore
+   * tree until some later checkpoint happens to bump it.
+   */
+  it("bumps contentRevision when a checkpoint is restored", () => {
+    const before = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "turn_completed", usage: NO_USAGE },
+      {
+        type: "checkpoint_recorded",
+        turn_id: "t1",
+        diffstat: { files: 4, insertions: 40, deletions: 2, truncated: false },
+      },
+    ]);
+
+    const after = play(
+      [
+        {
+          type: "checkpoint_restored",
+          turn_id: "t1",
+          diffstat: {
+            files: 4,
+            insertions: 2,
+            deletions: 40,
+            truncated: false,
+          },
+        },
+      ],
+      before.state,
+    );
+
+    expect(after.state.contentRevision).toBe(before.state.contentRevision + 1);
+    // The seam says what the turn changed, not what undoing it changed.
+    expect(
+      after.state.items.find((item) => item.kind === "turn_boundary"),
+    ).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      diffstat: { files: 4, insertions: 40, deletions: 2, truncated: false },
+    });
+  });
 });
 
 describe("unattributed terminals", () => {

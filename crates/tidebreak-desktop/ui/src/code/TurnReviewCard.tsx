@@ -228,7 +228,7 @@ function TurnActionsMenu({
     const ok = await confirm({
       title: "Restore the files to this point?",
       description:
-        "Every file goes back to how this turn left it, and anything written since is lost. Ignored files — build output, .env — are untouched, and nothing moves the branch: this changes files only, and HEAD stays where it is.",
+        "Every file goes back to how this turn left it. Anything written since is snapshotted first, so it stays recoverable from git — the restore names the snapshot when it finishes. Ignored files — build output, .env — are untouched, and nothing moves the branch: this changes files only, and HEAD stays where it is.",
       confirmLabel: "Restore files",
       destructive: true,
     });

@@ -9,6 +9,7 @@ import {
 import {
   applyCodeTurnSnapshot,
   hydrateCodeTurns,
+  noteCodeWorktreeChanged,
   reconcilePendingCodeTurns,
   type CodeSessionDeps,
 } from "./CodeSessionReducer";
@@ -231,6 +232,18 @@ export function peekCodeSession(
   sessionId: string,
 ): CodeSessionEntry | undefined {
   return registry.get(sessionId);
+}
+
+/**
+ * Tell a mounted session that the worktree moved under it.
+ *
+ * For a change that arrives over HTTP rather than through the journal — a
+ * checkpoint restore — so the worktree-derived views refresh even when the
+ * journal row does not land. A session nobody is holding refreshes on its
+ * next mount, so an absent entry is not an error.
+ */
+export function noteCodeSessionWorktreeChanged(sessionId: string): void {
+  registry.get(sessionId)?.store.getState().update(noteCodeWorktreeChanged);
 }
 
 /** Test-only: drop every live entry without waiting for unmounts. */

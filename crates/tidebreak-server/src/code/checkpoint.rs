@@ -437,9 +437,10 @@ pub(crate) async fn record_checkpoint(
 /// moves. Ignored files are untouched: a checkpoint tree is built by `add -A`,
 /// which never sees them, so they are in neither side of the transition.
 ///
-/// The worktree as it stands is snapshotted into a hidden safety ref before
-/// anything is written, so a restore the reader did not mean is recoverable
-/// from the object database rather than gone.
+/// Nothing is destroyed on a failure. The worktree as it stands is snapshotted
+/// into a hidden safety ref before anything is written, the checkpoint's tree
+/// is applied before any file is deleted, and the returned ref names the
+/// snapshot so the reader can be told where their work went.
 pub(crate) async fn restore_checkpoint(
     worktree: &Path,
     workspace_id: WorkspaceId,
@@ -462,14 +463,21 @@ pub(crate) async fn restore_checkpoint(
     )
     .await?;
 
-    // `read-tree -u` writes every path the checkpoint holds but knows nothing
-    // about the ones it does not, because the private index it transitions
-    // from starts empty. Files created since the checkpoint are therefore this
-    // function's own work.
-    for path in removed_by_restore(worktree, &before, &target).await? {
+    // The removal set is read off the two trees before either is touched, so
+    // it describes the worktree the reader asked about rather than a
+    // half-applied one.
+    let removed = removed_by_restore(worktree, &before, &target).await?;
+
+    // Apply first, delete second. `read-tree -u` writes every path the
+    // checkpoint holds but knows nothing about the ones it does not, because
+    // the private index it transitions from starts empty — so files created
+    // since the checkpoint are this function's own work. Doing that work
+    // after the apply means a failed apply has destroyed nothing: everything
+    // the reader had is still on disk, and the safety ref covers the rest.
+    apply_tree(worktree, &target).await?;
+    for path in removed {
         remove_restored_path(worktree, &path).await?;
     }
-    apply_tree(worktree, &target).await?;
 
     let changed = collect_changes(worktree, &before, &target, DiffBounds::default()).await?;
     Ok(RestoredCheckpoint {
@@ -3329,6 +3337,105 @@ mod tests {
                 .contains(&restored.safety_ref),
             "the safety ref must be reapable with the workspace's other refs"
         );
+    }
+
+    /// A restore that cannot finish must not have destroyed anything.
+    ///
+    /// The apply runs before any delete, so a checkpoint tree Git refuses to
+    /// check out leaves the worktree exactly as the reader left it. The tree
+    /// here is built by hand because `add -A` cannot produce one: a top-level
+    /// entry named `.git` is the one shape `read-tree -u` refuses outright,
+    /// on every platform and for every user, which is what makes this
+    /// deterministic rather than a permissions race.
+    #[tokio::test]
+    async fn an_apply_that_fails_deletes_nothing() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "apply-fails");
+        let workspace_id = ws();
+        let session_id = sess();
+        std::fs::write(tree.join("scratch.txt"), "at the checkpoint\n").unwrap();
+
+        let blob = git_text(&tree, &["hash-object", "-w", "--stdin"], GIT_TIMEOUT)
+            .await
+            .unwrap_or_default();
+        // `hash-object --stdin` with no stdin hashes the empty blob, which is
+        // all this needs: the entry's name is what Git rejects.
+        let entry = format!("100644 blob {blob}\t.git\n");
+        let hostile_tree = write_tree_from_entries(&tree, &entry).await;
+        let commit = git_text(
+            &tree,
+            &["commit-tree", &hostile_tree, "-m", "hostile checkpoint"],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let r#ref = checkpoint_ref(workspace_id, session_id, 1);
+        git_text(
+            &tree,
+            &["update-ref", "--no-deref", &r#ref, &commit],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        // What the reader has right now, none of which may disappear.
+        std::fs::remove_file(tree.join("scratch.txt")).unwrap();
+        std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
+        std::fs::create_dir_all(tree.join("later")).unwrap();
+        std::fs::write(tree.join("later/new.txt"), "postdates it\n").unwrap();
+
+        let err = restore_checkpoint(&tree, workspace_id, &turn_at(1, Some(r#ref)))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid path"), "{err}");
+
+        assert_eq!(
+            std::fs::read_to_string(tree.join("later/new.txt")).unwrap(),
+            "postdates it\n",
+            "a failed apply must not have deleted anything"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap(),
+            "after the checkpoint\n"
+        );
+
+        // And the safety ref was written before the attempt, so even a partial
+        // apply is recoverable.
+        let refs = list_checkpoint_refs(&tree).await.unwrap();
+        let safety = refs
+            .iter()
+            .find(|name| name.contains(PRE_RESTORE_SEGMENT))
+            .expect("the safety ref is written before anything is applied");
+        let listed = git_text(
+            &tree,
+            &["ls-tree", "-r", "--name-only", safety],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(listed.contains("later/new.txt"), "{listed}");
+    }
+
+    /// Build a tree from raw index entries, bypassing the path checks `add`
+    /// applies. Only a test needs this.
+    async fn write_tree_from_entries(worktree: &Path, entries: &str) -> String {
+        use std::io::Write as _;
+        let mut child = StdCommand::new("git")
+            .args(["mktree", "--missing"])
+            .current_dir(worktree)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(entries.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "mktree failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
     #[tokio::test]

@@ -162,6 +162,7 @@ pub async fn restore_workspace_checkpoint(
     let restored = code.restore_workspace_to_turn(id, body.turn_id).await?;
     Ok(Json(CodeCheckpointRestore {
         turn_id: restored.turn_id,
+        safety_ref: restored.safety_ref,
         stat: restored.diffstat,
     }))
 }

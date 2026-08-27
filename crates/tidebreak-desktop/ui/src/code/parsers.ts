@@ -2393,14 +2393,19 @@ export function parseCodeCheckpointRestore(
 ): CodeCheckpointRestore | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireCodeCheckpointRestore>(value, ["turn_id", "stat"]) ||
-    !nonEmpty(value.turn_id)
+    !onlyKeys<WireCodeCheckpointRestore>(value, [
+      "turn_id",
+      "safety_ref",
+      "stat",
+    ]) ||
+    !nonEmpty(value.turn_id) ||
+    !nonEmpty(value.safety_ref)
   ) {
     return null;
   }
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
-  return { turn_id: value.turn_id, stat };
+  return { turn_id: value.turn_id, safety_ref: value.safety_ref, stat };
 }
 
 export function parseCodePush(value: unknown): CodePushSnapshot | null {
@@ -3409,6 +3414,24 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       if (!diffstat) return null;
       return {
         type: "checkpoint_recorded",
+        turn_id: value.turn_id,
+        diffstat,
+      };
+    }
+    case "checkpoint_restored": {
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "checkpoint_restored" }>>(
+          value,
+          ["type", "turn_id", "diffstat"],
+        ) ||
+        !nonEmpty(value.turn_id)
+      ) {
+        return null;
+      }
+      const diffstat = parseDiffstat(value.diffstat);
+      if (!diffstat) return null;
+      return {
+        type: "checkpoint_restored",
         turn_id: value.turn_id,
         diffstat,
       };
