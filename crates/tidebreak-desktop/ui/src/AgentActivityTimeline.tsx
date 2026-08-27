@@ -251,7 +251,8 @@ type ExecActivityDetail = Extract<
  * A command step's row: the same boxless expandable chrome a foreground exec
  * call and code mode use. The body holds the outcome, full unelided command
  * line and, once the step has settled, the tail of what the command printed;
- * a failed row starts open so the reader lands on what failed.
+ * a settled row, including a failed one, stays folded until the reader
+ * opens it.
  */
 function ExecActivityCard({
   detail,
@@ -278,7 +279,6 @@ function ExecActivityCard({
       badge={
         <ExecActivityBadge outcome={outcome} exitCode={detail.exit_code} />
       }
-      defaultExpanded={failed}
       className={cn(failed && "text-critical")}
       // The assistive label names the command, not the sentence about it: it
       // stands in for a title the reader can see but a screen reader would

@@ -87,4 +87,55 @@ describe("ToolCommandCard expansion", () => {
     expect(screen.getByText("Done")).toBeTruthy();
     expect(screen.getByLabelText("Output")).toHaveTextContent("rendered");
   });
+
+  it("keeps a failed command folded until the reader opens it", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <ToolCommandCard
+        name="exec"
+        status="failed"
+        preview={preview}
+        result={{
+          tool: "exec",
+          exitCode: 101,
+          timedOut: false,
+          outputTruncated: false,
+          stdout: "",
+          stderr: "module not found\n",
+          backend: "local",
+        }}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /python3 render.py/ });
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Exit 101")).toBeNull();
+    expect(screen.queryByText(/module not found/)).toBeNull();
+
+    await user.click(row);
+
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Exit 101")).toBeTruthy();
+    expect(screen.getByLabelText("Output")).toHaveTextContent(
+      "module not found",
+    );
+
+    rerender(
+      <ToolCommandCard
+        name="exec"
+        status="failed"
+        preview={preview}
+        result={{
+          tool: "exec",
+          exitCode: null,
+          timedOut: true,
+          outputTruncated: false,
+          stdout: "",
+          stderr: "",
+          backend: "local",
+        }}
+      />,
+    );
+    expect(screen.getByText("Timed out")).toBeTruthy();
+  });
 });
