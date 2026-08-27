@@ -83,8 +83,8 @@ impl HarnessAdapter for GrokAdapter {
         }
     }
 
-    fn capabilities(&self, _probe: &HarnessProbe) -> HarnessCaps {
-        HarnessCaps {
+    fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps {
+        let mut caps = HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
             // Print-mode streaming-json has no parked approval request.
@@ -108,7 +108,15 @@ impl HarnessAdapter for GrokAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
+        };
+        // Off the captured 1.0 line the unprompted-write observation behind
+        // Auto no longer holds; a later default posture is unproven
+        // (decision 31 rule 3). The Unsupported verdicts stay: this adapter
+        // composes no approval channel or plan flags at any version.
+        if crate::probe::off_pinned_line(probe.version.as_deref(), (1, 0)) {
+            caps.auto_mode = CapLevel::Unknown;
         }
+        caps
     }
 
     fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
@@ -484,6 +492,26 @@ mod tests {
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
         assert_eq!(caps.mid_turn_steering, CapLevel::Unsupported);
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn auto_posture_degrades_off_the_1_0_line() {
+        let caps = GrokAdapter::new().capabilities(&HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("grok 1.1.0 (0badc0de) [stable]".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        });
+        assert_eq!(caps.auto_mode, CapLevel::Unknown);
+        // The adapter composes no approval channel or plan flags at any
+        // version, so those verdicts hold.
+        assert_eq!(caps.structured_approvals, CapLevel::Unsupported);
+        assert_eq!(caps.mid_turn_steering, CapLevel::Unsupported);
+        assert_eq!(caps.plan_mode, CapLevel::Unsupported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
     }
 
     #[test]
