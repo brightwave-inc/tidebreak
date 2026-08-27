@@ -18,6 +18,7 @@ import type {
   HarnessKind,
   ReasoningEffort,
 } from "../api/types";
+import { HttpError } from "../api/client";
 import { useApp } from "@/AppContext";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -495,6 +496,34 @@ export function NewWorkspaceDialog({
     void finishCreate(attempt, pending);
   }
 
+  /**
+   * Find the row `POST /code/workspaces` wrote before its setup script failed.
+   *
+   * The response carried the error, not the workspace, so the id has to come
+   * back off the list. Every row already in the catalog is one we know about,
+   * so the newest row that is not is the one this attempt created.
+   */
+  async function findCreatedWorkspace(
+    attempt: CreateAttempt,
+    pending: CodeWorkspaceSnapshot,
+  ): Promise<CodeWorkspaceSnapshot | null> {
+    const known = new Set(
+      useCodeCatalogStore
+        .getState()
+        .workspaces.map((workspace) => workspace.id),
+    );
+    known.delete(pending.id);
+    try {
+      const listed = await client.listCodeWorkspaces(attempt.repoId);
+      const fresh = listed
+        .filter((workspace) => !known.has(workspace.id))
+        .sort((left, right) => right.created_at.localeCompare(left.created_at));
+      return fresh[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async function finishCreate(
     attempt: CreateAttempt,
     pending: CodeWorkspaceSnapshot,
@@ -507,6 +536,25 @@ export function NewWorkspaceDialog({
         base_ref: attempt.baseRef.trim() || undefined,
       });
     } catch (error) {
+      // A failed setup script still cut the worktree and wrote the workspace
+      // row (Decision 0032). Deleting the card and offering "Try again" would
+      // create a second worktree for work the user already has, so keep the
+      // card, refetch the row the server wrote, and open it.
+      if (error instanceof HttpError && error.kind === "setup_failed") {
+        const created = await findCreatedWorkspace(attempt, pending);
+        toast.error(
+          friendlyErrorMessage(error, "Created, but the setup script failed"),
+        );
+        // No "Try again" either way: the worktree exists, and creating again
+        // would cut a second one.
+        if (created) {
+          replaceWorkspace(pending.id, created);
+          await revealCreatedWorkspace(created, attempt);
+        } else {
+          removeWorkspace(pending.id);
+        }
+        return;
+      }
       removeWorkspace(pending.id);
       retryAttempt.current = attempt;
       if (!attempt.createMore) {

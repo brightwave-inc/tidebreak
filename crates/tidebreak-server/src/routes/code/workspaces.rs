@@ -130,6 +130,19 @@ pub async fn restore_workspace(
     Ok(Json(CodeWorkspaceSnapshot::from(restored)))
 }
 
+/// `POST /code/workspaces/{id}/retry-setup` — run the setup script again on the
+/// worktree this workspace already has.
+///
+/// The only way out of `setup_failed` that keeps the checkout. Success returns
+/// the now-Active workspace; another failure returns 422 `setup_failed`.
+pub async fn retry_workspace_setup(
+    code: ScopedCode,
+    Path(id): Path<WorkspaceId>,
+) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
+    let workspace = code.retry_workspace_setup(id).await?;
+    Ok(Json(CodeWorkspaceSnapshot::from(workspace)))
+}
+
 pub async fn list_workspace_tree(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,

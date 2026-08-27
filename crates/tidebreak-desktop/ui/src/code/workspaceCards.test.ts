@@ -20,6 +20,7 @@ import {
   workspacePrChipSummary,
   workspaceStackParent,
   workspaceStatusRank,
+  WORKSPACE_STATUS_RANK_ORDER,
 } from "./workspaceCards";
 import {
   prCompactStatusLabel,
@@ -303,6 +304,24 @@ describe("workspaceStatusRank", () => {
         digest("ws-a", { lifecycle: "running" }),
       ),
     ).toBe("archived");
+  });
+
+  it("ranks a failed setup above idle so the card says the script broke", () => {
+    expect(
+      workspaceStatusRank(workspace("ws-a", "app", "setup_failed"), undefined),
+    ).toBe("setup_failed");
+    expect(WORKSPACE_STATUS_RANK_ORDER.indexOf("setup_failed")).toBeLessThan(
+      WORKSPACE_STATUS_RANK_ORDER.indexOf("idle"),
+    );
+  });
+
+  it("keeps live work ahead of a failed setup", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app", "setup_failed"),
+        digest("ws-a", { lifecycle: "running" }),
+      ),
+    ).toBe("running");
   });
 });
 

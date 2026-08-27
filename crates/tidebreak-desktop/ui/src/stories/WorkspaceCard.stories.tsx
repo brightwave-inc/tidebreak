@@ -85,6 +85,28 @@ export const Creating: Story = {
   },
 };
 
+/**
+ * The setup script failed. The checkout and branch survived, so the row keeps
+ * its commands and offers the retry — the critical line is the only thing that
+ * says the script never finished.
+ */
+export const SetupFailed: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      id: "ws-setup-failed",
+      title: "Rework the credential exchange",
+      status: "setup_failed",
+    },
+    visibleMeta: { repoChip: true, branch: true },
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      setupFailed: true,
+    }),
+  },
+};
+
 /** A green pull request with the hover detail held open for visual review. */
 export const HoverPullRequestReady: Story = {
   args: {

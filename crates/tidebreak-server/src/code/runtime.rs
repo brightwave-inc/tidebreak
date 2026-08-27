@@ -30,8 +30,8 @@ use tidebreak_core::{
     CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId,
     CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
     CodeTriggerId, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat,
-    FenceReason, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, ReasoningEffort, RepoId,
-    WorkspaceId,
+    FenceReason, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, QuickAction,
+    ReasoningEffort, RepoId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -128,6 +128,8 @@ pub(crate) struct RepoRegistration {
     pub branch_prefix: Option<String>,
     pub setup_script: Option<String>,
     pub archive_script: Option<String>,
+    /// Named commands workspaces of this repo offer. Validated by the caller.
+    pub quick_actions: Vec<QuickAction>,
 }
 
 /// Result of `POST /code/sessions/{id}/turns`.
@@ -1015,6 +1017,7 @@ impl CodeRuntime {
             branch_prefix,
             setup_script,
             archive_script,
+            quick_actions,
         } = metadata;
         let validated = validate_repo_path(&root_path).await.map_err(map_worktree)?;
         let toplevel = validated.toplevel.display().to_string();
@@ -1063,7 +1066,7 @@ impl CodeRuntime {
                 .unwrap_or_else(|| "tidebreak/".into()),
             setup_script,
             archive_script,
-            quick_actions: Vec::new(),
+            quick_actions,
             created_at: Utc::now(),
             removed_at: None,
             cloned_from,
@@ -1818,6 +1821,60 @@ impl CodeRuntime {
         }
         match setup {
             Ok(()) => Ok(workspace),
+            Err(error) => Err(ServerError::unprocessable_kind(
+                "setup_failed",
+                error.to_string(),
+            )),
+        }
+    }
+
+    /// Re-run the setup script on a worktree that already exists.
+    ///
+    /// A failed setup keeps the checkout (Decision 0032), but every other
+    /// route refuses a `setup_failed` workspace, so the state has no exit
+    /// short of archiving the work. This is that exit: fix the script, run it
+    /// again, and the workspace goes Active without cutting a second worktree.
+    ///
+    /// Both outcomes match create's tail — Active on success, still
+    /// `SetupFailed` and a 422 `setup_failed` on failure.
+    pub(crate) async fn retry_workspace_setup(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        let lifecycle = self.workspace_lifecycle_lock(id);
+        let _lifecycle_guard = lifecycle.lock().await;
+        let mut workspace = self.get_workspace(owner, id).await?;
+        if workspace.status == CodeWorkspaceStatus::Active {
+            return Ok(workspace);
+        }
+        if workspace.status != CodeWorkspaceStatus::SetupFailed {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_ready",
+                format!("workspace is {}", workspace.status.as_str()),
+            ));
+        }
+        let path = std::path::PathBuf::from(&workspace.worktree_path);
+        if !path.exists() {
+            return Err(ServerError::conflict_kind(
+                "worktree_missing",
+                "the worktree is gone; archive this workspace and restore it instead",
+            ));
+        }
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        Self::refuse_removed_repo(&repo)?;
+        match run_setup_script(&path, repo.setup_script.as_deref()).await {
+            Ok(()) => {
+                workspace.status = CodeWorkspaceStatus::Active;
+                if !self.save_workspace_final(&workspace).await? {
+                    return Err(ServerError::not_found(format!(
+                        "workspace {} not found",
+                        workspace.id
+                    )));
+                }
+                gh::run_auto_create_actions(&path, &repo.quick_actions).await;
+                Ok(workspace)
+            }
             Err(error) => Err(ServerError::unprocessable_kind(
                 "setup_failed",
                 error.to_string(),

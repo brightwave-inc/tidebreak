@@ -70,7 +70,8 @@ export type WorkspaceCommandId =
   | "run-quick-action"
   | "archive"
   | "force-archive"
-  | "restore";
+  | "restore"
+  | "retry-setup";
 
 export type WorkspaceCommand = {
   id: WorkspaceCommandId;
@@ -108,6 +109,8 @@ export function workspaceCommands(input: {
   canOpenInEditor?: boolean;
   /** Tidebreak's own checkout is connected, so a debug dump can become a fix. */
   canUneff?: boolean;
+  /** The setup script failed, so the workspace has a worktree but no session. */
+  setupFailed?: boolean;
 }): WorkspaceCommand[] {
   // An archived workspace has no worktree: nothing to open a terminal in,
   // no session to steer. What is left is reading, copying the branch that
@@ -129,6 +132,12 @@ export function workspaceCommands(input: {
   ];
   const editor = editorCommand(input.canOpenInEditor);
   if (editor) items.push(editor);
+  // The checkout is there and the branch is cut; only the script fell over.
+  // Running it again is the way back, and it is the only command here a
+  // setup-failed workspace can currently complete.
+  if (input.setupFailed) {
+    items.splice(1, 0, { id: "retry-setup", label: "Retry setup" });
+  }
   if (input.hasPr) {
     items.push({ id: "open-pr", label: "Open pull request" });
   }
@@ -172,6 +181,8 @@ export function workspaceHeaderCommands(input: {
   /** The shown agent has a transcript worth handing to a sibling. */
   canFork?: boolean;
   canUneff?: boolean;
+  /** The setup script failed, so the workspace has a worktree but no session. */
+  setupFailed?: boolean;
 }): WorkspaceCommand[] {
   const items: WorkspaceCommand[] = [
     worktreePathCommand(
@@ -183,6 +194,12 @@ export function workspaceHeaderCommands(input: {
     ? undefined
     : editorCommand(input.canOpenInEditor);
   if (editor) items.splice(1, 0, editor);
+  // A broken setup leads the menu: it is the one command that changes the
+  // workspace's state, and everything below it acts on a checkout the script
+  // never finished preparing.
+  if (input.setupFailed) {
+    items.unshift({ id: "retry-setup", label: "Retry setup" });
+  }
   if (input.hasSession) {
     items.push(
       input.attentionPinned
@@ -585,6 +602,25 @@ export function useWorkspaceCardCommands(): {
     }
   }
 
+  /**
+   * Run the repo's setup script again on the worktree the workspace already
+   * has. A second failure leaves the workspace exactly where it was, so the
+   * user can edit the script and try again without losing the checkout.
+   */
+  async function runRetrySetup(workspace: CodeWorkspaceSnapshot) {
+    try {
+      const revived = await client.retryCodeWorkspaceSetup(workspace.id);
+      upsertWorkspace(revived);
+      toast.success("Setup finished");
+      await navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: workspace.id },
+      });
+    } catch (error) {
+      toast.error(friendlyErrorMessage(error, "The setup script failed again"));
+    }
+  }
+
   function run(
     command: WorkspaceCommandId,
     context: WorkspaceCommandContext,
@@ -730,6 +766,9 @@ export function useWorkspaceCardCommands(): {
         return;
       case "restore":
         void runRestore(context.workspace);
+        return;
+      case "retry-setup":
+        void runRetrySetup(context.workspace);
         return;
     }
   }

@@ -10,6 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
+import { HttpError } from "../api/client";
 import { renderWithRouter } from "@/test/router";
 import type {
   CodeRepoSnapshot,
@@ -371,6 +372,60 @@ describe("NewWorkspaceDialog", () => {
     await waitFor(() =>
       expect(useCodeCatalogStore.getState().workspaces).toEqual([created]),
     );
+  });
+
+  /**
+   * A failed setup script still cut the worktree, so "Try again" would create
+   * a second one for work the user already has.
+   */
+  it("keeps the card and opens the workspace when setup fails", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const broken = {
+      ...workspace("ws-broken", "repo-new", "2026-08-24T12:00:00.000Z"),
+      status: "setup_failed",
+    } as CodeWorkspaceSnapshot;
+    const createCodeWorkspace = vi
+      .fn()
+      .mockRejectedValue(
+        new HttpError(422, "setup script exited 3", "setup_failed"),
+      );
+    const listCodeWorkspaces = vi.fn(async () => [broken]);
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          listCodeWorkspaces,
+          createCodeSession: vi.fn(),
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledOnce());
+    // No retry action: creating again would cut a second worktree.
+    expect(toastError.mock.calls[0]?.[1]).toBeUndefined();
+    await waitFor(() =>
+      expect(useCodeCatalogStore.getState().workspaces).toEqual([broken]),
+    );
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-broken"),
+    );
+    expect(createCodeWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it("keeps remembered models keyed by harness", () => {

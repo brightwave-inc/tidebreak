@@ -1069,6 +1069,302 @@ async fn workspace_setup_failure_preserves_the_checkout() {
     assert!(std::path::Path::new(path).join("README.md").is_file());
 }
 
+/// Quick actions are only reachable if a client can write them. `create`
+/// stores the list, `patch` replaces it whole, and an empty list clears it.
+#[tokio::test]
+async fn quick_actions_round_trip_through_create_and_patch() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "path": repo,
+            "quick_actions": [
+                { "name": "  Test  ", "command": " cargo test ", "auto_run_on_create": false },
+                { "name": "Install", "command": "pnpm install", "auto_run_on_create": true },
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let repo_id = json_id(&repo_body);
+    assert_eq!(repo_body["quick_actions"][0]["name"], "Test");
+    assert_eq!(repo_body["quick_actions"][0]["command"], "cargo test");
+    assert_eq!(repo_body["quick_actions"][1]["auto_run_on_create"], true);
+
+    let patched = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "quick_actions": [
+                { "name": "Lint", "command": "cargo clippy", "auto_run_on_create": false },
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), reqwest::StatusCode::OK);
+    let patched: serde_json::Value = patched.json().await.unwrap();
+    assert_eq!(patched["quick_actions"].as_array().unwrap().len(), 1);
+    assert_eq!(patched["quick_actions"][0]["name"], "Lint");
+
+    // Two actions under one name would make the second unreachable, because
+    // running one looks it up by name.
+    let duplicate = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "quick_actions": [
+                { "name": "Lint", "command": "cargo clippy", "auto_run_on_create": false },
+                { "name": "Lint", "command": "biome lint", "auto_run_on_create": false },
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let blank = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "quick_actions": [{ "name": "Lint", "command": "   ", "auto_run_on_create": false }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blank.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Nothing the server allocates is sized from the body. Every entry also
+    // renders in the header menu and the palette, so the list is bounded.
+    let over_cap: Vec<serde_json::Value> = (0..33)
+        .map(|index| {
+            serde_json::json!({
+                "name": format!("Action {index}"),
+                "command": "true",
+                "auto_run_on_create": false,
+            })
+        })
+        .collect();
+    let too_many = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "quick_actions": over_cap }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_many.status(), reqwest::StatusCode::BAD_REQUEST);
+    let refusal: serde_json::Value = too_many.json().await.unwrap();
+    // The refusal names the limit, so a client can fix the body without guessing.
+    assert!(
+        refusal["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("32")),
+        "refusal should name the cap, got {refusal}"
+    );
+
+    // Exactly the cap is still accepted.
+    let at_cap: Vec<serde_json::Value> = (0..32)
+        .map(|index| {
+            serde_json::json!({
+                "name": format!("Action {index}"),
+                "command": "true",
+                "auto_run_on_create": false,
+            })
+        })
+        .collect();
+    let accepted = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "quick_actions": at_cap }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        accepted.json::<serde_json::Value>().await.unwrap()["quick_actions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        32
+    );
+
+    let long_name = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "quick_actions": [{
+                "name": "n".repeat(65),
+                "command": "true",
+                "auto_run_on_create": false,
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_name.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let long_command = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "quick_actions": [{
+                "name": "Lint",
+                "command": "x".repeat(1025),
+                "auto_run_on_create": false,
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(long_command.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Back to one so the clear-vs-omit checks below read against a known list.
+    let reset = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "quick_actions": [
+                { "name": "Lint", "command": "cargo clippy", "auto_run_on_create": false },
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset.status(), reqwest::StatusCode::OK);
+
+    // Omitting the field leaves the stored list alone; an empty list clears it.
+    let renamed = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "display_name": "renamed" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(renamed["quick_actions"].as_array().unwrap().len(), 1);
+    let cleared = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "quick_actions": [] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(cleared["quick_actions"].as_array().unwrap().is_empty());
+}
+
+/// A failed setup keeps the checkout, so the way out is to fix the script and
+/// run it again — not to cut a second worktree. Retrying takes the workspace
+/// Active on the same path.
+#[tokio::test]
+async fn retry_setup_revives_a_setup_failed_workspace_in_place() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let repo_body: serde_json::Value = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo, "setup_script": "exit 3" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let repo_id = json_id(&repo_body).to_owned();
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "repo_id": repo_id, "title": "broken setup" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let listed = client
+        .get(format!("http://{addr}/code/workspaces?repo_id={repo_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    let workspace_id = json_id(&listed[0]).to_owned();
+    let worktree_path = listed[0]["worktree_path"].as_str().unwrap().to_owned();
+
+    // Still broken: the retry fails the same way and the status holds.
+    let again = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/retry-setup"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        again.json::<serde_json::Value>().await.unwrap()["kind"],
+        "setup_failed"
+    );
+
+    let fixed = client
+        .patch(format!("http://{addr}/code/repos/{repo_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "setup_script": "echo ok > .setup-ran" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fixed.status(), reqwest::StatusCode::OK);
+    let revived = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/retry-setup"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revived.status(), reqwest::StatusCode::OK);
+    let revived: serde_json::Value = revived.json().await.unwrap();
+    assert_eq!(revived["status"], "active");
+    // The same worktree, not a second one.
+    assert_eq!(revived["worktree_path"], worktree_path);
+    assert!(std::path::Path::new(&worktree_path)
+        .join(".setup-ran")
+        .is_file());
+    let listed = client
+        .get(format!("http://{addr}/code/workspaces?repo_id={repo_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+
+    // An already-active workspace is a no-op, not a re-run.
+    let repeat = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{workspace_id}/retry-setup"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repeat.status(), reqwest::StatusCode::OK);
+}
+
 #[tokio::test]
 async fn archive_requires_force_when_the_tree_is_dirty() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;

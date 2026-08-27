@@ -7,6 +7,7 @@ import {
   MessageSquare,
   Play,
   Plus,
+  RefreshCw,
   Terminal,
   Wrench,
 } from "lucide-react";
@@ -182,6 +183,7 @@ export function workspaceActionPaletteRows(input: {
     attentionPinned: input.attentionPinned,
     canUneff: input.canUneff,
     canOpenInEditor: input.canOpenInEditor,
+    setupFailed: input.workspace.status === "setup_failed",
   });
   const quick: WorkspaceCommand[] = archived
     ? []
@@ -216,6 +218,7 @@ const ACTION_ICONS: Partial<Record<WorkspaceCommandId, PaletteRow["icon"]>> = {
   archive: Archive,
   "force-archive": Archive,
   restore: Archive,
+  "retry-setup": RefreshCw,
 };
 
 /** The commands a chord already reaches, so the row can teach it. */

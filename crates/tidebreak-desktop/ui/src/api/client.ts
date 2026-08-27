@@ -84,6 +84,7 @@ import {
   type TaskPlan,
   type CodeApprovalSnapshot,
   type CodeRepoSnapshot,
+  type QuickAction,
   type CodeSessionSnapshot,
   type CodeTurnSnapshot,
   type CodeActionSnapshot,
@@ -2090,6 +2091,7 @@ export class ApiClient {
     branch_prefix?: string;
     setup_script?: string;
     archive_script?: string;
+    quick_actions?: QuickAction[];
   }): Promise<CodeRepoSnapshot> {
     return requireParsed(
       parseCodeRepo(
@@ -2122,6 +2124,8 @@ export class ApiClient {
       branch_prefix?: string;
       setup_script?: string | null;
       archive_script?: string | null;
+      /** The whole list, replaced. Omit to leave the stored list alone. */
+      quick_actions?: QuickAction[];
     },
   ): Promise<CodeRepoSnapshot> {
     return requireParsed(
@@ -2421,6 +2425,29 @@ export class ApiClient {
       parseCodeWorkspace(
         await this.json(
           `/code/workspaces/${encodeURIComponent(workspaceId)}/restore`,
+          {
+            method: "POST",
+            headers: this.headers(true),
+          },
+        ),
+      ),
+      "code workspace",
+    );
+  }
+
+  /**
+   * Run the repo's setup script again on a workspace that is `setup_failed`.
+   * The worktree is the one it already has, so a success takes the workspace
+   * Active without cutting a second checkout. A second failure comes back as
+   * 422 `setup_failed`.
+   */
+  async retryCodeWorkspaceSetup(
+    workspaceId: string,
+  ): Promise<CodeWorkspaceSnapshot> {
+    return requireParsed(
+      parseCodeWorkspace(
+        await this.json(
+          `/code/workspaces/${encodeURIComponent(workspaceId)}/retry-setup`,
           {
             method: "POST",
             headers: this.headers(true),
