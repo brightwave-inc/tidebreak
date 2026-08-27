@@ -242,11 +242,11 @@ fn remove_sqlite_files(database: &Path) -> Result<()> {
 }
 
 /// Delete one reset target. Windows can still hold the SQLite files for a
-/// beat after `close()` returns (WAL mapping), so a sharing violation retries
-/// instead of failing the epoch reset.
+/// beat after `close()` returns (WAL mapping), so a sharing or lock violation
+/// retries instead of failing the epoch reset.
 fn remove_reset_file(path: &Path, kind: &str) -> Result<()> {
     let delays_ms: &[u64] = if cfg!(windows) {
-        &[0, 10, 50, 100, 250]
+        &[0, 10, 50, 100, 250, 500, 1000]
     } else {
         &[0]
     };
@@ -277,7 +277,8 @@ fn remove_reset_file(path: &Path, kind: &str) -> Result<()> {
 }
 
 fn is_windows_sharing_violation(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(32)
+    // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+    matches!(error.raw_os_error(), Some(32 | 33))
 }
 
 /// Durable host-broker files that outlive SQLite unless explicitly cleared.
@@ -294,16 +295,7 @@ fn remove_host_broker_durable_state(data_dir: &Path) -> Result<()> {
         "host-broker-audit.previous.jsonl",
     ] {
         let path = data_dir.join(name);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(AgentError::config(format!(
-                    "failed to reset host-broker durable file {}: {error}",
-                    path.display()
-                )))
-            }
-        }
+        remove_reset_file(&path, "host-broker durable file")?;
     }
     Ok(())
 }
@@ -991,5 +983,56 @@ mod tests {
             Some(expected)
         );
         assert_eq!(std::fs::read(vector).unwrap(), b"current vector state");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_and_lock_violations_are_retried() {
+        assert!(is_windows_sharing_violation(
+            &std::io::Error::from_raw_os_error(32)
+        ));
+        assert!(is_windows_sharing_violation(
+            &std::io::Error::from_raw_os_error(33)
+        ));
+        assert!(!is_windows_sharing_violation(
+            &std::io::Error::from_raw_os_error(2)
+        ));
+        assert!(!is_windows_sharing_violation(
+            &std::io::Error::from_raw_os_error(5)
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_unlink_does_not_treat_busy_as_a_sharing_violation() {
+        assert!(!is_windows_sharing_violation(
+            &std::io::Error::from_raw_os_error(16)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_sqlite_files_retries_after_the_holding_handle_is_dropped() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join(DATABASE_FILE);
+        std::fs::write(&database, b"held").unwrap();
+        // SQLite maps WAL without FILE_SHARE_DELETE. Match that so the first
+        // remove_file fails with os error 32 until this handle is dropped.
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&database)
+            .unwrap();
+        let database_for_delete = database.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(hold);
+        });
+        remove_sqlite_files(&database_for_delete).unwrap();
+        worker.join().unwrap();
+        assert!(!database.exists());
     }
 }

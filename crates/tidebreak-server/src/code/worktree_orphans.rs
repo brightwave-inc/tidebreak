@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseBackend, Statement};
 use serde::{Deserialize, Serialize};
 
 /// Sidecar naming the trees a reset left on disk.
@@ -104,9 +104,12 @@ async fn scan(database: &Path) -> Result<Vec<OrphanedWorktree>, String> {
         return Ok(Vec::new());
     }
     // Read-only, so a scan can never create or migrate the file it is about to
-    // delete.
-    let url = format!("sqlite://{}?mode=ro", database.display());
-    let connection = Database::connect(&url)
+    // delete. One connection, and `immutable=1` so SQLite does not map WAL or
+    // SHM. Windows refuses the caller's delete while those mappings live.
+    let url = format!("sqlite://{}?mode=ro&immutable=1", database.display());
+    let mut options = ConnectOptions::new(url);
+    options.max_connections(1).min_connections(0);
+    let connection = Database::connect(options)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -121,7 +124,14 @@ async fn scan(database: &Path) -> Result<Vec<OrphanedWorktree>, String> {
     };
     // Close before returning either way: Windows refuses to delete a file this
     // process still has open, and the caller deletes this one next.
-    let _ = connection.close().await;
+    if let Err(error) = connection.close().await {
+        tracing::warn!(
+            database = %database.display(),
+            %error,
+            "could not close the doomed database after scanning worktrees; Windows may refuse \
+             the reset delete until the handle is gone"
+        );
+    }
 
     let recorded_at = Utc::now();
     let mut found = Vec::new();
