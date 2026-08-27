@@ -16,7 +16,6 @@ import {
   GitPullRequestDraft,
   LoaderCircle,
   MoreHorizontal,
-  Play,
   RefreshCw,
   ShieldAlert,
   X,
@@ -500,7 +499,7 @@ export function PullRequestDetailSheet({
                             : STATUS_TEXT.ready,
                       )}
                     >
-                      {counts.passing}/{counts.total}
+                      {counts.total - counts.pending}/{counts.total}
                     </span>
                   )}
                 </TabsTrigger>
@@ -1903,7 +1902,9 @@ export function CheckTone({
     return <X className={cn("size-3.5 shrink-0", STATUS_MARK.critical)} />;
   }
   if (bucket === "pending") {
-    return <Play className={cn("size-3.5 shrink-0", STATUS_MARK.pending)} />;
+    return (
+      <CircleDashed className={cn("size-3.5 shrink-0", STATUS_MARK.pending)} />
+    );
   }
   return <CircleDot className={cn("size-3.5 shrink-0", STATUS_MARK.neutral)} />;
 }
