@@ -186,7 +186,7 @@ impl HttpWire {
             .unwrap_or_default()
             .to_ascii_lowercase();
         if content_type.starts_with("text/event-stream") {
-            self.read_event_stream(expected_id, response, tools_list_changed)
+            self.read_event_stream(expected_id, response, tools_list_changed, bearer)
                 .await
         } else if content_type.starts_with("application/json") {
             let body = read_bounded_body(response).await?;
@@ -276,12 +276,12 @@ impl HttpWire {
         expected_id: u64,
         response: reqwest::Response,
         tools_list_changed: &mut bool,
+        bearer: Option<&str>,
     ) -> Result<Value> {
         use futures::StreamExt;
 
         let mut stream = response.bytes_stream();
         let mut parser = SseParser::default();
-        let mut server_requests: Vec<(Value, String)> = Vec::new();
         let mut outcome = None;
         'read: while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| {
@@ -297,18 +297,19 @@ impl HttpWire {
                         break 'read;
                     }
                     crate::client::Incoming::ServerRequest { id, method } => {
-                        server_requests.push((id, method));
+                        // Streamable HTTP carries server requests down the
+                        // open response stream, but their replies travel in a
+                        // separate POST. Answer before reading the next event:
+                        // a prompt server may wait for this reply before it
+                        // emits the original request's final result.
+                        let message = crate::client::server_request_response(id, &method)?;
+                        let response = self.post(&message, bearer).await?;
+                        check_status(response.status())?;
+                        self.absorb_session_id(&response)?;
                     }
                     crate::client::Incoming::Ignored => {}
                 }
             }
-        }
-        drop(stream);
-        // Answer embedded server requests after releasing the stream so the
-        // reply POSTs cannot deadlock against an unread response body.
-        for (id, method) in server_requests {
-            let response = crate::client::server_request_response(id, &method)?;
-            let _ = self.notify(&response).await;
         }
         outcome.ok_or_else(|| mcp_message("external server closed the stream before replying"))
     }
@@ -435,16 +436,19 @@ impl SseParser {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
+    use axum::body::{Body, Bytes};
     use axum::extract::State;
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::post;
-    use axum::Router;
-    use reqwest::header::{HeaderMap, HeaderName};
+    use axum::{Json, Router};
+    use reqwest::header::HeaderName;
 
     #[test]
     fn sse_parser_joins_multi_line_data_and_ignores_other_fields() {
@@ -598,6 +602,110 @@ mod tests {
             .expect_err("the session credential must not cross remote cleartext HTTP");
         assert!(error.to_string().contains("must use https"), "{error}");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replies_to_server_requests_before_the_http_stream_finishes() {
+        #[derive(Clone, Default)]
+        struct PromptState {
+            reply: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+        }
+
+        async fn handler(
+            State(state): State<PromptState>,
+            headers: HeaderMap,
+            Json(message): Json<Value>,
+        ) -> axum::response::Response {
+            assert_eq!(
+                headers
+                    .get(reqwest::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer chat-token")
+            );
+
+            if message.get("method").is_some() {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                *state.reply.lock().await = Some(reply_tx);
+                let (event_tx, event_rx) = tokio::sync::mpsc::channel(2);
+                event_tx
+                    .send(Ok::<_, Infallible>(Bytes::from_static(
+                        b"data: {\"jsonrpc\":\"2.0\",\"id\":\"server-ping\",\"method\":\"ping\"}\n\n",
+                    )))
+                    .await
+                    .unwrap();
+                tokio::spawn(async move {
+                    reply_rx.await.unwrap();
+                    event_tx
+                        .send(Ok(Bytes::from_static(
+                            b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n",
+                        )))
+                        .await
+                        .unwrap();
+                });
+                let stream = futures::stream::unfold(event_rx, |mut receiver| async move {
+                    receiver.recv().await.map(|event| (event, receiver))
+                });
+                return axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(reqwest::header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap();
+            }
+
+            assert_eq!(
+                message,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": "server-ping",
+                    "result": {}
+                })
+            );
+            state
+                .reply
+                .lock()
+                .await
+                .take()
+                .expect("the response stream registered its reply channel")
+                .send(())
+                .unwrap();
+            axum::response::Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        let app = Router::new()
+            .route("/mcp", post(handler))
+            .with_state(PromptState::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut wire =
+            HttpWire::with_headers(&format!("http://{address}/mcp"), None, HeaderMap::new())
+                .unwrap();
+        let mut tools_list_changed = false;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wire.request(
+                1,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list",
+                    "params": {}
+                }),
+                &mut tools_list_changed,
+                Some("chat-token"),
+            ),
+        )
+        .await
+        .expect("the prompt reply must unblock the open response stream")
+        .unwrap();
+
+        assert_eq!(result, serde_json::json!({"tools": []}));
     }
 
     #[test]

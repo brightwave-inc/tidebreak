@@ -113,6 +113,10 @@ export function AppFrame({
   }, [apis, appId]);
 
   useEffect(() => {
+    bridgeRef.current?.themeChanged();
+  }, [resolvedTheme]);
+
+  useEffect(() => {
     let cancelled = false;
     setState({ kind: "loading" });
     // The bundle is served by the host under its own strict CSP; the address

@@ -1,10 +1,13 @@
 import type { Decorator, Preview } from "@storybook/react-vite";
 import "katex/dist/katex.min.css";
+import { setThemeMode } from "../src/theme";
 import "../src/styles.css";
 
 const withTidebreakSurface: Decorator = (Story, context) => {
-  const dark = context.globals.theme === "dark";
+  const dark =
+    context.globals.theme === "dark" || context.globals.theme === "hc-dark";
   const fullscreen = context.parameters.layout === "fullscreen";
+  setThemeMode(dark ? "dark" : "light");
   document.documentElement.classList.toggle("dark", dark);
 
   return (
@@ -30,6 +33,8 @@ const preview: Preview = {
         items: [
           { value: "light", title: "Light", icon: "sun" },
           { value: "dark", title: "Dark", icon: "moon" },
+          { value: "hc-light", title: "High contrast light", icon: "sun" },
+          { value: "hc-dark", title: "High contrast dark", icon: "moon" },
         ],
         dynamicTitle: true,
       },

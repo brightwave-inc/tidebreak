@@ -244,6 +244,32 @@ describe("GatewayPanel", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("starts over when a pending browser sign-in stalls", async () => {
+    const client = api({
+      getGatewayStatus: vi.fn().mockResolvedValue({
+        ...signedOut,
+        sign_in: { state: "pending", authorization_url: "http://gw/stalled" },
+      }),
+    });
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
+    const user = userEvent.setup();
+    render(managedPanel(client));
+
+    expect(
+      await screen.findByText(/Waiting for the browser/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start over" }));
+
+    await waitFor(() => expect(client.gatewaySignIn).toHaveBeenCalled());
+    expect(open).toHaveBeenCalledWith(
+      "http://gw/oauth/authorize?x=1",
+      "_blank",
+      "noreferrer,noopener",
+    );
+    vi.unstubAllGlobals();
+  });
+
   it("lists entitled connected apps, and hides the section on an older gateway", async () => {
     const client = api({
       getGatewayStatus: vi.fn().mockResolvedValue(signedIn),

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { AppWindow } from "lucide-react";
+import { AppWindow, CircleAlert } from "lucide-react";
 import { useApp } from "./AppContext";
+import { Button } from "./components/ui/button";
 import { createMcpAppBridge, type McpAppBridge } from "./McpAppBridge";
 import { useTheme } from "./theme";
 
@@ -23,6 +24,7 @@ type ViewState =
   | { kind: "loading" }
   | { kind: "unavailable" }
   | { kind: "ready"; url: string };
+type PayloadState = "idle" | "loading" | "ready" | "failed";
 
 const DEFAULT_FRAME_HEIGHT = 96;
 
@@ -41,6 +43,8 @@ export function McpAppCard({
   const { client } = useApp();
   const { resolved: resolvedTheme } = useTheme();
   const [state, setState] = useState<ViewState>({ kind: "loading" });
+  const [payloadState, setPayloadState] = useState<PayloadState>("idle");
+  const [payloadAttempt, setPayloadAttempt] = useState(0);
   const [frameHeight, setFrameHeight] = useState(DEFAULT_FRAME_HEIGHT);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const bridgeRef = useRef<McpAppBridge | null>(null);
@@ -69,20 +73,30 @@ export function McpAppCard({
   }, []);
 
   useEffect(() => {
-    if (!chatId || !callId) return;
+    bridgeRef.current?.themeChanged();
+  }, [resolvedTheme]);
+
+  useEffect(() => {
+    if (!chatId || !callId) {
+      setPayloadState("idle");
+      return;
+    }
     let cancelled = false;
+    setPayloadState("loading");
     void client
       .getMcpAppPayload(chatId, callId)
       .then((payload) => {
-        if (!cancelled) bridgeRef.current?.deliverPayload(payload);
+        if (cancelled) return;
+        bridgeRef.current?.deliverPayload(payload);
+        setPayloadState("ready");
       })
       .catch(() => {
-        // Without a payload the view still renders; it just waits for data.
+        if (!cancelled) setPayloadState("failed");
       });
     return () => {
       cancelled = true;
     };
-  }, [client, chatId, callId]);
+  }, [client, chatId, callId, payloadAttempt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +121,7 @@ export function McpAppCard({
 
   return (
     <section
-      className="bg-background max-w-prose overflow-hidden rounded-lg border"
+      className="bg-background w-full min-w-0 max-w-prose overflow-hidden rounded-lg border"
       aria-label={`App view from MCP server ${server}`}
     >
       {/* The one host-drawn provenance mark: embedded documents must stay
@@ -121,6 +135,26 @@ export function McpAppCard({
         <span className="truncate">{server}</span>
       </div>
       <div className="border-t">
+        {payloadState === "failed" && (
+          <div
+            className="border-warning-border bg-warning-background text-warning-foreground flex min-w-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-2"
+            role="alert"
+          >
+            <div className="flex min-w-0 items-center gap-1.5 text-xs">
+              <CircleAlert className="size-3.5 shrink-0" aria-hidden="true" />
+              <span>Tool result did not load.</span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              className="border-warning-border bg-background text-warning-foreground hover:bg-warning-background hover:text-warning-foreground"
+              onClick={() => setPayloadAttempt((attempt) => attempt + 1)}
+            >
+              Retry
+            </Button>
+          </div>
+        )}
         {state.kind === "loading" && (
           <p className="text-muted-foreground p-3 text-xs">Loading view…</p>
         )}

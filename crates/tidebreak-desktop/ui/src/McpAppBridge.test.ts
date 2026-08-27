@@ -1,3 +1,10 @@
+import {
+  LATEST_PROTOCOL_VERSION,
+  McpUiHostContextChangedNotificationSchema,
+  McpUiInitializeResultSchema,
+  McpUiToolInputNotificationSchema,
+  McpUiToolResultNotificationSchema,
+} from "@modelcontextprotocol/ext-apps";
 import { describe, expect, it, vi } from "vitest";
 
 import { AppInvokeRefusalError } from "./api";
@@ -50,6 +57,10 @@ function harness(
 }
 
 describe("createMcpAppBridge", () => {
+  it("uses the protocol version published by the external-app SDK", () => {
+    expect(MCP_APPS_PROTOCOL_VERSION).toBe(LATEST_PROTOCOL_VERSION);
+  });
+
   it("answers ui/initialize with every required result field", () => {
     const { fromView, sent, targets } = harness("dark");
     fromView({ jsonrpc: "2.0", id: 0, method: "ui/initialize", params: {} });
@@ -70,6 +81,10 @@ describe("createMcpAppBridge", () => {
         },
       },
     ]);
+    const [reply] = sent() as Array<{ result: unknown }>;
+    expect(McpUiInitializeResultSchema.safeParse(reply.result).success).toBe(
+      true,
+    );
     // A sandboxed frame's origin is opaque; only "*" delivers.
     expect(targets()).toEqual(["*"]);
   });
@@ -104,6 +119,12 @@ describe("createMcpAppBridge", () => {
       structuredContent: { status: 200 },
       isError: false,
     });
+    expect(McpUiToolInputNotificationSchema.safeParse(input).success).toBe(
+      true,
+    );
+    expect(McpUiToolResultNotificationSchema.safeParse(result).success).toBe(
+      true,
+    );
 
     // The pair is sent exactly once, whichever side repeats itself.
     fromView({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
@@ -124,6 +145,38 @@ describe("createMcpAppBridge", () => {
     expect(result.params).toEqual({
       content: [{ type: "text", text: "text only" }],
       isError: true,
+    });
+  });
+
+  it("propagates theme changes after initialization and deduplicates them", () => {
+    const { bridge, fromView, sent, setTheme } = harness("light");
+    fromView({ jsonrpc: "2.0", id: 0, method: "ui/initialize", params: {} });
+
+    // The theme changes during the handshake. The bridge waits until the
+    // view reports initialized, then sends the missed host-context update.
+    setTheme("dark");
+    bridge.themeChanged();
+    expect(sent()).toHaveLength(1);
+    fromView({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
+
+    const darkUpdate = sent()[1];
+    expect(darkUpdate).toEqual({
+      jsonrpc: "2.0",
+      method: "ui/notifications/host-context-changed",
+      params: { theme: "dark" },
+    });
+    expect(
+      McpUiHostContextChangedNotificationSchema.safeParse(darkUpdate).success,
+    ).toBe(true);
+
+    bridge.themeChanged();
+    expect(sent()).toHaveLength(2);
+    setTheme("light");
+    bridge.themeChanged();
+    expect(sent()[2]).toEqual({
+      jsonrpc: "2.0",
+      method: "ui/notifications/host-context-changed",
+      params: { theme: "light" },
     });
   });
 

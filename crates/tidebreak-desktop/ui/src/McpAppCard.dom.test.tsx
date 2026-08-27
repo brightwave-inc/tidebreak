@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import type { ReactNode } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 import type { ApiClient } from "./api";
@@ -69,5 +70,44 @@ describe("McpAppCard", () => {
       await screen.findByText(/This view is unavailable/),
     ).toBeInTheDocument();
     expect(screen.queryByTitle(/MCP App view/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the frame visible and retries a transient payload failure", async () => {
+    const createMcpViewFrame = vi
+      .fn()
+      .mockResolvedValue({ frame_path: "/mcp/view-frames/token-1" });
+    const getMcpAppPayload = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("temporary failure"))
+      .mockResolvedValueOnce({
+        arguments: { query: "open" },
+        content: '{"issues":[]}',
+        structured_content: { issues: [] },
+        is_error: false,
+      });
+    const user = userEvent.setup();
+    render(
+      withApp(
+        {
+          createMcpViewFrame,
+          getMcpAppPayload,
+          baseUrl: "http://127.0.0.1:7777",
+        } as Partial<ApiClient>,
+        <McpAppCard
+          server="gateway"
+          resourceUri="ui://gateway/app.html"
+          chatId="chat-1"
+          callId="call-1"
+        />,
+      ),
+    );
+
+    expect(await screen.findByTitle("MCP App view from gateway")).toBeVisible();
+    const warning = await screen.findByRole("alert");
+    expect(warning).toHaveTextContent("Tool result did not load.");
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(getMcpAppPayload).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 });

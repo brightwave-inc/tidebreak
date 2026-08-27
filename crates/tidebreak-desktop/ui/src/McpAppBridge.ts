@@ -83,6 +83,8 @@ export type McpAppBridge = {
   handleMessage: (event: MessageEvent) => void;
   /** Provide the tool payload; delivered once the view has initialized. */
   deliverPayload: (payload: McpAppPayload) => void;
+  /** Notify an initialized view when the host's resolved theme changes. */
+  themeChanged: () => void;
   /** Stop posting anything further (frame unmounting). */
   dispose: () => void;
 };
@@ -118,6 +120,7 @@ export function createMcpAppBridge(options: {
   let payload: McpAppPayload | null = null;
   let delivered = false;
   let disposed = false;
+  let deliveredTheme: "light" | "dark" | null = null;
 
   function post(message: unknown) {
     if (disposed) return;
@@ -149,6 +152,18 @@ export function createMcpAppBridge(options: {
     });
   }
 
+  function themeChanged() {
+    if (!viewInitialized || deliveredTheme === null) return;
+    const theme = options.theme();
+    if (theme === deliveredTheme) return;
+    deliveredTheme = theme;
+    post({
+      jsonrpc: "2.0",
+      method: "ui/notifications/host-context-changed",
+      params: { theme },
+    });
+  }
+
   function handleMessage(event: MessageEvent) {
     const frame = options.frame();
     if (disposed || frame === null || event.source !== frame) return;
@@ -160,7 +175,9 @@ export function createMcpAppBridge(options: {
 
     if (isRequest) {
       switch (method) {
-        case "ui/initialize":
+        case "ui/initialize": {
+          const theme = options.theme();
+          deliveredTheme = theme;
           post({
             jsonrpc: "2.0",
             id,
@@ -171,13 +188,14 @@ export function createMcpAppBridge(options: {
               // All four result fields are required by the view's schema —
               // an omitted hostContext fails its connect outright.
               hostContext: {
-                theme: options.theme(),
+                theme,
                 displayMode: "inline",
                 platform: "desktop",
               },
             },
           });
           break;
+        }
         case "ping":
           post({ jsonrpc: "2.0", id, result: {} });
           break;
@@ -305,6 +323,9 @@ export function createMcpAppBridge(options: {
     switch (method) {
       case "ui/notifications/initialized":
         viewInitialized = true;
+        // The host theme may have changed after ui/initialize but before the
+        // view confirmed initialization. Send that missed update now.
+        themeChanged();
         flush();
         break;
       case "ui/notifications/size-changed": {
@@ -334,6 +355,7 @@ export function createMcpAppBridge(options: {
       payload = next;
       flush();
     },
+    themeChanged,
     dispose() {
       disposed = true;
     },
