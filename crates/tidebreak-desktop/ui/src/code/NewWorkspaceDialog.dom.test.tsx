@@ -76,6 +76,7 @@ function harness(kind: HarnessKind): HarnessDoctorEntry {
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,
+    relaunch_composes_permission_mode: kind !== "opencode",
   } as HarnessDoctorEntry;
 }
 
@@ -314,6 +315,34 @@ describe("NewWorkspaceDialog", () => {
       reasoningEffortByHarness: {},
       fastModeByHarness: {},
     });
+  });
+
+  it("says the mode is fixed once an opencode session starts", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("opencode")],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          listCodeHarnessModels: vi.fn(async () => ({
+            kind: "opencode" as const,
+            models: [],
+            reasoning_efforts: [],
+          })),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      screen.getByText("Mode is fixed once the session starts"),
+    ).toBeInTheDocument();
   });
 
   // A report that has not landed knows nothing about any engine, so the

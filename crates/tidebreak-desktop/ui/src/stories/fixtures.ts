@@ -489,6 +489,7 @@ function doctorEntry(
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,
+    relaunch_composes_permission_mode: true,
     ...overrides,
   };
 }
@@ -518,6 +519,7 @@ export const harnessDoctor: HarnessDoctorReport = {
       version: "1.18.18",
       tier: "tertiary",
       authenticated: true,
+      relaunch_composes_permission_mode: false,
       caps: { ...fullCaps, allow_mode: "unknown", reasoning_levels: "unknown" },
     }),
     doctorEntry({

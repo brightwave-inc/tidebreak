@@ -410,6 +410,10 @@ pub struct HarnessDoctorEntry {
     pub remediation: String,
     pub stderr: String,
     pub unrecognized_event_count: i64,
+    /// Whether relaunching a session applies a permission mode chosen after
+    /// it started. False for engines that fix the mode on session create
+    /// (opencode); true where a relaunch rebuilds the launch plan.
+    pub relaunch_composes_permission_mode: bool,
 }
 
 /// One model a harness CLI listed.

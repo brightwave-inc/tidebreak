@@ -7764,6 +7764,74 @@ async fn the_doctor_caches_probes_and_refresh_re_probes() {
     );
 }
 
+/// opencode fixes permission mode at session create; Claude and Codex
+/// recompose it on relaunch. The doctor carries that so the picker can lock.
+#[tokio::test]
+async fn the_doctor_reports_whether_relaunch_composes_permission_mode() {
+    let (dir, store) = temp_db_store("code.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(
+        ScriptedAdapter::new(plain_text_script()).with_kind(HarnessKind::ClaudeCode),
+    ));
+    registry.register(Arc::new(
+        ScriptedAdapter::new(plain_text_script()).with_kind(HarnessKind::Codex),
+    ));
+    registry.register(Arc::new(
+        ScriptedAdapter::new(plain_text_script())
+            .with_kind(HarnessKind::Opencode)
+            .with_posture_fixed_at_session_start(),
+    ));
+    let runtime = Arc::new(CodeRuntime::with_registry(
+        db,
+        dir.path().to_path_buf(),
+        registry,
+    ));
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime);
+    let token = state.token.clone();
+    let addr = serve(app(state)).await;
+    let client = reqwest::Client::new();
+
+    let report = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    let by_kind: std::collections::BTreeMap<String, bool> = report["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap().to_owned(),
+                row["relaunch_composes_permission_mode"]
+                    .as_bool()
+                    .expect("doctor must send relaunch_composes_permission_mode"),
+            )
+        })
+        .collect();
+    assert_eq!(by_kind.get("claude_code"), Some(&true));
+    assert_eq!(by_kind.get("codex"), Some(&true));
+    assert_eq!(by_kind.get("opencode"), Some(&false));
+}
+
 /// Decision 71's doctor half: on a gateway-hosted machine the relay-covered
 /// engines are ready without a local sign-in — nobody can open a terminal
 /// there — and the uncovered ones say they are not available hosted yet,
