@@ -1834,10 +1834,18 @@ async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool,
         Err(_) => {
             // No upstream: unique commits versus the workspace base would be lost
             // only if the branch were deleted; still report them so archive is honest.
-            let range = format!("{base_ref}..HEAD");
+            let Some(base_commit) = resolve_archive_base(worktree_path, base_ref).await? else {
+                tracing::warn!(
+                    base_ref,
+                    path = %worktree_path.display(),
+                    "code-mode: workspace base is missing; treating the branch as unpushed"
+                );
+                return Ok(true);
+            };
+            let range = format!("{base_commit}..HEAD");
             let count = git_stdout(
                 Some(worktree_path),
-                &["rev-list", "--count", &range],
+                &["rev-list", "--count", &range, "--"],
                 GIT_TIMEOUT,
             )
             .await
@@ -1845,6 +1853,44 @@ async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool,
             Ok(count.parse::<u64>().unwrap_or(1) > 0)
         }
     }
+}
+
+/// Resolve a stored workspace base without assuming that a local branch exists.
+///
+/// Hosted and worktree-oriented clones can retain only `origin/<branch>` while
+/// workspace rows keep the short branch name. Resolve the short name first so
+/// ordinary repositories preserve their behavior, then use the matching
+/// remote-tracking ref. Returning `None` keeps archive conservative instead of
+/// turning a missing ref into a 500 response.
+async fn resolve_archive_base(
+    worktree_path: &Path,
+    base_ref: &str,
+) -> Result<Option<String>, WorktreeError> {
+    let base_ref = base_ref.trim();
+    let mut candidates = vec![base_ref.to_owned()];
+    if !base_ref.is_empty() && !base_ref.starts_with("refs/") && !base_ref.starts_with("origin/") {
+        candidates.push(format!("refs/remotes/origin/{base_ref}"));
+    }
+
+    for candidate in candidates {
+        let revision = format!("{candidate}^{{commit}}");
+        match git_stdout(
+            Some(worktree_path),
+            &["rev-parse", "--verify", "--quiet", &revision],
+            GIT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(commit) => return Ok(Some(commit)),
+            Err(error) if error.is_empty() => {}
+            Err(error) => {
+                return Err(WorktreeError::internal(format!(
+                    "could not resolve workspace base {candidate}: {error}"
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn classify_worktree_add(err: String, branch: &str) -> WorktreeError {
@@ -2090,6 +2136,38 @@ mod tests {
         assert!(
             !listed.contains("gone"),
             "prune should drop the stale registration: {listed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_uses_the_remote_tracking_base_when_the_local_branch_is_missing() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "remote-base");
+        create_ready(&repo, &path, "tidebreak/remote-base", "main").await;
+        let base = git_stdout(Some(&repo), &["rev-parse", "main"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        run(
+            &repo,
+            &["git", "update-ref", "refs/remotes/origin/main", &base],
+        );
+        run(&repo, &["git", "update-ref", "-d", "refs/heads/main"]);
+
+        assert_eq!(archive_blockers(&path, "main").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn archive_treats_a_missing_base_as_unpushed_instead_of_failing() {
+        let (_dir, repo) = init_repo();
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "missing-base");
+        create_ready(&repo, &path, "tidebreak/missing-base", "main").await;
+        run(&repo, &["git", "update-ref", "-d", "refs/heads/main"]);
+
+        assert_eq!(
+            archive_blockers(&path, "main").await.unwrap(),
+            Some(ArchiveBlock::Unpushed)
         );
     }
 
