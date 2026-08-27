@@ -61,6 +61,32 @@ type DeliveryScenario =
   | "notifications"
   | "notifications-empty";
 
+/**
+ * Open one pull request's detail sheet from the list.
+ *
+ * Scoped to the list on purpose: a workspace in the rail can carry the same
+ * title as the pull request it opened, and an unscoped text query matches
+ * the rail first — which navigates to the workspace instead of opening the
+ * sheet, and the story then asserts against a page that is not there.
+ */
+async function openPullRequest(canvasElement: HTMLElement, title: string) {
+  await openListRow(canvasElement, "Pull requests", title);
+}
+
+/** The same, for the runs and deployments list. */
+async function openRun(canvasElement: HTMLElement, title: string) {
+  await openListRow(canvasElement, "Runs and deployments", title);
+}
+
+async function openListRow(
+  canvasElement: HTMLElement,
+  list: string,
+  title: string,
+) {
+  const rows = within(canvasElement).getByRole("list", { name: list });
+  await userEvent.click(await within(rows).findByText(title));
+}
+
 function pending<T>(): Promise<T> {
   return new Promise(() => {});
 }
@@ -606,11 +632,8 @@ export const PullRequestStacks: Story = {
 export const PullRequestStackDetail: Story = {
   args: { scenario: "pull-requests-stacked" },
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Stack middle: reconcile sweep"),
-    );
+    await openPullRequest(canvasElement, "Stack middle: reconcile sweep");
     await expect(
       await body.findByRole("heading", {
         name: "Stack middle: reconcile sweep",
@@ -628,13 +651,10 @@ export const PullRequestStackDetail: Story = {
 
 export const PullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     // The detail is a sheet portaled to the document body, so its content
     // lives outside the story canvas.
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Make workspace deep links durable"),
-    );
+    await openPullRequest(canvasElement, "Make workspace deep links durable");
     await expect(
       await body.findByRole("heading", {
         name: "Make workspace deep links durable",
@@ -657,9 +677,7 @@ export const PullRequestUnregisteredStack: Story = {
     await expect(await canvas.findAllByText("Unregistered stack")).toHaveLength(
       3,
     );
-    await userEvent.click(
-      await canvas.findByText("Unregistered middle: the queries"),
-    );
+    await openPullRequest(canvasElement, "Unregistered middle: the queries");
     await expect(
       await body.findByRole("button", { name: /Create stack \(3 layers\)/ }),
     ).toBeVisible();
@@ -675,9 +693,8 @@ export const PullRequestUnregisteredStack: Story = {
 /** The full GitHub-shaped sheet: lifecycle, diffstat, reviewers, Markdown. */
 export const PullRequestDetailConversation: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     await expect(
       await body.findByRole("heading", { name: "Build the delivery center" }),
     ).toBeVisible();
@@ -698,9 +715,8 @@ export const PullRequestDetailConversation: Story = {
  */
 export const PullRequestCommentOrdering: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     const later = await body.findByText(
       "Keep repository failures visible without hiding usable results.",
     );
@@ -735,9 +751,8 @@ export const PullRequestCommentOrdering: Story = {
  */
 export const PullRequestAdminMerge: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     await expect(
       await body.findByRole("button", { name: "Enable auto-merge" }),
     ).toBeEnabled();
@@ -765,9 +780,8 @@ export const PullRequestAdminMerge: Story = {
  */
 export const PullRequestAgentActions: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     await userEvent.click(
       await body.findByRole("button", { name: "Fix with an agent" }),
     );
@@ -791,11 +805,8 @@ export const PullRequestAgentActions: Story = {
  */
 export const PullRequestFreshAgent: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Adopt the shared status tone map"),
-    );
+    await openPullRequest(canvasElement, "Adopt the shared status tone map");
     await userEvent.click(
       await body.findByRole("button", { name: "Fix with an agent" }),
     );
@@ -815,9 +826,8 @@ export const PullRequestFreshAgent: Story = {
 
 export const PullRequestDetailFiles: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     await userEvent.click(await body.findByRole("tab", { name: /Files/ }));
     await expect(await body.findByText(/19 files changed/)).toBeVisible();
     await userEvent.click(
@@ -831,9 +841,8 @@ export const PullRequestDetailFiles: Story = {
 
 export const PullRequestDetailChecks: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
     await expect(await body.findByText(/1 of 2 passed/)).toBeVisible();
   },
@@ -842,10 +851,10 @@ export const PullRequestDetailChecks: Story = {
 /** Merged: no merge controls, a reopen-free sheet, and who merged it. */
 export const MergedPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Cache the workspace digest between polls"),
+    await openPullRequest(
+      canvasElement,
+      "Cache the workspace digest between polls",
     );
     await expect(
       await body.findByRole("heading", {
@@ -862,11 +871,8 @@ export const MergedPullRequestDetail: Story = {
 /** Closed without merging: the only action left is to reopen it. */
 export const ClosedPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Rewrite the deployment runbook"),
-    );
+    await openPullRequest(canvasElement, "Rewrite the deployment runbook");
     await expect(
       await body.findByRole("button", { name: "Reopen" }),
     ).toBeVisible();
@@ -876,11 +882,8 @@ export const ClosedPullRequestDetail: Story = {
 /** Draft: mark ready is offered, merge is not. */
 export const DraftPullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Document managed deployments"),
-    );
+    await openPullRequest(canvasElement, "Document managed deployments");
     await expect(
       await body.findByRole("button", { name: "Mark ready" }),
     ).toBeVisible();
@@ -893,11 +896,8 @@ export const DraftPullRequestDetail: Story = {
 /** Conflicting: no host merge action, and the card says why. */
 export const BlockedMergePullRequestDetail: Story = {
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText("Adopt the shared status tone map"),
-    );
+    await openPullRequest(canvasElement, "Adopt the shared status tone map");
     await expect(
       await body.findByText(
         "Resolve the conflicts with the base branch first.",
@@ -967,9 +967,8 @@ export const RunDetail: Story = {
     initialUrl: "/code/delivery/runs",
   },
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Desktop CI"));
+    await openRun(canvasElement, "Desktop CI");
     await expect(
       await body.findByRole("heading", { name: "Desktop CI" }),
     ).toBeVisible();
@@ -1030,9 +1029,8 @@ export const NotificationRules: Story = {
 export const NarrowPullRequestDetail: Story = {
   parameters: { viewport: { defaultViewport: "compact" } },
   play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await canvas.findByText("Build the delivery center"));
+    await openPullRequest(canvasElement, "Build the delivery center");
     await expect(
       await body.findByRole("heading", { name: "Build the delivery center" }),
     ).toBeVisible();

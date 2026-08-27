@@ -342,9 +342,7 @@ describe("PullRequestDetailSheet", () => {
 
   it("carries labels, reviewers, and the diffstat in the header", async () => {
     await renderPanel(2251);
-    const header = screen.getByRole("heading", {
-      name: "Build the delivery center",
-    }).parentElement!.parentElement!.parentElement!;
+    const header = await screen.findByLabelText("Pull request summary");
     expect(within(header).getByText("desktop")).toBeInTheDocument();
     expect(within(header).getByText("+2140")).toBeInTheDocument();
     expect(within(header).getByText("−83")).toBeInTheDocument();
