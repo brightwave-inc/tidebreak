@@ -20,12 +20,14 @@
 //!   [`TurnEnd::Fatal`] and the run exits nonzero, unless the driver itself
 //!   interrupted the turn.
 //!
-//! Inference wiring: when the environment hands the pod a placeholder
-//! credential, each engine is configured at its vendor-default base with that
-//! placeholder, and the environment's interception boundary swaps it for a
-//! real credential per destination. Without a placeholder — a hand-run agent,
-//! most often — no wiring is applied and the engine uses whatever credentials
-//! it already has.
+//! Inference wiring: a sandboxed pod carries a placeholder credential and
+//! the gateway URL its confinement boundary serves inference through. Every
+//! engine is pointed at that gateway's protocol roots — the boundary
+//! recognizes gateway traffic by authority, so an engine configured at a
+//! vendor-default base would be talking to an unlisted destination, not
+//! getting a credential swap. Without a placeholder — a hand-run agent,
+//! most often — no wiring is applied and the engine uses whatever
+//! credentials it already has.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -39,7 +41,7 @@ use tidebreak_harness::{
     SessionSpec, TurnInput, TurnOutcome,
 };
 
-use crate::engine::{Engine, EngineError, SteerRefused, TurnEnd, TurnHandle, TurnRequest};
+use crate::engine::{Engine, EngineError, SteerOutcome, TurnEnd, TurnHandle, TurnRequest};
 
 /// The placeholder credential the environment hands a sandboxed pod.
 ///
@@ -49,18 +51,66 @@ use crate::engine::{Engine, EngineError, SteerRefused, TurnEnd, TurnHandle, Turn
 /// such an environment and no wiring is applied.
 pub const PLACEHOLDER_TOKEN_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_PLACEHOLDER_TOKEN";
 
+/// The gateway base URL the environment writes on every sandboxed pod.
+///
+/// The confinement boundary recognizes gateway traffic by authority:
+/// inference must go to this host, and `/compat/anthropic` and
+/// `/compat/openai` are the protocol roots hanging off it.
+pub const GATEWAY_URL_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_GATEWAY_URL";
+
 /// Environment variable name the wiring carries the credential under, for
 /// engines whose clients read it from the environment.
 pub const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
 
-const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
-const OPENAI_BASE: &str = "https://api.openai.com";
-const XAI_BASE: &str = "https://api.x.ai";
+/// The environment's inference contract, resolved from the pod's variables.
+#[derive(Debug)]
+pub struct GatewayInference {
+    /// The placeholder credential the boundary swaps for a real one.
+    pub placeholder_credential: String,
+    /// The gateway root every engine's protocol base derives from.
+    pub gateway_url: String,
+}
 
-/// Reads the placeholder credential, treating empty the same as absent.
-#[must_use]
-pub fn placeholder_credential_from_env() -> Option<String> {
-    std::env::var(PLACEHOLDER_TOKEN_VARIABLE)
+/// Resolves the inference contract from the environment.
+///
+/// No placeholder means a hand-run agent on ambient credentials: no wiring.
+/// A placeholder without a usable gateway URL is a broken pod contract and
+/// fails loudly — configuring the engine at a vendor default would aim its
+/// first turn at a destination the confinement boundary refuses.
+pub fn gateway_inference_from_env() -> Result<Option<GatewayInference>, String> {
+    resolve_gateway_inference(
+        read_trimmed(PLACEHOLDER_TOKEN_VARIABLE),
+        read_trimmed(GATEWAY_URL_VARIABLE),
+    )
+}
+
+fn resolve_gateway_inference(
+    placeholder: Option<String>,
+    gateway_url: Option<String>,
+) -> Result<Option<GatewayInference>, String> {
+    let Some(placeholder_credential) = placeholder else {
+        return Ok(None);
+    };
+    let Some(gateway_url) = gateway_url else {
+        return Err(format!(
+            "{PLACEHOLDER_TOKEN_VARIABLE} is set but {GATEWAY_URL_VARIABLE} is missing or empty; \
+             a sandboxed pod always carries both"
+        ));
+    };
+    if !gateway_url.starts_with("https://") && !gateway_url.starts_with("http://") {
+        return Err(format!(
+            "{GATEWAY_URL_VARIABLE} is not an http(s) URL: {gateway_url}"
+        ));
+    }
+    Ok(Some(GatewayInference {
+        placeholder_credential,
+        gateway_url,
+    }))
+}
+
+/// Reads one variable, treating empty and whitespace the same as absent.
+fn read_trimmed(name: &str) -> Option<String> {
+    std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
@@ -83,8 +133,8 @@ pub struct HarnessEngineSpec {
     pub allowed_read_roots: Vec<PathBuf>,
     /// Outbound-trust variables every engine child carries.
     pub trust_env: Vec<(OsString, OsString)>,
-    /// The environment's placeholder credential, when the pod has one.
-    pub placeholder_credential: Option<String>,
+    /// The environment's inference contract, when the pod has one.
+    pub gateway_inference: Option<GatewayInference>,
 }
 
 /// Drives one engine CLI session through `tidebreak-harness`.
@@ -127,20 +177,18 @@ impl HarnessEngine {
             message: format!("the {} probe reported no binary path", self.kind),
         })?;
 
-        let (extra_argv, extra_env, relay_key_env) = match &self.spec.placeholder_credential {
-            Some(key) => {
-                let openai_base = if self.kind == HarnessKind::Grok {
-                    XAI_BASE
-                } else {
-                    OPENAI_BASE
-                };
+        let (extra_argv, extra_env, relay_key_env) = match &self.spec.gateway_inference {
+            Some(inference) => {
+                let root = inference.gateway_url.trim_end_matches('/');
+                let anthropic_base = format!("{root}/compat/anthropic");
+                let openai_base = format!("{root}/compat/openai");
                 let (argv, env) = spawn_wiring(
                     self.kind,
                     &InferenceWiring {
-                        anthropic_base: ANTHROPIC_BASE,
-                        openai_base,
+                        anthropic_base: &anthropic_base,
+                        openai_base: &openai_base,
                         key_env: RELAY_KEY_ENV,
-                        key,
+                        key: &inference.placeholder_credential,
                     },
                 );
                 (argv, env, Some(RELAY_KEY_ENV.to_owned()))
@@ -333,11 +381,28 @@ impl TurnHandle for HarnessTurn {
         ended
     }
 
-    async fn steer(&mut self, body: String) -> Result<(), SteerRefused> {
-        // Any refusal — an engine with no mid-turn channel, or one that
-        // rejected this particular steer — keeps the message queued for the
-        // next turn.
-        self.session.steer(body).await.map_err(|_| SteerRefused)
+    async fn steer(&mut self, body: String) -> SteerOutcome {
+        if let Some(ended) = &self.ended {
+            return SteerOutcome::Ended(ended.clone());
+        }
+        let session = Arc::clone(&self.session);
+        let joined = tokio::select! {
+            biased;
+            joined = &mut self.run => joined,
+            result = session.steer(body) => {
+                // Any refusal — an engine with no mid-turn channel, or one
+                // that rejected this steer — keeps the message queued for the
+                // next turn.
+                return if result.is_ok() {
+                    SteerOutcome::Delivered
+                } else {
+                    SteerOutcome::Refused
+                };
+            }
+        };
+        let ended = self.conclude(joined);
+        self.ended = Some(ended.clone());
+        SteerOutcome::Ended(ended)
     }
 
     async fn interrupt(&mut self) {
@@ -352,6 +417,7 @@ impl TurnHandle for HarnessTurn {
 mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
+    use std::time::Duration;
 
     use tidebreak_core::{CapLevel, CodeUsage, HarnessCaps};
     use tidebreak_harness::{ApprovalDecision, HarnessApprovalRef, HostEnv};
@@ -425,6 +491,8 @@ mod tests {
     #[derive(Default)]
     struct CapturedSpec {
         permission_mode: Option<PermissionMode>,
+        worktree: Option<PathBuf>,
+        allowed_read_roots: Vec<PathBuf>,
         extra_argv: Vec<String>,
         extra_env: Vec<(String, String)>,
         relay_key_env: Option<String>,
@@ -482,6 +550,8 @@ mod tests {
             }
             *self.captured.lock().unwrap() = CapturedSpec {
                 permission_mode: Some(spec.permission_mode),
+                worktree: Some(spec.worktree),
+                allowed_read_roots: spec.allowed_read_roots,
                 extra_argv: spec.extra_argv,
                 extra_env: spec.extra_env,
                 relay_key_env: spec.relay_key_env,
@@ -525,7 +595,7 @@ mod tests {
                 OsString::from("SSL_CERT_FILE"),
                 OsString::from("/tmp/bundle.pem"),
             )],
-            placeholder_credential: None,
+            gateway_inference: None,
         })
     }
 
@@ -697,7 +767,27 @@ mod tests {
         }]));
         let mut engine = engine_over(adapter, probe(true));
         let mut turn = engine.start_turn(request("go")).await.unwrap();
-        assert!(turn.steer("also do this".to_owned()).await.is_err());
+        assert_eq!(
+            turn.steer("also do this".to_owned()).await,
+            SteerOutcome::Refused
+        );
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+    }
+
+    #[tokio::test]
+    async fn a_completed_turn_wins_over_a_late_steer() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            event: Some(completed_event()),
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            turn.steer("too late".to_owned()).await,
+            SteerOutcome::Ended(TurnEnd::Completed { success: true })
+        );
         assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
     }
 
@@ -729,7 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_placeholder_credential_wires_the_engine_at_its_vendor_base() {
+    async fn a_placeholder_credential_wires_the_engine_at_the_gateway() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
             event: Some(completed_event()),
             outcome: Ok(TurnOutcome::Clean),
@@ -737,19 +827,40 @@ mod tests {
         }]));
         let captured = adapter.captured.clone();
         let mut engine = engine_over(adapter, probe(true));
-        engine.spec.placeholder_credential = Some("placeholder".to_owned());
+        // The trailing slash must not double up in the derived roots.
+        engine.spec.gateway_inference = Some(GatewayInference {
+            placeholder_credential: "placeholder".to_owned(),
+            gateway_url: "https://gateway.internal:8443/".to_owned(),
+        });
         engine.start_turn(request("go")).await.unwrap();
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.relay_key_env.as_deref(), Some(RELAY_KEY_ENV));
-        assert!(captured
-            .extra_env
-            .iter()
-            .any(|(name, value)| name == "ANTHROPIC_BASE_URL" && value == ANTHROPIC_BASE));
+        assert!(captured.extra_env.iter().any(|(name, value)| {
+            name == "ANTHROPIC_BASE_URL"
+                && value == "https://gateway.internal:8443/compat/anthropic"
+        }));
         assert!(captured
             .extra_env
             .iter()
             .any(|(name, value)| name == "ANTHROPIC_AUTH_TOKEN" && value == "placeholder"));
+    }
+
+    /// The placeholder never stands alone: without a gateway URL the pod
+    /// contract is broken, and wiring an engine anywhere else would aim it
+    /// at a destination the confinement boundary refuses.
+    #[test]
+    fn a_placeholder_without_a_gateway_url_is_refused() {
+        let error = resolve_gateway_inference(Some("placeholder".to_owned()), None).unwrap_err();
+        assert!(error.contains(GATEWAY_URL_VARIABLE));
+        let error = resolve_gateway_inference(
+            Some("placeholder".to_owned()),
+            Some("gateway.internal:8443".to_owned()),
+        )
+        .unwrap_err();
+        assert!(error.contains("http"));
+        // No placeholder: a hand-run agent, no wiring, no complaint.
+        assert!(resolve_gateway_inference(None, None).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -759,12 +870,18 @@ mod tests {
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
-        // Assert through the session spec by capturing paths too.
-        let mut engine = engine_over(adapter.clone(), probe(true));
+        let captured = adapter.captured.clone();
+        let mut engine = engine_over(adapter, probe(true));
         engine.start_turn(request("go")).await.unwrap();
-        // Paths are fixed in `engine_over`; a wrong worktree would have been
-        // caught by the adapter refusing a relative read root at launch.
-        assert!(Path::new("/workspace").is_absolute());
-        let _ = adapter;
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(
+            captured.worktree.as_deref(),
+            Some(Path::new("/workspace/repo"))
+        );
+        assert_eq!(
+            captured.allowed_read_roots,
+            vec![PathBuf::from("/workspace")]
+        );
     }
 }

@@ -24,7 +24,7 @@ use tidebreak_harness::HostEnv;
 use tidebreak_supervised_agent::control::Control;
 use tidebreak_supervised_agent::drive::Driver;
 use tidebreak_supervised_agent::harness_engine::{
-    placeholder_credential_from_env, HarnessEngine, HarnessEngineSpec,
+    gateway_inference_from_env, HarnessEngine, HarnessEngineSpec,
 };
 use tidebreak_supervised_agent::inputs::{resolve, RawInputs};
 use tidebreak_supervised_agent::trust::TrustOptions;
@@ -42,6 +42,16 @@ async fn run() -> i32 {
         Err(error) => {
             eprintln!("{error}");
             return error.code;
+        }
+    };
+    // Part of the environment contract: a placeholder credential without a
+    // gateway URL is a broken pod, better refused here than at the first
+    // turn's inference request.
+    let gateway_inference = match gateway_inference_from_env() {
+        Ok(inference) => inference,
+        Err(error) => {
+            eprintln!("{error}");
+            return EXIT_MISSING_INPUT;
         }
     };
 
@@ -108,7 +118,7 @@ async fn run() -> i32 {
         worktree: workdir.clone(),
         allowed_read_roots,
         trust_env,
-        placeholder_credential: placeholder_credential_from_env(),
+        gateway_inference,
     });
 
     let wip = if !inputs.forge_push_denied && !bootstrap.clones.is_empty() {
