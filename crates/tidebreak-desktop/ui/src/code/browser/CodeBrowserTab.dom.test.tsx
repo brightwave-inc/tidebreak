@@ -1446,6 +1446,19 @@ describe("CodeBrowserTab", () => {
         runtime.calls.filter(({ action }) => action.type === "create"),
       ).toHaveLength(2),
     );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId,
+      });
+    });
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
     expect(
       screen.getByText(
         "Resetting the Tidebreak development profile… reopening stored browser pages.",
@@ -1625,6 +1638,23 @@ describe("CodeBrowserTab", () => {
         runtime.calls.filter(({ action }) => action.type === "create"),
       ).toHaveLength(2),
     );
+    const resetIndex = runtime.calls.findIndex(
+      ({ action }) => action.type === "reset_profile",
+    );
+    const recoveryCreateIndex = runtime.calls.findIndex(
+      ({ action }, index) => index > resetIndex && action.type === "create",
+    );
+    expect(resetIndex).toBeGreaterThan(-1);
+    expect(recoveryCreateIndex).toBeGreaterThan(resetIndex);
+    expect(
+      runtime.calls.some(
+        ({ action }, index) =>
+          index > resetIndex &&
+          index < recoveryCreateIndex &&
+          action.type === "set_visible" &&
+          action.visible,
+      ),
+    ).toBe(false);
     expect(
       screen.queryByText("WebKit could not remove the managed profile data"),
     ).toBeNull();
@@ -1640,6 +1670,16 @@ describe("CodeBrowserTab", () => {
         "WebKit could not remove the managed profile data",
       ),
     ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(
+          ({ action }, index) =>
+            index > recoveryCreateIndex &&
+            action.type === "set_visible" &&
+            action.visible,
+        ),
+      ).toBe(true),
+    );
     expect(
       runtime.calls.filter(({ action }) => action.type === "create"),
     ).toHaveLength(2);

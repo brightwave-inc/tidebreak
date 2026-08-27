@@ -135,16 +135,21 @@ describe("BrowserToolbar managed profile reset", () => {
     ).toBeVisible();
     expect(
       screen.getByText(
-        /same stored Tidebreak browser pages will return signed out in a fresh Tidebreak development profile/i,
+        /closes every Tidebreak browser tab and deletes the managed development-profile cookies, site data, and cache/i,
       ),
     ).toBeVisible();
     expect(
       screen.getByText(
-        /Managed cookies, site data, and cache are deleted; Safari and Chrome are untouched/i,
+        /same pages return signed out in a fresh Tidebreak profile/i,
       ),
     ).toBeVisible();
     expect(
       screen.getByText(/existing agent origin grants remain/i),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        /Safari, Chrome, and your personal browser profiles are never read or changed/i,
+      ),
     ).toBeVisible();
   });
 

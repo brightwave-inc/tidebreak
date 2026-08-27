@@ -42,6 +42,7 @@ type BrowserScenario =
   | "inspect-on"
   | "profile-reset-confirmation"
   | "profile-resetting"
+  | "profile-reset-deleting"
   | "profile-reset-reconstructing"
   | "profile-reset-failure";
 
@@ -212,10 +213,11 @@ function BrowserStory({
   const profileResetScenario =
     scenario === "profile-reset-confirmation" ||
     scenario === "profile-resetting" ||
+    scenario === "profile-reset-deleting" ||
     scenario === "profile-reset-reconstructing" ||
     scenario === "profile-reset-failure";
   const profileResetPhase = profileResetStarted
-    ? scenario === "profile-resetting"
+    ? scenario === "profile-reset-deleting"
       ? "deleting"
       : scenario === "profile-reset-reconstructing"
         ? "reconstructing"
@@ -223,6 +225,7 @@ function BrowserStory({
     : null;
   const onResetProfile =
     scenario === "profile-resetting" ||
+    scenario === "profile-reset-deleting" ||
     scenario === "profile-reset-reconstructing"
       ? () => {
           setProfileResetStarted(true);
@@ -643,11 +646,45 @@ export const ManagedProfileResetConfirmation: Story = {
     );
     const dialog = await body.findByRole("alertdialog");
     await waitFor(() => expect(dialog).toBeVisible());
+    await expect(
+      within(dialog).getByText(
+        /same pages return signed out in a fresh Tidebreak profile/i,
+      ),
+    ).toBeVisible();
+    await expect(
+      within(dialog).getByText(/existing agent origin grants remain/i),
+    ).toBeVisible();
   },
 };
 
 export const ManagedProfileResetting: Story = {
   args: { scenario: "profile-resetting" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await userEvent.click(
+      await body.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await expect(
+      canvas.getByText(
+        "Resetting the Tidebreak development profile… closing browser tabs.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const ManagedProfileDeletingData: Story = {
+  args: { scenario: "profile-reset-deleting" },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
@@ -718,6 +755,9 @@ export const ManagedProfileResetFailure: Story = {
     );
     await expect(
       canvas.getByText("WebKit could not remove the managed profile data"),
+    ).toBeVisible();
+    await expect(
+      canvas.getByText("One page for people and agents."),
     ).toBeVisible();
   },
 };
@@ -844,6 +884,11 @@ export const ToolbarNarrow320ManagedProfileReset: Story = {
     );
     const dialog = await body.findByRole("alertdialog");
     await waitFor(() => expect(dialog).toBeVisible());
+    await expect(
+      within(dialog).getByText(
+        /same pages return signed out in a fresh Tidebreak profile/i,
+      ),
+    ).toBeVisible();
   },
 };
 

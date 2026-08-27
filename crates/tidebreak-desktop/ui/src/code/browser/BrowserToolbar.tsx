@@ -177,10 +177,11 @@ export function BrowserToolbar({
       title: "Reset development profile?",
       description: (
         <>
-          The same stored Tidebreak browser pages will return signed out in a
-          fresh Tidebreak development profile. Managed cookies, site data, and
-          cache are deleted; Safari and Chrome are untouched, and existing agent
-          origin grants remain.
+          This closes every Tidebreak browser tab and deletes the managed
+          development-profile cookies, site data, and cache. The same pages
+          return signed out in a fresh Tidebreak profile, while existing agent
+          origin grants remain. Safari, Chrome, and your personal browser
+          profiles are never read or changed.
         </>
       ),
       confirmLabel: "Reset development profile",
