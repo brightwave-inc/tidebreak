@@ -1,3 +1,4 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -12,15 +13,19 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { CodeApprovalCard } from "../../src/components/CodeApprovalCard";
 import { Button, LoadingState, StatusPill } from "../../src/components/Controls";
 import { ErrorText } from "../../src/components/Screen";
 import {
+  decideCodeApproval,
   interruptCodeSession,
+  listCodeApprovals,
   listCodeQueuedTurns,
   listCodeTurns,
   steerCodeSession,
   submitCodeTurn,
 } from "../../src/lib/api";
+import { pendingApprovals } from "../../src/lib/approvals";
 import {
   clearDeliveredDraft,
   codeSubmissionWasAccepted,
@@ -46,8 +51,17 @@ export default function SessionDetailScreen() {
   }>();
   const session = useSessionStore((state) => state.session);
   const client = useMachineClient();
+  const queryClient = useQueryClient();
   const [refreshVersion, setRefreshVersion] = useState(0);
   const transcript = useSessionEvents(client, params.id, refreshVersion);
+  const approvalsQuery = useQuery({
+    queryKey: ["code-approvals", client, params.id],
+    enabled: !!client && !!params.id,
+    queryFn: () => listCodeApprovals(client!, params.id!),
+    refetchInterval: 5_000,
+  });
+  const approvals = pendingApprovals(approvalsQuery.data ?? []);
+  const approvalListKey = approvals.map((approval) => approval.id).join(":");
   const scrollRef = useRef<ScrollView>(null);
   const submittingTurnRef = useRef(false);
   const steeringRef = useRef(false);
@@ -80,7 +94,14 @@ export default function SessionDetailScreen() {
     } else {
       setShowJump(true);
     }
-  }, [transcript.items, pinned]);
+  }, [approvalListKey, transcript.items, pinned]);
+
+  useEffect(() => {
+    if (transcript.approvalRevision === 0) return;
+    void queryClient.invalidateQueries({
+      queryKey: ["code-approvals", client, params.id],
+    });
+  }, [client, params.id, queryClient, transcript.approvalRevision]);
 
   useEffect(() => {
     if (!transcript.activeTurnId) setMode("followup");
@@ -209,6 +230,21 @@ export default function SessionDetailScreen() {
     }
   }
 
+  async function decideApproval(
+    approvalId: string,
+    decision: "approve" | "deny",
+    feedback?: string,
+  ) {
+    if (!client) return;
+    try {
+      await decideCodeApproval(client, approvalId, decision, feedback);
+    } finally {
+      // The decision can commit even when its response is lost. Replace every
+      // cached approval list before the reader can submit the decision again.
+      await queryClient.invalidateQueries({ queryKey: ["code-approvals"] });
+    }
+  }
+
   async function refreshAfterAmbiguousAction() {
     if (
       !client ||
@@ -310,6 +346,23 @@ export default function SessionDetailScreen() {
                 <TimelineRow key={item.id} item={item} />
               ))
             )}
+            {approvalsQuery.isError ? (
+              <ErrorText>
+                {approvalsQuery.error instanceof Error
+                  ? approvalsQuery.error.message
+                  : "Could not load approvals for this session."}
+              </ErrorText>
+            ) : null}
+            {approvals.map((approval) => (
+              <CodeApprovalCard
+                key={approval.id}
+                approval={approval}
+                onApprove={() => decideApproval(approval.id, "approve")}
+                onDeny={(feedback) =>
+                  decideApproval(approval.id, "deny", feedback)
+                }
+              />
+            ))}
           </ScrollView>
           {showJump && !pinned ? (
             <Pressable
