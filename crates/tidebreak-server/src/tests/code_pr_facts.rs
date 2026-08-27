@@ -266,7 +266,8 @@ async fn a_journaled_create_mints_an_authored_fact() {
     .await;
 
     let search_path = shim.display().to_string();
-    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path)).await;
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
 
     let owner = OwnerId::local();
     let fact = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
@@ -284,7 +285,8 @@ async fn a_journaled_create_mints_an_authored_fact() {
     assert_eq!(attributed[0].1, CodePullRequestRelation::Authored);
 
     // Re-running the sweep is idempotent: one row, first_seen_at holds.
-    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path)).await;
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
     let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
         .await
         .unwrap();
@@ -318,7 +320,8 @@ async fn a_journaled_push_mints_a_contributed_fact() {
     .await;
 
     let search_path = shim.display().to_string();
-    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path)).await;
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
 
     let owner = OwnerId::local();
     let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
@@ -327,6 +330,84 @@ async fn a_journaled_push_mints_a_contributed_fact() {
     assert_eq!(attributed.len(), 1);
     assert_eq!(attributed[0].1, CodePullRequestRelation::Contributed);
     assert_eq!(attributed[0].0.number, 412);
+}
+
+#[tokio::test]
+async fn a_confirmed_push_marks_the_workspace_hot() {
+    // The agent's own push moves the head, and nothing else dirties the row
+    // for it: route mutations cover the user's actions, not the engine's.
+    // Left unmarked, the watch reads a pre-push head, calls its own fix turn
+    // a repeat, and parks (issue 2799).
+    let (dir, store) = temp_db_store("pr-facts-hot.db").await;
+    let work = init_github_shaped_repo(dir.path());
+    let shim = dir.path().join("bin");
+    std::fs::create_dir_all(&shim).unwrap();
+    write_gh_shim(&shim, &dir.path().join("gh.log"));
+    let (session, turn_id) = seeded(&store, &work).await;
+
+    journal_command(
+        &store,
+        &session,
+        "call-1",
+        "git push -u origin feat/x",
+        &work,
+        ToolOutcome::Succeeded,
+        "branch pushed",
+        None,
+    )
+    .await;
+
+    let hot = crate::code::pr_refresh::HotPullRequests::default();
+    let search_path = shim.display().to_string();
+    pr_facts::sweep_turn_for_pull_request_acts(
+        &store,
+        &session,
+        turn_id,
+        Some(&search_path),
+        Some(&hot),
+    )
+    .await;
+
+    assert_eq!(
+        hot.live(),
+        vec![(OwnerId::local(), session.workspace_id)],
+        "the confirmed push puts the workspace on the hot refresh tier"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_pushed_nothing_leaves_the_hot_tier_alone() {
+    let (dir, store) = temp_db_store("pr-facts-not-hot.db").await;
+    let work = init_github_shaped_repo(dir.path());
+    let shim = dir.path().join("bin");
+    std::fs::create_dir_all(&shim).unwrap();
+    write_gh_shim(&shim, &dir.path().join("gh.log"));
+    let (session, turn_id) = seeded(&store, &work).await;
+
+    journal_command(
+        &store,
+        &session,
+        "call-1",
+        "gh pr view 412",
+        &work,
+        ToolOutcome::Succeeded,
+        "done",
+        None,
+    )
+    .await;
+
+    let hot = crate::code::pr_refresh::HotPullRequests::default();
+    let search_path = shim.display().to_string();
+    pr_facts::sweep_turn_for_pull_request_acts(
+        &store,
+        &session,
+        turn_id,
+        Some(&search_path),
+        Some(&hot),
+    )
+    .await;
+
+    assert!(hot.live().is_empty());
 }
 
 #[tokio::test]
@@ -372,7 +453,8 @@ async fn reads_comments_and_failures_mint_nothing() {
     .await;
 
     let search_path = shim.display().to_string();
-    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path)).await;
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
 
     let owner = OwnerId::local();
     assert!(
@@ -420,7 +502,8 @@ async fn a_signed_out_gh_mints_nothing() {
     .await;
 
     let search_path = shim.display().to_string();
-    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path)).await;
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
 
     let owner = OwnerId::local();
     assert!(

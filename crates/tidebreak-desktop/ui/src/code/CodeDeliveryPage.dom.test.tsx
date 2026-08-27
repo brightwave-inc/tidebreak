@@ -35,10 +35,12 @@ import {
   codeDeliverySearchFrom,
 } from "./CodeDeliveryPage";
 import { useCodeDeliveryStore } from "./CodeDeliveryStore";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 afterEach(() => {
   cleanup();
   useCodeDeliveryStore.getState().reset();
+  useCodeUpdatesStore.getState().reset();
 });
 
 vi.mock("@/openInBrowser", () => ({ openInBrowser: vi.fn() }));
@@ -157,6 +159,31 @@ async function rowFor(title: string): Promise<HTMLElement> {
 }
 
 describe("delivery pull request list", () => {
+  it("re-reads when the server nudges the delivery channel", async () => {
+    // The server says when the pull-request store moved (decision 66). The
+    // list is a projection of that nudge, not a clock of its own: without
+    // the subscription a fix turn's result waits for the reader to press
+    // Refresh (issue 2799).
+    const queryCodeDeliveryPullRequests = vi.fn(async () => ({
+      capability: deliveryRepositoriesSnapshot.capability,
+      items: deliveryPullRequests,
+      errors: [],
+      fetched_at: "2026-08-20T15:20:00.000Z",
+    }));
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests,
+    } as unknown as ApiClient);
+
+    await waitFor(() =>
+      expect(queryCodeDeliveryPullRequests).toHaveBeenCalledTimes(1),
+    );
+    useCodeUpdatesStore.getState().apply({ type: "delivery" });
+    await waitFor(() =>
+      expect(queryCodeDeliveryPullRequests).toHaveBeenCalledTimes(2),
+    );
+  });
+
   it("opens repository-scoped trigger rules from the production dialog", async () => {
     const user = userEvent.setup();
     const listCodeTriggers = vi.fn(async () => []);

@@ -207,8 +207,9 @@ pub(crate) struct CodeRuntime {
     /// sibling's turn starts after this one ends. See record 55.
     worktree_turns: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     /// Workspaces whose digest was requested recently, with the owner each
-    /// belongs to: the hot tier the refresher walks (decision 66).
-    hot_prs: Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>,
+    /// belongs to: the hot tier the refresher walks (decision 66). Shared by
+    /// handle so the post-turn fact detector marks its own pushes hot.
+    hot_prs: super::pr_refresh::HotPullRequests,
     /// Per-owner delivery nudge debounce, including one pending trailing edge.
     delivery_nudges: DeliveryNudgeDebounce,
     /// Paces and parks every conditional GitHub read (decision 66).
@@ -258,11 +259,6 @@ pub(crate) struct CodeRuntime {
 /// How long one base branch's rules answer stands before the next read.
 /// Rules change on the order of releases, not pushes.
 const BRANCH_RULES_TTL: Duration = Duration::from_secs(3600);
-
-/// How long one digest request keeps a workspace on the hot refresh tier
-/// (decision 66). The UI asks again while a workspace stays open, so the
-/// window only needs to outlive its poll spacing with room to spare.
-const HOT_WINDOW: Duration = Duration::from_secs(120);
 
 /// Floor between two delivery nudges to one owner (decision 66): a sweep
 /// updating many rows collapses to one re-read on the other side.
@@ -443,7 +439,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
-            hot_prs: Mutex::new(HashMap::new()),
+            hot_prs: super::pr_refresh::HotPullRequests::default(),
             delivery_nudges: DeliveryNudgeDebounce::default(),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
@@ -576,7 +572,7 @@ impl CodeRuntime {
             workers: Mutex::new(HashMap::new()),
             workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
-            hot_prs: Mutex::new(HashMap::new()),
+            hot_prs: super::pr_refresh::HotPullRequests::default(),
             delivery_nudges: DeliveryNudgeDebounce::default(),
             host_gate: super::pr_fetch::HostGate::default(),
             branch_rules: Mutex::new(HashMap::new()),
@@ -2145,11 +2141,16 @@ impl CodeRuntime {
         }
     }
 
-    /// Keep this workspace on the hot refresh tier for [`HOT_WINDOW`].
+    /// Keep this workspace on the hot refresh tier.
     fn mark_workspace_pr_hot(&self, owner: &OwnerId, id: WorkspaceId) {
-        let mut hot = self.hot_prs.lock().expect("hot prs");
-        hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
-        hot.insert(id, (owner.clone(), Instant::now()));
+        self.hot_prs.mark(owner, id);
+    }
+
+    /// The hot tier itself, for a writer that outlives no runtime reference:
+    /// the post-turn fact detector marks the workspace whose head it just
+    /// watched move (issue 2799).
+    pub(super) fn hot_pull_requests(&self) -> super::pr_refresh::HotPullRequests {
+        self.hot_prs.clone()
     }
 
     /// One delivery nudge on the updates channel, debounced per owner
@@ -2161,11 +2162,7 @@ impl CodeRuntime {
 
     /// The workspaces the hot refresher walks this tick.
     pub(super) fn hot_pull_request_workspaces(&self) -> Vec<(OwnerId, WorkspaceId)> {
-        let mut hot = self.hot_prs.lock().expect("hot prs");
-        hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
-        hot.iter()
-            .map(|(id, (owner, _))| (owner.clone(), *id))
-            .collect()
+        self.hot_prs.live()
     }
 
     /// Start the hot pull-request refresher once (decision 66).
@@ -2211,7 +2208,8 @@ impl CodeRuntime {
     /// row's stored ETag: a 304 answers from the row for free, and a 200
     /// carries new state. The result lands on the row — live tier, fanout,
     /// and the ETags for next time. `None` leaves the caller's persisted
-    /// digest standing: no pull request, a parked host, or a failed read.
+    /// digest standing: no pull request, a parked host, a failed read, or a
+    /// conditional read whose row moved under it.
     async fn fetched_workspace_digest(
         &self,
         owner: &OwnerId,
@@ -2416,9 +2414,14 @@ impl CodeRuntime {
         };
 
         let digest = pr_fetch::digest_from_parts(&pull, &checks, review_decision, in_merge_queue);
-        self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
-            .await;
-        if let Err(err) = tidebreak_core::db::code::set_pull_request_fetch_state(
+        // The validator gates every write this read produces, not just the
+        // fetch state (issue 2799). A 304 reconstructs its digest from the
+        // stored snapshot, so a row that moved under the read leaves that
+        // reconstruction describing a pull request that no longer exists.
+        // Write the transport hints first: if the row refuses them, the
+        // digest never reaches the live tier, the workspace column, or the
+        // caller's broadcast.
+        let accepted = match tidebreak_core::db::code::set_pull_request_fetch_state(
             &self.db,
             owner,
             &host,
@@ -2433,8 +2436,22 @@ impl CodeRuntime {
         )
         .await
         {
-            tracing::debug!(error = %err, "code-mode: fetch-state write failed");
+            Ok(accepted) => accepted,
+            Err(err) => {
+                tracing::debug!(error = %err, "code-mode: fetch-state write failed");
+                false
+            }
+        };
+        if !fresh_pull && !accepted {
+            tracing::debug!(
+                host = %host,
+                number = number,
+                "code-mode: a conditional pull-request read lost its validator; dropping it"
+            );
+            return None;
         }
+        self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
+            .await;
         Some(digest)
     }
 
@@ -5154,6 +5171,7 @@ impl CodeRuntime {
             attached.subagents.clone(),
             self.gh_search_path_owned(),
             self.recap_hook(),
+            self.hot_pull_requests(),
         );
         let approval = self.approval_channel(
             &attached.owner,
