@@ -31,6 +31,14 @@ type CommandCall = {
   action: BrowserHostAction;
 };
 
+function resetIdFrom(calls: CommandCall[]): number {
+  const reset = calls.find(({ action }) => action.type === "reset_profile");
+  if (!reset || reset.action.type !== "reset_profile") {
+    throw new Error("profile reset command was not sent");
+  }
+  return reset.action.resetId;
+}
+
 const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
   name: "wk_webview",
   capabilities: {
@@ -41,6 +49,14 @@ const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
     screenshot: false,
     crossOriginFrames: false,
     profileReset: false,
+  },
+};
+
+const resetEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
+  ...inspectEngine,
+  capabilities: {
+    ...inspectEngine.capabilities,
+    profileReset: true,
   },
 };
 
@@ -61,12 +77,15 @@ function agentAccess(
 
 function browserHost(options?: {
   createGate?: Promise<void>;
+  createGates?: Array<Promise<void> | undefined>;
   createError?: string;
   createErrors?: Array<string | null>;
   existing?: boolean;
   snapshotGate?: Promise<void>;
   actionErrors?: Partial<Record<BrowserHostAction["type"], string>>;
   runtime?: Partial<BrowserHostSnapshot>;
+  resetGate?: Promise<void>;
+  resetError?: string;
 }): {
   host: CodeBrowserHost;
   calls: CommandCall[];
@@ -109,14 +128,18 @@ function browserHost(options?: {
         }
         const actionError = options?.actionErrors?.[action.type];
         if (actionError) throw new Error(actionError);
+        if (action.type === "reset_profile") {
+          if (options?.resetGate) await options.resetGate;
+          if (options?.resetError) throw new Error(options.resetError);
+        }
         if (action.type === "create") {
+          const createGate =
+            options?.createGates?.[createAttempt] ?? options?.createGate;
           const createError =
             options?.createErrors?.[createAttempt] ?? options?.createError;
           createAttempt += 1;
           if (createError) throw new Error(createError);
-        }
-        if (action.type === "create" && options?.createGate) {
-          await options.createGate;
+          if (createGate) await createGate;
         }
         if (action.type === "set_inspect") inspectEnabled = action.enabled;
         if (action.type === "remove_inspect") inspectEnabled = false;
@@ -1332,6 +1355,453 @@ describe("CodeBrowserTab", () => {
       });
     });
     expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled();
+  });
+
+  it("reopens the stored page after a successful production profile reset", async () => {
+    const user = userEvent.setup();
+    let releaseReset: (() => void) | undefined;
+    let releaseRecovery: (() => void) | undefined;
+    const resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    const recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const runtime = browserHost({
+      createGates: [undefined, recoveryGate],
+      resetGate,
+      runtime: { engine: resetEngine },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/app"
+        host={runtime.host}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Browser options" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Resetting the Tidebreak development profile… closing browser tabs.",
+      ),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(({ action }) => action.type === "reset_profile"),
+      ).toBe(true),
+    );
+    const resetId = resetIdFrom(runtime.calls);
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_deleting_data",
+        resetId,
+      });
+    });
+    expect(
+      await screen.findByText(
+        "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.",
+      ),
+    ).toBeVisible();
+
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId,
+      });
+      releaseReset?.();
+    });
+    expect(
+      await screen.findByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId,
+      });
+    });
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+    await act(async () => releaseRecovery?.());
+    expect(
+      await screen.findByRole("button", { name: "Browser options" }),
+    ).toBeEnabled();
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "reset_profile"),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId,
+      });
+    });
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(2);
+  });
+
+  it("rejects pre-reset document epochs after native closing is acknowledged", async () => {
+    const user = userEvent.setup();
+    let releaseReset: (() => void) | undefined;
+    const resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    const runtime = browserHost({
+      resetGate,
+      runtime: { engine: resetEngine },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/app"
+        host={runtime.host}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Browser options" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(({ action }) => action.type === "reset_profile"),
+      ).toBe(true),
+    );
+    const resetId = resetIdFrom(runtime.calls);
+
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/app",
+        documentEpoch: 9,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_deleting_data",
+        resetId,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId,
+      });
+      releaseReset?.();
+    });
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/fresh",
+        documentEpoch: 1,
+      });
+    });
+
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("example.com/fresh");
+  });
+
+  it("reconstructs the native view before showing a deletion failure", async () => {
+    const user = userEvent.setup();
+    let releaseReset: (() => void) | undefined;
+    let releaseRecovery: (() => void) | undefined;
+    const resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    const recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const runtime = browserHost({
+      createGates: [undefined, recoveryGate],
+      resetGate,
+      resetError: "WebKit could not remove the managed profile data",
+      runtime: { engine: resetEngine },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/app"
+        host={runtime.host}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Browser options" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(({ action }) => action.type === "reset_profile"),
+      ).toBe(true),
+    );
+    const resetId = resetIdFrom(runtime.calls);
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_deleting_data",
+        resetId,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId,
+      });
+      releaseReset?.();
+    });
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    expect(
+      screen.queryByText("WebKit could not remove the managed profile data"),
+    ).toBeNull();
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+
+    await act(async () => releaseRecovery?.());
+    expect(
+      await screen.findByText(
+        "WebKit could not remove the managed profile data",
+      ),
+    ).toBeVisible();
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(2);
+
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/app",
+      });
+    });
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "reload" },
+      }),
+    );
+  });
+
+  it("reconstructs a sibling stored tab from the native reset cycle", async () => {
+    const runtime = browserHost({ runtime: { engine: resetEngine } });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/app"
+        host={runtime.host}
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Browser options" });
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId: 9001,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_deleting_data",
+        resetId: 9001,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId: 9001,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/app",
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "reload" },
+      }),
+    );
+  });
+
+  it("does not accept a pre-reset create response as the reconstructed view", async () => {
+    let releaseInitialCreate: (() => void) | undefined;
+    const initialCreateGate = new Promise<void>((resolve) => {
+      releaseInitialCreate = resolve;
+    });
+    const runtime = browserHost({
+      createGates: [initialCreateGate, undefined],
+      runtime: { engine: resetEngine },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/app"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(1),
+    );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId: 9002,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_deleting_data",
+        resetId: 9002,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId: 9002,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    await act(async () => releaseInitialCreate?.());
+    expect(
+      runtime.calls.filter(({ action }) => action.type === "create"),
+    ).toHaveLength(2);
+
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/app",
+      });
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "reload" },
+      }),
+    );
   });
 
   it("uses native Reload when the browser view already exists", async () => {

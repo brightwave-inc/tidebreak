@@ -23,14 +23,17 @@ import {
   Laptop,
   LoaderCircle,
   LockKeyhole,
+  MoreHorizontal,
   Pause,
   RefreshCw,
   Search,
   ShieldCheck,
   ShieldAlert,
+  Trash2,
   X,
 } from "lucide-react";
 
+import { useConfirm } from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -40,12 +43,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
-import type {
-  BrowserAgentAccess,
-  BrowserController,
-  BrowserHostSnapshot,
+import {
+  type BrowserAgentAccess,
+  type BrowserController,
+  type BrowserHostSnapshot,
+  type BrowserProfileResetPhase,
 } from "./browserHost";
 import { browserSecurity, MAX_BROWSER_URL_CHARS } from "./browserNavigation";
 import type { BrowserSession } from "./browserSession";
@@ -99,6 +103,8 @@ export function BrowserToolbar({
   onRevokeAgent,
   onSelectHistory,
   onOpenExternal,
+  profileResetPhase,
+  onResetProfile,
   onOverlayOpenChange,
   onAgentAccessOpenChange,
   agentAccessOpen = false,
@@ -125,7 +131,9 @@ export function BrowserToolbar({
   onShareAgent?: () => void;
   onRevokeAgent?: () => void;
   onSelectHistory: (index: number) => void;
+  profileResetPhase?: BrowserProfileResetPhase | null;
   onOpenExternal: () => void;
+  onResetProfile?: () => Promise<void>;
   onOverlayOpenChange: (open: boolean) => void;
   onAgentAccessOpenChange?: (open: boolean) => void;
   agentAccessOpen?: boolean;
@@ -139,10 +147,76 @@ export function BrowserToolbar({
   const securityId = useId();
   const compactToolbar = useCompactToolbar(toolbarRef, COMPACT_TOOLBAR_WIDTH);
   const security = session.url ? browserSecurity(session.url) : null;
+  const { confirm, dialog: resetDialog } = useConfirm();
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const resetFlowRef = useRef(false);
+  const lastResetPhaseRef = useRef<BrowserProfileResetPhase>("closing");
+  const canResetProfile = Boolean(
+    engine?.capabilities.profileReset && onResetProfile,
+  );
+  const resetInProgress = resetting || Boolean(profileResetPhase);
+  if (profileResetPhase) {
+    lastResetPhaseRef.current = profileResetPhase;
+  } else if (!resetInProgress) {
+    lastResetPhaseRef.current = "closing";
+  }
+
+  function handleOptionsOpenChange(open: boolean) {
+    setOptionsOpen(open);
+    if (!resetFlowRef.current) onOverlayOpenChange(open);
+  }
+
+  async function handleResetProfile() {
+    if (!onResetProfile) return;
+    resetFlowRef.current = true;
+    setOptionsOpen(false);
+    onOverlayOpenChange(true);
+    const approved = await confirm({
+      title: "Reset development profile?",
+      description: (
+        <>
+          The same stored Tidebreak browser pages will return signed out in a
+          fresh Tidebreak development profile. Managed cookies, site data, and
+          cache are deleted; Safari and Chrome are untouched, and existing agent
+          origin grants remain.
+        </>
+      ),
+      confirmLabel: "Reset development profile",
+      cancelLabel: "Keep profile",
+      destructive: true,
+    });
+    if (!approved) {
+      resetFlowRef.current = false;
+      onOverlayOpenChange(false);
+      return;
+    }
+
+    setResetting(true);
+    setResetError(null);
+    try {
+      await onResetProfile();
+    } catch (error) {
+      setResetError(
+        friendlyErrorMessage(error, "Could not reset the development profile"),
+      );
+    } finally {
+      setResetting(false);
+      resetFlowRef.current = false;
+      onOverlayOpenChange(false);
+    }
+  }
 
   useEffect(() => {
     if (!session.url) inputRef.current?.focus();
   }, [session.url]);
+
+  useEffect(() => {
+    if (canResetProfile || !optionsOpen || resetFlowRef.current) return;
+    setOptionsOpen(false);
+    onOverlayOpenChange(false);
+  }, [canResetProfile, onOverlayOpenChange, optionsOpen]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -360,18 +434,65 @@ export function BrowserToolbar({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <WithTooltip label="Open externally">
-          <Button
-            type="button"
-            variant="ghost"
-            size={compactToolbar ? "icon-xs" : "icon-sm"}
-            disabled={!session.url}
-            onClick={onOpenExternal}
+        {canResetProfile ? (
+          <DropdownMenu
+            open={optionsOpen}
+            onOpenChange={handleOptionsOpenChange}
           >
-            <ExternalLink />
-            <span className="sr-only">Open externally</span>
-          </Button>
-        </WithTooltip>
+            <WithTooltip label="Browser options">
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size={compactToolbar ? "icon-xs" : "icon-sm"}
+                  disabled={resetInProgress}
+                  aria-label={
+                    resetInProgress
+                      ? "Resetting development profile"
+                      : "Browser options"
+                  }
+                >
+                  {resetInProgress ? (
+                    <LoaderCircle className="animate-spin motion-reduce:animate-none" />
+                  ) : (
+                    <MoreHorizontal />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+            </WithTooltip>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem
+                disabled={!session.url || resetting}
+                onSelect={onOpenExternal}
+              >
+                <ExternalLink />
+                Open externally
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={resetInProgress}
+                onSelect={() => void handleResetProfile()}
+              >
+                <Trash2 />
+                Reset development profile
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <WithTooltip label="Open externally">
+            <Button
+              type="button"
+              variant="ghost"
+              size={compactToolbar ? "icon-xs" : "icon-sm"}
+              disabled={!session.url}
+              onClick={onOpenExternal}
+            >
+              <ExternalLink />
+              <span className="sr-only">Open externally</span>
+            </Button>
+          </WithTooltip>
+        )}
       </div>
 
       {addressError && (
@@ -391,8 +512,40 @@ export function BrowserToolbar({
           onTakeOver={onTakeOver}
         />
       )}
+      {resetInProgress && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="border-t border-info-border bg-info-background px-3 py-1.5 text-xs text-info-foreground"
+        >
+          <span className="live-label-shimmer">
+            {profileResetStatusMessage(lastResetPhaseRef.current)}
+          </span>
+        </div>
+      )}
+      {resetError && (
+        <BrowserNoticeRow
+          tone="critical"
+          message={resetError}
+          actionLabel="Try again"
+          onAction={() => void handleResetProfile()}
+          onDismiss={() => setResetError(null)}
+        />
+      )}
+      {resetDialog}
     </header>
   );
+}
+
+function profileResetStatusMessage(phase: BrowserProfileResetPhase): string {
+  switch (phase) {
+    case "deleting":
+      return "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.";
+    case "reconstructing":
+      return "Resetting the Tidebreak development profile… reopening stored browser pages.";
+    case "closing":
+      return "Resetting the Tidebreak development profile… closing browser tabs.";
+  }
 }
 
 function BrowserAgentAccessControl({

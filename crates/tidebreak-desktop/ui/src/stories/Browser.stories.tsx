@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 
 import {
   BrowserAgentControlRow,
@@ -39,7 +39,11 @@ type BrowserScenario =
   | "inspect-enable-failure"
   | "inspect-remove-failure"
   | "inspect-off"
-  | "inspect-on";
+  | "inspect-on"
+  | "profile-reset-confirmation"
+  | "profile-resetting"
+  | "profile-reset-reconstructing"
+  | "profile-reset-failure";
 
 const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
   name: "wk_webview",
@@ -51,6 +55,13 @@ const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
     screenshot: false,
     crossOriginFrames: false,
     profileReset: false,
+  },
+};
+const resetEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
+  ...inspectEngine,
+  capabilities: {
+    ...inspectEngine.capabilities,
+    profileReset: true,
   },
 };
 
@@ -175,6 +186,7 @@ function BrowserStory({
   const [viewportState, setViewportState] = useState<BrowserViewport>(
     viewport ?? { preset: "fit", customWidth: 1024 },
   );
+  const [profileResetStarted, setProfileResetStarted] = useState(false);
   const inspectEnabled =
     scenario === "inspect-on" || scenario === "inspect-remove-failure";
   const inspectFailure =
@@ -197,6 +209,33 @@ function BrowserStory({
         : scenario === "paused"
           ? pausedAccess
           : unsharedAccess;
+  const profileResetScenario =
+    scenario === "profile-reset-confirmation" ||
+    scenario === "profile-resetting" ||
+    scenario === "profile-reset-reconstructing" ||
+    scenario === "profile-reset-failure";
+  const profileResetPhase = profileResetStarted
+    ? scenario === "profile-resetting"
+      ? "deleting"
+      : scenario === "profile-reset-reconstructing"
+        ? "reconstructing"
+        : null
+    : null;
+  const onResetProfile =
+    scenario === "profile-resetting" ||
+    scenario === "profile-reset-reconstructing"
+      ? () => {
+          setProfileResetStarted(true);
+          return new Promise<void>(() => {});
+        }
+      : scenario === "profile-reset-failure"
+        ? () =>
+            Promise.reject(
+              new Error("WebKit could not remove the managed profile data"),
+            )
+        : profileResetScenario
+          ? () => Promise.resolve()
+          : undefined;
 
   return (
     <div className="grid min-h-dvh place-items-center bg-muted/45 p-4 sm:p-8">
@@ -214,7 +253,7 @@ function BrowserStory({
           canGoForward={false}
           controller={controller}
           agentAccess={agentAccess}
-          engine={inspectEngine}
+          engine={profileResetScenario ? resetEngine : inspectEngine}
           onAddressChange={setAddress}
           onNavigate={fn()}
           onBack={fn()}
@@ -227,6 +266,8 @@ function BrowserStory({
           onRevokeAgent={fn()}
           onSelectHistory={fn()}
           onOpenExternal={fn()}
+          onResetProfile={onResetProfile}
+          profileResetPhase={profileResetPhase}
           onOverlayOpenChange={fn()}
           onAgentAccessOpenChange={fn()}
           onToggleInspect={fn()}
@@ -335,9 +376,11 @@ function BrowserStory({
 function NarrowToolbarStory({
   width,
   access,
+  resetProfile = false,
 }: {
   width: 320 | 390;
   access: BrowserAgentAccess;
+  resetProfile?: boolean;
 }) {
   const session = browserSession("ready");
   const [address, setAddress] = useState(session.address);
@@ -360,7 +403,7 @@ function NarrowToolbarStory({
           canGoForward={false}
           controller={undefined}
           agentAccess={access}
-          engine={inspectEngine}
+          engine={resetProfile ? resetEngine : inspectEngine}
           onAddressChange={setAddress}
           onNavigate={fn()}
           onBack={fn()}
@@ -372,6 +415,7 @@ function NarrowToolbarStory({
           onShareAgent={fn()}
           onRevokeAgent={fn()}
           onSelectHistory={fn()}
+          onResetProfile={resetProfile ? () => Promise.resolve() : undefined}
           onOpenExternal={fn()}
           onOverlayOpenChange={fn()}
           onAgentAccessOpenChange={fn()}
@@ -584,6 +628,100 @@ export const AgentControlled: Story = {
   },
 };
 
+export const ManagedProfileResetConfirmation: Story = {
+  args: { scenario: "profile-reset-confirmation" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    const dialog = await body.findByRole("alertdialog");
+    await waitFor(() => expect(dialog).toBeVisible());
+  },
+};
+
+export const ManagedProfileResetting: Story = {
+  args: { scenario: "profile-resetting" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await userEvent.click(
+      await body.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await expect(
+      canvas.getByText(
+        "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const ManagedProfileReconstructing: Story = {
+  args: { scenario: "profile-reset-reconstructing" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await userEvent.click(
+      await body.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await expect(
+      canvas.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const ManagedProfileResetFailure: Story = {
+  args: { scenario: "profile-reset-failure" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await userEvent.click(
+      await body.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await expect(
+      canvas.getByText("WebKit could not remove the managed profile data"),
+    ).toBeVisible();
+  },
+};
+
 export const HumanTakeoverRequired: Story = { args: { scenario: "takeover" } };
 
 export const SlowPage: Story = { args: { scenario: "slow" } };
@@ -686,6 +824,27 @@ export const ToolbarNarrow390Paused: Story = {
       access={{ ...pausedAccess, shared: true, scope: "origin" }}
     />
   ),
+};
+
+export const ToolbarNarrow320ManagedProfileReset: Story = {
+  args: { scenario: "profile-reset-confirmation" },
+  render: () => (
+    <NarrowToolbarStory width={320} access={unsharedAccess} resetProfile />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    const dialog = await body.findByRole("alertdialog");
+    await waitFor(() => expect(dialog).toBeVisible());
+  },
 };
 
 export const InspectOff: Story = {
