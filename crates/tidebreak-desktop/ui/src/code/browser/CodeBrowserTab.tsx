@@ -23,9 +23,11 @@ import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
 import { BrowserViewportControl } from "./BrowserViewportControl";
 import {
   browserUnavailableMessage,
+  resetCodeBrowserProfile,
   type BrowserBounds,
   type BrowserHostAction,
   type BrowserHostEvent,
+  type BrowserProfileResetPhase,
   type BrowserHostSnapshot,
   type CodeBrowserHost,
   nativeCodeBrowserHost,
@@ -61,6 +63,13 @@ import {
 
 const SLOW_LOAD_MS = 15_000;
 const PERSIST_DELAY_MS = 150;
+let nextProfileResetId = 0;
+
+function createProfileResetId(): number {
+  nextProfileResetId =
+    nextProfileResetId >= Number.MAX_SAFE_INTEGER ? 1 : nextProfileResetId + 1;
+  return nextProfileResetId;
+}
 
 type BrowserAgentHostAction = Extract<
   BrowserHostAction,
@@ -108,14 +117,29 @@ function CodeBrowserTabSession({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [agentAccessOpen, setAgentAccessOpen] = useState(false);
   const [viewportOpen, setViewportOpen] = useState(false);
+  const [profileResetPhase, setProfileResetPhase] =
+    useState<BrowserProfileResetPhase | null>(null);
+  const [profileResetReconstructing, setProfileResetReconstructing] =
+    useState(false);
   const [slow, setSlow] = useState(false);
   const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
   const nativeReady = useRef(false);
   const nativePresence = useRef<"unknown" | "missing" | "present">("unknown");
-  const nativeCreateInFlight = useRef<Promise<void> | null>(null);
+  const nativeSurfaceGeneration = useRef(0);
+  const nativeCreateInFlight = useRef<{
+    generation: number;
+    operation: Promise<void>;
+  } | null>(null);
   const nativeCreateRequestedUrl = useRef<string | null>(null);
+  const activeProfileResetId = useRef<number | null>(null);
+  const locallyInitiatedProfileResetId = useRef<number | null>(null);
+  const completedProfileResetIds = useRef(new Set<number>());
+  const profileResetRecovery = useRef<{
+    resetId: number;
+    operation: Promise<void>;
+  } | null>(null);
   const nativeExpectedNavigationUrl = useRef<string | null>(null);
   const nativeDocumentEpoch = useRef(0);
   const resizeCreateAttempted = useRef(false);
@@ -134,6 +158,7 @@ function CodeBrowserTabSession({
     !historyOpen &&
     !agentAccessOpen &&
     !viewportOpen &&
+    !profileResetReconstructing &&
     session.loadState !== "failed";
   const visibleRef = useRef(visible);
 
@@ -196,91 +221,173 @@ function CodeBrowserTabSession({
     window.cancelAnimationFrame(frame);
   }, []);
 
-  const scheduleNativeReveal = useCallback(() => {
+  const markNativeClosedForProfileReset = useCallback(() => {
     cancelNativeReveal();
-    if (
-      !mountedRef.current ||
-      !nativeReady.current ||
-      !visibleRef.current ||
-      !host.available()
-    ) {
-      return;
-    }
+    nativeSurfaceGeneration.current =
+      nativeSurfaceGeneration.current >= Number.MAX_SAFE_INTEGER
+        ? 1
+        : nativeSurfaceGeneration.current + 1;
+    nativeReady.current = false;
+    nativePresence.current = "missing";
+    nativeCreateRequestedUrl.current = null;
+    nativeExpectedNavigationUrl.current = null;
+    nativeDocumentEpoch.current = 0;
+    resizeCreateAttempted.current = false;
+    nativeHistoryAvailable.current = false;
+    lastNativeBounds.current = null;
+    visibleRef.current = false;
+    setProfileResetReconstructing(true);
+  }, [cancelNativeReveal]);
 
-    const frame = window.requestAnimationFrame(() => {
-      if (nativeRevealFrame.current !== frame) return;
-      nativeRevealFrame.current = null;
+  const beginProfileResetCycle = useCallback(
+    (resetId: number, phase: BrowserProfileResetPhase): boolean => {
+      if (completedProfileResetIds.current.has(resetId)) return false;
+      if (activeProfileResetId.current !== resetId) {
+        activeProfileResetId.current = resetId;
+        profileResetRecovery.current = null;
+        markNativeClosedForProfileReset();
+      }
+      setProfileResetPhase(phase);
+      return true;
+    },
+    [markNativeClosedForProfileReset],
+  );
+
+  const finishProfileResetCycle = useCallback((resetId: number) => {
+    completedProfileResetIds.current.add(resetId);
+    while (completedProfileResetIds.current.size > 8) {
+      const oldest = completedProfileResetIds.current.values().next().value;
+      if (oldest === undefined) break;
+      completedProfileResetIds.current.delete(oldest);
+    }
+    if (activeProfileResetId.current !== resetId) return;
+    activeProfileResetId.current = null;
+    if (profileResetRecovery.current?.resetId === resetId) {
+      profileResetRecovery.current = null;
+    }
+    setProfileResetPhase(null);
+    setProfileResetReconstructing(false);
+  }, []);
+
+  const scheduleNativeReveal = useCallback(
+    (expectedGeneration = nativeSurfaceGeneration.current) => {
+      cancelNativeReveal();
       if (
         !mountedRef.current ||
         !nativeReady.current ||
         !visibleRef.current ||
-        !host.available()
+        !host.available() ||
+        nativeSurfaceGeneration.current !== expectedGeneration
       ) {
         return;
       }
-      void host
-        .command(workspaceId, browserId, { type: "set_visible", visible: true })
-        .catch(() => undefined);
-    });
-    nativeRevealFrame.current = frame;
-  }, [browserId, cancelNativeReveal, host, workspaceId]);
+
+      const frame = window.requestAnimationFrame(() => {
+        if (nativeRevealFrame.current !== frame) return;
+        nativeRevealFrame.current = null;
+        if (
+          !mountedRef.current ||
+          !nativeReady.current ||
+          !visibleRef.current ||
+          !host.available() ||
+          nativeSurfaceGeneration.current !== expectedGeneration
+        ) {
+          return;
+        }
+        void host
+          .command(workspaceId, browserId, {
+            type: "set_visible",
+            visible: true,
+          })
+          .catch(() => undefined);
+      });
+      nativeRevealFrame.current = frame;
+    },
+    [browserId, cancelNativeReveal, host, workspaceId],
+  );
 
   /** Reconcile live bounds and visibility after a native view becomes ready. */
-  const reconcileAfterNativeReady = useCallback(async () => {
-    if (!mountedRef.current) {
-      nativeReady.current = false;
-      cancelNativeReveal();
-      await host.command(workspaceId, browserId, {
-        type: "set_visible",
-        visible: false,
-      });
-      return;
-    }
-    nativeReady.current = true;
-    const bounds = readBrowserBounds(viewportSurfaceRef.current);
-    if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
-      lastNativeBounds.current = bounds;
-      recordRuntime(
-        await host.command(workspaceId, browserId, {
-          type: "set_bounds",
-          bounds,
-        }),
-      );
-    }
-    if (!mountedRef.current || !visibleRef.current) {
-      if (!mountedRef.current) nativeReady.current = false;
-      cancelNativeReveal();
-      recordRuntime(
+  const reconcileAfterNativeReady = useCallback(
+    async (
+      expectedGeneration = nativeSurfaceGeneration.current,
+    ): Promise<boolean> => {
+      if (nativeSurfaceGeneration.current !== expectedGeneration) return false;
+      if (!mountedRef.current) {
+        nativeReady.current = false;
+        cancelNativeReveal();
+        if (nativeSurfaceGeneration.current !== expectedGeneration) {
+          return false;
+        }
         await host.command(workspaceId, browserId, {
           type: "set_visible",
           visible: false,
-        }),
-      );
-      return;
-    }
-    scheduleNativeReveal();
-  }, [
-    browserId,
-    cancelNativeReveal,
-    host,
-    recordRuntime,
-    scheduleNativeReveal,
-    workspaceId,
-  ]);
+        });
+        return false;
+      }
+      nativeReady.current = true;
+      const bounds = readBrowserBounds(viewportSurfaceRef.current);
+      if (bounds && !sameBrowserBounds(lastNativeBounds.current, bounds)) {
+        if (nativeSurfaceGeneration.current !== expectedGeneration) {
+          return false;
+        }
+        lastNativeBounds.current = bounds;
+        const snapshot = await host.command(workspaceId, browserId, {
+          type: "set_bounds",
+          bounds,
+        });
+        if (nativeSurfaceGeneration.current !== expectedGeneration) {
+          return false;
+        }
+        recordRuntime(snapshot);
+      }
+      if (nativeSurfaceGeneration.current !== expectedGeneration) return false;
+      if (!mountedRef.current || !visibleRef.current) {
+        if (!mountedRef.current) nativeReady.current = false;
+        cancelNativeReveal();
+        if (nativeSurfaceGeneration.current !== expectedGeneration) {
+          return false;
+        }
+        const snapshot = await host.command(workspaceId, browserId, {
+          type: "set_visible",
+          visible: false,
+        });
+        if (nativeSurfaceGeneration.current !== expectedGeneration) {
+          return false;
+        }
+        recordRuntime(snapshot);
+        return true;
+      }
+      scheduleNativeReveal(expectedGeneration);
+      return true;
+    },
+    [
+      browserId,
+      cancelNativeReveal,
+      host,
+      recordRuntime,
+      scheduleNativeReveal,
+      workspaceId,
+    ],
+  );
 
   const createAndReconcileNative = useCallback(
     async (url: string): Promise<boolean> => {
       if (!host.available()) return false;
+      const generation = nativeSurfaceGeneration.current;
       if (nativeReady.current) {
-        await reconcileAfterNativeReady();
-        return true;
+        await reconcileAfterNativeReady(generation);
+        return (
+          nativeSurfaceGeneration.current === generation && nativeReady.current
+        );
       }
       nativeCreateRequestedUrl.current = url;
       const pending = nativeCreateInFlight.current;
-      if (pending) {
+      if (pending?.generation === generation) {
         nativeExpectedNavigationUrl.current = url;
-        await pending;
-        return nativeReady.current;
+        await pending.operation;
+        return (
+          nativeSurfaceGeneration.current === generation && nativeReady.current
+        );
       }
       const bounds = readBrowserBounds(viewportSurfaceRef.current);
       if (!bounds) return false;
@@ -288,20 +395,22 @@ function CodeBrowserTabSession({
       resizeCreateAttempted.current = true;
       const operation = (async () => {
         try {
-          recordRuntime(
-            await host.command(workspaceId, browserId, {
-              type: "create",
-              url,
-              bounds,
-              visible: false,
-            }),
-          );
+          const snapshot = await host.command(workspaceId, browserId, {
+            type: "create",
+            url,
+            bounds,
+            visible: false,
+          });
+          if (nativeSurfaceGeneration.current !== generation) return;
+          recordRuntime(snapshot);
           nativePresence.current = "present";
           lastNativeBounds.current = bounds;
-          await reconcileAfterNativeReady();
+          await reconcileAfterNativeReady(generation);
+          if (nativeSurfaceGeneration.current !== generation) return;
           nativeHistoryAvailable.current =
             sessionRef.current.history.length <= 1;
         } catch (error) {
+          if (nativeSurfaceGeneration.current !== generation) return;
           nativeReady.current = false;
           nativePresence.current = "missing";
           if (nativeExpectedNavigationUrl.current === url) {
@@ -311,7 +420,11 @@ function CodeBrowserTabSession({
         }
 
         let deliveredUrl = url;
-        while (mountedRef.current && nativeReady.current) {
+        while (
+          mountedRef.current &&
+          nativeReady.current &&
+          nativeSurfaceGeneration.current === generation
+        ) {
           const requestedUrl = nativeCreateRequestedUrl.current;
           if (!requestedUrl || requestedUrl === deliveredUrl) break;
           recordRuntime(
@@ -324,18 +437,60 @@ function CodeBrowserTabSession({
           nativeHistoryAvailable.current = false;
         }
       })();
-      nativeCreateInFlight.current = operation;
+      const inFlight = { generation, operation };
+      nativeCreateInFlight.current = inFlight;
       try {
         await operation;
-        return true;
+        return (
+          nativeSurfaceGeneration.current === generation && nativeReady.current
+        );
       } finally {
-        if (nativeCreateInFlight.current === operation) {
+        if (nativeCreateInFlight.current === inFlight) {
           nativeCreateInFlight.current = null;
           nativeCreateRequestedUrl.current = null;
         }
       }
     },
     [browserId, host, reconcileAfterNativeReady, recordRuntime, workspaceId],
+  );
+
+  const reconstructAfterProfileReset = useCallback(
+    (resetId: number): Promise<void> => {
+      if (completedProfileResetIds.current.has(resetId)) {
+        return Promise.resolve();
+      }
+      const pending = profileResetRecovery.current;
+      if (pending?.resetId === resetId) return pending.operation;
+      if (!beginProfileResetCycle(resetId, "reconstructing")) {
+        return Promise.resolve();
+      }
+
+      const operation = (async () => {
+        const url = sessionRef.current.url;
+        if (!url) return;
+        try {
+          if (!host.available()) throw new Error(browserUnavailableMessage());
+          const created = await createAndReconcileNative(url);
+          if (!created) throw new Error("The browser surface is not ready");
+        } catch (error) {
+          if (mountedRef.current) {
+            updateSession((current) =>
+              failBrowserSession(
+                current,
+                friendlyErrorMessage(
+                  error,
+                  "Could not restore the in-app browser",
+                ),
+              ),
+            );
+          }
+          throw error;
+        }
+      })();
+      profileResetRecovery.current = { resetId, operation };
+      return operation;
+    },
+    [beginProfileResetCycle, createAndReconcileNative, host, updateSession],
   );
 
   useEffect(() => {
@@ -446,11 +601,17 @@ function CodeBrowserTabSession({
 
       if (!current.url) return;
 
+      const snapshotGeneration = nativeSurfaceGeneration.current;
       try {
         const snapshot = await host.command(workspaceId, browserId, {
           type: "snapshot",
         });
-        if (cancelled) return;
+        if (
+          cancelled ||
+          nativeSurfaceGeneration.current !== snapshotGeneration
+        ) {
+          return;
+        }
         if (
           snapshot.browserId !== browserId ||
           snapshot.workspaceId !== workspaceId
@@ -475,13 +636,16 @@ function CodeBrowserTabSession({
             });
             setAddress(browserDisplayAddress(snapshot.url));
           }
-          await reconcileAfterNativeReady();
+          await reconcileAfterNativeReady(snapshotGeneration);
         } else {
           nativePresence.current = "missing";
           await createAndReconcileNative(current.url);
         }
       } catch (error) {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          nativeSurfaceGeneration.current === snapshotGeneration
+        ) {
           updateSession((value) =>
             failBrowserSession(
               value,
@@ -493,6 +657,38 @@ function CodeBrowserTabSession({
     }
 
     function handleHostEvent(event: BrowserHostEvent) {
+      if (event.type === "profile_reset_closing") {
+        if (event.resetId !== undefined) {
+          beginProfileResetCycle(event.resetId, "closing");
+        }
+        return;
+      }
+      if (event.type === "profile_reset_deleting_data") {
+        if (event.resetId !== undefined) {
+          beginProfileResetCycle(event.resetId, "deleting");
+        }
+        return;
+      }
+      if (event.type === "profile_reset_reconstruct") {
+        if (event.resetId === undefined) return;
+        const resetId = event.resetId;
+        if (completedProfileResetIds.current.has(resetId)) return;
+        const recovery = reconstructAfterProfileReset(resetId);
+        void recovery.then(
+          () => {
+            if (locallyInitiatedProfileResetId.current !== resetId) {
+              finishProfileResetCycle(resetId);
+            }
+          },
+          () => {
+            if (locallyInitiatedProfileResetId.current !== resetId) {
+              finishProfileResetCycle(resetId);
+            }
+          },
+        );
+        return;
+      }
+
       if (
         event.documentEpoch !== undefined &&
         event.documentEpoch < nativeDocumentEpoch.current
@@ -597,10 +793,13 @@ function CodeBrowserTabSession({
       unsubscribe?.();
     };
   }, [
+    beginProfileResetCycle,
     browserId,
     createAndReconcileNative,
+    finishProfileResetCycle,
     host,
     recordRuntime,
+    reconstructAfterProfileReset,
     reconcileAfterNativeReady,
     updateSession,
     workspaceId,
@@ -618,6 +817,7 @@ function CodeBrowserTabSession({
         const bounds = readBrowserBounds(surface);
         if (!bounds) return;
         if (!nativeReady.current) {
+          if (profileResetReconstructing) return;
           const url = sessionRef.current.url;
           if (
             nativePresence.current === "missing" &&
@@ -670,7 +870,14 @@ function CodeBrowserTabSession({
       window.removeEventListener("resize", sync);
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [browserId, createAndReconcileNative, host, updateSession, workspaceId]);
+  }, [
+    browserId,
+    createAndReconcileNative,
+    host,
+    profileResetReconstructing,
+    updateSession,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (!nativeReady.current || !host.available()) return;
@@ -868,6 +1075,29 @@ function CodeBrowserTabSession({
     await host.openExternal(url).catch(() => undefined);
   }
 
+  async function resetProfile() {
+    const resetId = createProfileResetId();
+    locallyInitiatedProfileResetId.current = resetId;
+    beginProfileResetCycle(resetId, "closing");
+    let resetError: unknown;
+    try {
+      await resetCodeBrowserProfile(workspaceId, browserId, resetId, host);
+    } catch (error) {
+      resetError = error;
+    }
+
+    let reconstructionError: unknown;
+    try {
+      await reconstructAfterProfileReset(resetId);
+    } catch (error) {
+      reconstructionError = error;
+    } finally {
+      locallyInitiatedProfileResetId.current = null;
+      finishProfileResetCycle(resetId);
+    }
+    if (resetError) throw resetError;
+    if (reconstructionError) throw reconstructionError;
+  }
   const notice = session.notice;
   const noticeTarget = notice?.url ? validateBrowserUrl(notice.url) : null;
   const actionableNoticeUrl = noticeTarget?.ok ? noticeTarget.url : null;
@@ -932,6 +1162,8 @@ function CodeBrowserTabSession({
         }
         onSelectHistory={(index) => void selectHistory(index)}
         onOpenExternal={() => void openExternal()}
+        profileResetPhase={profileResetPhase}
+        onResetProfile={resetProfile}
         onOverlayOpenChange={setHistoryOpen}
         onAgentAccessOpenChange={setAgentAccessOpen}
         agentAccessOpen={agentAccessOpen}

@@ -71,7 +71,7 @@ describe("browser host lifecycle", () => {
 });
 
 describe("managed browser profile reset", () => {
-  it("sends only the trusted session identity and reset command", async () => {
+  it("sends only session identity and a non-authoritative reset correlation id", async () => {
     const command = vi.fn().mockResolvedValue({
       exists: false,
       workspaceId: "workspace-1",
@@ -84,10 +84,11 @@ describe("managed browser profile reset", () => {
       openExternal: vi.fn(async () => undefined),
     };
 
-    await resetCodeBrowserProfile("workspace-1", "browser-1", host);
+    await resetCodeBrowserProfile("workspace-1", "browser-1", 17, host);
 
     expect(command).toHaveBeenCalledWith("workspace-1", "browser-1", {
       type: "reset_profile",
+      resetId: 17,
     });
   });
 
@@ -101,7 +102,7 @@ describe("managed browser profile reset", () => {
     };
 
     await expect(
-      resetCodeBrowserProfile("workspace-1", "browser-1", host),
+      resetCodeBrowserProfile("workspace-1", "browser-1", 18, host),
     ).rejects.toThrow(
       "The managed browser profile is available only on this computer",
     );

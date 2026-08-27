@@ -61,8 +61,13 @@ export type BrowserHostAction =
   | { type: "take_human_control" }
   | { type: "set_inspect"; enabled: boolean }
   | { type: "remove_inspect" }
-  | { type: "reset_profile" }
+  | { type: "reset_profile"; resetId: number }
   | { type: "close" };
+
+export type BrowserProfileResetPhase =
+  | "closing"
+  | "deleting"
+  | "reconstructing";
 
 export type BrowserHostSnapshot = {
   exists: boolean;
@@ -104,7 +109,11 @@ export type BrowserHostEvent = {
     | "navigation_blocked"
     | "controller_changed"
     | "agent_navigation_paused"
-    | "agent_access_changed";
+    | "agent_access_changed"
+    | "profile_reset_closing"
+    | "profile_reset_deleting_data"
+    | "profile_reset_reconstruct";
+  resetId?: number;
   url?: string;
   title?: string;
   message?: string;
@@ -208,11 +217,13 @@ export function browserUnavailableMessage(): string {
 
 /**
  * Reset the one managed profile selected by this trusted native session.
- * Renderer code never supplies a profile id, engine handle, or filesystem path.
+ * `resetId` only correlates native phase events. Renderer code never supplies a
+ * profile id, engine handle, or filesystem path.
  */
 export async function resetCodeBrowserProfile(
   workspaceId: string,
   browserId: string,
+  resetId: number,
   host: CodeBrowserHost = nativeCodeBrowserHost,
 ): Promise<void> {
   if (!host.available()) {
@@ -220,7 +231,10 @@ export async function resetCodeBrowserProfile(
       "The managed browser profile is available only on this computer",
     );
   }
-  await host.command(workspaceId, browserId, { type: "reset_profile" });
+  await host.command(workspaceId, browserId, {
+    type: "reset_profile",
+    resetId,
+  });
 }
 /** Explicit tab close. Tab switches only hide the native child webview. */
 export async function closeCodeBrowser(

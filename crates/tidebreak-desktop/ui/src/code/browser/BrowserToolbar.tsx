@@ -46,10 +46,10 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "../interactive";
 import {
-  resetCodeBrowserProfile,
   type BrowserAgentAccess,
   type BrowserController,
   type BrowserHostSnapshot,
+  type BrowserProfileResetPhase,
 } from "./browserHost";
 import { browserSecurity, MAX_BROWSER_URL_CHARS } from "./browserNavigation";
 import type { BrowserSession } from "./browserSession";
@@ -103,6 +103,7 @@ export function BrowserToolbar({
   onRevokeAgent,
   onSelectHistory,
   onOpenExternal,
+  profileResetPhase,
   onResetProfile,
   onOverlayOpenChange,
   onAgentAccessOpenChange,
@@ -130,6 +131,7 @@ export function BrowserToolbar({
   onShareAgent?: () => void;
   onRevokeAgent?: () => void;
   onSelectHistory: (index: number) => void;
+  profileResetPhase?: BrowserProfileResetPhase | null;
   onOpenExternal: () => void;
   onResetProfile?: () => Promise<void>;
   onOverlayOpenChange: (open: boolean) => void;
@@ -150,7 +152,16 @@ export function BrowserToolbar({
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
   const resetFlowRef = useRef(false);
-  const canResetProfile = Boolean(engine?.capabilities.profileReset);
+  const lastResetPhaseRef = useRef<BrowserProfileResetPhase>("closing");
+  const canResetProfile = Boolean(
+    engine?.capabilities.profileReset && onResetProfile,
+  );
+  const resetInProgress = resetting || Boolean(profileResetPhase);
+  if (profileResetPhase) {
+    lastResetPhaseRef.current = profileResetPhase;
+  } else if (!resetInProgress) {
+    lastResetPhaseRef.current = "closing";
+  }
 
   function handleOptionsOpenChange(open: boolean) {
     setOptionsOpen(open);
@@ -158,6 +169,7 @@ export function BrowserToolbar({
   }
 
   async function handleResetProfile() {
+    if (!onResetProfile) return;
     resetFlowRef.current = true;
     setOptionsOpen(false);
     onOverlayOpenChange(true);
@@ -165,9 +177,10 @@ export function BrowserToolbar({
       title: "Reset development profile?",
       description: (
         <>
-          This closes every Tidebreak browser tab and deletes the managed
-          development-profile cookies, site data, and cache. Safari, Chrome, and
-          your personal browser profiles are never read or changed.
+          The same stored Tidebreak browser pages will return signed out in a
+          fresh Tidebreak development profile. Managed cookies, site data, and
+          cache are deleted; Safari and Chrome are untouched, and existing agent
+          origin grants remain.
         </>
       ),
       confirmLabel: "Reset development profile",
@@ -183,12 +196,7 @@ export function BrowserToolbar({
     setResetting(true);
     setResetError(null);
     try {
-      if (onResetProfile) {
-        await onResetProfile();
-      } else {
-        await resetCodeBrowserProfile(session.workspaceId, session.id);
-        window.location.reload();
-      }
+      await onResetProfile();
     } catch (error) {
       setResetError(
         friendlyErrorMessage(error, "Could not reset the development profile"),
@@ -437,14 +445,14 @@ export function BrowserToolbar({
                   type="button"
                   variant="ghost"
                   size={compactToolbar ? "icon-xs" : "icon-sm"}
-                  disabled={resetting}
+                  disabled={resetInProgress}
                   aria-label={
-                    resetting
+                    resetInProgress
                       ? "Resetting development profile"
                       : "Browser options"
                   }
                 >
-                  {resetting ? (
+                  {resetInProgress ? (
                     <LoaderCircle className="animate-spin motion-reduce:animate-none" />
                   ) : (
                     <MoreHorizontal />
@@ -463,7 +471,7 @@ export function BrowserToolbar({
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 variant="destructive"
-                disabled={resetting}
+                disabled={resetInProgress}
                 onSelect={() => void handleResetProfile()}
               >
                 <Trash2 />
@@ -504,13 +512,15 @@ export function BrowserToolbar({
           onTakeOver={onTakeOver}
         />
       )}
-      {resetting && (
+      {resetInProgress && (
         <div
           role="status"
           aria-live="polite"
           className="border-t border-info-border bg-info-background px-3 py-1.5 text-xs text-info-foreground"
         >
-          Resetting the Tidebreak development profile… closing browser tabs.
+          <span className="live-label-shimmer">
+            {profileResetStatusMessage(lastResetPhaseRef.current)}
+          </span>
         </div>
       )}
       {resetError && (
@@ -525,6 +535,17 @@ export function BrowserToolbar({
       {resetDialog}
     </header>
   );
+}
+
+function profileResetStatusMessage(phase: BrowserProfileResetPhase): string {
+  switch (phase) {
+    case "deleting":
+      return "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.";
+    case "reconstructing":
+      return "Resetting the Tidebreak development profile… reopening stored browser pages.";
+    case "closing":
+      return "Resetting the Tidebreak development profile… closing browser tabs.";
+  }
 }
 
 function BrowserAgentAccessControl({
