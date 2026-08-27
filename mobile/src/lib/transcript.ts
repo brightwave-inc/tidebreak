@@ -1,4 +1,8 @@
-import type { CodeEvent, SequencedCodeEventFrame } from "../generated/wire";
+import type {
+  CodeEvent,
+  CodeTurnSnapshot,
+  SequencedCodeEventFrame,
+} from "../generated/wire";
 import { resumeAfter, shouldApplyDurable } from "./cursor";
 
 export type TimelineItem =
@@ -12,10 +16,54 @@ export type TranscriptState = {
   items: TimelineItem[];
   assistantBuffer: string;
   tools: Record<string, { name: string; summary: string }>;
+  activeTurnId: string | null;
 };
 
 export function initialTranscript(): TranscriptState {
-  return { lastSeq: 0, items: [], assistantBuffer: "", tools: {} };
+  return {
+    lastSeq: 0,
+    items: [],
+    assistantBuffer: "",
+    tools: {},
+    activeTurnId: null,
+  };
+}
+
+/** Merge durable turn rows without disturbing live stream presentation. */
+export function hydrateTurnHistory(
+  state: TranscriptState,
+  turns: readonly CodeTurnSnapshot[],
+): TranscriptState {
+  const known = new Set(state.items.map((item) => item.id));
+  const unanchored: TimelineItem[] = [];
+  const items = [...state.items];
+  for (const turn of [...turns].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  )) {
+    const id = `user:${turn.id}`;
+    if (!known.has(id)) {
+      const prompt: TimelineItem = {
+        kind: "user",
+        id,
+        text: turn.user_input,
+      };
+      const marker = items.findIndex((item) => item.id === `turn:${turn.id}`);
+      if (marker === -1) unanchored.push(prompt);
+      else items.splice(marker, 0, prompt);
+      known.add(id);
+    }
+  }
+  const running = [...turns]
+    .sort((left, right) => right.ordinal - left.ordinal)
+    .find((turn) => turn.status === "running");
+  return {
+    ...state,
+    // The row request and event replay race. Once any replayed event has
+    // landed, an older running row must not resurrect completed controls.
+    activeTurnId:
+      state.activeTurnId ?? (state.lastSeq === 0 ? (running?.id ?? null) : null),
+    items: [...unanchored, ...items],
+  };
 }
 
 export function reduceTranscript(
@@ -43,7 +91,12 @@ function applyEvent(
       );
     case "turn_started":
       return appendStatus(
-        { ...state, assistantBuffer: "" },
+        {
+          ...state,
+          assistantBuffer: "",
+          activeTurnId: event.turn_id,
+          items: moveTurnPromptToTail(state.items, event.turn_id),
+        },
         `turn:${event.turn_id}`,
         "Turn started",
       );
@@ -92,15 +145,23 @@ function applyEvent(
       };
     }
     case "turn_completed":
-      return appendStatus(state, `done:${state.lastSeq}`, "Turn completed");
+      return appendStatus(
+        { ...state, activeTurnId: null },
+        `done:${state.lastSeq}`,
+        "Turn completed",
+      );
     case "turn_failed":
       return appendStatus(
-        state,
+        { ...state, activeTurnId: null },
         `fail:${state.lastSeq}`,
         `Turn failed${event.error?.message ? `: ${event.error.message}` : ""}`,
       );
     case "turn_interrupted":
-      return appendStatus(state, `int:${state.lastSeq}`, "Turn interrupted");
+      return appendStatus(
+        { ...state, activeTurnId: null },
+        `int:${state.lastSeq}`,
+        "Turn interrupted",
+      );
     case "approval_requested":
       return appendStatus(
         state,
@@ -132,6 +193,19 @@ function applyEvent(
     default:
       return state;
   }
+}
+
+function moveTurnPromptToTail(
+  items: TimelineItem[],
+  turnId: string,
+): TimelineItem[] {
+  const index = items.findIndex((item) => item.id === `user:${turnId}`);
+  if (index === -1 || index === items.length - 1) return items;
+  const next = [...items];
+  const [prompt] = next.splice(index, 1);
+  if (!prompt) return items;
+  next.push(prompt);
+  return next;
 }
 
 function appendStatus(

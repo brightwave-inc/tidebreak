@@ -21,7 +21,13 @@
   --info: #3b82c4;
   --info-foreground: #1d4ed8;
   --info-background: #eff6ff;
+  --info-border: #b7d5f3;
   --warning: #c9891a;
   --warning-foreground: #92400e;
+  --warning-background: #fff8e8;
+  --warning-border: #efd39a;
   --live: #0f8f86;
+  --live-foreground: #0b625d;
+  --live-background: #e8f8f6;
+  --live-border: #9dd8d2;
 }

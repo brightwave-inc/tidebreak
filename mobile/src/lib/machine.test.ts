@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  MachineClient,
+  MachineRequestError,
   WS_HANDSHAKE,
   WS_TOKEN_PREFIX,
   connectWithBackoff,
@@ -41,6 +43,103 @@ describe("machineWsUrl", () => {
     expect(machineWsUrl("http://127.0.0.1:8080", "/code/updates")).toBe(
       "ws://127.0.0.1:8080/code/updates",
     );
+  });
+});
+
+describe("MachineClient requests", () => {
+  it("mints the attached resource and sends JSON without following redirects", async () => {
+    const getAccessToken = vi.fn(async () => "machine-token");
+    const fetchImpl = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response(JSON.stringify({ accepted: true }), { status: 202 }),
+    );
+    const client = new MachineClient({
+      baseUrl: "https://machine.example",
+      resource: "tidebreak:attached",
+      tokens: { getAccessToken },
+      fetchImpl,
+    });
+
+    await expect(
+      client.requestJson("/code/sessions/s-1/turns", {
+        method: "POST",
+        body: { message: "continue" },
+        expectedStatus: 202,
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(getAccessToken).toHaveBeenCalledWith("tidebreak:attached");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe(
+      "https://machine.example/code/sessions/s-1/turns",
+    );
+    expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      redirect: "manual",
+      body: JSON.stringify({ message: "continue" }),
+      headers: {
+        Authorization: "Bearer machine-token",
+        "Content-Type": "application/json",
+      },
+    });
+  });
+
+  it("preserves stable server errors without reflecting an HTML body", async () => {
+    const client = new MachineClient({
+      baseUrl: "https://machine.example",
+      resource: "tidebreak:attached",
+      tokens: { getAccessToken: async () => "machine-token" },
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            kind: "steering_unavailable",
+            message: "This harness cannot steer.",
+          }),
+          { status: 422 },
+        ),
+    });
+    await expect(
+      client.requestJson("/code/sessions/s-1/steer"),
+    ).rejects.toMatchObject({
+      status: 422,
+      kind: "steering_unavailable",
+      message: "This harness cannot steer. (HTTP 422)",
+    } satisfies Partial<MachineRequestError>);
+
+    const proxyClient = new MachineClient({
+      baseUrl: "https://machine.example",
+      resource: "tidebreak:attached",
+      tokens: { getAccessToken: async () => "machine-token" },
+      fetchImpl: async () =>
+        new Response("<h1>private proxy detail</h1>", { status: 502 }),
+    });
+    await expect(proxyClient.getJson("/code/approvals")).rejects.toThrow(
+      "Machine request failed. (HTTP 502)",
+    );
+  });
+
+  it("accepts empty successful responses and refuses malformed JSON", async () => {
+    const responses = [
+      new Response(null, { status: 202 }),
+      new Response(null, { status: 200 }),
+      new Response("not-json", { status: 200 }),
+    ];
+    const client = new MachineClient({
+      baseUrl: "https://machine.example",
+      resource: "tidebreak:attached",
+      tokens: { getAccessToken: async () => "machine-token" },
+      fetchImpl: async () => responses.shift()!,
+    });
+
+    await expect(
+      client.requestJson("/code/sessions/s-1/interrupt", {
+        method: "POST",
+        expectedStatus: 202,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      client.requestJson("/unexpected-status", { expectedStatus: 202 }),
+    ).rejects.not.toBeInstanceOf(MachineRequestError);
+    await expect(client.getJson("/bad-json")).rejects.toThrow(/valid JSON/);
   });
 });
 
