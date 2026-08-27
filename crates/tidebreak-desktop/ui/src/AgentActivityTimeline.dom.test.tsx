@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -70,7 +71,8 @@ describe("AgentActivityTimeline", () => {
     expect(screen.queryByRole("list")).toBeNull();
   });
 
-  it("gives a failed command an open card with its headline, exit status, and captured output", () => {
+  it("gives a failed command a folded card that reveals headline, exit status, and captured output", async () => {
+    const user = userEvent.setup();
     const { rerender } = render(
       <AgentActivityTimeline state={state} active={false} expanded />,
     );
@@ -81,10 +83,18 @@ describe("AgentActivityTimeline", () => {
     const card = within(commandRow).getByRole("button", {
       name: /pip install matplotlib/,
     });
-    expect(card.getAttribute("aria-expanded")).toBe("true");
+    expect(card.getAttribute("aria-expanded")).toBe("false");
     expect(card.querySelector(".font-mono")?.textContent).toBe(
       "pip install matplotlib",
     );
+    expect(within(commandRow).queryByText("Exit 1")).toBeNull();
+    expect(
+      within(commandRow).queryByText(/ERROR: no matching distribution/),
+    ).toBeNull();
+
+    await user.click(card);
+
+    expect(card.getAttribute("aria-expanded")).toBe("true");
     expect(within(commandRow).getByText("Exit 1")).toBeTruthy();
     expect(
       within(commandRow).getByText(/ERROR: no matching distribution/),
@@ -109,7 +119,7 @@ describe("AgentActivityTimeline", () => {
     expect(screen.getByText("No output captured.")).toBeTruthy();
   });
 
-  it("leads a narrated command with its sentence and keeps the command line in the body", () => {
+  it("leads a narrated command with its sentence and keeps the command line in the body", async () => {
     const narrated: AgentActivityState = {
       ...state,
       items: state.items.map((item, index) =>
@@ -127,6 +137,7 @@ describe("AgentActivityTimeline", () => {
           : item,
       ),
     };
+    const user = userEvent.setup();
     render(<AgentActivityTimeline state={narrated} active={false} expanded />);
 
     const commandRow = within(screen.getByRole("list")).getAllByRole(
@@ -137,6 +148,7 @@ describe("AgentActivityTimeline", () => {
     });
     // The sentence is prose, so it does not wear the command's monospace.
     expect(card.querySelector(".font-mono")).toBeNull();
+    await user.click(card);
     // The literal action is not lost: the open body still carries it.
     expect(within(commandRow).getByText("pip install matplotlib")).toBeTruthy();
   });

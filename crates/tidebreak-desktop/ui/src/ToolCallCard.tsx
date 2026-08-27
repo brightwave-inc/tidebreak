@@ -268,8 +268,8 @@ const FALLBACK_TOOL: ToolPresentation = {
  * does not read shell. A call that narrated nothing falls back to the command
  * itself, in monospace. Either way the literal command and its output are in
  * the body, one click away. It opens while the command is still running;
- * otherwise it collapses back to one line once the badge carries the
- * outcome.
+ * a settled card, including a failed one, collapses back to one line once
+ * the badge carries the outcome.
  *
  * Only tools that project a preview get a card. Everything else lives in the
  * activity rail, where a line of text is the whole story the renderer has.
@@ -321,7 +321,7 @@ export function ToolCommandCard({
         trailing={
           <ToolStatusIcon tone={presentation.tone} className="size-3.5" />
         }
-        defaultExpanded={running || presentation.tone === "failed"}
+        defaultExpanded={running}
       >
         {tabbed ? (
           <Tabs defaultValue="output">

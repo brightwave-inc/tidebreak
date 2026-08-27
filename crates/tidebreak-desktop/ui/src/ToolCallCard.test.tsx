@@ -1,6 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { ExecResultPreview } from "./api";
 import { toolPreviewPresentation } from "./ToolPreview";
 import {
   ToolCommandCard,
@@ -153,8 +152,18 @@ describe("ToolCommandCard", () => {
       />,
     );
 
+    const failed = renderToStaticMarkup(
+      <ToolCommandCard
+        name="exec"
+        status="failed"
+        preview={preview}
+        result={null}
+      />,
+    );
+
     expect(running).toContain('aria-expanded="true"');
     expect(done).toContain('aria-expanded="false"');
+    expect(failed).toContain('aria-expanded="false"');
   });
 
   it("keeps settled metadata in the expanded detail", () => {
@@ -192,9 +201,21 @@ describe("ToolCommandCard", () => {
     expect(completed).not.toContain("Done");
     expect(waiting).not.toContain("Waiting for approval");
     expect(cancelled).not.toContain("Not run");
+    expect(
+      visibleText(
+        renderToStaticMarkup(
+          <ToolCommandCard
+            name="exec"
+            status="failed"
+            preview={preview}
+            result={null}
+          />,
+        ),
+      ),
+    ).not.toContain("Failed");
 
-    // Active and failed commands start open, so their status is already part
-    // of the detail the reader needs now.
+    // A live command starts open, so its status is already part of the
+    // detail the reader needs now.
     expect(
       visibleText(
         renderToStaticMarkup(
@@ -207,18 +228,6 @@ describe("ToolCommandCard", () => {
         ),
       ),
     ).toContain("Running…");
-    expect(
-      visibleText(
-        renderToStaticMarkup(
-          <ToolCommandCard
-            name="exec"
-            status="failed"
-            preview={preview}
-            result={null}
-          />,
-        ),
-      ),
-    ).toContain("Failed");
   });
 
   it("says a degraded run is degraded without needing the card opened", () => {
@@ -372,41 +381,5 @@ describe("command output", () => {
 
     expect(markup).toContain('role="tab"');
     expect(visibleText(markup)).toContain("Waiting for output…");
-  });
-});
-
-describe("outcome badges", () => {
-  const ran: ExecResultPreview = {
-    tool: "exec",
-    exitCode: 0,
-    timedOut: false,
-    outputTruncated: false,
-    stdout: "",
-    stderr: "",
-  };
-
-  it("prefers the most specific thing it can say about a failure", () => {
-    const badge = (
-      result: ExecResultPreview | null,
-      status: "completed" | "failed",
-    ) =>
-      visibleText(
-        renderToStaticMarkup(
-          <ToolCommandCard
-            name="exec"
-            status={status}
-            preview={preview}
-            result={result}
-          />,
-        ),
-      );
-
-    expect(badge({ ...ran, exitCode: 101 }, "failed")).toContain("Exit 101");
-    expect(
-      badge({ ...ran, exitCode: null, timedOut: true }, "failed"),
-    ).toContain("Timed out");
-    expect(badge(ran, "completed")).not.toContain("Done");
-    // No result to be specific about yet.
-    expect(badge(null, "failed")).toContain("Failed");
   });
 });
