@@ -50,17 +50,16 @@ export function SidebarAccountMenu({
 
   useEffect(() => {
     let cancelled = false;
-    void client
-      .getGatewayStatus()
+    void Promise.resolve()
+      .then(() => client.getGatewayStatus())
       .then((status) => {
         if (!cancelled) setGateway(status);
       })
       .catch(() => {
         if (!cancelled) setGateway(null);
       });
-    void useCodeDeliveryStore
-      .getState()
-      .loadRepositories(client)
+    void Promise.resolve()
+      .then(() => useCodeDeliveryStore.getState().loadRepositories(client))
       .catch(() => undefined);
     return () => {
       cancelled = true;
