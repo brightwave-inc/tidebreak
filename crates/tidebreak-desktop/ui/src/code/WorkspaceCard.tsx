@@ -224,11 +224,11 @@ export function WorkspaceCard({
     <article
       className={cn(
         "group/workspace relative rounded-xl border border-transparent transition-[background-color,border-color,box-shadow,opacity] duration-150",
-        selected
-          ? "border-border bg-muted/60"
-          : active
-            ? "border-border-subtle bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]"
-            : "hover:bg-background/55",
+        selected && "border-border bg-muted/60",
+        active &&
+          "shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]",
+        !selected && active && "border-border-subtle bg-background",
+        !selected && !active && "hover:bg-background/55",
         archived && "opacity-65",
       )}
       data-workspace-card=""

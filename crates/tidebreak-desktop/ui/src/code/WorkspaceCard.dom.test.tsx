@@ -39,6 +39,7 @@ function renderCard(overrides?: {
   visibleMeta?: { repoChip: boolean; branch: boolean };
   detailDefaultOpen?: boolean;
   canOpenWorktree?: boolean;
+  active?: boolean;
   selected?: boolean;
   commands?: ReturnType<typeof workspaceCommands>;
   contextMenuLabel?: string;
@@ -57,7 +58,7 @@ function renderCard(overrides?: {
       digest={undefined}
       session={undefined}
       repoName="app"
-      active={false}
+      active={overrides?.active ?? false}
       selected={overrides?.selected}
       terminalOpen={false}
       density={overrides?.density ?? "detailed"}
@@ -287,6 +288,23 @@ describe("WorkspaceCard", () => {
     expect(onSelectPointer).toHaveBeenCalledTimes(1);
     fireEvent.click(row);
     expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the active shadow when the open workspace is also selected", () => {
+    renderCard({ selected: true });
+    const selectedOnly = document.querySelector("[data-workspace-card]");
+    expect(selectedOnly).toHaveAttribute("data-selected");
+    expect(selectedOnly).not.toHaveAttribute("data-active");
+    const selectedOnlyClass = selectedOnly?.className ?? "";
+    cleanup();
+
+    renderCard({ selected: true, active: true });
+    const selectedAndActive = document.querySelector("[data-workspace-card]");
+    expect(selectedAndActive).toHaveAttribute("data-selected");
+    expect(selectedAndActive).toHaveAttribute("data-active");
+    expect(selectedAndActive?.className).not.toBe(selectedOnlyClass);
+    expect(selectedAndActive?.className).toContain("shadow-[");
+    expect(selectedOnlyClass).not.toContain("shadow-[");
   });
 
   it("names a bulk menu without the single-card commands", async () => {
