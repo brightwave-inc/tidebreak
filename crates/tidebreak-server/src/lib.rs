@@ -567,6 +567,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::harness_llm_anthropic_messages),
         )
         .route(
+            "/code/llm/openai/v1/models",
+            get(routes::code::harness_llm_openai_models),
+        )
+        .route(
             "/code/llm/openai/v1/responses",
             post(routes::code::harness_llm_openai_responses),
         )

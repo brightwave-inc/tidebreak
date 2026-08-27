@@ -43,6 +43,27 @@ pub async fn harness_llm_openai_responses(
     relay(state, RelayEndpoint::OpenAiResponses, headers, query, body).await
 }
 
+pub async fn harness_llm_openai_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    match state.code.as_ref().and_then(|code| code.harness_llm()) {
+        Some(relay) => {
+            relay
+                .forward_models(RelayEndpoint::OpenAiModels, &headers)
+                .await
+        }
+        // The desktop and static-token self-host profiles run engines on the
+        // machine's own provider configuration; they mint no relay keys, so
+        // nothing legitimate calls this.
+        None => RelayEndpoint::OpenAiModels.error_response(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "this machine has no harness inference relay",
+        ),
+    }
+}
+
 async fn relay(
     state: AppState,
     endpoint: RelayEndpoint,

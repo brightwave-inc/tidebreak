@@ -52,7 +52,8 @@ pub(crate) use harnesses::{
     install_harness, list_harness_models, list_harnesses, refresh_harnesses,
 };
 pub(crate) use llm::{
-    harness_llm_anthropic_messages, harness_llm_openai_responses, MAX_HARNESS_LLM_BODY_BYTES,
+    harness_llm_anthropic_messages, harness_llm_openai_models, harness_llm_openai_responses,
+    MAX_HARNESS_LLM_BODY_BYTES,
 };
 pub(crate) use repos::{
     clone_defaults, create_repo, delete_repo, get_clone_job, get_repo, list_github_repositories,
