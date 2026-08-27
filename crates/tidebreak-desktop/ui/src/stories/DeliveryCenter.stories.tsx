@@ -724,7 +724,7 @@ export const PullRequestCommentOrdering: Story = {
     await expect(
       Boolean(
         later.compareDocumentPosition(earlier) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
+          Node.DOCUMENT_POSITION_FOLLOWING,
       ),
     ).toBe(true);
 
@@ -737,7 +737,7 @@ export const PullRequestCommentOrdering: Story = {
     await expect(
       Boolean(
         earlier.compareDocumentPosition(later) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
+          Node.DOCUMENT_POSITION_FOLLOWING,
       ),
     ).toBe(true);
   },
