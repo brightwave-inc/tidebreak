@@ -26,7 +26,6 @@ import {
   harnessCanStartNow,
   harnessUnusableReason,
   preferredCodeModels,
-  requiresHarnessModelIds,
   type CodeModelOption,
 } from "./labels";
 
@@ -176,13 +175,8 @@ export function StartSessionPrompt({
       defaultModelKey,
     );
     const native = useCodeCatalogStore.getState().modelsByHarness[selectedKind];
-    const needsNative =
-      requiresHarnessModelIds(selectedKind) || gateway.length === 0;
-    if (!needsNative) {
-      apply(gateway);
-      setModelLoading(false);
-      return;
-    }
+    // Same as the in-workspace composer: always load the harness listing so
+    // gateway rows can inherit `fast_mode` (and per-model effort ladders).
     if (native !== undefined) {
       apply(preferredCodeModels(selectedKind, native, gateway));
       setModelLoading(false);

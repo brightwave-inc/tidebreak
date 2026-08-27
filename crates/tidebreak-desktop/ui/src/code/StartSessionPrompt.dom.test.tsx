@@ -598,6 +598,57 @@ describe("StartSessionPrompt", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows fast mode on a gateway catalog row the harness listing marks as fast", async () => {
+    const client = {
+      listCodeHarnessModels: vi.fn(async () => ({
+        kind: "claude_code" as const,
+        models: [
+          {
+            id: "claude-opus-5",
+            label: "Claude Opus 5",
+            default: true,
+            reasoning_efforts: [],
+            fast_mode: true,
+          },
+        ],
+        reasoning_efforts: ["low", "medium", "high"] as ReasoningEffort[],
+        fast_mode: true,
+      })),
+    };
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("claude_code", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={vi.fn()}
+          client={client}
+          catalogModels={[
+            {
+              key: "model_gateway::claude-opus-5",
+              id: "claude-opus-5",
+              display_name: "Claude Opus 5",
+              provider: "model_gateway",
+              vendor: "anthropic",
+              available: true,
+            } as never,
+          ]}
+          defaultModelKey="model_gateway::claude-opus-5"
+        />,
+      ),
+    );
+
+    expect(client.listCodeHarnessModels).toHaveBeenCalledWith("claude_code");
+    expect(
+      await screen.findByRole("button", { name: "Model: Claude Opus 5" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Fast mode off" }),
+    ).toBeInTheDocument();
+  });
+
   it("posts the chosen reasoning effort and fast mode on start", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();

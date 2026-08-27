@@ -357,6 +357,42 @@ describe("preferredCodeModels", () => {
     expect(preferredCodeModels("codex", native, gateway)).toEqual(gateway);
     expect(preferredCodeModels("claude_code", native, [])).toEqual(native);
   });
+
+  it("copies fast_mode from the harness listing onto matching gateway rows", () => {
+    const listed = [
+      {
+        id: "claude-opus-5",
+        label: "Claude Opus 5",
+        source: "Claude Code",
+        fast_mode: true,
+      },
+    ];
+    const catalog = [
+      {
+        id: "claude-opus-5",
+        label: "Claude Opus 5",
+        source: "Claude Code · model-gateway",
+      },
+      {
+        id: "claude-sonnet-5",
+        label: "Claude Sonnet 5",
+        source: "Claude Code · model-gateway",
+      },
+    ];
+    expect(preferredCodeModels("claude_code", listed, catalog)).toEqual([
+      {
+        id: "claude-opus-5",
+        label: "Claude Opus 5",
+        source: "Claude Code · model-gateway",
+        fast_mode: true,
+      },
+      {
+        id: "claude-sonnet-5",
+        label: "Claude Sonnet 5",
+        source: "Claude Code · model-gateway",
+      },
+    ]);
+  });
 });
 
 describe("groupCodeModelOptions", () => {

@@ -350,13 +350,10 @@ export function NewWorkspaceDialog({
     };
     const gateway = gatewayCodeModels(models, harness, defaultModelKey);
     const native = useCodeCatalogStore.getState().modelsByHarness[harness];
-    const needsNative =
-      requiresHarnessModelIds(harness) || gateway.length === 0;
-    if (!needsNative) {
-      apply(gateway);
-      setModelLoading(false);
-      return;
-    }
+    // Fetch the harness listing even when the gateway catalog already has
+    // display rows: those rows omit `fast_mode`, and the engine's effort
+    // ladder is also stored from this fetch. Join happens in
+    // `preferredCodeModels`.
     if (native !== undefined) {
       apply(preferredCodeModels(harness, native, gateway));
       setModelLoading(false);
