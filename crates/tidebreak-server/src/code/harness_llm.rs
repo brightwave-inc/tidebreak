@@ -39,7 +39,6 @@ use axum::response::Response;
 use tidebreak_core::{AgentError, CodeSessionId, HarnessKind, OwnerId};
 
 use crate::obo_gateway::{GatewayCompatModel, OboGateway};
-use crate::providers::GatewayModelProtocol;
 
 /// Whose inference a relay key spends.
 #[derive(Clone)]
@@ -119,15 +118,17 @@ impl HarnessLlmRelay {
         }
     }
 
-    /// The caller's models on one protocol this relay carries. Keeping the
-    /// read behind the relay means hosted pickers and the turns they start
-    /// always answer to the same gateway deployment.
-    pub(crate) async fn models(
+    /// Both of the caller's compat listings. Keeping the read behind the
+    /// relay means hosted pickers and the turns they start always answer to
+    /// the same gateway deployment.
+    pub(crate) async fn listings(
         &self,
         owner: &OwnerId,
-        protocol: GatewayModelProtocol,
-    ) -> tidebreak_core::Result<Vec<GatewayCompatModel>> {
-        self.obo.compat_models(owner, protocol).await
+    ) -> tidebreak_core::Result<(
+        tidebreak_core::Result<Vec<GatewayCompatModel>>,
+        tidebreak_core::Result<Vec<GatewayCompatModel>>,
+    )> {
+        self.obo.compat_listings(owner).await
     }
 
     /// Mint the relay key for `subject`, replacing any prior key the same

@@ -8598,20 +8598,19 @@ async fn a_hosted_machine_lists_the_gateway_catalog_as_an_engines_models() {
     }
     assert_eq!(
         observed.anthropic_reads.load(Ordering::SeqCst),
-        2,
-        "Claude and OpenCode are the only Anthropic listing readers"
+        4,
+        "every hosted picker reads both listings; four engines, four Anthropic reads"
     );
     assert_eq!(
         observed.openai_reads.load(Ordering::SeqCst),
-        3,
-        "Codex, Grok, and OpenCode are the only OpenAI listing readers"
+        4,
+        "every hosted picker reads both listings; four engines, four OpenAI reads"
     );
     gateway_server.abort();
 }
 
-/// A one-protocol engine reads only the listing its turns use. An unrelated
-/// compat surface may be unavailable without turning every picker into an
-/// error; OpenCode still requires both because it offers both providers.
+/// A one-protocol engine still succeeds when the unused listing is down.
+/// OpenCode still requires both because it offers both providers.
 #[tokio::test]
 async fn a_hosted_engine_does_not_require_an_unrelated_gateway_listing() {
     let anthropic_only = FakeModelGateway::new(

@@ -43,8 +43,6 @@ use futures::StreamExt as _;
 use tidebreak_core::{AgentError, OwnerId, Profile, Result};
 use tidebreak_router::BearerTokenSource;
 
-use crate::providers::GatewayModelProtocol;
-
 /// Mint a replacement this close to expiry instead of using the cached token.
 ///
 /// Matches the desktop's refresh leeway, so a turn never opens a request with
@@ -686,95 +684,59 @@ impl OboGateway {
         })
     }
 
-    /// One model listing the engine relay can carry for `owner`, read from
-    /// the matching gateway compat surface with their fresh inference token
-    /// (decision 71, issue 2755).
+    /// Both compat listings the engine relay can carry for `owner`, each
+    /// read with their fresh inference token (decision 71, issue 2755).
     ///
-    /// The listing is exactly the set a turn through that protocol
-    /// authenticates against, so an engine picker served from it offers no
-    /// dead picks and omits nothing entitled. Reading one protocol does not
-    /// depend on the other compat surface being available.
+    /// Both surfaces are always requested so a caller-supplied engine kind
+    /// never chooses the HTTP destination. A one-protocol engine still
+    /// succeeds when the unused listing is down: the picker keeps only the
+    /// result its wiring can honor.
     ///
     /// # Errors
-    /// Fails when this process holds no live subject for `owner`, when the
-    /// exchange or a read is refused, on transport failure, and when a body
-    /// is not a listing shape.
-    pub(crate) async fn compat_models(
+    /// Each side fails on its own when this process holds no live subject
+    /// for `owner`, when the exchange or that read is refused, on transport
+    /// failure, and when that body is not a listing shape.
+    pub(crate) async fn compat_listings(
         &self,
         owner: &OwnerId,
-        protocol: GatewayModelProtocol,
-    ) -> Result<Vec<GatewayCompatModel>> {
+    ) -> Result<(
+        Result<Vec<GatewayCompatModel>>,
+        Result<Vec<GatewayCompatModel>>,
+    )> {
         let token = self.bearer_for(owner).await?;
-        self.compat_models_page(protocol, &token).await
+        Ok(futures::future::join(
+            self.anthropic_compat_listing(&token),
+            self.openai_compat_listing(&token),
+        )
+        .await)
     }
 
-    /// One compat listing. The endpoint is selected from this gateway's
-    /// prevalidated fixed fields, rather than accepting a URL-shaped helper
-    /// argument. This keeps the protocol boundary explicit and prevents a
-    /// caller-controlled destination from reaching the HTTP client.
-    async fn compat_models_page(
-        &self,
-        protocol: GatewayModelProtocol,
-        token: &str,
-    ) -> Result<Vec<GatewayCompatModel>> {
-        let response = match protocol {
-            GatewayModelProtocol::AnthropicMessages => {
-                self.client.get(self.anthropic_models_url.clone())
-            }
-            GatewayModelProtocol::OpenaiResponses => {
-                self.client.get(self.openai_models_url.clone())
-            }
-        }
-        .bearer_auth(token)
-        .send()
+    async fn anthropic_compat_listing(&self, token: &str) -> Result<Vec<GatewayCompatModel>> {
+        parse_compat_listing(
+            self.client
+                .get(self.anthropic_models_url.clone())
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|error| {
+                    AgentError::msg(format!("the Model Gateway model listing failed: {error}"))
+                })?,
+        )
         .await
-        .map_err(|error| {
-            AgentError::msg(format!("the Model Gateway model listing failed: {error}"))
-        })?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(AgentError::SignInRequired(
-                "the Model Gateway refused the model listing for your session; sign in again"
-                    .into(),
-            ));
-        }
-        let body = read_bounded(response, CATALOG_RESPONSE_LIMIT).await?;
-        if !status.is_success() {
-            return Err(AgentError::msg(format!(
-                "the Model Gateway model listing failed with status {status}"
-            )));
-        }
-        let listing: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
-            AgentError::msg(format!(
-                "the Model Gateway returned an unreadable model listing: {error}"
-            ))
-        })?;
-        let rows = listing
-            .get("data")
-            .and_then(|data| data.as_array())
-            .ok_or_else(|| AgentError::msg("the Model Gateway model listing has no data array"))?;
-        Ok(rows
-            .iter()
-            .filter_map(|row| {
-                let id = row.get("id")?.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                Some(GatewayCompatModel {
-                    display_name: row
-                        .get("display_name")
-                        .and_then(|value| value.as_str())
-                        .map(str::trim)
-                        .filter(|display_name| !display_name.is_empty())
-                        .map(str::to_owned),
-                    family_default: row
-                        .get("is_family_default")
-                        .and_then(|value| value.as_bool())
-                        == Some(true),
-                    id: id.to_owned(),
-                })
-            })
-            .collect())
+    }
+
+    async fn openai_compat_listing(&self, token: &str) -> Result<Vec<GatewayCompatModel>> {
+        parse_compat_listing(
+            self.client
+                .get(self.openai_models_url.clone())
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|error| {
+                    AgentError::msg(format!("the Model Gateway model listing failed: {error}"))
+                })?,
+        )
+        .await
     }
 
     /// The forge identity this caller's git operations would act as, probed
@@ -1360,6 +1322,55 @@ pub(crate) mod test_support {
             self.listed.lock().expect("listed").clone()
         }
     }
+}
+
+/// Parse one compat listing body. Shared by both surfaces because they
+/// share the `data` array shape; only the Anthropic surface carries
+/// display names and family defaults.
+async fn parse_compat_listing(response: reqwest::Response) -> Result<Vec<GatewayCompatModel>> {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(AgentError::SignInRequired(
+            "the Model Gateway refused the model listing for your session; sign in again".into(),
+        ));
+    }
+    let body = read_bounded(response, CATALOG_RESPONSE_LIMIT).await?;
+    if !status.is_success() {
+        return Err(AgentError::msg(format!(
+            "the Model Gateway model listing failed with status {status}"
+        )));
+    }
+    let listing: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+        AgentError::msg(format!(
+            "the Model Gateway returned an unreadable model listing: {error}"
+        ))
+    })?;
+    let rows = listing
+        .get("data")
+        .and_then(|data| data.as_array())
+        .ok_or_else(|| AgentError::msg("the Model Gateway model listing has no data array"))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let id = row.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some(GatewayCompatModel {
+                display_name: row
+                    .get("display_name")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|display_name| !display_name.is_empty())
+                    .map(str::to_owned),
+                family_default: row
+                    .get("is_family_default")
+                    .and_then(|value| value.as_bool())
+                    == Some(true),
+                id: id.to_owned(),
+            })
+        })
+        .collect())
 }
 
 /// Read at most `limit` bytes, refusing anything larger.

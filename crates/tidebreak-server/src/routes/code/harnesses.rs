@@ -11,7 +11,6 @@ use super::types::{
 use crate::code::harness_label;
 use crate::code::harness_llm::relay_covered;
 use crate::obo_gateway::GatewayCompatModel;
-use crate::providers::GatewayModelProtocol;
 use tidebreak_core::HarnessKind;
 
 /// The doctor surface, served from the memoized probes (decision 0034).
@@ -118,16 +117,17 @@ pub async fn list_harness_models(
 /// listings, the same surfaces [`crate::code::harness_llm::spawn_wiring`]
 /// points each engine at.
 ///
-/// Each engine reads only the listing its relay wiring can reach. Claude Code
-/// posts to the Anthropic surface; Codex and Grok to the OpenAI one; opencode
-/// sees both. OpenCode ids are provider-qualified so its request body selects
-/// the provider wired to that listing: `anthropic/{raw}` for Anthropic and
-/// `model-gateway/{raw}` for OpenAI Responses. Duplicate raw ids prefer the
-/// Anthropic surface. Gateway rows carry no per-model effort ladder or
-/// fast-mode promise — the engine's own ladder above is the honest outer
-/// bound — and only the Anthropic surface's `is_family_default` annotation
-/// claims a default. The wiring per engine is
-/// [`crate::code::harness_llm::spawn_wiring`].
+/// Both listings are always fetched; `kind` only chooses which rows to
+/// keep. Claude Code posts to the Anthropic surface; Codex and Grok to the
+/// OpenAI one; opencode sees both. A one-protocol engine still succeeds
+/// when the unused listing is down. OpenCode ids are provider-qualified so
+/// its request body selects the provider wired to that listing:
+/// `anthropic/{raw}` for Anthropic and `model-gateway/{raw}` for OpenAI
+/// Responses. Duplicate raw ids prefer the Anthropic surface. Gateway rows
+/// carry no per-model effort ladder or fast-mode promise — the engine's
+/// own ladder above is the honest outer bound — and only the Anthropic
+/// surface's `is_family_default` annotation claims a default. The wiring
+/// per engine is [`crate::code::harness_llm::spawn_wiring`].
 async fn hosted_models(
     code: &ScopedCode,
     kind: HarnessKind,
@@ -135,25 +135,19 @@ async fn hosted_models(
     let relay = code
         .harness_llm()
         .expect("hosted means the relay is active");
+    let (anthropic, openai) = relay.listings(code.owner()).await?;
     match kind {
-        HarnessKind::ClaudeCode => Ok(relay
-            .models(code.owner(), GatewayModelProtocol::AnthropicMessages)
-            .await?
+        HarnessKind::ClaudeCode => Ok(anthropic?
             .into_iter()
             .map(|row| hosted_model(row, None))
             .collect()),
-        HarnessKind::Codex | HarnessKind::Grok => Ok(relay
-            .models(code.owner(), GatewayModelProtocol::OpenaiResponses)
-            .await?
+        HarnessKind::Codex | HarnessKind::Grok => Ok(openai?
             .into_iter()
             .map(|row| hosted_model(row, None))
             .collect()),
         HarnessKind::Opencode => {
-            let (anthropic, openai) = futures::future::try_join(
-                relay.models(code.owner(), GatewayModelProtocol::AnthropicMessages),
-                relay.models(code.owner(), GatewayModelProtocol::OpenaiResponses),
-            )
-            .await?;
+            let anthropic = anthropic?;
+            let openai = openai?;
             let mut seen = std::collections::HashSet::new();
             let mut models = Vec::with_capacity(anthropic.len() + openai.len());
             for row in anthropic {
