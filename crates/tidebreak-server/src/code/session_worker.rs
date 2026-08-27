@@ -33,7 +33,7 @@ use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
-    CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspaceStatus, DbStore, FenceReason,
+    CodeTurnId, CodeTurnStatus, CodeUsage, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
     HarnessNoticeLevel, OwnerId, PermissionMode, ToolOutcome,
 };
 use tidebreak_harness::{
@@ -229,6 +229,12 @@ pub(crate) struct LiveSink {
     owner: OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
+    /// Which engine this session runs, for copy that names it.
+    harness: HarnessKind,
+    /// Whether this session's inference rides the on-behalf-of relay
+    /// (decision 71). The relay's refusals are already legible and name the
+    /// gateway, so [`LiveSink::legible_turn_error`] leaves them untouched.
+    relay_wired: bool,
     turn_id: std::sync::Mutex<Option<CodeTurnId>>,
     /// Resume ref reported during engine startup but not yet proven durable.
     ///
@@ -266,6 +272,27 @@ impl LiveSink {
     fn take_unrecognized_delta(&self, total: u64) -> u64 {
         let flushed = self.flushed_unrecognized.swap(total, Ordering::SeqCst);
         total.saturating_sub(flushed)
+    }
+
+    /// The engine's report of a failed turn, made legible when it is a
+    /// provider authentication failure (issue 2653): the vendor's raw 401
+    /// body cannot tell the reader "sign this harness in" from "the
+    /// provider is down", so the sentence the create-time refusal uses
+    /// leads and the engine's own words follow. A turn riding the relay
+    /// keeps its message untouched — the relay's refusals already name the
+    /// gateway, and "sign in in your own terminal" is wrong on a hosted
+    /// machine.
+    fn legible_turn_error(&self, message: String) -> BoundedError {
+        if self.relay_wired || !provider_auth_failure(&message) {
+            return BoundedError { message };
+        }
+        let label = crate::code::harness_label(self.harness);
+        BoundedError {
+            message: format!(
+                "{label} is not signed in on this machine. Sign in to {label} in your own \
+                 terminal, then try again. The engine reported: {message}"
+            ),
+        }
     }
 
     /// Persist a reported resume ref after the engine proves a turn started.
@@ -577,6 +604,15 @@ impl HarnessEventSink for LiveSink {
         }
         let Some(code_event) = map_event(event, turn_id) else {
             return;
+        };
+        // An engine that fails a turn can pass the provider's raw 401 body
+        // straight through. Swap it for the legible sentence before the
+        // journal keeps it.
+        let code_event = match code_event {
+            CodeEvent::TurnFailed { error } => CodeEvent::TurnFailed {
+                error: self.legible_turn_error(error.message),
+            },
+            other => other,
         };
         // Assistant deltas stream and are gone. The `assistant_message` that
         // closes the run repeats them exactly, so a row here would store the
@@ -1725,7 +1761,7 @@ async fn drive_turn_inner(
                     (
                         CodeTurnStatus::Failed,
                         CodeEvent::TurnFailed {
-                            error: BoundedError { message: detail },
+                            error: sink.legible_turn_error(detail),
                         },
                     )
                 } else {
@@ -1772,9 +1808,7 @@ async fn drive_turn_inner(
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
                 let event = CodeEvent::TurnFailed {
-                    error: BoundedError {
-                        message: err.to_string(),
-                    },
+                    error: sink.legible_turn_error(err.to_string()),
                 };
                 sink.note_subagent_boundary(&event).await;
                 let _ = persist_turn_and_publish(
@@ -2182,6 +2216,28 @@ pub(crate) async fn attach_engine(
     Ok(session)
 }
 
+/// Whether an engine's failure message reads as the provider refusing its
+/// credentials, as opposed to any other turn failure. Matches the raw 401
+/// bodies and sign-in errors the shipped engines actually print; anything
+/// unrecognized passes through untouched.
+fn provider_auth_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        // OpenAI's raw 401 body, what a signed-out Codex prints.
+        "missing bearer or basic authentication",
+        // The error type the vendors' 401 bodies carry.
+        "authentication_error",
+        // What a signed-out Claude Code prints in its result line.
+        "invalid api key",
+        "please run /login",
+        // Anthropic's refusal of a rejected bearer.
+        "invalid bearer token",
+        "401 unauthorized",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sink_for(
     db: Arc<DbStore>,
@@ -2189,6 +2245,8 @@ pub(crate) fn sink_for(
     owner: OwnerId,
     session_id: CodeSessionId,
     spawn_epoch: i64,
+    harness: HarnessKind,
+    relay_wired: bool,
     turn_id: Option<CodeTurnId>,
     subagents: Vec<CodeSubagentSummary>,
     gh_search_path: Option<String>,
@@ -2200,6 +2258,8 @@ pub(crate) fn sink_for(
         owner,
         session_id,
         spawn_epoch,
+        harness,
+        relay_wired,
         turn_id: std::sync::Mutex::new(turn_id),
         pending_resume_ref: std::sync::Mutex::new(None),
         gh_search_path,
@@ -2889,6 +2949,8 @@ mod tests {
             OwnerId::local(),
             session_id,
             1,
+            HarnessKind::ClaudeCode,
+            false,
             None,
             Vec::new(),
             None,
@@ -3163,6 +3225,8 @@ mod tests {
             owner.clone(),
             session_id,
             attached.spawn_epoch,
+            HarnessKind::Codex,
+            false,
             None,
             attached.subagents,
             None,
@@ -3571,5 +3635,66 @@ mod tests {
             message,
             "compare these\n\nimages attached to this message:\n- `first.png`\n- `second.png`"
         );
+    }
+
+    #[test]
+    fn provider_auth_failures_are_recognized_and_other_failures_are_not() {
+        // The vendor bodies the shipped engines actually pass through.
+        assert!(provider_auth_failure(
+            "Missing bearer or basic authentication in header"
+        ));
+        assert!(provider_auth_failure(
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#
+        ));
+        assert!(provider_auth_failure("Invalid API key · Please run /login"));
+        assert!(provider_auth_failure("HTTP 401 Unauthorized"));
+        // Everything else keeps the engine's own words.
+        assert!(!provider_auth_failure(
+            "overloaded_error: try again shortly"
+        ));
+        assert!(!provider_auth_failure("engine exited with status 1"));
+    }
+
+    #[tokio::test]
+    async fn a_raw_401_turn_failure_reads_as_a_sign_in_problem() {
+        let (_directory, _store, sink, _session_id) = seeded_sink().await;
+        let mapped =
+            sink.legible_turn_error("Missing bearer or basic authentication in header".into());
+        assert!(
+            mapped
+                .message
+                .starts_with("Claude Code is not signed in on this machine."),
+            "got: {}",
+            mapped.message
+        );
+        // The engine's own words survive for whoever debugs the transcript.
+        assert!(mapped
+            .message
+            .contains("Missing bearer or basic authentication in header"));
+        let untouched = sink.legible_turn_error("engine exited with status 1".into());
+        assert_eq!(untouched.message, "engine exited with status 1");
+    }
+
+    #[tokio::test]
+    async fn a_relay_wired_session_keeps_the_relays_own_refusal() {
+        let (_directory, store, bus, session_id) =
+            seeded_session(HarnessKind::Codex, Some("0.147.0")).await;
+        let sink = sink_for(
+            store,
+            bus,
+            OwnerId::local(),
+            session_id,
+            1,
+            HarnessKind::Codex,
+            true,
+            None,
+            Vec::new(),
+            None,
+            None,
+        );
+        // The relay's refusals already name the gateway; "sign in in your
+        // own terminal" would be wrong on a hosted machine.
+        let kept = sink.legible_turn_error("authentication_error: sign in required".into());
+        assert_eq!(kept.message, "authentication_error: sign in required");
     }
 }

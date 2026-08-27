@@ -1015,6 +1015,8 @@ mod tests {
             session.owner.clone(),
             session_id,
             session.spawn_epoch,
+            session.harness_kind,
+            false,
             None,
             session.subagents.clone(),
             None,

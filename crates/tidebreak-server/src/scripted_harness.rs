@@ -150,7 +150,7 @@ pub(crate) struct ScriptedAdapter {
     /// and queue a follow-up before the script plays.
     turn_delay: Duration,
     /// What the probe reports as this engine's local sign-in state.
-    authenticated: Option<bool>,
+    authenticated: Arc<std::sync::Mutex<Option<bool>>>,
 }
 
 impl ScriptedAdapter {
@@ -185,7 +185,7 @@ impl ScriptedAdapter {
             approval_ack_delay: Duration::ZERO,
             probes: Arc::new(AtomicU64::new(0)),
             launched_approvals: Arc::new(std::sync::Mutex::new(Vec::new())),
-            authenticated: Some(true),
+            authenticated: Arc::new(std::sync::Mutex::new(Some(true))),
             writes: Vec::new(),
             turn_delay: Duration::ZERO,
         }
@@ -385,9 +385,16 @@ impl ScriptedAdapter {
     /// Report this local sign-in state from the probe, for surfaces that
     /// branch on it — the doctor's hosted report among them.
     #[allow(dead_code)]
-    pub(crate) fn with_authenticated(mut self, authenticated: Option<bool>) -> Self {
-        self.authenticated = authenticated;
+    pub(crate) fn with_authenticated(self, authenticated: Option<bool>) -> Self {
+        self.set_authenticated(authenticated);
         self
+    }
+
+    /// Flip the sign-in state the next probe reports. Tests use this to
+    /// model a user signing in after the doctor has already cached signed-out.
+    #[allow(dead_code)]
+    pub(crate) fn set_authenticated(&self, authenticated: Option<bool>) {
+        *self.authenticated.lock().expect("scripted auth") = authenticated;
     }
 }
 
@@ -403,7 +410,7 @@ impl HarnessAdapter for ScriptedAdapter {
             found: true,
             binary_path: Some(PathBuf::from("/scripted/engine")),
             version: Some("scripted".into()),
-            authenticated: self.authenticated,
+            authenticated: *self.authenticated.lock().expect("scripted auth"),
             stderr: String::new(),
             env: Vec::new(),
             commands: Vec::new(),

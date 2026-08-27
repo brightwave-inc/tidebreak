@@ -2383,6 +2383,177 @@ async fn unsupported_fast_mode_is_refused_on_create_and_live_update() {
     assert_eq!(body["kind"], "fast_mode_unsupported", "{body}");
 }
 
+/// A definitively signed-out engine refuses at create with a message the UI
+/// can show, instead of minting a session that dies on turn one with the
+/// provider's raw 401 (#2653).
+#[tokio::test]
+async fn a_signed_out_engine_refuses_at_create_not_on_turn_one() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_authenticated(Some(false));
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "harness_not_authenticated", "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("Claude Code is not signed in on this machine."),
+        "{body}"
+    );
+}
+
+/// Signing in after the doctor has cached a signed-out probe must not leave
+/// create stuck on that answer. Create re-probes a cached refusal rather
+/// than waiting for an explicit doctor refresh.
+#[tokio::test]
+async fn create_re_probes_a_cached_signed_out_observation() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_authenticated(Some(false));
+    let (router, token, _runtime, dir) = code_app_with(adapter.clone()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let report = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(report["harnesses"][0]["authenticated"], false);
+    assert_eq!(adapter.probe_count(), 1);
+
+    adapter.set_authenticated(Some(true));
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    assert!(
+        adapter.probe_count() >= 2,
+        "create must re-probe a cached signed-out observation, not reuse it"
+    );
+}
+
+/// Only a definitive signed-out observation refuses. A probe that could not
+/// verify the sign-in state answers `None`, and a false refusal on a working
+/// machine is strictly worse than the first-turn failure it would prevent.
+#[tokio::test]
+async fn an_unverified_sign_in_state_does_not_block_create() {
+    let adapter = ScriptedAdapter::new(plain_text_script()).with_authenticated(None);
+    let (router, token, _runtime, dir) = code_app_with(adapter).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+}
+
+/// The #2742 guarantee holds at create time: on a gateway-hosted machine the
+/// relay authenticates covered engines as the caller, so a signed-out engine
+/// still creates a session freely.
+#[tokio::test]
+async fn a_signed_out_relay_covered_engine_still_creates_on_a_hosted_machine() {
+    let (dir, store) = temp_db_store("code.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(
+        ScriptedAdapter::new(plain_text_script()).with_authenticated(Some(false)),
+    ));
+    let gateway = Arc::new(
+        crate::obo_gateway::OboGateway::new(
+            "https://gateway.example",
+            "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed".to_owned(),
+        )
+        .unwrap(),
+    );
+    let runtime = Arc::new(
+        CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry).with_harness_llm(
+            Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway)),
+        ),
+    );
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime.clone());
+    let token = state.token.clone();
+    let addr = serve(app(state)).await;
+    // Boot publishes the loopback base the relay wiring needs before any
+    // worker attaches; tests serve the router directly, so publish it here.
+    runtime.start(format!("http://{addr}")).await.unwrap();
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let created = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+}
+
 /// A model switch keeps the model but clears settings the new row cannot
 /// honor before the turn or its snapshot sees them.
 #[tokio::test]

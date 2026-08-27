@@ -365,11 +365,21 @@ fn env_key_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr, case_insensitive:
     }
 }
 
-fn env_value<'a>(env: &'a [(OsString, OsString)], key: &std::ffi::OsStr) -> Option<&'a OsString> {
+pub(crate) fn env_value<'a>(
+    env: &'a [(OsString, OsString)],
+    key: &std::ffi::OsStr,
+) -> Option<&'a OsString> {
     env.iter()
         .rev()
         .find(|(candidate, _)| env_key_eq(candidate, key, cfg!(windows)))
         .map(|(_, value)| value)
+}
+
+/// Whether the captured environment assigns any of `names` a non-empty value.
+pub(crate) fn env_sets_any(env: &[(OsString, OsString)], names: &[&str]) -> bool {
+    names.iter().any(|name| {
+        env_value(env, std::ffi::OsStr::new(name)).is_some_and(|value| !value.is_empty())
+    })
 }
 
 fn apply_captured_env(command: &mut Command, env: &[(std::ffi::OsString, std::ffi::OsString)]) {

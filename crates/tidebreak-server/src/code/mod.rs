@@ -40,3 +40,13 @@ pub(crate) mod worktree_root;
 
 pub(crate) use runtime::CodeRuntime;
 pub(crate) use scoped::ScopedCode;
+
+/// The display name the product uses for an engine, wherever copy names one.
+pub(crate) fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
+    match kind {
+        tidebreak_core::HarnessKind::ClaudeCode => "Claude Code",
+        tidebreak_core::HarnessKind::Codex => "Codex CLI",
+        tidebreak_core::HarnessKind::Opencode => "opencode",
+        tidebreak_core::HarnessKind::Grok => "Grok CLI",
+    }
+}
