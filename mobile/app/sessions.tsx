@@ -138,7 +138,13 @@ export default function SessionsScreen() {
           );
         })}
         <Pressable
-          className="rounded-lg border border-border bg-background px-4 py-3 mt-2"
+          className="mt-2 rounded-lg border border-border bg-background px-4 py-3"
+          onPress={() => router.push("/approvals")}
+        >
+          <Text className="text-center text-base text-foreground">Approvals</Text>
+        </Pressable>
+        <Pressable
+          className="rounded-lg border border-border bg-background px-4 py-3"
           onPress={() => router.push("/settings")}
         >
           <Text className="text-center text-base text-foreground">Settings</Text>

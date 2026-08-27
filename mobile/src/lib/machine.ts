@@ -1,4 +1,8 @@
-import { fetchRefusingRedirects, type HttpFetch } from "./http";
+import {
+  fetchRefusingRedirects,
+  type HttpFetch,
+  type HttpRequestInit,
+} from "./http";
 import {
   INITIAL_RECONNECT_DELAY_MS,
   jitteredDelay,
@@ -35,23 +39,109 @@ export function machineWsUrl(baseUrl: string, path: string): string {
   return `${httpToWs(trimmed)}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+export type MachineRequestOptions = {
+  method?: string;
+  body?: unknown;
+  expectedStatus?: number | readonly number[];
+};
+
+export class MachineRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly kind: string | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "MachineRequestError";
+  }
+}
+
+function requestUrl(baseUrl: string, path: string): string {
+  const base = baseUrl.replace(/\/$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function statusMatches(
+  status: number,
+  expected: number | readonly number[] | undefined,
+): boolean {
+  if (expected === undefined) return status >= 200 && status < 300;
+  return Array.isArray(expected)
+    ? expected.includes(status)
+    : status === expected;
+}
+
+function parseErrorBody(text: string): { kind: string | null; message: string } {
+  if (text.length === 0) {
+    return { kind: null, message: "Machine request failed." };
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      const body = parsed as Record<string, unknown>;
+      return {
+        kind:
+          typeof body.kind === "string" && body.kind.length > 0
+            ? body.kind
+            : null,
+        message:
+          typeof body.message === "string" && body.message.length > 0
+            ? body.message
+            : "Machine request failed.",
+      };
+    }
+  } catch {
+    // Stable machine errors are JSON. Do not reflect an HTML proxy body.
+  }
+  return { kind: null, message: "Machine request failed." };
+}
+
 export class MachineClient {
   constructor(private readonly options: MachineClientOptions) {}
 
   async getJson(path: string): Promise<unknown> {
+    return this.requestJson(path);
+  }
+
+  async requestJson(
+    path: string,
+    request: MachineRequestOptions = {},
+  ): Promise<unknown> {
     const token = await this.options.tokens.getAccessToken(
       this.options.resource,
     );
-    const url = `${this.options.baseUrl.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+    };
+    const init: HttpRequestInit = { headers };
+    if (request.method) init.method = request.method;
+    if (request.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(request.body);
+    }
     const response = await fetchRefusingRedirects(
-      url,
-      { headers: { Authorization: `Bearer ${token}` } },
+      requestUrl(this.options.baseUrl, path),
+      init,
       this.options.fetchImpl,
     );
+    const text = await response.text();
     if (!response.ok) {
-      throw new Error(`Machine request failed (HTTP ${response.status})`);
+      const error = parseErrorBody(text);
+      throw new MachineRequestError(
+        response.status,
+        error.kind,
+        `${error.message} (HTTP ${response.status})`,
+      );
     }
-    return response.json();
+    if (!statusMatches(response.status, request.expectedStatus)) {
+      throw new Error(`Machine response used unexpected HTTP ${response.status}.`);
+    }
+    if (text.length === 0) return undefined;
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new Error("Machine response was not valid JSON.");
+    }
   }
 
   /**

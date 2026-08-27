@@ -1,38 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import type { CodeTurnSnapshot } from "../generated/wire";
+import { listCodeTurns } from "../lib/api";
 import { connectWithBackoff } from "../lib/machine";
 import type { MachineClient } from "../lib/machine";
 import {
+  hydrateTurnHistory,
   initialTranscript,
   isSequencedCodeEventFrame,
   reduceTranscript,
   type TranscriptState,
 } from "../lib/transcript";
 
-function isTurnSnapshot(value: unknown): value is CodeTurnSnapshot {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    typeof (value as { id?: unknown }).id === "string" &&
-    typeof (value as { user_input?: unknown }).user_input === "string"
-  );
-}
-
-function parseTurns(json: unknown): CodeTurnSnapshot[] {
-  if (Array.isArray(json)) return json.filter(isTurnSnapshot);
-  if (json && typeof json === "object") {
-    const record = json as Record<string, unknown>;
-    for (const key of ["turns", "items"]) {
-      const value = record[key];
-      if (Array.isArray(value)) return value.filter(isTurnSnapshot);
-    }
-  }
-  return [];
-}
-
 export function useSessionEvents(
   client: MachineClient | null,
   sessionId: string | undefined,
+  refreshVersion = 0,
 ): TranscriptState & { live: boolean } {
   const [state, setState] = useState<TranscriptState>(initialTranscript);
   const [live, setLive] = useState(false);
@@ -43,35 +24,51 @@ export function useSessionEvents(
       setLive(false);
       return;
     }
+    const activeClient = client;
+    const activeSessionId = sessionId;
     let lastSeq = 0;
+    let disposed = false;
+    const requestedPrompts = new Set<string>();
     setState(initialTranscript());
 
-    void client
-      .getJson(`/code/sessions/${encodeURIComponent(sessionId)}/turns`)
-      .then((json) => {
-        const turns = parseTurns(json);
-        setState((current) => {
-          if (current.items.some((item) => item.kind === "user")) return current;
-          const items = turns.map((turn) => ({
-            kind: "user" as const,
-            id: `user:${turn.id}`,
-            text: turn.user_input,
-          }));
-          return { ...current, items: [...items, ...current.items] };
+    function hydrateTurns(turnId?: string) {
+      void listCodeTurns(activeClient, activeSessionId)
+        .then((turns) => {
+          if (disposed) return;
+          const selected = turnId
+            ? turns.filter((turn) => turn.id === turnId)
+            : turns;
+          if (turnId && selected.length === 0) {
+            requestedPrompts.delete(turnId);
+            return;
+          }
+          for (const turn of selected) requestedPrompts.add(turn.id);
+          setState((current) => hydrateTurnHistory(current, selected));
+        })
+        .catch(() => {
+          if (turnId) requestedPrompts.delete(turnId);
         });
-      })
-      .catch(() => undefined);
+    }
+
+    hydrateTurns();
 
     const conn = connectWithBackoff(
       () =>
-        client.openSocket(
-          `/code/sessions/${encodeURIComponent(sessionId)}/events?after=${lastSeq}`,
+        activeClient.openSocket(
+          `/code/sessions/${encodeURIComponent(activeSessionId)}/events?after=${lastSeq}`,
         ),
       {
         onMessage: (data) => {
           try {
             const parsed: unknown = JSON.parse(data);
             if (!isSequencedCodeEventFrame(parsed)) return;
+            if (
+              parsed.event.type === "turn_started" &&
+              !requestedPrompts.has(parsed.event.turn_id)
+            ) {
+              requestedPrompts.add(parsed.event.turn_id);
+              hydrateTurns(parsed.event.turn_id);
+            }
             setState((current) => {
               const next = reduceTranscript(current, parsed);
               lastSeq = next.lastSeq;
@@ -85,8 +82,11 @@ export function useSessionEvents(
       },
     );
     conn.start();
-    return () => conn.dispose();
-  }, [client, sessionId]);
+    return () => {
+      disposed = true;
+      conn.dispose();
+    };
+  }, [client, refreshVersion, sessionId]);
 
   return useMemo(() => ({ ...state, live }), [state, live]);
 }
