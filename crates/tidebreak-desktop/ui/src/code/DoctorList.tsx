@@ -128,6 +128,9 @@ function statusBadge(
   }
   if (install?.error) return { label: "Download failed", variant: "critical" };
   if (isHarnessReady(entry)) return { label: "Ready", variant: "success" };
+  if (entry.auth_mode === "hosted_unavailable") {
+    return { label: "Unavailable", variant: "warning" };
+  }
   // A state, not an instruction — the instruction is the line below it.
   if (entry.found) {
     return entry.authenticated === false
@@ -156,11 +159,20 @@ function subtitle(
   }
   if (install?.error) return install.error;
   if (entry.remediation) return entry.remediation;
-  if (entry.found && entry.authenticated !== true) {
+  // A relay-covered engine on a hosted machine needs no sign-in, so the
+  // fallback below must not demand one; say where its turns run instead.
+  if (
+    entry.found &&
+    entry.auth_mode !== "gateway_relay" &&
+    entry.authenticated !== true
+  ) {
     return "Sign in via your terminal, then re-check.";
   }
   if (harnessNeedsDownload(entry)) {
     return "Downloads the first time you pick it.";
+  }
+  if (entry.auth_mode === "gateway_relay") {
+    return "Turns run as you through the Model Gateway.";
   }
   return TIER_NOTES[entry.tier];
 }
@@ -188,7 +200,13 @@ function DoctorRow({
   const downloading = Boolean(install && !install.done && !install.error);
   const failed = Boolean(install?.error);
   const canDownload =
-    Boolean(onInstall) && !entry.found && entry.installable && !downloading;
+    Boolean(onInstall) &&
+    !entry.found &&
+    entry.installable &&
+    !downloading &&
+    // Downloading an engine the relay cannot carry would hand the reader a
+    // binary that still cannot run here.
+    entry.auth_mode !== "hosted_unavailable";
   const detailId = `harness-detail-${entry.kind}`;
 
   return (
@@ -262,11 +280,13 @@ function DoctorRow({
         >
           <Detail label="Tier">{HARNESS_TIER_LABELS[entry.tier]}</Detail>
           <Detail label="Signed in">
-            {entry.authenticated === undefined
-              ? "not observed"
-              : entry.authenticated
-                ? "yes"
-                : "no"}
+            {entry.auth_mode === "gateway_relay"
+              ? "as you, through the gateway"
+              : entry.authenticated === undefined
+                ? "not observed"
+                : entry.authenticated
+                  ? "yes"
+                  : "no"}
           </Detail>
           {entry.path && (
             <Detail label="Path">

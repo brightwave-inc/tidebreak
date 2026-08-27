@@ -90,6 +90,7 @@ function entry(
     tier: "reference",
     caps: { ...CAPS, structured_approvals: "supported", ...caps },
     commands: [],
+    auth_mode: "local_sign_in",
     remediation: "",
     stderr: "",
     unrecognized_event_count: 0,

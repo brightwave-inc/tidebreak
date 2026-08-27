@@ -207,6 +207,7 @@ import {
   type CodeWorkspaceStatus as WireCodeWorkspaceStatus,
   type FenceReason as WireFenceReason,
   type HarnessCaps as WireHarnessCaps,
+  type HarnessAuthMode as WireHarnessAuthMode,
   type HarnessDoctorEntry as WireHarnessDoctorEntry,
   type HarnessDoctorReport as WireHarnessDoctorReport,
   type HarnessKind as WireHarnessKind,
@@ -1292,6 +1293,7 @@ export type HarnessNoticeLevel = WireHarnessNoticeLevel;
 /** Doctor report for every registered engine. */
 export type HarnessDoctorReport = WireHarnessDoctorReport;
 export type HarnessDoctorEntry = WireHarnessDoctorEntry;
+export type HarnessAuthMode = WireHarnessAuthMode;
 export type HarnessKind = WireHarnessKind;
 export type HarnessTier = WireHarnessTier;
 export type HarnessCaps = WireHarnessCaps;

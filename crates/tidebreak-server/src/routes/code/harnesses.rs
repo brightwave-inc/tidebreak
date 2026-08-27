@@ -5,9 +5,10 @@ use crate::error::ServerError;
 use crate::extract::Json;
 
 use super::types::{
-    CodeHarnessInstallSnapshot, HarnessDoctorEntry, HarnessDoctorReport, HarnessModel,
-    HarnessModelList, InstallHarnessQuery,
+    CodeHarnessInstallSnapshot, HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport,
+    HarnessModel, HarnessModelList, InstallHarnessQuery,
 };
+use crate::code::harness_llm::relay_covered;
 use tidebreak_core::HarnessKind;
 
 /// The doctor surface, served from the memoized probes (decision 0034).
@@ -94,6 +95,11 @@ pub async fn list_harness_models(
 async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
     let sessions = code.list_sessions().await?;
     let sessions = &sessions;
+    // On a gateway-hosted machine, engine inference rides the on-behalf-of
+    // relay (decision 71) and the local sign-in probe answers the wrong
+    // question: nobody can open a terminal there, and a signed-out engine is
+    // a ready one. Everywhere else the probe decides, exactly as before.
+    let hosted = code.harness_llm_relay_active();
     // Probe the kinds concurrently. A cold probe is a login shell plus a
     // version and an authentication subprocess, so a serial walk over the
     // harnesses is most of what this route costs on a cache miss.
@@ -110,16 +116,30 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
             let install_error = code.pin_install_error(*kind);
             let installable = tidebreak_harness::pin_for(*kind).is_some();
             let label = harness_label(*kind);
+            let auth_mode = if !hosted {
+                HarnessAuthMode::LocalSignIn
+            } else if relay_covered(*kind) {
+                HarnessAuthMode::GatewayRelay
+            } else {
+                HarnessAuthMode::HostedUnavailable
+            };
             let remediation = if let Some(err) = install_error {
                 format!("could not download the pinned {kind} binary: {err}")
+            } else if auth_mode == HarnessAuthMode::HostedUnavailable {
+                format!("{label} is not available on hosted machines yet.")
+            } else if !probe.found && !installable {
+                format!("this build ships no pinned {kind} binary to download")
+            } else if auth_mode == HarnessAuthMode::GatewayRelay {
+                // The relay carries each turn as the caller, so no local
+                // sign-in stands between the reader and a session. A missing
+                // binary is the lazy pin's download, not a fault.
+                String::new()
             } else if probe.found && probe.authenticated == Some(false) {
                 format!("Sign in to {label} in your own terminal, then re-check.")
             } else if probe.found && probe.authenticated.is_none() {
                 format!(
                     "Tidebreak could not verify the {label} sign-in. Sign in to {label} in your own terminal, then re-check."
                 )
-            } else if !probe.found && !installable {
-                format!("this build ships no pinned {kind} binary to download")
             } else {
                 // A missing but installable engine has nothing for the reader
                 // to repair: picking it downloads it.
@@ -138,6 +158,7 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 caps,
                 commands: probe.commands,
                 authenticated: probe.authenticated,
+                auth_mode,
                 remediation,
                 stderr: probe.stderr,
                 unrecognized_event_count,

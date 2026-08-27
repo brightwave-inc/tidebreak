@@ -207,6 +207,7 @@ const START_HARNESS: HarnessDoctorEntry = {
     slash_commands: "unknown",
   },
   commands: [],
+  auth_mode: "local_sign_in",
   remediation: "",
   stderr: "",
   unrecognized_event_count: 0,

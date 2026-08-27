@@ -979,7 +979,12 @@ export type CodeDeliveryPrAttentionReason = "changes_requested" | "checks_failed
  * User-initiated global PR action. Code-changing actions deliberately do not
  * exist here; they remain workspace-scoped agent prompts.
  */
-export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
+export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | { "type": "create_stack", 
+/**
+ * The chain to register, bottom to top. Every pull request's base
+ * ref must match the previous one's head ref.
+ */
+numbers: Array<number>, } | { "type": "rerun_failed", workflow_run_ids: Array<number>, } | { "type": "close" } | { "type": "reopen" } | { "type": "comment", body: string, };
 
 export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullRequestTarget, action: CodeDeliveryPullRequestAction, };
 
@@ -987,7 +992,13 @@ export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullReques
  * Full PR drawer payload. Conversation entries retain the existing bounded
  * comment contract used by workspace PRs.
  */
-export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, commits: number, merged_by?: string, 
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, 
+/**
+ * The full stack chain this pull request belongs to, bottom to top,
+ * when the host reported one. Absent on hosts without stacked pull
+ * requests.
+ */
+stack?: Array<CodeDeliveryStackMember>, commits: number, merged_by?: string, 
 /**
  * Empty when the diff could not be read. Truncated by `files_truncated`
  * rather than paged: the panel is a review aid, not a diff viewer.
@@ -1038,13 +1049,32 @@ in_merge_queue?: boolean,
  */
 comment_count?: number, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, 
 /**
- * The open pull request this one is stacked on: its base branch is that
- * pull request's head branch in the same repository (decision 62).
- * Derived from the durable fact set, so a parent outside the current
- * page or filter still resolves. Absent when the base is the default
- * branch or nothing tracked owns it.
+ * The host stack this pull request belongs to (GitHub stacked pull
+ * requests), when the host reported one. Identifies the stack, not the
+ * PR.
  */
-stack_parent_number?: number, labels: Array<string>, created_at: string, updated_at: string, 
+stack_number?: number, 
+/**
+ * Total layers in that stack, bottom to top, including merged ones.
+ */
+stack_size?: number, 
+/**
+ * The pull request this one is stacked on. Host stack order wins when
+ * the host reported a stack; branch inference from the durable fact set
+ * is the fallback (decision 62), so a parent outside the current page
+ * or filter still resolves. Absent when the base is the default branch
+ * or nothing tracked owns it.
+ */
+stack_parent_number?: number, 
+/**
+ * A stack-shaped chain of inferred edges the host has no stack for,
+ * bottom to top, when one resolves gaplessly around this pull request
+ * and no member is host-registered. Creating the stack on GitHub makes
+ * the host own the ordering, the retargeting, and the whole-chain merge
+ * — without it, merging a layer lands it into the branch below rather
+ * than the default branch, which is easy to do by accident.
+ */
+unregistered_stack_numbers?: Array<number>, labels: Array<string>, created_at: string, updated_at: string, 
 /**
  * Set only once the pull request merged. `state` alone cannot separate a
  * merged pull request from a closed one on every host response, and the
@@ -1106,6 +1136,23 @@ export type CodeDeliveryRunsPage = { capability: CodeGitHubCapability, items: Ar
  * One repository-level failure in an otherwise usable aggregate response.
  */
 export type CodeDeliverySourceError = { repository?: CodeGitHubRepositoryTarget, kind: string, message: string, retry_at?: string, };
+
+/**
+ * One layer of a pull-request stack, in bottom-to-top order.
+ */
+export type CodeDeliveryStackMember = { number: number, 
+/**
+ * Host state token (open, closed).
+ */
+state: string, draft: boolean, 
+/**
+ * Set once this layer merged.
+ */
+merged_at?: string, 
+/**
+ * Head branch name.
+ */
+head_branch: string, head_sha?: string, };
 
 export type CodeDeliveryWorkflowJob = { id: number, name: string, status: string, conclusion?: string, url: string, started_at: string | null, completed_at: string | null, failed_steps: Array<string>, };
 
@@ -1295,7 +1342,7 @@ at_turn?: CodeTurnId, };
  */
 export type CodeForkTranscript = { path: string, dir: string, byte_len: number, 
 /**
- * Turns the condensed transcript renders in full.
+ * Complete turn histories the condensed transcript renders in full.
  */
 turns: number, 
 /**
@@ -1308,8 +1355,8 @@ total_turns: number,
  */
 at_turn_ordinal?: number, 
 /**
- * True when anything was left out to fit the size cap: the oldest
- * turns, or the end of a turn too large on its own.
+ * True when bounded replay omitted whole turn histories or the file size
+ * cap reduced the oldest turns or the end of one oversized turn.
  */
 truncated: boolean, };
 
@@ -1585,7 +1632,7 @@ export type CodeTurnId = string;
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
 
 /**
  * Status of one user→engine turn.
@@ -1796,7 +1843,7 @@ bundle_bytes?: number, };
 /**
  * Status of a persisted workspace.
  */
-export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archived" | "released";
+export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archiving" | "archived" | "released";
 
 /**
  * Bounded path listing for `GET /code/workspaces/{id}/tree`.
@@ -2436,6 +2483,11 @@ export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "pro
 export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "path_subtree", prefix: string, } | { "scope": "whole_tool" };
 
 /**
+ * How a session of one engine authenticates on this machine.
+ */
+export type HarnessAuthMode = "local_sign_in" | "gateway_relay" | "hosted_unavailable";
+
+/**
  * Capability vector for one probed engine version.
  *
  * Constructed exhaustively — there is no [`Default`] — so a new flag is a
@@ -2529,7 +2581,16 @@ export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean,
  * the download starts; the doctor is not a gate the reader must clear
  * first.
  */
-installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
+installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, 
+/**
+ * How a session of this engine authenticates here: the engine's own
+ * local sign-in, the on-behalf-of relay on a gateway-hosted machine
+ * (decision 71), or nothing where the relay does not cover the engine
+ * yet. Readiness follows this — `authenticated` stays the local probe
+ * observation, which on a hosted machine is not what a session
+ * authenticates with.
+ */
+auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number, };
 
 /**
  * Doctor report for every registered engine adapter.

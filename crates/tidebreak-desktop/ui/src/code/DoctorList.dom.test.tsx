@@ -100,6 +100,7 @@ describe("DoctorList", () => {
             slash_commands: "unknown",
           },
           commands: [],
+          auth_mode: "local_sign_in",
           remediation: "",
           stderr: "",
           unrecognized_event_count: 6,
@@ -141,6 +142,51 @@ describe("DoctorList", () => {
     expect(onInstall).toHaveBeenCalledWith("opencode");
   });
 
+  it("reads relay-covered engines as ready on a hosted machine", () => {
+    render(
+      <DoctorList
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              // The hosted machine's own probe sees no sign-in, and that is
+              // no longer the verdict: the relay carries the turn.
+              authenticated: false,
+              auth_mode: "gateway_relay",
+            },
+            {
+              ...notDownloaded,
+              kind: "opencode",
+              found: true,
+              authenticated: false,
+              auth_mode: "hosted_unavailable",
+              remediation: "opencode is not available on hosted machines yet.",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(
+      screen.getByText("Turns run as you through the Model Gateway."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("opencode is not available on hosted machines yet."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 engines ready.")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "No engine is ready yet. Sign in to one below, then re-check.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Sign in via your terminal, then re-check."),
+    ).not.toBeInTheDocument();
+  });
   /** An engine still downloading offers no second Download button. */
   it("reports a download in flight instead of offering another", () => {
     render(
@@ -183,6 +229,7 @@ const notDownloaded: HarnessDoctorEntry = {
     slash_commands: "unknown",
   },
   commands: [],
+  auth_mode: "local_sign_in",
   remediation: "",
   stderr: "",
   unrecognized_event_count: 0,

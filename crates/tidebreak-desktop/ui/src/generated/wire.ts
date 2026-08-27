@@ -2483,6 +2483,11 @@ export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "pro
 export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "scope": "any_args_for", command: string, } | { "scope": "command_prefix", tokens: Array<string>, } | { "scope": "path_subtree", prefix: string, } | { "scope": "whole_tool" };
 
 /**
+ * How a session of one engine authenticates on this machine.
+ */
+export type HarnessAuthMode = "local_sign_in" | "gateway_relay" | "hosted_unavailable";
+
+/**
  * Capability vector for one probed engine version.
  *
  * Constructed exhaustively — there is no [`Default`] — so a new flag is a
@@ -2576,7 +2581,16 @@ export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean,
  * the download starts; the doctor is not a gate the reader must clear
  * first.
  */
-installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, remediation: string, stderr: string, unrecognized_event_count: number, };
+installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, 
+/**
+ * How a session of this engine authenticates here: the engine's own
+ * local sign-in, the on-behalf-of relay on a gateway-hosted machine
+ * (decision 71), or nothing where the relay does not cover the engine
+ * yet. Readiness follows this — `authenticated` stays the local probe
+ * observation, which on a hosted machine is not what a session
+ * authenticates with.
+ */
+auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number, };
 
 /**
  * Doctor report for every registered engine adapter.

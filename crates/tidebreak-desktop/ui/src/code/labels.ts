@@ -4,6 +4,7 @@ import type {
   CodeSessionLifecycle,
   CodeWorkspaceStatus,
   FenceReason,
+  HarnessAuthMode,
   HarnessCaps,
   HarnessKind,
   HarnessTier,
@@ -116,10 +117,22 @@ export function fenceReasonText(reason: FenceReason): string {
   return reason.detail;
 }
 
+/**
+ * True when this engine can serve a session right now.
+ *
+ * On a gateway-hosted machine the relay-covered engines are ready without a
+ * local sign-in (decision 71), and the uncovered ones can never be; the
+ * `auth_mode` the server reports decides, and `authenticated` — the local
+ * probe observation — does not.
+ */
 export function isHarnessReady(entry: {
   found: boolean;
   authenticated?: boolean;
+  auth_mode?: HarnessAuthMode;
 }): boolean {
+  const mode = entry.auth_mode ?? "local_sign_in";
+  if (mode === "gateway_relay") return entry.found;
+  if (mode === "hosted_unavailable") return false;
   return entry.found && entry.authenticated === true;
 }
 
@@ -152,13 +165,22 @@ export function harnessUnusableReason(entry: {
   found: boolean;
   installable: boolean;
   authenticated?: boolean;
+  auth_mode?: HarnessAuthMode;
   remediation?: string;
   caps: ModeCaps;
 }): string | null {
+  const mode = entry.auth_mode ?? "local_sign_in";
+  if (mode === "hosted_unavailable") {
+    return "Not available on hosted machines yet";
+  }
   if (!entry.found && !entry.installable) return "Not installed";
-  if (entry.authenticated === false) return "Sign in via your terminal";
-  if (entry.found && entry.authenticated === undefined) {
-    return "Unverified — sign in via your terminal";
+  // A relay-covered engine needs no sign-in on a hosted machine, so the
+  // local probe observation is not a gate there either.
+  if (mode === "local_sign_in") {
+    if (entry.authenticated === false) return "Sign in via your terminal";
+    if (entry.found && entry.authenticated === undefined) {
+      return "Unverified — sign in via your terminal";
+    }
   }
   if (!harnessHonorsAnyCreateMode(entry)) return "Not available yet";
   return null;
@@ -169,6 +191,7 @@ export function harnessCanStartNow(entry: {
   found: boolean;
   installable: boolean;
   authenticated?: boolean;
+  auth_mode?: HarnessAuthMode;
   remediation?: string;
   caps: ModeCaps;
 }): boolean {

@@ -7593,6 +7593,80 @@ async fn the_doctor_caches_probes_and_refresh_re_probes() {
     );
 }
 
+/// Decision 71's doctor half: on a gateway-hosted machine the relay-covered
+/// engines are ready without a local sign-in — nobody can open a terminal
+/// there — and the uncovered ones say they are not available hosted yet,
+/// rather than demanding that terminal sign-in.
+#[tokio::test]
+async fn the_doctor_reports_relay_engines_ready_on_a_hosted_machine() {
+    let (dir, store) = temp_db_store("code.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(
+        ScriptedAdapter::new(plain_text_script()).with_authenticated(Some(false)),
+    ));
+    registry.register(Arc::new(
+        ScriptedAdapter::new(plain_text_script())
+            .with_kind(HarnessKind::Opencode)
+            .with_authenticated(Some(false)),
+    ));
+    let gateway = Arc::new(
+        crate::obo_gateway::OboGateway::new(
+            "https://gateway.example",
+            "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed".to_owned(),
+        )
+        .unwrap(),
+    );
+    let runtime = Arc::new(
+        CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry).with_harness_llm(
+            Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway)),
+        ),
+    );
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime);
+    let token = state.token.clone();
+    let addr = serve(app(state)).await;
+    let client = reqwest::Client::new();
+
+    let report = client
+        .get(format!("http://{addr}/code/harnesses"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+
+    let claude = &report["harnesses"][0];
+    assert_eq!(claude["kind"], "claude_code");
+    assert_eq!(claude["auth_mode"], "gateway_relay");
+    assert_eq!(
+        claude["authenticated"], false,
+        "the local probe observation stays on the row; it is just no longer the verdict"
+    );
+    assert_eq!(claude["remediation"], "");
+
+    let opencode = &report["harnesses"][1];
+    assert_eq!(opencode["kind"], "opencode");
+    assert_eq!(opencode["auth_mode"], "hosted_unavailable");
+    assert_eq!(
+        opencode["remediation"],
+        "opencode is not available on hosted machines yet."
+    );
+}
+
 /// A session restored at boot comes back supervised. Recovery re-attaches its
 /// worker, and that worker's approval endpoint is minted from the bound
 /// loopback address — so recovery has to run after the address is published.
