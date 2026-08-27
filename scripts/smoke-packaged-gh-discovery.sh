@@ -136,6 +136,7 @@ jq -e '.capability.authenticated == false' "$response" >/dev/null
 
 [[ -s "$fake_log" ]] || {
   echo "The packaged app reported gh without invoking the login-shell binary." >&2
+  echo "Discovery must probe the login shell before /opt/homebrew/bin/gh or /usr/local/bin/gh." >&2
   exit 1
 }
 if grep -Fvx 'auth status --json hosts' "$fake_log" >/dev/null; then

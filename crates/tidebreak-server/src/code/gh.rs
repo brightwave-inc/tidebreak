@@ -1205,13 +1205,19 @@ async fn resolve_gh_binary(search_path: Option<&str>) -> Option<PathBuf> {
             binary,
             login_env: None,
         },
-        None => {
-            let capture = probe_shell(&HostEnv::from_process(), "gh").await.ok()?;
-            GhLaunch {
+        None => match probe_shell(&HostEnv::from_process(), "gh").await {
+            Ok(capture) => GhLaunch {
                 binary: capture.binary,
                 login_env: Some(Arc::new(capture.env)),
-            }
-        }
+            },
+            // Homebrew installs after PATH and login-shell probing. GitHub's
+            // macOS runners ship `/opt/homebrew/bin/gh`; looking there first
+            // skips the probe the packaged-app smoke test exists to prove.
+            Err(_) => GhLaunch {
+                binary: well_known_gh()?,
+                login_env: None,
+            },
+        },
     };
     let _ = GH_LAUNCH.set(launch);
     GH_LAUNCH.get().map(|launch| launch.binary.clone())
@@ -1438,18 +1444,23 @@ fn find_gh(search_path: Option<&str>) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if search_path.is_some() {
-        return None;
+    None
+}
+
+fn well_known_gh() -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    {
+        [
+            PathBuf::from("/opt/homebrew/bin/gh"),
+            PathBuf::from("/usr/local/bin/gh"),
+        ]
+        .into_iter()
+        .find(|candidate| is_executable(candidate))
     }
-    // Packaged apps inherit a GUI PATH that often omits Homebrew. Login-shell
-    // probing still runs after this; these are the install locations `gh`
-    // actually uses when that probe cannot run.
-    [
-        PathBuf::from("/opt/homebrew/bin/gh"),
-        PathBuf::from("/usr/local/bin/gh"),
-    ]
-    .into_iter()
-    .find(|candidate| is_executable(candidate))
+    #[cfg(windows)]
+    {
+        None
+    }
 }
 
 #[cfg(windows)]
