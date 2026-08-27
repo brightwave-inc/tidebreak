@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tidebreak_code_execution::managed_node::{managed_node_executable, managed_node_path_dir};
+use tidebreak_managed_node::{managed_node_executable, managed_node_path_dir};
 use tokio::process::Command;
 use tokio::time::timeout;
 

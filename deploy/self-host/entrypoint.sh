@@ -4,7 +4,7 @@
 #
 # The server resolves the runtime from one exact path,
 # `{TIDEBREAK_DATA_DIR}/tools/node/{version}`, and refuses to look anywhere
-# else (crates/tidebreak-code-execution/src/managed_node.rs). That path is
+# else (crates/tidebreak-managed-node/src/lib.rs). That path is
 # inside the data directory, which every real deployment mounts a volume over
 # — and a mount hides whatever the image layer put underneath it. Unpacking
 # Node there at build time would therefore work only on a container whose data

@@ -20,10 +20,7 @@ const entrypoint = readFileSync(
   "utf8",
 );
 const managedNode = readFileSync(
-  new URL(
-    "../crates/tidebreak-code-execution/src/managed_node.rs",
-    import.meta.url,
-  ),
+  new URL("../crates/tidebreak-managed-node/src/lib.rs", import.meta.url),
   "utf8",
 );
 
@@ -49,7 +46,7 @@ function runBlock(marker) {
 
 function pinnedNodeVersion() {
   const match = managedNode.match(/MANAGED_NODE_VERSION: &str = "([^"]+)"/);
-  assert.ok(match, "managed_node.rs must declare MANAGED_NODE_VERSION");
+  assert.ok(match, "tidebreak-managed-node must declare MANAGED_NODE_VERSION");
   return match[1];
 }
 
@@ -59,7 +56,7 @@ function pinnedNodeDigest(architecture) {
       `target_os = "linux", target_arch = "${architecture}"[\\s\\S]*?artifact_sha256: "([0-9a-f]{64})"`,
     ),
   );
-  assert.ok(match, `managed_node.rs must pin the linux ${architecture} digest`);
+  assert.ok(match, `tidebreak-managed-node must pin the linux ${architecture} digest`);
   return match[1];
 }
 
@@ -107,8 +104,8 @@ test("each architecture takes the Node digest its platform pin names", () => {
 
 test("the Node install marker carries the field names the server reads", () => {
   const block = runBlock("nodejs.org");
-  // managed_node.rs deserializes `version` and `artifactSha256`; a marker with
-  // any other shape reads as no install at all.
+  // tidebreak-managed-node deserializes `version` and `artifactSha256`; a
+  // marker with any other shape reads as no install at all.
   assert.match(block, /"version": "%s"/);
   assert.match(block, /"artifactSha256": "%s"/);
   // The digest is checked before a byte is unpacked, and the tree is what the

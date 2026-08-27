@@ -19,7 +19,6 @@ pub mod host_paths;
 pub mod host_tools;
 mod http;
 mod local;
-pub mod managed_node;
 #[cfg(target_os = "macos")]
 mod network;
 pub mod office_render;

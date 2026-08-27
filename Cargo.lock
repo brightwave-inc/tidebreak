@@ -7311,6 +7311,7 @@ dependencies = [
  "tidebreak-code-execution",
  "tidebreak-core",
  "tidebreak-host-broker",
+ "tidebreak-managed-node",
  "tidebreak-server",
  "tokio",
  "tokio-util",
@@ -7337,8 +7338,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "tidebreak-code-execution",
  "tidebreak-core",
+ "tidebreak-managed-node",
  "tokio",
  "tracing",
  "uuid",
@@ -7360,6 +7361,15 @@ dependencies = [
  "thiserror 2.0.20",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tidebreak-managed-node"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -7462,6 +7472,7 @@ dependencies = [
  "tidebreak-core",
  "tidebreak-egress",
  "tidebreak-harness",
+ "tidebreak-managed-node",
  "tidebreak-mcp",
  "tidebreak-router",
  "tidebreak-sandbox-agent",
