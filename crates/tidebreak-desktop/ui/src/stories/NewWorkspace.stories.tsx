@@ -342,6 +342,31 @@ export const Default: Story = {
   },
 };
 
+/** A clipboard image stays attached instead of inserting its local path. */
+export const PastedImage: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const prompt = page.getByRole("textbox", { name: "First message" });
+    await userEvent.type(prompt, "Review this screenshot");
+
+    const image = new File(
+      [new Uint8Array([1, 2, 3, 4])],
+      "workspace-composer.png",
+      {
+        type: "image/png",
+      },
+    );
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { files: [image] },
+    });
+    prompt.dispatchEvent(paste);
+
+    await expect(page.getByLabelText("Attached images")).toBeVisible();
+    await expect(page.getByText("workspace-composer.png")).toBeVisible();
+  },
+};
+
 /** The minimum supported window wraps settings without clipping the actions. */
 export const MinimumWindow: Story = {
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
