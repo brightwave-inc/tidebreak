@@ -20,6 +20,7 @@ export type HttpRequestInit = {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  signal?: AbortSignal;
 };
 
 /** The response surface shared by DOM `Response` and expo's `FetchResponse`. */

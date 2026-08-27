@@ -43,6 +43,7 @@ export type MachineRequestOptions = {
   method?: string;
   body?: unknown;
   expectedStatus?: number | readonly number[];
+  signal?: AbortSignal;
 };
 
 export class MachineRequestError extends Error {
@@ -99,8 +100,11 @@ function parseErrorBody(text: string): { kind: string | null; message: string } 
 export class MachineClient {
   constructor(private readonly options: MachineClientOptions) {}
 
-  async getJson(path: string): Promise<unknown> {
-    return this.requestJson(path);
+  async getJson(
+    path: string,
+    request: Pick<MachineRequestOptions, "signal"> = {},
+  ): Promise<unknown> {
+    return this.requestJson(path, request);
   }
 
   async requestJson(
@@ -115,6 +119,7 @@ export class MachineClient {
     };
     const init: HttpRequestInit = { headers };
     if (request.method) init.method = request.method;
+    if (request.signal) init.signal = request.signal;
     if (request.body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(request.body);
