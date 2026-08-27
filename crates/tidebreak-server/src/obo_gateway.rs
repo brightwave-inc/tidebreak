@@ -705,29 +705,32 @@ impl OboGateway {
         protocol: GatewayModelProtocol,
     ) -> Result<Vec<GatewayCompatModel>> {
         let token = self.bearer_for(owner).await?;
-        let url = match protocol {
-            GatewayModelProtocol::AnthropicMessages => &self.anthropic_models_url,
-            GatewayModelProtocol::OpenaiResponses => &self.openai_models_url,
-        };
-        self.compat_models_page(url, &token).await
+        self.compat_models_page(protocol, &token).await
     }
 
-    /// One compat listing. The two surfaces share the `data` array shape;
-    /// only the Anthropic surface carries display names and family defaults.
+    /// One compat listing. The endpoint is selected from this gateway's
+    /// prevalidated fixed fields, rather than accepting a URL-shaped helper
+    /// argument. This keeps the protocol boundary explicit and prevents a
+    /// caller-controlled destination from reaching the HTTP client.
     async fn compat_models_page(
         &self,
-        url: &reqwest::Url,
+        protocol: GatewayModelProtocol,
         token: &str,
     ) -> Result<Vec<GatewayCompatModel>> {
-        let response = self
-            .client
-            .get(url.clone())
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|error| {
-                AgentError::msg(format!("the Model Gateway model listing failed: {error}"))
-            })?;
+        let response = match protocol {
+            GatewayModelProtocol::AnthropicMessages => {
+                self.client.get(self.anthropic_models_url.clone())
+            }
+            GatewayModelProtocol::OpenaiResponses => {
+                self.client.get(self.openai_models_url.clone())
+            }
+        }
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| {
+            AgentError::msg(format!("the Model Gateway model listing failed: {error}"))
+        })?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(AgentError::SignInRequired(
