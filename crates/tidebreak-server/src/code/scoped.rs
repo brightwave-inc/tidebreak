@@ -848,6 +848,12 @@ impl ScopedCode {
         self.runtime.harness_llm().is_some()
     }
 
+    /// The engine inference relay, on a machine that has one. The hosted
+    /// model listing reads the caller's gateway catalog through it.
+    pub(crate) fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
+        self.runtime.harness_llm()
+    }
+
     /// Warm the pinned install of one engine. See
     /// [`CodeRuntime::start_harness_install`].
     ///

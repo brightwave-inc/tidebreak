@@ -424,7 +424,7 @@ pub struct HarnessDoctorEntry {
     pub relaunch_composes_permission_mode: bool,
 }
 
-/// One model a harness CLI listed.
+/// One model row offered for a harness session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct HarnessModel {
     pub id: String,
@@ -437,6 +437,16 @@ pub struct HarnessModel {
     /// control, the same way an empty effort ladder does.
     #[serde(default)]
     pub fast_mode: bool,
+}
+
+/// Whose catalog produced a harness model list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessModelSource {
+    /// The engine's own native listing command, used on local machines.
+    Harness,
+    /// The caller-usable Model Gateway compat listing, used on hosted machines.
+    ModelGateway,
 }
 
 /// `GET /code/harnesses/{kind}/models`.
@@ -453,6 +463,7 @@ pub struct HarnessModelList {
     /// control at all.
     #[serde(default)]
     pub reasoning_efforts: Vec<ReasoningEffort>,
+    pub source: HarnessModelSource,
 }
 
 /// Body of `POST /code/repos/clone`.

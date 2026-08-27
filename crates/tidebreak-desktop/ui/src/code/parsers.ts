@@ -131,6 +131,7 @@ import type {
   HarnessCaps as WireHarnessCaps,
   HarnessDoctorEntry as WireHarnessDoctorEntry,
   HarnessDoctorReport as WireHarnessDoctorReport,
+  HarnessModelSource as WireHarnessModelSource,
   QuickAction as WireQuickAction,
   SequencedCodeEventFrame as WireSequencedCodeEventFrame,
   ToolDetail as WireToolDetail,
@@ -202,6 +203,10 @@ const HARNESS_AUTH_MODES = new Set<HarnessAuthMode>([
   "gateway_managed",
   "gateway_relay",
   "hosted_unavailable",
+]);
+const HARNESS_MODEL_SOURCES = new Set<WireHarnessModelSource>([
+  "harness",
+  "model_gateway",
 ]);
 const CAP_LEVELS = new Set<CapLevel>(["supported", "unsupported", "unknown"]);
 const PERMISSION_MODES = new Set<PermissionMode>([
@@ -2980,6 +2985,14 @@ export type ParsedHarnessModel = {
   fast_mode: boolean;
 };
 
+export type ParsedHarnessModelList = {
+  kind: HarnessKind;
+  /** Missing means an older server whose listing was always native. */
+  source?: WireHarnessModelSource;
+  models: ParsedHarnessModel[];
+  reasoning_efforts: ReasoningEffort[];
+};
+
 function parseEfforts(value: unknown): ReasoningEffort[] {
   // A server that predates the field, or a level this build cannot label,
   // narrows the offer rather than failing the whole list.
@@ -2990,11 +3003,9 @@ function parseEfforts(value: unknown): ReasoningEffort[] {
     : [];
 }
 
-export function parseHarnessModelList(value: unknown): {
-  kind: HarnessKind;
-  models: ParsedHarnessModel[];
-  reasoning_efforts: ReasoningEffort[];
-} | null {
+export function parseHarnessModelList(
+  value: unknown,
+): ParsedHarnessModelList | null {
   if (
     !isRecord(value) ||
     !isMember(value.kind, HARNESS_KINDS) ||
@@ -3002,6 +3013,13 @@ export function parseHarnessModelList(value: unknown): {
   ) {
     return null;
   }
+  const source =
+    value.source === undefined
+      ? "harness"
+      : isMember(value.source, HARNESS_MODEL_SOURCES)
+        ? value.source
+        : null;
+  if (source === null) return null;
   const models: ParsedHarnessModel[] = [];
   for (const item of value.models) {
     if (
@@ -3024,6 +3042,7 @@ export function parseHarnessModelList(value: unknown): {
   }
   return {
     kind: value.kind,
+    source,
     models,
     reasoning_efforts: parseEfforts(value.reasoning_efforts),
   };

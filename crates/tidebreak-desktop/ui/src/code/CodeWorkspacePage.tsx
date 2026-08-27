@@ -125,7 +125,10 @@ const CodeBrowserTab = lazy(async () => {
   const module = await import("./browser/CodeBrowserTab");
   return { default: module.CodeBrowserTab };
 });
-import { useCodeCatalogStore } from "./CodeCatalogStore";
+import {
+  codeModelsFromHarnessListing,
+  useCodeCatalogStore,
+} from "./CodeCatalogStore";
 import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -2274,7 +2277,7 @@ function CodeSessionPane({
         if (cancelled) return;
         rememberHarnessModels(
           session.harness_kind,
-          harnessCodeModels(listed.models, session.harness_kind),
+          codeModelsFromHarnessListing(listed, session.harness_kind),
           listed.reasoning_efforts,
         );
       },
