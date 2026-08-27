@@ -408,6 +408,7 @@ pub(crate) struct BrowserRegistry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BrowserProfileResetSession {
     pub(crate) browser_id: String,
+    pub(crate) workspace_id: String,
     instance_id: u64,
     previous_halt: bool,
 }
@@ -557,6 +558,7 @@ impl BrowserRegistry {
                 })
                 .map(|(browser_id, record)| BrowserProfileResetSession {
                     browser_id: browser_id.clone(),
+                    workspace_id: record.workspace_id.clone(),
                     instance_id: record.instance_id,
                     previous_halt: *record.dispatch.halt.borrow(),
                 })
@@ -2391,9 +2393,9 @@ mod tests {
             reset
                 .sessions()
                 .iter()
-                .map(|session| session.browser_id.as_str())
+                .map(|session| (session.browser_id.as_str(), session.workspace_id.as_str()))
                 .collect::<Vec<_>>(),
-            ["browser-1", "browser-2"]
+            [("browser-1", "workspace-1"), ("browser-2", "workspace-2")]
         );
         assert_eq!(reset.profile_id(), profile_id);
         assert_eq!(

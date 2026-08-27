@@ -42,6 +42,7 @@ type BrowserScenario =
   | "inspect-on"
   | "profile-reset-confirmation"
   | "profile-resetting"
+  | "profile-reset-reconstructing"
   | "profile-reset-failure";
 
 const inspectEngine: NonNullable<BrowserHostSnapshot["engine"]> = {
@@ -185,6 +186,7 @@ function BrowserStory({
   const [viewportState, setViewportState] = useState<BrowserViewport>(
     viewport ?? { preset: "fit", customWidth: 1024 },
   );
+  const [profileResetStarted, setProfileResetStarted] = useState(false);
   const inspectEnabled =
     scenario === "inspect-on" || scenario === "inspect-remove-failure";
   const inspectFailure =
@@ -210,10 +212,22 @@ function BrowserStory({
   const profileResetScenario =
     scenario === "profile-reset-confirmation" ||
     scenario === "profile-resetting" ||
+    scenario === "profile-reset-reconstructing" ||
     scenario === "profile-reset-failure";
+  const profileResetPhase = profileResetStarted
+    ? scenario === "profile-resetting"
+      ? "deleting"
+      : scenario === "profile-reset-reconstructing"
+        ? "reconstructing"
+        : null
+    : null;
   const onResetProfile =
-    scenario === "profile-resetting"
-      ? () => new Promise<void>(() => {})
+    scenario === "profile-resetting" ||
+    scenario === "profile-reset-reconstructing"
+      ? () => {
+          setProfileResetStarted(true);
+          return new Promise<void>(() => {});
+        }
       : scenario === "profile-reset-failure"
         ? () =>
             Promise.reject(
@@ -253,6 +267,7 @@ function BrowserStory({
           onSelectHistory={fn()}
           onOpenExternal={fn()}
           onResetProfile={onResetProfile}
+          profileResetPhase={profileResetPhase}
           onOverlayOpenChange={fn()}
           onAgentAccessOpenChange={fn()}
           onToggleInspect={fn()}
@@ -651,7 +666,33 @@ export const ManagedProfileResetting: Story = {
     );
     await expect(
       canvas.getByText(
-        "Resetting the Tidebreak development profile… closing browser tabs.",
+        "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.",
+      ),
+    ).toBeVisible();
+  },
+};
+
+export const ManagedProfileReconstructing: Story = {
+  args: { scenario: "profile-reset-reconstructing" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Browser options" }),
+    );
+    await userEvent.click(
+      await body.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await userEvent.click(
+      await body.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await expect(
+      canvas.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
       ),
     ).toBeVisible();
   },

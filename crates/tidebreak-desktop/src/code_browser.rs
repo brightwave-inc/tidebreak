@@ -37,6 +37,7 @@ const CODE_BROWSER_EVENT: &str = "code-browser:event";
 const MAX_BROWSER_ID_CHARS: usize = 80;
 const MAX_WORKSPACE_ID_CHARS: usize = 200;
 const MAX_BROWSER_URL_CHARS: usize = 8_192;
+const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 const SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL: std::time::Duration =
@@ -84,7 +85,12 @@ enum CodeBrowserAction {
         enabled: bool,
     },
     RemoveInspect,
-    ResetProfile,
+    ResetProfile {
+        /// Correlates renderer recovery with native phase events. It never
+        /// selects an owner, profile, engine store, or filesystem path.
+        #[serde(rename = "resetId")]
+        reset_id: u64,
+    },
     Close,
 }
 
@@ -119,6 +125,17 @@ struct CodeBrowserEvent {
     agent_access: Option<BrowserAgentAccess>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeBrowserProfileResetEvent {
+    workspace_id: String,
+    browser_id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    reset_id: u64,
 }
 
 #[tauri::command]
@@ -169,7 +186,8 @@ pub(crate) async fn code_browser_command(
                 visible,
             )
         }
-        CodeBrowserAction::ResetProfile => {
+        CodeBrowserAction::ResetProfile { reset_id } => {
+            validated_profile_reset_id(reset_id)?;
             let _lifecycle = profiles.lock_lifecycle().await;
             reset_browser_profile(
                 &app,
@@ -177,6 +195,7 @@ pub(crate) async fn code_browser_command(
                 &profiles,
                 &request.browser_id,
                 &request.workspace_id,
+                reset_id,
             )
             .await?;
             Ok(BrowserSnapshot::missing(
@@ -920,21 +939,44 @@ async fn reset_browser_profile(
     profiles: &BrowserProfileStore,
     browser_id: &str,
     workspace_id: &str,
+    reset_id: u64,
 ) -> Result<(), String> {
     let reset = registry
         .begin_profile_reset(browser_id, workspace_id)
         .await?;
-    let profile = profiles.resolve(reset.owner_id(), reset.profile_id())?;
+    let sessions = reset.sessions().to_vec();
+    let profile = match profiles.resolve(reset.owner_id(), reset.profile_id()) {
+        Ok(profile) => profile,
+        Err(error) => {
+            return recover_failed_profile_reset(reset, error, || {
+                emit_profile_reset_event(app, &sessions, reset_id, "profile_reset_reconstruct");
+            });
+        }
+    };
     let owner_id = reset.owner_id().clone();
     let profile_id = reset.profile_id().to_owned();
-    close_before_delete(
+    let result = close_before_delete(
+        || emit_profile_reset_event(app, &sessions, reset_id, "profile_reset_closing"),
         || close_profile_sessions(app, reset.sessions()),
+        || emit_profile_reset_event(app, &sessions, reset_id, "profile_reset_deleting_data"),
         || delete_managed_profile(app, &profile),
     )
-    .await?;
-    reset.finish();
-    profiles.forget(&owner_id, &profile_id)?;
-    Ok(())
+    .await;
+    match result {
+        Ok(()) => match profiles.forget(&owner_id, &profile_id) {
+            Ok(()) => {
+                reset.finish();
+                emit_profile_reset_event(app, &sessions, reset_id, "profile_reset_reconstruct");
+                Ok(())
+            }
+            Err(error) => recover_failed_profile_reset(reset, error, || {
+                emit_profile_reset_event(app, &sessions, reset_id, "profile_reset_reconstruct");
+            }),
+        },
+        Err(error) => recover_failed_profile_reset(reset, error, || {
+            emit_profile_reset_event(app, &sessions, reset_id, "profile_reset_reconstruct");
+        }),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -944,23 +986,67 @@ async fn reset_browser_profile(
     _profiles: &BrowserProfileStore,
     _browser_id: &str,
     _workspace_id: &str,
+    _reset_id: u64,
 ) -> Result<(), String> {
     Err("browser profile reset is not available on this platform".to_owned())
 }
 
 #[cfg(any(target_os = "macos", test))]
-async fn close_before_delete<C, CloseFuture, D, DeleteFuture>(
+async fn close_before_delete<S, C, CloseFuture, P, D, DeleteFuture>(
+    started: S,
     close: C,
+    closed: P,
     delete: D,
 ) -> Result<(), String>
 where
+    S: FnOnce(),
     C: FnOnce() -> CloseFuture,
     CloseFuture: std::future::Future<Output = Result<(), String>>,
+    P: FnOnce(),
     D: FnOnce() -> DeleteFuture,
     DeleteFuture: std::future::Future<Output = Result<(), String>>,
 {
+    started();
     close().await?;
+    closed();
     delete().await
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn recover_failed_profile_reset<R>(
+    reset: crate::browser_control::BrowserProfileResetLease,
+    error: String,
+    reconstruct: R,
+) -> Result<(), String>
+where
+    R: FnOnce(),
+{
+    drop(reset);
+    reconstruct();
+    Err(error)
+}
+
+#[cfg(target_os = "macos")]
+fn emit_profile_reset_event(
+    app: &AppHandle,
+    sessions: &[crate::browser_control::BrowserProfileResetSession],
+    reset_id: u64,
+    kind: &'static str,
+) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    for session in sessions {
+        let _ = main.emit(
+            CODE_BROWSER_EVENT,
+            CodeBrowserProfileResetEvent {
+                workspace_id: session.workspace_id.clone(),
+                browser_id: session.browser_id.clone(),
+                kind,
+                reset_id,
+            },
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1160,7 +1246,7 @@ fn run_action(
         | CodeBrowserAction::TakeHumanControl
         | CodeBrowserAction::SetInspect { .. }
         | CodeBrowserAction::RemoveInspect
-        | CodeBrowserAction::ResetProfile
+        | CodeBrowserAction::ResetProfile { .. }
         | CodeBrowserAction::Close => Err(format!(
             "browser action is not valid for the open session {browser_id}"
         )),
@@ -1277,6 +1363,13 @@ pub(crate) fn validated_workspace_id(workspace_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validated_profile_reset_id(reset_id: u64) -> Result<(), String> {
+    if reset_id == 0 || reset_id > MAX_JS_SAFE_INTEGER {
+        return Err("browser profile reset id is not valid".to_owned());
+    }
+    Ok(())
+}
+
 fn emit_event(main: &Webview, event: CodeBrowserEvent) {
     let _ = main.emit(CODE_BROWSER_EVENT, event);
 }
@@ -1382,6 +1475,33 @@ mod tests {
     }
 
     #[test]
+    fn profile_reset_ids_stay_exact_across_renderer_events() {
+        assert!(validated_profile_reset_id(1).is_ok());
+        assert!(validated_profile_reset_id(MAX_JS_SAFE_INTEGER).is_ok());
+        assert!(validated_profile_reset_id(0).is_err());
+        assert!(validated_profile_reset_id(MAX_JS_SAFE_INTEGER + 1).is_err());
+    }
+
+    #[test]
+    fn profile_reset_events_carry_the_target_session_and_cycle() {
+        assert_eq!(
+            serde_json::to_value(CodeBrowserProfileResetEvent {
+                workspace_id: "workspace-1".to_owned(),
+                browser_id: "browser-1".to_owned(),
+                kind: "profile_reset_reconstruct",
+                reset_id: 17,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "workspaceId": "workspace-1",
+                "browserId": "browser-1",
+                "type": "profile_reset_reconstruct",
+                "resetId": 17,
+            })
+        );
+    }
+
+    #[test]
     fn browser_urls_are_http_only_and_cannot_reenter_the_app_origin() {
         let renderer = Url::parse("http://localhost:1420/code/w/one").unwrap();
         assert!(validated_url("https://example.com/docs", Some(&renderer)).is_ok());
@@ -1429,9 +1549,17 @@ mod tests {
         let delete_events = std::sync::Arc::clone(&events);
 
         close_before_delete(
+            {
+                let events = std::sync::Arc::clone(&events);
+                move || events.lock().unwrap().push("closing")
+            },
             move || async move {
                 close_events.lock().unwrap().push("close");
                 Ok(())
+            },
+            {
+                let events = std::sync::Arc::clone(&events);
+                move || events.lock().unwrap().push("deleting")
             },
             move || async move {
                 delete_events.lock().unwrap().push("delete");
@@ -1441,7 +1569,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(*events.lock().unwrap(), ["close", "delete"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["closing", "close", "deleting", "delete"]
+        );
     }
 
     #[tokio::test]
@@ -1450,7 +1581,9 @@ mod tests {
         let delete_probe = std::sync::Arc::clone(&deleted);
 
         assert!(close_before_delete(
+            || {},
             || async { Err("close failed".to_owned()) },
+            || panic!("deletion phase must wait for every session to close"),
             move || async move {
                 delete_probe.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
@@ -1460,6 +1593,57 @@ mod tests {
         .is_err());
 
         assert!(!deleted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn profile_reset_preserves_the_deletion_error_after_the_phase_signal() {
+        let phases = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let closing = std::sync::Arc::clone(&phases);
+        let deleting = std::sync::Arc::clone(&phases);
+
+        let error = close_before_delete(
+            move || closing.lock().unwrap().push("closing"),
+            || async { Ok(()) },
+            move || deleting.lock().unwrap().push("deleting"),
+            || async { Err("WebKit could not remove profile data".to_owned()) },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(*phases.lock().unwrap(), ["closing", "deleting"]);
+        assert_eq!(error, "WebKit could not remove profile data");
+    }
+
+    #[tokio::test]
+    async fn failed_profile_reset_restores_registry_before_reconstruction() {
+        let registry = BrowserRegistry::default();
+        registry
+            .register(
+                "browser-1",
+                "workspace-1",
+                "https://example.com/app".to_owned(),
+                true,
+            )
+            .unwrap();
+        let reset = registry
+            .begin_profile_reset("browser-1", "workspace-1")
+            .await
+            .unwrap();
+        let recovered_registry = registry.clone();
+
+        let error = recover_failed_profile_reset(
+            reset,
+            "WebKit could not remove profile data".to_owned(),
+            move || {
+                assert!(recovered_registry
+                    .snapshot("browser-1", "workspace-1")
+                    .is_ok());
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "WebKit could not remove profile data");
+        assert!(registry.snapshot("browser-1", "workspace-1").is_ok());
     }
 
     #[test]

@@ -3,7 +3,10 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { BrowserHostSnapshot } from "./browserHost";
+import type {
+  BrowserHostSnapshot,
+  BrowserProfileResetPhase,
+} from "./browserHost";
 import type { BrowserSession } from "./browserSession";
 import { BrowserToolbar } from "./BrowserToolbar";
 
@@ -50,6 +53,7 @@ function toolbarProps(
     onOpenExternal?: () => void;
     onResetProfile?: () => Promise<void>;
     onOverlayOpenChange?: (open: boolean) => void;
+    profileResetPhase?: BrowserProfileResetPhase;
   } = {},
 ) {
   return {
@@ -67,8 +71,13 @@ function toolbarProps(
     onStop: vi.fn(),
     onSelectHistory: vi.fn(),
     onOpenExternal: options.onOpenExternal ?? vi.fn(),
-    onResetProfile: options.onResetProfile,
+    onResetProfile:
+      options.onResetProfile ??
+      (engine?.capabilities.profileReset
+        ? vi.fn(async () => undefined)
+        : undefined),
     onOverlayOpenChange: options.onOverlayOpenChange ?? vi.fn(),
+    profileResetPhase: options.profileResetPhase,
   };
 }
 
@@ -99,6 +108,22 @@ describe("BrowserToolbar managed profile reset", () => {
     expect(onOpenExternal).toHaveBeenCalledOnce();
   });
 
+  it("does not offer reset without the production owner callback", () => {
+    render(
+      <BrowserToolbar
+        {...toolbarProps(resetEngine)}
+        onResetProfile={undefined}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Browser options" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Open externally" }),
+    ).toBeVisible();
+  });
+
   it("explains the exact Tidebreak-only reset boundary before approval", async () => {
     const user = userEvent.setup();
     render(<BrowserToolbar {...toolbarProps(resetEngine)} />);
@@ -110,13 +135,16 @@ describe("BrowserToolbar managed profile reset", () => {
     ).toBeVisible();
     expect(
       screen.getByText(
-        /closes every Tidebreak browser tab and deletes the managed development-profile cookies, site data, and cache/i,
+        /same stored Tidebreak browser pages will return signed out in a fresh Tidebreak development profile/i,
       ),
     ).toBeVisible();
     expect(
       screen.getByText(
-        /Safari, Chrome, and your personal browser profiles are never read or changed/i,
+        /Managed cookies, site data, and cache are deleted; Safari and Chrome are untouched/i,
       ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/existing agent origin grants remain/i),
     ).toBeVisible();
   });
 
@@ -142,7 +170,7 @@ describe("BrowserToolbar managed profile reset", () => {
     );
   });
 
-  it("shows progress and keeps the native browser obscured until reset settles", async () => {
+  it("shows each native phase and keeps the browser obscured until reset settles", async () => {
     const user = userEvent.setup();
     let resolveReset: (() => void) | undefined;
     const onResetProfile = vi.fn(
@@ -152,14 +180,11 @@ describe("BrowserToolbar managed profile reset", () => {
         }),
     );
     const onOverlayOpenChange = vi.fn();
-    render(
-      <BrowserToolbar
-        {...toolbarProps(resetEngine, {
-          onResetProfile,
-          onOverlayOpenChange,
-        })}
-      />,
-    );
+    const props = toolbarProps(resetEngine, {
+      onResetProfile,
+      onOverlayOpenChange,
+    });
+    const view = render(<BrowserToolbar {...props} />);
 
     await openResetConfirmation(user);
     await user.click(
@@ -176,16 +201,55 @@ describe("BrowserToolbar managed profile reset", () => {
     ).toBeDisabled();
     expect(onOverlayOpenChange).toHaveBeenLastCalledWith(true);
 
+    view.rerender(<BrowserToolbar {...props} profileResetPhase="deleting" />);
+    expect(
+      await screen.findByText(
+        "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.",
+      ),
+    ).toBeVisible();
+
+    view.rerender(
+      <BrowserToolbar {...props} profileResetPhase="reconstructing" />,
+    );
+    expect(
+      await screen.findByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+
+    view.rerender(<BrowserToolbar {...props} profileResetPhase={null} />);
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
+
     await act(async () => resolveReset?.());
 
     await waitFor(() =>
       expect(
-        screen.queryByText(
-          "Resetting the Tidebreak development profile… closing browser tabs.",
-        ),
+        screen.queryByRole("button", { name: "Resetting development profile" }),
       ).toBeNull(),
     );
     expect(onOverlayOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("shows a sibling reset phase and prevents a competing reset", () => {
+    render(
+      <BrowserToolbar
+        {...toolbarProps(resetEngine)}
+        profileResetPhase="deleting"
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Resetting development profile" }),
+    ).toBeDisabled();
   });
 
   it("presents a native failure with retry and dismissal", async () => {
