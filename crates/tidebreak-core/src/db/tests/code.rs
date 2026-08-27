@@ -3549,7 +3549,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         count_attributed_prs_for_workspace, get_pull_request_fact, get_pull_request_fetch_state,
         insert_pull_request_attribution, list_attributed_facts_for_workspace,
         list_fact_repo_identities, promote_attribution_to_authored, save_pull_request_fact,
-        set_pull_request_fetch_state, set_pull_request_live_state,
+        set_pull_request_fetch_state, set_pull_request_live_state, PullRequestFetchCondition,
     };
 
     let (_dir, store) = temp_store().await;
@@ -3622,6 +3622,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         "tools",
         412,
         Some(&refreshed),
+        PullRequestFetchCondition::Unconditional,
         Some("W/\"pull-2\""),
         Some("W/\"checks-2\""),
         Some("W/\"reviews-2\""),
@@ -3768,6 +3769,7 @@ async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
     use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
     use crate::db::code::{
         get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
+        PullRequestFetchCondition,
     };
 
     let (_dir, store) = temp_store().await;
@@ -3811,6 +3813,7 @@ async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
         "tools",
         99,
         Some(&fresh),
+        PullRequestFetchCondition::Unconditional,
         Some("W/\"fresh\""),
         None,
         None,
@@ -3827,6 +3830,95 @@ async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
     assert_eq!(stored.fact.title, "Stale");
     assert_eq!(stored.fact.head_sha.as_deref(), Some("old"));
     assert_eq!(stored.pull_etag, None);
+}
+
+#[tokio::test]
+async fn late_304_cannot_restore_an_invalidated_pull_validator() {
+    use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
+    use crate::db::code::{
+        get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
+        PullRequestFetchCondition,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let observed = now();
+    let snapshot_a = CodePullRequestFact {
+        id: CodePullRequestId::new(),
+        owner: owner.clone(),
+        host: "github.com".into(),
+        repo_owner: "acme".into(),
+        repo_name: "tools".into(),
+        number: 100,
+        url: "https://github.com/acme/tools/pull/100".into(),
+        title: "Snapshot A".into(),
+        state: CodePullRequestState::Open,
+        draft: false,
+        author: None,
+        head_branch: "feature".into(),
+        base_branch: "main".into(),
+        head_sha: Some("aaa".into()),
+        created_at: observed,
+        updated_at: observed,
+        merged_at: None,
+        closed_at: None,
+        first_seen_at: observed,
+        last_seen_at: observed,
+        live: None,
+    };
+    save_pull_request_fact(&store, &snapshot_a).await.unwrap();
+    assert!(set_pull_request_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        100,
+        Some(&snapshot_a),
+        PullRequestFetchCondition::Unconditional,
+        Some("W/\"snapshot-a\""),
+        Some("W/\"checks-a\""),
+        Some("W/\"reviews-a\""),
+    )
+    .await
+    .unwrap());
+
+    let refresh = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot_c = CodePullRequestFact {
+        title: "Snapshot C".into(),
+        head_sha: Some("ccc".into()),
+        ..snapshot_a.clone()
+    };
+    save_pull_request_fact(&store, &snapshot_c).await.unwrap();
+
+    assert!(!set_pull_request_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        100,
+        None,
+        PullRequestFetchCondition::PullEtag(refresh.pull_etag.as_deref()),
+        refresh.pull_etag.as_deref(),
+        Some("W/\"late-checks\""),
+        Some("W/\"late-reviews\""),
+    )
+    .await
+    .unwrap());
+
+    let stored = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.fact.title, "Snapshot C");
+    assert_eq!(stored.fact.head_sha.as_deref(), Some("ccc"));
+    assert_eq!(stored.pull_etag, None);
+    assert_eq!(stored.checks_etag.as_deref(), Some("W/\"checks-a\""));
+    assert_eq!(stored.reviews_etag.as_deref(), Some("W/\"reviews-a\""));
 }
 
 /// A whole-row turn save cannot blank a recap that landed while it was held.
