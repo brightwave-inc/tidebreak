@@ -2269,6 +2269,7 @@ impl CodeRuntime {
             ),
             None => (None, None, None, None),
         };
+        let sent_pull_etag = pull_etag.clone();
         let (pull, fresh_pull) = match pr_fetch::read_pull_request(
             gate,
             transport,
@@ -2408,6 +2409,11 @@ impl CodeRuntime {
         } else {
             None
         };
+        let condition = if fresh_pull {
+            tidebreak_core::db::code::PullRequestFetchCondition::Unconditional
+        } else {
+            tidebreak_core::db::code::PullRequestFetchCondition::PullEtag(sent_pull_etag.as_deref())
+        };
 
         let digest = pr_fetch::digest_from_parts(&pull, &checks, review_decision, in_merge_queue);
         self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
@@ -2420,6 +2426,7 @@ impl CodeRuntime {
             &repo_name,
             number,
             fresh_fact.as_ref(),
+            condition,
             pull_etag.as_deref(),
             checks_etag.as_deref(),
             reviews_etag.as_deref(),

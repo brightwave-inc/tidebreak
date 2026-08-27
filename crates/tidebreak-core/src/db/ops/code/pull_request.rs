@@ -6,7 +6,7 @@
 //! to a pull request it authored or contributed to (decision 62). GitHub
 //! stays authoritative; these rows record what was observed and when.
 
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, Set,
@@ -187,6 +187,15 @@ pub struct PullRequestFetchState {
     pub reviews_etag: Option<String>,
 }
 
+/// The condition that protects one pull-request fetch-state write.
+#[derive(Debug, Clone, Copy)]
+pub enum PullRequestFetchCondition<'a> {
+    /// A fresh 200 response replaces the snapshot and validator together.
+    Unconditional,
+    /// A 304 response writes only if the row still holds the validator sent.
+    PullEtag(Option<&'a str>),
+}
+
 /// Load one observed pull request with its stored fetch ETags.
 pub async fn get_pull_request_fetch_state(
     store: &DbStore,
@@ -218,8 +227,10 @@ pub async fn get_pull_request_fetch_state(
 /// 304 passes `None`. The pull snapshot and its ETag must move in one row
 /// update, or concurrent refreshes can pair one response's validator with
 /// another response's snapshot and make the next 304 reconstruct stale
-/// state. Endpoint ETags carry the pass's final values. `Ok(false)` when no
-/// fact row exists for the identity.
+/// state. A 304 also compares the stored pull ETag in this update. If another
+/// writer changed or cleared that validator, the stale response updates zero
+/// rows. Endpoint ETags carry the pass's final values. `Ok(false)` when no
+/// fact row matches the identity and condition.
 #[allow(clippy::too_many_arguments)]
 pub async fn set_pull_request_fetch_state(
     store: &DbStore,
@@ -229,31 +240,74 @@ pub async fn set_pull_request_fetch_state(
     repo_name: &str,
     number: u64,
     fresh_fact: Option<&CodePullRequestFact>,
+    condition: PullRequestFetchCondition<'_>,
     pull_etag: Option<&str>,
     checks_etag: Option<&str>,
     reviews_etag: Option<&str>,
 ) -> Result<bool> {
     let number = i64::try_from(number)
         .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
-    let Some(row) = find_fact_row(store, owner, host, repo_owner, repo_name, number).await? else {
-        return Ok(false);
-    };
-    let mut model: entities::code_pull_request::ActiveModel = row.into();
+    let mut update = entities::code_pull_request::Entity::update_many()
+        .col_expr(
+            entities::code_pull_request::Column::PullEtag,
+            Expr::value(pull_etag.map(ToOwned::to_owned)),
+        )
+        .col_expr(
+            entities::code_pull_request::Column::ChecksEtag,
+            Expr::value(checks_etag.map(ToOwned::to_owned)),
+        )
+        .col_expr(
+            entities::code_pull_request::Column::ReviewsEtag,
+            Expr::value(reviews_etag.map(ToOwned::to_owned)),
+        )
+        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_pull_request::Column::Host.eq(host))
+        .filter(entities::code_pull_request::Column::RepoOwner.eq(repo_owner))
+        .filter(entities::code_pull_request::Column::RepoName.eq(repo_name))
+        .filter(entities::code_pull_request::Column::Number.eq(number));
     if let Some(fact) = fresh_fact {
-        model.url = Set(fact.url.clone());
-        model.title = Set(fact.title.clone());
-        model.state = Set(fact.state.as_str().to_owned());
-        model.draft = Set(fact.draft);
-        model.head_branch = Set(fact.head_branch.clone());
-        model.base_branch = Set(fact.base_branch.clone());
-        model.head_sha = Set(fact.head_sha.clone());
-        model.last_seen_at = Set(fact.last_seen_at);
+        update = update
+            .col_expr(
+                entities::code_pull_request::Column::Url,
+                Expr::value(fact.url.clone()),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::Title,
+                Expr::value(fact.title.clone()),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::State,
+                Expr::value(fact.state.as_str().to_owned()),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::Draft,
+                Expr::value(fact.draft),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::HeadBranch,
+                Expr::value(fact.head_branch.clone()),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::BaseBranch,
+                Expr::value(fact.base_branch.clone()),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::HeadSha,
+                Expr::value(fact.head_sha.clone()),
+            )
+            .col_expr(
+                entities::code_pull_request::Column::LastSeenAt,
+                Expr::value(fact.last_seen_at),
+            );
     }
-    model.pull_etag = Set(pull_etag.map(ToOwned::to_owned));
-    model.checks_etag = Set(checks_etag.map(ToOwned::to_owned));
-    model.reviews_etag = Set(reviews_etag.map(ToOwned::to_owned));
-    model.update(&store.conn).await.map_err(store_err)?;
-    Ok(true)
+    if let PullRequestFetchCondition::PullEtag(expected) = condition {
+        update = match expected {
+            Some(etag) => update.filter(entities::code_pull_request::Column::PullEtag.eq(etag)),
+            None => update.filter(entities::code_pull_request::Column::PullEtag.is_null()),
+        };
+    }
+    let result = update.exec(&store.conn).await.map_err(store_err)?;
+    Ok(result.rows_affected == 1)
 }
 
 /// Every observed pull request on one repository identity.
