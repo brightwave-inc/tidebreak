@@ -417,9 +417,16 @@ impl BrowserChannelSpec {
 
     /// Whether a settings environment key belongs to Tidebreak rather than
     /// the user. Adapters must reject these keys before composing a launch.
+    ///
+    /// The session relay key (decision 71) is the one exception: the server
+    /// itself hands an engine child `TIDEBREAK_LLM_KEY`, and codex resolves
+    /// its provider credential from exactly that name, so it must survive
+    /// the reserved-namespace strip. Every other key in the namespace still
+    /// belongs to Tidebreak, not the user.
     #[must_use]
     pub fn is_reserved_env_key(key: &str) -> bool {
-        key.to_ascii_uppercase().starts_with("TIDEBREAK_")
+        let key = key.to_ascii_uppercase();
+        key.starts_with("TIDEBREAK_") && key != "TIDEBREAK_LLM_KEY"
     }
 
     /// Inject the capability-file path as the final environment value on a
