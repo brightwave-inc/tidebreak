@@ -36,7 +36,7 @@ const preview: Preview = {
     },
   },
   initialGlobals: {
-    theme: "light",
+    theme: "dark",
   },
   parameters: {
     controls: {
