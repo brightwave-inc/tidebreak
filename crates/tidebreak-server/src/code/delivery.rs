@@ -4401,40 +4401,67 @@ fn parse_comment_count(value: &Value) -> Option<u64> {
 }
 
 /// GitHub's pull-request list REST payload leaves `comments` null. The issues
-/// list uses the same numbers and carries an integer count, so one extra GET
-/// fills rows the list omitted. Failures and misses stay absent.
+/// list uses the same numbers and carries an integer count. One page mixes
+/// ordinary issues in, so keep paging while listed PR numbers are still
+/// missing. Failures and leftover misses stay absent.
+const ISSUE_COMMENT_PAGE_SIZE: usize = 100;
+const ISSUE_COMMENT_MAX_PAGES: u32 = 10;
+
+fn absorb_issue_comment_counts(
+    issues: &[Value],
+    needed: &mut HashSet<u64>,
+    counts: &mut HashMap<u64, u64>,
+) {
+    for issue in issues {
+        let Some(number) = issue.get("number").and_then(Value::as_u64) else {
+            continue;
+        };
+        if !needed.contains(&number) {
+            continue;
+        }
+        let Some(comments) = issue.get("comments").and_then(Value::as_u64) else {
+            continue;
+        };
+        needed.remove(&number);
+        counts.insert(number, comments);
+    }
+}
+
 async fn overlay_issue_comment_counts(
     api: &DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     state: &str,
     values: &mut [Value],
 ) {
-    if values
-        .iter()
-        .all(|value| parse_comment_count(value).is_some())
-    {
+    let mut needed = HashSet::new();
+    for value in values.iter() {
+        if parse_comment_count(value).is_some() {
+            continue;
+        }
+        if let Some(number) = value.get("number").and_then(Value::as_u64) {
+            needed.insert(number);
+        }
+    }
+    if needed.is_empty() {
         return;
     }
     let state = if state == "merged" { "closed" } else { state };
-    let endpoint = format!(
-        "{}?state={state}&per_page=100",
-        api_endpoint(target, "issues")
-    );
-    let Ok(payload) = api.get(&endpoint).await else {
-        return;
-    };
-    let Some(issues) = payload.as_array() else {
-        return;
-    };
     let mut counts = HashMap::new();
-    for issue in issues {
-        let Some(number) = issue.get("number").and_then(Value::as_u64) else {
-            continue;
+    for page in 1..=ISSUE_COMMENT_MAX_PAGES {
+        let endpoint = format!(
+            "{}?state={state}&per_page={ISSUE_COMMENT_PAGE_SIZE}&page={page}",
+            api_endpoint(target, "issues")
+        );
+        let Ok(payload) = api.get(&endpoint).await else {
+            break;
         };
-        let Some(comments) = issue.get("comments").and_then(Value::as_u64) else {
-            continue;
+        let Some(issues) = payload.as_array() else {
+            break;
         };
-        counts.insert(number, comments);
+        absorb_issue_comment_counts(issues, &mut needed, &mut counts);
+        if needed.is_empty() || issues.len() < ISSUE_COMMENT_PAGE_SIZE {
+            break;
+        }
     }
     for value in values {
         if parse_comment_count(value).is_some() {
@@ -5120,6 +5147,29 @@ mod tests {
                 .comment_count,
             None
         );
+    }
+
+    #[test]
+    fn issue_comment_overlay_skips_crowding_issues() {
+        let mut needed = HashSet::from([17, 19]);
+        let mut counts = HashMap::new();
+        absorb_issue_comment_counts(
+            &[
+                serde_json::json!({"number": 1, "comments": 9}),
+                serde_json::json!({"number": 17, "comments": 2}),
+            ],
+            &mut needed,
+            &mut counts,
+        );
+        assert_eq!(counts.get(&17), Some(&2));
+        assert!(!needed.contains(&17));
+        absorb_issue_comment_counts(
+            &[serde_json::json!({"number": 19, "comments": 4})],
+            &mut needed,
+            &mut counts,
+        );
+        assert!(needed.is_empty());
+        assert_eq!(counts.get(&19), Some(&4));
     }
 
     #[test]

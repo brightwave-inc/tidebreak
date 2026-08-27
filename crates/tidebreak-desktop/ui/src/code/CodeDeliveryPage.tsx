@@ -557,7 +557,7 @@ function CodeDeliveryBody({
         </div>
         <nav
           className="mt-4 flex items-center gap-1"
-          aria-label="Pull request views"
+          aria-label="Pull requests and runs"
         >
           <DeliveryTab
             active={surface === "pull_requests"}
