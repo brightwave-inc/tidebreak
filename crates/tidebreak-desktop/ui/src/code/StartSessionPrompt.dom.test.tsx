@@ -12,10 +12,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ReactNode } from "react";
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
-import type { HarnessDoctorEntry } from "../api/types";
+import type { HarnessDoctorEntry, ManagedPolicy } from "../api/types";
+import { ManagedPolicyContext } from "../managedPolicy";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
@@ -156,7 +158,8 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    // The default posture is never silent: it says what it will do.
+    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "Harness" }).closest("form"),
     ).toHaveClass("chat-composer");
@@ -175,6 +178,50 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.queryByText("Mode is fixed once the session starts"),
     ).toBeNull();
+  });
+
+  it("starts under the managed ceiling instead of the engine's Allow default", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    const capped: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+      allow_local_mcp_servers: false,
+      permission_mode_ceiling: "ask",
+    };
+    await renderWithRouter(
+      wrap(
+        <ManagedPolicyContext.Provider value={capped}>
+          <StartSessionPrompt
+            workspaceId="workspace-1"
+            harnesses={[entry("claude_code", {})]}
+            starting={false}
+            selectedMode={null}
+            onSelectMode={vi.fn()}
+            onStart={onStart}
+          />
+        </ManagedPolicyContext.Provider>,
+      ),
+    );
+    expect(
+      screen.getByRole("button", { name: "Permissions: Ask" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(ALLOW_ALL_NOTE)).not.toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "list the files",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onStart).toHaveBeenCalledWith(
+      "claude_code",
+      "ask",
+      "list the files",
+      undefined,
+      undefined,
+      null,
+      false,
+    );
   });
 
   it("says opencode's mode is fixed once the session starts", async () => {
@@ -239,7 +286,7 @@ describe("StartSessionPrompt", () => {
     );
   });
 
-  it("switches an Auto-only engine to Auto without extra permission copy", async () => {
+  it("switches an Auto-only engine to Auto and states that it never asks", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
@@ -267,7 +314,8 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Auto" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    // Grok's Auto has no approval channel behind it, and the composer says so.
+    expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
       "list the files",

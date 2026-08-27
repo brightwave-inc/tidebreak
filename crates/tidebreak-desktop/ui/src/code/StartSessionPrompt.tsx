@@ -9,6 +9,8 @@ import type {
   ReasoningEffort,
 } from "../api/types";
 import type { ComposerWorkspaceFiles } from "@/Composer";
+import { clampPermissionMode } from "../PermissionModeMenu";
+import { useManagedPolicy } from "../managedPolicy";
 import { CodeComposer } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
@@ -112,12 +114,15 @@ export function StartSessionPrompt({
     selectable.find((entry) => harnessCanStartNow(entry)) ??
     selectable[0];
   const availableModes = selected ? createPermissionModes(selected.caps) : [];
-  const mode: PermissionMode =
+  const ceiling = useManagedPolicy().permission_mode_ceiling;
+  const mode: PermissionMode = clampPermissionMode(
     selectedMode && availableModes.includes(selectedMode)
       ? selectedMode
       : selected
         ? defaultCreatePermissionMode(selected.caps)
-        : "plan";
+        : "plan",
+    ceiling,
+  );
 
   const selectedKind = selected?.kind;
   const model = selectedKind ? modelsByHarness[selectedKind] : undefined;

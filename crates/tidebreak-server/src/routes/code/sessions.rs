@@ -4,6 +4,7 @@ use crate::extract::{Json, Path, RawBytes};
 use crate::routes::image_attachment::{
     inspect_image_bytes, require_declared_type_matches, PublishedImageAttachment,
 };
+use crate::routes::providers_models::refuse_permission_mode_over_ceiling;
 use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 use axum::body::Body;
@@ -21,10 +22,12 @@ use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
 
 pub async fn create_session(
+    State(state): State<AppState>,
     code: ScopedCode,
     Path(workspace_id): Path<WorkspaceId>,
     Json(body): Json<CreateSessionBody>,
 ) -> Result<impl IntoResponse, ServerError> {
+    refuse_permission_mode_over_ceiling(&state, Some(body.permission_mode)).await?;
     let session = code
         .create_session(
             workspace_id,
@@ -286,12 +289,15 @@ pub async fn reap_session(
 ///
 /// The engine is relaunched against the new posture, so this is refused
 /// while a turn is running and while the session has ended. A mode the
-/// engine cannot honor is refused here rather than approximated.
+/// engine cannot honor is refused here rather than approximated, and so is
+/// a mode above the ceiling a managed profile asserts.
 pub async fn set_session_permission_mode(
+    State(state): State<AppState>,
     code: ScopedCode,
     Path(id): Path<CodeSessionId>,
     Json(body): Json<SetPermissionModeBody>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+    refuse_permission_mode_over_ceiling(&state, Some(body.permission_mode)).await?;
     let session = code.set_permission_mode(id, body.permission_mode).await?;
     Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
 }

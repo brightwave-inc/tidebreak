@@ -59,6 +59,20 @@ function autonomyRank(mode: PermissionMode): number {
   return PERMISSION_MODE_SCALE.findIndex((option) => option.value === mode);
 }
 
+/**
+ * The mode a create or start should post under a managed ceiling: the
+ * requested posture when it is at or below the ceiling, otherwise the
+ * ceiling itself. Chat create already seeds this way server-side; code
+ * posts an explicit mode, so the client has to clamp before the request.
+ */
+export function clampPermissionMode(
+  mode: PermissionMode,
+  ceiling: PermissionMode | null | undefined,
+): PermissionMode {
+  if (ceiling == null) return mode;
+  return autonomyRank(mode) > autonomyRank(ceiling) ? ceiling : mode;
+}
+
 export function permissionModeOption(mode: PermissionMode | null) {
   const value = mode ?? DEFAULT_PERMISSION_MODE;
   return (
@@ -79,10 +93,18 @@ export function permissionModeOption(mode: PermissionMode | null) {
  *
  * A managed profile may assert a permission-mode ceiling. Modes above it
  * render locked — decided elsewhere rather than silently missing — and the
- * server enforces the same ceiling at the chat routes and the turn gate, so
- * this is legibility, not the lockdown itself. A stored mode already above
- * the ceiling displays as the ceiling, matching what the turn actually runs
- * under.
+ * server enforces the same ceiling at the chat routes, the turn gate, and the
+ * code session routes, so this is legibility, not the lockdown itself.
+ *
+ * Chat's turn gate clamps an over-ceiling stored mode, so the trigger
+ * displays the ceiling to match what the turn actually runs under. A code
+ * session has no such clamp: pass `clampDisplay={false}` so the picker
+ * shows the stored mode the engine launched with. Create surfaces clamp
+ * the posted value themselves (`clampPermissionMode`) so the label and
+ * the request agree without relying on this display remap.
+ *
+ * The rows carry no posture descriptions. What an unsupervised mode will do
+ * is stated once, under the control, by the surface that offers it.
  */
 export function PermissionModeMenu({
   scopeKey,
@@ -90,6 +112,7 @@ export function PermissionModeMenu({
   disabled,
   onChange,
   availableModes,
+  clampDisplay = true,
   open: controlledOpen,
   onOpenChange,
 }: {
@@ -104,6 +127,12 @@ export function PermissionModeMenu({
    * disabled, so what an engine cannot do is stated rather than missing.
    */
   availableModes?: readonly PermissionMode[];
+  /**
+   * When true (chat), an over-ceiling stored mode displays as the ceiling
+   * the turn actually runs under. When false (a live code session), the
+   * trigger shows `value` so it matches the engine launch posture.
+   */
+  clampDisplay?: boolean;
   /** Open the menu from outside — a surface's keyboard shortcut. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -154,9 +183,10 @@ export function PermissionModeMenu({
   const ceilingRank = ceiling === null ? null : autonomyRank(ceiling);
   const overCeiling = (mode: PermissionMode) =>
     ceilingRank !== null && autonomyRank(mode) > ceilingRank;
-  const effective = overCeiling(value ?? DEFAULT_PERMISSION_MODE)
-    ? ceiling
-    : value;
+  const effective =
+    clampDisplay && overCeiling(value ?? DEFAULT_PERMISSION_MODE)
+      ? ceiling
+      : value;
   const current = permissionModeOption(effective);
   const CurrentIcon = current.icon;
   const controlsDisabled = disabled || saving;

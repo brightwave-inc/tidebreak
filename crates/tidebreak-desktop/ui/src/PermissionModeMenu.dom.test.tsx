@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ManagedPolicy, PermissionMode } from "./api";
 import { ManagedPolicyContext } from "./managedPolicy";
-import { PermissionModeMenu } from "./PermissionModeMenu";
+import { clampPermissionMode, PermissionModeMenu } from "./PermissionModeMenu";
 import { useFirstTaskGuide } from "./FirstTaskWalkthrough";
 
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
@@ -77,6 +77,44 @@ it("locks modes above a managed ceiling", async () => {
 
   await userEvent.click(locked);
   expect(onChange).not.toHaveBeenCalled();
+});
+
+it("clamps a requested mode down to a managed ceiling", () => {
+  expect(clampPermissionMode("allow", "ask")).toBe("ask");
+  expect(clampPermissionMode("auto", "ask")).toBe("ask");
+  expect(clampPermissionMode("ask", "ask")).toBe("ask");
+  expect(clampPermissionMode("plan", "ask")).toBe("plan");
+  expect(clampPermissionMode("allow", null)).toBe("allow");
+  expect(clampPermissionMode("allow", undefined)).toBe("allow");
+});
+
+/**
+ * A code session has no turn-gate clamp, so the picker shows the stored
+ * mode the engine launched with rather than the ceiling the chat menu
+ * would display.
+ */
+it("shows a stored over-ceiling mode when display clamping is off", async () => {
+  const capped: ManagedPolicy = {
+    managed: false,
+    source: "unmanaged",
+    misconfigured: false,
+    allow_local_mcp_servers: false,
+    permission_mode_ceiling: "ask",
+  };
+  render(
+    <ManagedPolicyContext.Provider value={capped}>
+      <PermissionModeMenu
+        scopeKey="code-1"
+        value="allow"
+        clampDisplay={false}
+        onChange={vi.fn()}
+      />
+    </ManagedPolicyContext.Provider>,
+  );
+
+  expect(
+    screen.getByRole("button", { name: "Permissions: Allow all" }),
+  ).toBeInTheDocument();
 });
 
 it("lets a new chat save while an old chat write is still settling", async () => {

@@ -241,10 +241,12 @@ pub(super) async fn has_api_key(secrets: &dyn SecretProvider) -> bool {
 
 /// Refuse selecting a permission mode above the managed ceiling.
 ///
-/// The picker-facing half of the lockdown: the authoritative clamp lives at
-/// the turn gate, which also catches chats whose stored mode predates the
-/// policy. Selecting a mode at or below the ceiling stays open — the policy
-/// names a maximum, not a fixed mode.
+/// The picker-facing half of the lockdown: for chat the authoritative clamp
+/// lives at the turn gate, which also catches chats whose stored mode
+/// predates the policy. A code session has no such clamp — its posture is
+/// composed into the engine's launch, so the ceiling binds where the mode is
+/// chosen: session create and the mode route. Selecting a mode at or below
+/// the ceiling stays open — the policy names a maximum, not a fixed mode.
 pub(super) async fn refuse_permission_mode_over_ceiling(
     state: &AppState,
     requested: Option<PermissionMode>,

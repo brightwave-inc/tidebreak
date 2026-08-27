@@ -17,12 +17,15 @@ import type {
   CodeWorkspaceSnapshot,
   HarnessDoctorEntry,
   HarnessKind,
+  ManagedPolicy,
 } from "../api/types";
+import { ManagedPolicyContext } from "../managedPolicy";
 import {
   OPTIMISTIC_WORKSPACE_ID_PREFIX,
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
+import { ALLOW_ALL_NOTE } from "./labels";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
 import type { CodeTurnSubmission, ParsedHarnessModel } from "./parsers";
@@ -554,11 +557,11 @@ describe("NewWorkspaceDialog", () => {
         screen.getByRole("button", { name: "Model: GPT 5.6 Sol" }),
       ).toBeEnabled(),
     );
-    // Allow is the default where the engine honors it.
+    // Allow is the default where the engine honors it, and it says so.
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeEnabled();
-    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
 
     fireEvent.keyDown(screen.getByRole("dialog"), {
       key: "Enter",
@@ -587,6 +590,69 @@ describe("NewWorkspaceDialog", () => {
       }),
     );
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+  });
+
+  it("posts the managed ceiling instead of the engine's Allow default", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    useCodeUiStore.setState({
+      lastCreate: { modelsByHarness: {}, permissionMode: "allow" },
+    });
+    const createCodeWorkspace = vi.fn(async () =>
+      workspace("ws-ceiling", "repo-new", "2026-08-20T00:00:00.000Z"),
+    );
+    const createCodeSession = vi.fn(async () =>
+      session("ws-ceiling", "claude_code", "2026-08-20T00:00:00.000Z"),
+    );
+    const capped: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+      allow_local_mcp_servers: false,
+      permission_mode_ceiling: "ask",
+    };
+    await renderWithRouter(
+      <ManagedPolicyContext.Provider value={capped}>
+        <AppContextProvider
+          value={app({
+            createCodeWorkspace,
+            createCodeSession,
+            listCodeHarnessModels: claudeModels(),
+          })}
+        >
+          <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+        </AppContextProvider>
+      </ManagedPolicyContext.Provider>,
+      { initialUrl: "/code" },
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Model: Sonnet" }),
+      ).toBeEnabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Permissions: Ask" }),
+    ).toBeEnabled();
+    expect(screen.queryByText(ALLOW_ALL_NOTE)).not.toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    await waitFor(() =>
+      expect(createCodeSession).toHaveBeenCalledWith("ws-ceiling", {
+        harness: "claude_code",
+        permission_mode: "ask",
+        model: "sonnet",
+      }),
+    );
   });
 
   it("creates on Enter in the message; Shift+Enter stays a newline", async () => {

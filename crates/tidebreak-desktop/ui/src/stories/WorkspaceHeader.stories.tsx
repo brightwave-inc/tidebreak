@@ -6,10 +6,12 @@ import type {
   Attention,
   CodeSessionSnapshot,
   CodeWorkspacePrSnapshot,
+  PermissionMode,
 } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { AttentionBadge } from "@/code/AttentionBadge";
 import { SessionLifecycleIndicator } from "@/code/SessionLifecycleIndicator";
+import { SessionPermissionIndicator } from "@/code/SessionPermissionIndicator";
 import {
   WorkspaceOverflowMenu,
   workspaceHeaderCommands,
@@ -59,6 +61,7 @@ function HeaderState({
   lifecycle = "running",
   pendingApprovals = 0,
   unrecognizedEventCount = 0,
+  permissionMode = "allow",
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   loading?: boolean;
@@ -68,6 +71,7 @@ function HeaderState({
   lifecycle?: CodeSessionSnapshot["lifecycle"];
   pendingApprovals?: number;
   unrecognizedEventCount?: number;
+  permissionMode?: PermissionMode;
 }) {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(initialReviewOpen);
@@ -119,6 +123,10 @@ function HeaderState({
               unrecognizedEventCount={unrecognizedEventCount}
               runningLabel={lifecycle === "running" ? activityLabel : undefined}
             />
+            <span className="text-border" aria-hidden>
+              ·
+            </span>
+            <SessionPermissionIndicator mode={permissionMode} />
           </>
         )
       }
@@ -230,6 +238,28 @@ export const UnrecognizedEngineEvents: Story = {
     snapshot: openPrGit,
     activityLabel: "Shell running",
     unrecognizedEventCount: 3,
+  },
+};
+
+/**
+ * The posture the session runs under, next to its lifecycle. Create picks the
+ * most autonomous mode the engine honors, so the header is where a reader
+ * learns which one they got.
+ */
+export const AsksBeforeEachTool: Story = {
+  args: { snapshot: openPrGit, permissionMode: "ask" },
+};
+
+export const RunsOnItsOwn: Story = {
+  args: { snapshot: openPrGit, permissionMode: "auto" },
+};
+
+export const PlansOnly: Story = {
+  args: {
+    snapshot: openPrGit,
+    permissionMode: "plan",
+    lifecycle: "idle",
+    activityLabel: "Idle",
   },
 };
 

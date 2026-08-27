@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { ReasoningEffort } from "../api/types";
 import type { ModeCaps } from "./labels";
 import {
+  ALLOW_ALL_NOTE,
+  PERMISSION_MODE_POSTURES,
+  UNSUPERVISED_AUTO_NOTE,
   autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
@@ -15,6 +18,8 @@ import {
   isHarnessReady,
   preferredCodeModels,
   sessionLifecycleTooltip,
+  sessionPermissionModeTooltip,
+  unsupervisedModeStatement,
 } from "./labels";
 
 function caps(
@@ -88,20 +93,49 @@ describe("create-time permission mode", () => {
     ).toEqual(["plan"]);
   });
 
-  it("offers only unsupervised Auto for a grok-shaped engine", () => {
-    const grok = caps("unsupported", "unsupported", "supported");
-    expect(createPermissionModes(grok)).toEqual(["auto"]);
-    expect(
-      createPermissionModes(
-        caps("unsupported", "unsupported", "supported", "supported"),
-      ),
-    ).toEqual(["auto", "allow"]);
-    expect(defaultCreatePermissionMode(grok)).toBe("auto");
+  it("offers unsupervised Auto and Allow for a grok-shaped engine", () => {
+    // Grok: no plan mode, no approval channel, both autonomous postures
+    // (`crates/tidebreak-harness/src/grok/mod.rs`).
+    const grok = caps("unsupported", "unsupported", "supported", "supported");
+    expect(createPermissionModes(grok)).toEqual(["auto", "allow"]);
+    expect(defaultCreatePermissionMode(grok)).toBe("allow");
     expect(autoIsUnsupervised(grok)).toBe(true);
+    // An engine with an auto posture and no allow-all still lands on Auto.
+    const autoOnly = caps("unsupported", "unsupported", "supported");
+    expect(createPermissionModes(autoOnly)).toEqual(["auto"]);
+    expect(defaultCreatePermissionMode(autoOnly)).toBe("auto");
+    expect(autoIsUnsupervised(autoOnly)).toBe(true);
     // Supervised Auto rides the approval channel and needs no statement.
     expect(
       autoIsUnsupervised(caps("supported", "supported", "supported")),
     ).toBe(false);
+  });
+});
+
+describe("unsupervisedModeStatement", () => {
+  it("states a posture that runs with nobody to ask", () => {
+    // Allow all never asks, whatever the engine can do.
+    expect(unsupervisedModeStatement("allow", false)).toBe(ALLOW_ALL_NOTE);
+    expect(unsupervisedModeStatement("allow", true)).toBe(ALLOW_ALL_NOTE);
+    // Auto only when the engine has no approval channel to escalate through.
+    expect(unsupervisedModeStatement("auto", true)).toBe(
+      UNSUPERVISED_AUTO_NOTE,
+    );
+    expect(unsupervisedModeStatement("auto", false)).toBeNull();
+    // A posture that escalates needs no statement.
+    expect(unsupervisedModeStatement("ask", true)).toBeNull();
+    expect(unsupervisedModeStatement("plan", true)).toBeNull();
+  });
+});
+
+describe("sessionPermissionModeTooltip", () => {
+  it("names the posture and spells out what it does", () => {
+    expect(sessionPermissionModeTooltip("allow")).toBe(
+      `Permissions: Allow all\n${PERMISSION_MODE_POSTURES.allow}`,
+    );
+    expect(sessionPermissionModeTooltip("plan")).toBe(
+      `Permissions: Plan\n${PERMISSION_MODE_POSTURES.plan}`,
+    );
   });
 });
 
