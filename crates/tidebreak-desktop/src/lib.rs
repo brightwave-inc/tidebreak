@@ -25,6 +25,7 @@ mod broker;
 )]
 mod browser_control;
 mod browser_profile;
+mod browser_recovery;
 mod browser_runtime_adapter;
 #[allow(
     dead_code,

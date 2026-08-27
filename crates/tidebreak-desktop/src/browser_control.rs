@@ -25,6 +25,8 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
+use crate::browser_recovery::{BrowserSessionStore, RecoveredBrowserSession};
+
 const BROWSER_AUDIT_FILE: &str = "browser-audit.jsonl";
 const AGENT_CAPABILITY_TTL: Duration = Duration::from_secs(90);
 const AGENT_CONFIRMATION_TTL: Duration = Duration::from_secs(30);
@@ -258,6 +260,14 @@ struct BrowserRecord {
     resetting: bool,
 }
 
+pub(crate) struct ManagedBrowserRegistration {
+    pub(crate) owner_id: OwnerId,
+    pub(crate) profile_id: String,
+    pub(crate) url: String,
+    pub(crate) title: Option<String>,
+    pub(crate) visible: bool,
+}
+
 #[derive(Clone)]
 struct BrowserDispatchState {
     halt: watch::Sender<bool>,
@@ -402,6 +412,7 @@ struct BrowserRegistryState {
 pub(crate) struct BrowserRegistry {
     state: Arc<Mutex<BrowserRegistryState>>,
     audit: BrowserAuditLog,
+    sessions: BrowserSessionStore,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -461,13 +472,43 @@ impl Default for BrowserRegistry {
         Self {
             state: Arc::new(Mutex::new(BrowserRegistryState::default())),
             audit: BrowserAuditLog::default(),
+            sessions: BrowserSessionStore::default(),
         }
     }
 }
 
 impl BrowserRegistry {
     pub(crate) fn initialize_private_state(&self, data_dir: &Path) -> Result<(), String> {
-        self.audit.initialize(data_dir)
+        self.audit.initialize(data_dir)?;
+        self.sessions.initialize(data_dir)
+    }
+
+    pub(crate) fn recover_session(
+        &self,
+        owner_id: &OwnerId,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<RecoveredBrowserSession>, String> {
+        self.sessions.recover(owner_id, browser_id, workspace_id)
+    }
+
+    pub(crate) fn ensure_recovery_binding(
+        &self,
+        owner_id: &OwnerId,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), String> {
+        self.sessions
+            .ensure_binding(owner_id, browser_id, workspace_id)
+    }
+
+    pub(crate) fn forget_recovery(
+        &self,
+        owner_id: &OwnerId,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), String> {
+        self.sessions.forget(owner_id, browser_id, workspace_id)
     }
 
     pub(crate) fn register_managed(
@@ -479,6 +520,32 @@ impl BrowserRegistry {
         url: String,
         visible: bool,
     ) -> Result<u64, String> {
+        self.register_managed_with_title(
+            browser_id,
+            workspace_id,
+            ManagedBrowserRegistration {
+                owner_id,
+                profile_id,
+                url,
+                title: None,
+                visible,
+            },
+        )
+    }
+
+    pub(crate) fn register_managed_with_title(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        registration: ManagedBrowserRegistration,
+    ) -> Result<u64, String> {
+        let ManagedBrowserRegistration {
+            owner_id,
+            profile_id,
+            url,
+            title,
+            visible,
+        } = registration;
         let mut state = self.lock();
         if let Some(record) = state.records.get(browser_id) {
             ensure_workspace(browser_id, workspace_id, record)?;
@@ -495,7 +562,7 @@ impl BrowserRegistry {
                 workspace_id: workspace_id.to_owned(),
                 profile_id,
                 url: Some(url),
-                title: None,
+                title,
                 load_state: BrowserLoadState::Loading,
                 document_epoch: 0,
                 visible,
@@ -1539,10 +1606,33 @@ impl BrowserRegistry {
         instance_id: u64,
         url: String,
     ) -> Option<BrowserSnapshot> {
-        self.update_instance(browser_id, workspace_id, instance_id, |record| {
-            record.url = Some(url);
-            record.load_state = BrowserLoadState::Ready;
-        })
+        let (snapshot, owner_id, title) = {
+            let mut state = self.lock();
+            {
+                let record = state.records.get_mut(browser_id)?;
+                if record.workspace_id != workspace_id
+                    || record.instance_id != instance_id
+                    || record.resetting
+                {
+                    return None;
+                }
+                record.url = Some(url.clone());
+                record.load_state = BrowserLoadState::Ready;
+            }
+            let record = state.records.get(browser_id)?;
+            (
+                record.snapshot(browser_id, agent_access_for_record(&state, record)),
+                record.owner_id.clone(),
+                record.title.clone(),
+            )
+        };
+        if let Err(error) =
+            self.sessions
+                .commit(&owner_id, browser_id, workspace_id, &url, title.as_deref())
+        {
+            log_recovery_persistence_error(error);
+        }
+        Some(snapshot)
     }
 
     /// Record a validated same-document URL change without advancing the
@@ -1556,22 +1646,35 @@ impl BrowserRegistry {
         document_epoch: u64,
         url: String,
     ) -> Option<BrowserSnapshot> {
-        let mut state = self.lock();
-        {
-            let record = state.records.get_mut(browser_id)?;
-            if record.workspace_id != workspace_id
-                || record.instance_id != instance_id
-                || record.document_epoch != document_epoch
-                || record.resetting
-                || record.url.as_deref() == Some(url.as_str())
+        let (snapshot, owner_id, title) = {
+            let mut state = self.lock();
             {
-                return None;
+                let record = state.records.get_mut(browser_id)?;
+                if record.workspace_id != workspace_id
+                    || record.instance_id != instance_id
+                    || record.document_epoch != document_epoch
+                    || record.resetting
+                    || record.url.as_deref() == Some(url.as_str())
+                {
+                    return None;
+                }
+                record.url = Some(url.clone());
+                record.load_state = BrowserLoadState::Ready;
             }
-            record.url = Some(url);
-            record.load_state = BrowserLoadState::Ready;
+            let record = state.records.get(browser_id)?;
+            (
+                record.snapshot(browser_id, agent_access_for_record(&state, record)),
+                record.owner_id.clone(),
+                record.title.clone(),
+            )
+        };
+        if let Err(error) =
+            self.sessions
+                .commit(&owner_id, browser_id, workspace_id, &url, title.as_deref())
+        {
+            log_recovery_persistence_error(error);
         }
-        let record = state.records.get(browser_id)?;
-        Some(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+        Some(snapshot)
     }
 
     pub(crate) fn title_changed(
@@ -1582,22 +1685,40 @@ impl BrowserRegistry {
         url: Option<String>,
         title: String,
     ) -> Option<BrowserSnapshot> {
-        let mut state = self.lock();
-        {
-            let record = state.records.get_mut(browser_id)?;
-            if record.workspace_id != workspace_id
-                || record.instance_id != instance_id
-                || record.resetting
-                || url
-                    .as_ref()
-                    .is_some_and(|url| record.url.as_ref() != Some(url))
+        let (snapshot, owner_id, title) = {
+            let mut state = self.lock();
             {
-                return None;
+                let record = state.records.get_mut(browser_id)?;
+                if record.workspace_id != workspace_id
+                    || record.instance_id != instance_id
+                    || record.resetting
+                    || url
+                        .as_ref()
+                        .is_some_and(|url| record.url.as_ref() != Some(url))
+                {
+                    return None;
+                }
+                record.title = Some(title);
             }
-            record.title = Some(title);
+            let record = state.records.get(browser_id)?;
+            (
+                record.snapshot(browser_id, agent_access_for_record(&state, record)),
+                record.owner_id.clone(),
+                record.title.clone(),
+            )
+        };
+        if let Some(url) = url {
+            if let Err(error) = self.sessions.update_title(
+                &owner_id,
+                browser_id,
+                workspace_id,
+                &url,
+                title.as_deref(),
+            ) {
+                log_recovery_persistence_error(error);
+            }
         }
-        let record = state.records.get(browser_id)?;
-        Some(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+        Some(snapshot)
     }
 
     pub(crate) fn remove(&self, browser_id: &str, workspace_id: &str) -> Result<bool, String> {
@@ -2162,6 +2283,10 @@ fn clean_audit_text(value: &str, max_chars: usize, fallback: &str) -> String {
     clean_controller_text(value, max_chars, fallback)
 }
 
+fn log_recovery_persistence_error(error: String) {
+    eprintln!("tidebreak-desktop: browser recovery state was not persisted: {error}");
+}
+
 fn ensure_workspace(
     browser_id: &str,
     workspace_id: &str,
@@ -2323,6 +2448,230 @@ mod tests {
                 true,
             )
             .is_err());
+    }
+
+    #[test]
+    fn restart_recovers_only_the_last_completed_navigation_without_authority() {
+        let private = tempfile::tempdir().unwrap();
+        let owner = OwnerId::local();
+        let registry = BrowserRegistry::default();
+        registry.initialize_private_state(private.path()).unwrap();
+        let instance = registry
+            .register_managed(
+                "browser-1",
+                "workspace-1",
+                owner.clone(),
+                Uuid::new_v4().to_string(),
+                "https://example.com/committed".to_owned(),
+                true,
+            )
+            .unwrap();
+        let ready = registry
+            .page_started(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/committed".to_owned(),
+            )
+            .and_then(|_| {
+                registry.page_finished(
+                    "browser-1",
+                    "workspace-1",
+                    instance,
+                    "https://example.com/committed".to_owned(),
+                )
+            })
+            .unwrap();
+        registry
+            .title_changed(
+                "browser-1",
+                "workspace-1",
+                instance,
+                Some("https://example.com/committed".to_owned()),
+                "Committed page".to_owned(),
+            )
+            .unwrap();
+        let origin = BrowserOrigin::from_url("https://example.com/committed").unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        let capability = registry.issue_agent_capability("workspace-1", "Code agent");
+        force_agent_controller(&registry, "browser-1", capability);
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                ready.document_epoch.unwrap(),
+                "snapshot-1".to_owned(),
+                HashMap::from([("@e1".to_owned(), target("Continue"))]),
+            )
+            .unwrap();
+
+        registry
+            .page_started(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/in-flight".to_owned(),
+            )
+            .unwrap();
+        registry
+            .title_changed(
+                "browser-1",
+                "workspace-1",
+                instance,
+                Some("https://example.com/in-flight".to_owned()),
+                "In-flight page".to_owned(),
+            )
+            .unwrap();
+        drop(registry);
+
+        let reopened = BrowserRegistry::default();
+        reopened.initialize_private_state(private.path()).unwrap();
+        let recovered = reopened
+            .recover_session(&owner, "browser-1", "workspace-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.url, "https://example.com/committed");
+        assert_eq!(recovered.title.as_deref(), Some("Committed page"));
+
+        reopened
+            .register_managed_with_title(
+                "browser-1",
+                "workspace-1",
+                ManagedBrowserRegistration {
+                    owner_id: owner,
+                    profile_id: Uuid::new_v4().to_string(),
+                    url: recovered.url,
+                    title: recovered.title,
+                    visible: true,
+                },
+            )
+            .unwrap();
+        let snapshot = reopened.snapshot("browser-1", "workspace-1").unwrap();
+        assert_eq!(snapshot.document_epoch, Some(0));
+        assert_eq!(
+            snapshot.controller.unwrap().kind,
+            BrowserControllerKind::Human
+        );
+        let access = snapshot.agent_access.unwrap();
+        assert!(!access.shared);
+        assert!(!access.can_observe);
+        assert!(!access.can_control);
+        let state = reopened.lock();
+        let record = state.records.get("browser-1").unwrap();
+        assert!(record.controller_capability_id.is_none());
+        assert!(record.semantic_snapshot.is_none());
+        assert!(state.capabilities.is_empty());
+        assert!(state.grants.is_empty());
+    }
+
+    #[test]
+    fn same_document_navigation_becomes_the_recovery_url() {
+        let private = tempfile::tempdir().unwrap();
+        let owner = OwnerId::local();
+        let registry = BrowserRegistry::default();
+        registry.initialize_private_state(private.path()).unwrap();
+        let instance = registry
+            .register_managed(
+                "browser-1",
+                "workspace-1",
+                owner.clone(),
+                Uuid::new_v4().to_string(),
+                "https://example.com/start".to_owned(),
+                true,
+            )
+            .unwrap();
+        let ready = registry
+            .page_started(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/start".to_owned(),
+            )
+            .and_then(|_| {
+                registry.page_finished(
+                    "browser-1",
+                    "workspace-1",
+                    instance,
+                    "https://example.com/start".to_owned(),
+                )
+            })
+            .unwrap();
+        registry
+            .same_document_navigation(
+                "browser-1",
+                "workspace-1",
+                instance,
+                ready.document_epoch.unwrap(),
+                "https://example.com/start#details".to_owned(),
+            )
+            .unwrap();
+        drop(registry);
+
+        let reopened = BrowserRegistry::default();
+        reopened.initialize_private_state(private.path()).unwrap();
+        assert_eq!(
+            reopened
+                .recover_session(&owner, "browser-1", "workspace-1")
+                .unwrap()
+                .unwrap()
+                .url,
+            "https://example.com/start#details"
+        );
+    }
+
+    #[test]
+    fn explicit_close_forgets_only_the_exact_recovery_binding() {
+        let private = tempfile::tempdir().unwrap();
+        let owner = OwnerId::local();
+        let registry = BrowserRegistry::default();
+        registry.initialize_private_state(private.path()).unwrap();
+        let instance = registry
+            .register_managed(
+                "browser-1",
+                "workspace-1",
+                owner.clone(),
+                Uuid::new_v4().to_string(),
+                "https://example.com/".to_owned(),
+                true,
+            )
+            .unwrap();
+        registry
+            .page_finished(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/".to_owned(),
+            )
+            .unwrap();
+
+        assert!(registry
+            .recover_session(&owner, "browser-1", "workspace-2")
+            .is_err());
+        assert!(registry
+            .forget_recovery(&owner, "browser-1", "workspace-2")
+            .is_err());
+        registry.remove("browser-1", "workspace-1").unwrap();
+        registry
+            .forget_recovery(&owner, "browser-1", "workspace-1")
+            .unwrap();
+        drop(registry);
+
+        let reopened = BrowserRegistry::default();
+        reopened.initialize_private_state(private.path()).unwrap();
+        assert!(reopened
+            .recover_session(&owner, "browser-1", "workspace-1")
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
