@@ -11,10 +11,12 @@ import {
 function digest(
   attention: Attention["state"],
   lifecycle: CodeSessionDigest["lifecycle"],
+  turnCount = 0,
 ): CodeSessionDigest {
   return {
     attention: { state: attention, source: "lifecycle" },
     lifecycle,
+    turn_count: turnCount,
   } as CodeSessionDigest;
 }
 
@@ -85,7 +87,7 @@ describe("attentionMarkForDigest", () => {
     ).toBeUndefined();
   });
 
-  it("keeps attention that outranks lifecycle and leaves idle unmarked", () => {
+  it("keeps attention that outranks lifecycle and leaves a never-started idle unmarked", () => {
     const needsYou = digest(
       { type: "needs_you", prompt: "Approve this?", source: "structured" },
       "idle",
@@ -94,5 +96,18 @@ describe("attentionMarkForDigest", () => {
     expect(
       attentionMarkForDigest(digest({ type: "idle" }, "idle")),
     ).toBeUndefined();
+  });
+
+  it("marks a parked turn as Done so the card still reads as an agent", () => {
+    const done = {
+      state: { type: "done_unreviewed" as const },
+      source: "lifecycle" as const,
+    };
+    expect(
+      attentionMarkForDigest(digest({ type: "working" }, "idle", 1)),
+    ).toEqual(done);
+    expect(attentionMarkForDigest(digest({ type: "idle" }, "idle", 3))).toEqual(
+      done,
+    );
   });
 });

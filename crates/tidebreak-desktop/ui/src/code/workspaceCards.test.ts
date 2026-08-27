@@ -12,7 +12,10 @@ import {
   groupWorkspacesByRepo,
   listArchivedWorkspaces,
   middleTruncate,
+  isSessionRowWorthy,
   sessionActivityLabel,
+  sessionActivityLineLabel,
+  sessionRowLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
   workspaceStackParent,
@@ -332,6 +335,58 @@ describe("formatCompactAge", () => {
   });
 });
 
+describe("isSessionRowWorthy", () => {
+  it("keeps a parked idle agent on the rail", () => {
+    expect(isSessionRowWorthy(digest("ws-a", { turn_count: 2 }))).toBe(true);
+    expect(
+      isSessionRowWorthy(
+        digest("ws-a", { lifecycle: "created", turn_count: 0 }),
+      ),
+    ).toBe(false);
+    expect(isSessionRowWorthy(undefined)).toBe(false);
+  });
+});
+
+describe("sessionRowLabel", () => {
+  it("calls a parked turn Done once it has finished work", () => {
+    expect(sessionRowLabel(digest("ws-a", { turn_count: 2 }))).toBe("Done");
+    expect(
+      sessionRowLabel(digest("ws-a", { lifecycle: "created", turn_count: 0 })),
+    ).toBe("Created");
+  });
+});
+
+describe("sessionActivityLineLabel", () => {
+  it("prefers the recap on a parked turn", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          turn_count: 4,
+          recap: "Folded the backoff into refresh.",
+        }),
+      ),
+    ).toBe("Folded the backoff into refresh.");
+  });
+
+  it("keeps live activity and the turn count together", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          lifecycle: "running",
+          activity: "shell",
+          turn_count: 3,
+        }),
+      ),
+    ).toBe("Shell running · 3 turns");
+  });
+
+  it("falls back to Done and the turn count without a recap", () => {
+    expect(sessionActivityLineLabel(digest("ws-a", { turn_count: 2 }))).toBe(
+      "Done · 2 turns",
+    );
+  });
+});
+
 describe("sessionActivityLabel", () => {
   it.each([
     ["agent", "Agent working"],
@@ -417,6 +472,35 @@ describe("workspaceCardLabel", () => {
         session,
       }),
     ).toBe("Fix login · Idle · app · tidebreak/fix-login");
+  });
+
+  it("announces Done for a parked idle session, matching the complete mark", () => {
+    const session = digest("ws-a", {
+      lifecycle: "idle",
+      attention: { state: { type: "idle" }, source: "lifecycle" },
+      turn_count: 4,
+    });
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: {
+          state: { type: "done_unreviewed" },
+          source: "lifecycle",
+        },
+        session,
+      }),
+    ).toBe("Fix login · Done · app · tidebreak/fix-login");
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: session.attention,
+        session,
+      }),
+    ).toBe("Fix login · Done · app · tidebreak/fix-login");
   });
 
   it("announces queue membership instead of the open lifecycle", () => {
