@@ -84,6 +84,7 @@ export function useTranscriptFollow({
   const contentObserverRef = useRef<ResizeObserver | null>(null);
   const [scrolledAway, setScrolledAway] = useState(false);
   const [fadeClass, setFadeClass] = useState<string | null>(null);
+  const followPaintRef = useRef<number | null>(null);
 
   // Reflect where the scroll sits onto the edge-fade masks: fade the top once
   // there is content above, the bottom while there is content below.
@@ -109,10 +110,25 @@ export function useTranscriptFollow({
     if (!scroll) return;
     isProgrammaticRef.current = true;
     setScrolledAway(false);
-    scrollToLatest(scroll, "auto");
-    requestAnimationFrame(() => {
-      isProgrammaticRef.current = false;
-    });
+    // Two frames: the first lets newly inserted rows paint, the second
+    // scrolls. A catch-up scroll in the same frame as the insert is what
+    // WKWebView blanks until the next user scroll — a send.
+    if (followPaintRef.current !== null) return;
+    const afterPaint = () => {
+      followPaintRef.current = requestAnimationFrame(() => {
+        followPaintRef.current = null;
+        const latest = scrollRef.current;
+        if (!latest) {
+          isProgrammaticRef.current = false;
+          return;
+        }
+        scrollToLatest(latest, "auto");
+        requestAnimationFrame(() => {
+          isProgrammaticRef.current = false;
+        });
+      });
+    };
+    followPaintRef.current = requestAnimationFrame(afterPaint);
   }, []);
 
   const smoothScrollToBottom = useCallback(() => {
@@ -246,6 +262,15 @@ export function useTranscriptFollow({
     if (visible && followsLatestRef.current) scrollToBottom("auto");
     updateEdges();
   }, [visible, scrollToBottom, updateEdges]);
+
+  useEffect(() => {
+    return () => {
+      if (followPaintRef.current !== null) {
+        cancelAnimationFrame(followPaintRef.current);
+        followPaintRef.current = null;
+      }
+    };
+  }, []);
 
   return {
     scrollRef: attachScrollRef,

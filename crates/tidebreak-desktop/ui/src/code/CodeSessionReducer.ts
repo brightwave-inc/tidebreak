@@ -775,8 +775,7 @@ export function reduceCodeSessionEvent(
   const effects: CodeSessionEffect[] = [];
   // Snapshot activity can be stale across a retained close. Historical rows
   // stay unassigned until replay itself establishes their turn.
-  const attributedTurnId =
-    framed.replayed === true ? state.journalTurnId : state.activeTurnId;
+  const attributedTurnId = activityTurnId(state, framed);
 
   switch (event.type) {
     case "session_started":
@@ -1233,6 +1232,36 @@ function replayFollowsAcceptedTurn(
     state.acceptedTurnFence !== null &&
     framed.seq > state.acceptedTurnFence.afterSeq
   );
+}
+
+/**
+ * Which turn a frame's rows belong on.
+ *
+ * Replay follows the journal's `turn_started`. Live frames follow the active
+ * turn, except in the window after a submit is accepted and before the engine
+ * names that turn: leftover activity from the turn that just finished must
+ * not land on the new prompt. That is what made a delayed first reply appear
+ * under the next user message.
+ */
+function activityTurnId(
+  state: CodeSessionState,
+  framed: SequencedCodeEventFrame,
+): string | null {
+  if (framed.replayed === true) return state.journalTurnId;
+  if (state.acceptedTurnFence !== null && state.journalTurnId === null) {
+    return lastBoundaryTurnId(state.items) ?? state.activeTurnId;
+  }
+  return state.activeTurnId ?? lastBoundaryTurnId(state.items);
+}
+
+function lastBoundaryTurnId(
+  items: readonly CodeTranscriptItem[],
+): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind === "turn_boundary" && item.turnId) return item.turnId;
+  }
+  return null;
 }
 
 /**

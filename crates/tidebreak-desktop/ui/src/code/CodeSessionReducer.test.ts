@@ -1848,6 +1848,71 @@ describe("hydrate then replay", () => {
     ]);
   });
 
+  it("inserts a late assistant message before the finished turn's seam", () => {
+    const { state: completed } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
+    const late = reduceCodeSessionEvent(
+      completed,
+      framed(completed.lastSeq + 1, {
+        type: "assistant_message",
+        text: "Three issues triaged.",
+      }),
+      deps(),
+    );
+
+    expect(late.state.items.map((item) => item.kind)).toEqual([
+      "assistant",
+      "turn_boundary",
+    ]);
+    expect(late.state.items[0]).toMatchObject({
+      kind: "assistant",
+      text: "Three issues triaged.",
+      turnId: "t1",
+      streaming: false,
+    });
+  });
+
+  it("keeps a late assistant message on the turn that just finished after the next prompt is accepted", () => {
+    const { state: completed } = play([
+      { type: "turn_started", turn_id: "t1" },
+      { type: "turn_completed", usage: NO_USAGE },
+    ]);
+    const accepted = applyAcceptedTurn(completed, {
+      ...SNAPSHOT_TURN,
+      id: "t2",
+      ordinal: 2,
+      status: "running",
+      user_input: "poll for them",
+      ended_at: undefined,
+    });
+    const late = reduceCodeSessionEvent(
+      accepted,
+      framed(accepted.lastSeq + 1, {
+        type: "assistant_message",
+        text: "Three issues triaged.",
+      }),
+      deps(),
+    );
+
+    expect(late.state.items.map((item) => item.kind)).toEqual([
+      "assistant",
+      "turn_boundary",
+      "user",
+    ]);
+    expect(late.state.items[0]).toMatchObject({
+      kind: "assistant",
+      text: "Three issues triaged.",
+      turnId: "t1",
+    });
+    expect(late.state.items[2]).toMatchObject({
+      kind: "user",
+      turnId: "t2",
+      text: "poll for them",
+    });
+  });
+
   it("keeps a later turn's seam from capturing an earlier turn's replay", () => {
     const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
       SNAPSHOT_TURN,
