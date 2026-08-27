@@ -60,7 +60,6 @@ import { HarnessInstallNote } from "./HarnessInstallNote";
 import { useWarmHarnessInstall } from "./useHarnessInstall";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
-  autoIsUnsupervised,
   createPermissionModes,
   defaultCreatePermissionMode,
   effortLadder,
@@ -70,7 +69,6 @@ import {
   PERMISSION_MODE_POLICY_BLOCKED,
   preferredCodeModels,
   requiresHarnessModelIds,
-  unsupervisedModeStatement,
   CREATE_PERMISSION_MODE_FIXED,
   HARNESS_LABELS,
   type CodeModelOption,
@@ -369,15 +367,6 @@ export function NewWorkspaceDialog({
   );
   const postedMode = permittedMode ?? requestedMode;
   const policyBlocksCreate = Boolean(selectedHarness && permittedMode === null);
-  // The posture create is about to post is never silent: a mode that runs
-  // with nobody to ask says so next to the control (decisions 0038, 0039).
-  const unsupervisedNote =
-    selectedHarness && !policyBlocksCreate
-      ? unsupervisedModeStatement(
-          postedMode,
-          autoIsUnsupervised(selectedHarness.caps),
-        )
-      : null;
   // An engine still downloading is a legal pick, not a legal start: create
   // would sit on the same npm install with nothing but a spinner. The install
   // note under the pills says what the wait is, and any engine already on
@@ -1153,11 +1142,6 @@ export function NewWorkspaceDialog({
                   false && (
                   <p className="text-muted-foreground px-2 text-xs">
                     {CREATE_PERMISSION_MODE_FIXED}
-                  </p>
-                )}
-                {unsupervisedNote && (
-                  <p className="text-muted-foreground px-2 text-xs">
-                    {unsupervisedNote}
                   </p>
                 )}
                 {policyBlocksCreate && (

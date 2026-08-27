@@ -113,36 +113,9 @@ export const CREATE_PERMISSION_MODE_FIXED =
 export const PERMISSION_MODE_POSTURES: Record<PermissionMode, string> = {
   plan: "Plans the work and writes nothing",
   ask: "Asks before every tool that changes something",
-  // No claim about escalation: whether Auto has anywhere to ask is the
-  // engine's capability, not the mode's (see [`autoIsUnsupervised`]).
   auto: "Decides for itself as it works",
   allow: "Runs every tool without asking",
 };
-
-/** Stated wherever unsupervised Auto is offered (decision 0038). */
-export const UNSUPERVISED_AUTO_NOTE =
-  "This engine has no approval channel: in Auto, every action runs without asking.";
-
-/** Stated wherever Allow is offered (decision 0039). */
-export const ALLOW_ALL_NOTE =
-  "This engine's permission system is off: every action runs without asking.";
-
-/**
- * The statement a surface shows next to the permission control when the
- * posture on offer runs with nobody to ask (decisions 0038, 0039).
- *
- * `null` for a posture that escalates, so the statement appears only where it
- * changes what the reader should expect: Allow all anywhere, and Auto on an
- * engine whose Auto is unsupervised.
- */
-export function unsupervisedModeStatement(
-  mode: PermissionMode,
-  autoUnsupervised: boolean,
-): string | null {
-  if (mode === "allow") return ALLOW_ALL_NOTE;
-  if (mode === "auto" && autoUnsupervised) return UNSUPERVISED_AUTO_NOTE;
-  return null;
-}
 
 /** The header chip's tooltip: the posture, named and spelled out. */
 export function sessionPermissionModeTooltip(mode: PermissionMode): string {
@@ -251,21 +224,10 @@ export function harnessCanStartNow(entry: {
 }
 
 /**
- * True when this engine's Auto runs with nobody to ask (decision 0038):
- * it has an auto posture but no approval channel to escalate through.
- */
-export function autoIsUnsupervised(caps: ModeCaps): boolean {
-  return (
-    caps.auto_mode === "supported" && caps.structured_approvals !== "supported"
-  );
-}
-
-/**
  * Create default: the most autonomous posture the engine honors, walking
  * Allow → Auto → Ask → Plan (decision 0039, amended 2026-08-18). Approving
  * every step of a fresh session cost more than it caught, so create starts
- * where the work runs. The mode is never silent: whichever surface offers it
- * states the posture next to the control (decisions 0033, 0038).
+ * where the work runs.
  */
 export function defaultCreatePermissionMode(caps: ModeCaps): PermissionMode {
   if (caps.allow_mode === "supported") return "allow";

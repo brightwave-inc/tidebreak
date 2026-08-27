@@ -62,7 +62,6 @@ import {
   codeModelVendor,
   effortLadder,
   groupCodeModelOptions,
-  unsupervisedModeStatement,
   type CodeModelOption,
   PERMISSION_MODE_UNAVAILABLE_REASON,
   SESSION_PERMISSION_MODE_LOCKED,
@@ -1089,20 +1088,6 @@ export function CodeComposer({
     }
   }
 
-  // The posture is never silent: a mode that runs with nobody to ask says so
-  // under the control that picked it (decisions 0038, 0039). An engine that
-  // offers Auto but not Ask has no approval channel, so its Auto escalates
-  // nothing. Start states it once, where the choice is made; a live session
-  // carries it in the workspace header instead of under every draft.
-  const unsupervisedNote = sessionId
-    ? null
-    : unavailableReason
-      ? null
-      : unsupervisedModeStatement(
-          permissionMode,
-          availableModes.includes("auto") && !availableModes.includes("ask"),
-        );
-
   return (
     <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
       <Composer
@@ -1228,11 +1213,6 @@ export function CodeComposer({
         steerStatus={steerStatus}
         footerNote={
           <>
-            {unsupervisedNote && (
-              <p className="text-muted-foreground text-xs">
-                {unsupervisedNote}
-              </p>
-            )}
             {unavailableReason && (
               <p className="text-muted-foreground text-xs">
                 {unavailableReason}

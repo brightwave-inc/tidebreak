@@ -333,6 +333,12 @@ export const Default: Story = {
     expect(prompt.getBoundingClientRect().height).toBeGreaterThanOrEqual(
       13 * unit,
     );
+    const engine = page.getByRole("button", { name: /^Harness:/ });
+    const permissions = page.getByRole("button", { name: /^Permissions:/ });
+    expect(permissions.getBoundingClientRect().top).toBeCloseTo(
+      engine.getBoundingClientRect().top,
+      0,
+    );
   },
 };
 
