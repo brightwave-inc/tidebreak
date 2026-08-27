@@ -1915,7 +1915,7 @@ impl CodeRuntime {
             .map_err(map_gh)?;
         // The delivery lists hold the pre-push row.
         self.delivery_cache.invalidate();
-        // Best-effort contributed fact (decision 62): a user push to a branch
+        // Best-effort contributed fact (decision 77): a user push to a branch
         // that is a pull request's head is the same act the detector mints
         // for. Failures are silent; the reconcile sweep corrects. On a hosted
         // machine the read rides the forge REST API with the same credential
@@ -2720,7 +2720,7 @@ impl CodeRuntime {
     }
 
     /// Every pull request attributed to the workspace, from the durable fact
-    /// store (decision 62): open first, then newest activity. No host read.
+    /// store (decision 77): open first, then newest activity. No host read.
     pub(crate) async fn workspace_pull_requests(
         &self,
         owner: &OwnerId,
@@ -2987,7 +2987,7 @@ impl CodeRuntime {
         let created_number = digest.number;
         workspace.pr = Some(digest);
         self.save_workspace(&workspace).await?;
-        // Best-effort authored fact (decision 62). The digest just came from
+        // Best-effort authored fact (decision 77). The digest just came from
         // the host; the REST path already holds the full row, and the `gh`
         // path re-reads it repository-qualified for full identity and
         // timestamps. Failures are silent; the reconcile sweep corrects.
@@ -4661,7 +4661,7 @@ impl CodeRuntime {
         *self.trigger_sweep.lock().expect("trigger sweep") = Some(guard);
     }
 
-    /// Start the pull-request reconcile sweep once (decision 62). Same
+    /// Start the pull-request reconcile sweep once (decision 77). Same
     /// weak-handle shape, on a third coprime interval.
     pub(super) fn ensure_reconcile_sweep(self: &Arc<Self>) {
         if self.reconcile_started.swap(true, Ordering::SeqCst) {

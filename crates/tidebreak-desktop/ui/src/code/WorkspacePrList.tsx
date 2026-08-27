@@ -22,7 +22,7 @@ export function factKey(fact: CodeWorkspacePullRequestFact): string {
 }
 
 /**
- * Every pull request attributed to the workspace (decision 62), as a compact
+ * Every pull request attributed to the workspace (decision 77), as a compact
  * selector above the single-PR panel. Rendered only when there is more than
  * one, so the common one-PR workspace keeps today's surface untouched.
  */

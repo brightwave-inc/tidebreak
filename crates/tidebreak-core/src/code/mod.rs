@@ -623,7 +623,7 @@ pub struct CodeRepo {
     /// Populated lazily the first time the origin resolves and refreshed when
     /// it changes; `None` until then, and for repositories whose origin is
     /// not GitHub-shaped. Persisted so pull-request facts join to local
-    /// repositories without a git subprocess per read (decision 62).
+    /// repositories without a git subprocess per read (decision 77).
     pub origin_host: Option<String>,
     /// Repository owner login parsed from the origin remote.
     pub origin_owner: Option<String>,
@@ -666,7 +666,7 @@ pub struct CodeWorkspace {
     pub bundle_bytes: Option<i64>,
 }
 
-/// Coarse lifecycle of an observed pull request (decision 62).
+/// Coarse lifecycle of an observed pull request (decision 77).
 ///
 /// Deliberately narrower than the digest's free-form `state` string: the fact
 /// table stores only what stack derivation and trigger edges key on.
@@ -705,7 +705,7 @@ impl CodePullRequestState {
     }
 }
 
-/// How strongly a workspace is tied to a pull request (decision 62).
+/// How strongly a workspace is tied to a pull request (decision 77).
 ///
 /// Only two acts mint attribution: `gh pr create` (authored) and a push whose
 /// branch is or becomes a pull request's head (contributed). Reading,
@@ -742,7 +742,7 @@ impl CodePullRequestRelation {
     }
 }
 
-/// Which observer first tied a workspace to a pull request (decision 62).
+/// Which observer first tied a workspace to a pull request (decision 77).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodePullRequestDiscovery {
@@ -776,7 +776,7 @@ impl CodePullRequestDiscovery {
     }
 }
 
-/// Durable observation of one pull request (decision 62).
+/// Durable observation of one pull request (decision 77).
 ///
 /// GitHub stays authoritative; a row is a confirmed observation, never a
 /// guess. Identity is `(owner, host, repo_owner, repo_name, number)`, so a
@@ -892,7 +892,7 @@ impl CodePullRequestLiveState {
     }
 }
 
-/// One workspace's tie to one pull request (decision 62).
+/// One workspace's tie to one pull request (decision 77).
 ///
 /// At most one row per `(pull_request, workspace)`; `relation` holds the
 /// strongest claim, upgraded from contributed to authored when authoring
@@ -1278,11 +1278,11 @@ pub enum CodeTriggerCondition {
     Merged,
     /// The pull request closed without merging.
     Closed,
-    /// A pull request came into existence (decision 62). Edge-sourced from
+    /// A pull request came into existence (decision 77). Edge-sourced from
     /// the durable fact store's `first_seen_at`, never from
     /// [`classify_trigger_condition`].
     PrOpened,
-    /// A tracked pull request's head moved (decision 62). Edge-sourced from
+    /// A tracked pull request's head moved (decision 77). Edge-sourced from
     /// the fact store, once per distinct head; the first observed head is a
     /// silent baseline, never a notification.
     PrUpdated,
@@ -1581,7 +1581,7 @@ impl CodeTriggerFire {
 ///
 /// Deliberately never returns [`CodeTriggerCondition::PrOpened`] or
 /// [`CodeTriggerCondition::PrUpdated`]: those are edges of the durable fact
-/// store (decision 62), not states a digest can carry, and the trigger
+/// store (decision 77), not states a digest can carry, and the trigger
 /// sweep's fact pass fires them without a host read.
 #[must_use]
 pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerCondition> {

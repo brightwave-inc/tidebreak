@@ -439,7 +439,7 @@ export const ReviewMergeQueued: Story = {
 };
 
 /**
- * Several attributed pull requests (decision 62): the set lists above the
+ * Several attributed pull requests (decision 77): the set lists above the
  * panel, the primary stays live, and a selected row shows its stored
  * snapshot.
  */

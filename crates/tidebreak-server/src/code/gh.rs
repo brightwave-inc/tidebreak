@@ -1961,7 +1961,7 @@ pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
     }
 }
 
-/// Fields a pull-request fact snapshot needs (decision 62). Narrower than the
+/// Fields a pull-request fact snapshot needs (decision 77). Narrower than the
 /// delivery list fields: no checks, review, or mergeability — those stay
 /// live-only.
 pub(crate) const PR_FACT_FIELDS: &str = "number,url,title,state,isDraft,author,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergedAt,closedAt";

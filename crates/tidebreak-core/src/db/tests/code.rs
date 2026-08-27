@@ -3536,7 +3536,7 @@ async fn trigger_attention_acceptance_is_atomic_and_global() {
     );
 }
 
-/// Facts and attribution (decision 62): identity upsert, claim-once, and the
+/// Facts and attribution (decision 77): identity upsert, claim-once, and the
 /// contributed-to-authored promotion.
 #[tokio::test]
 async fn pull_request_facts_upsert_claim_and_promote() {

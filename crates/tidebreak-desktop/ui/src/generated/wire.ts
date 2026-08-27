@@ -1061,7 +1061,7 @@ stack_size?: number,
 /**
  * The pull request this one is stacked on. Host stack order wins when
  * the host reported a stack; branch inference from the durable fact set
- * is the fallback (decision 62), so a parent outside the current page
+ * is the fallback (decision 77), so a parent outside the current page
  * or filter still resolves. Absent when the base is the default branch
  * or nothing tracked owns it.
  */
@@ -1162,7 +1162,7 @@ export type CodeDeliveryWorkflowJob = { id: number, name: string, status: string
 export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: RepoId, title: string, branch_name: string, status: CodeWorkspaceStatus, exact: boolean, 
 /**
  * Durable attribution behind this link, when one is stored: the
- * workspace authored or contributed to the pull request (decision 62).
+ * workspace authored or contributed to the pull request (decision 77).
  * Absent on links the live heuristic derived.
  */
 relation?: CodePullRequestRelation, };
@@ -1427,7 +1427,7 @@ comments: Array<PullRequestComment>, };
 export type CodePrMergeMethod = "squash" | "merge" | "rebase";
 
 /**
- * How strongly a workspace is tied to a pull request (decision 62).
+ * How strongly a workspace is tied to a pull request (decision 77).
  *
  * Only two acts mint attribution: `gh pr create` (authored) and a push whose
  * branch is or becomes a pull request's head (contributed). Reading,
@@ -1498,7 +1498,7 @@ harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attentio
 activity?: CodeSessionActivity, pr_state?: PullRequestDigest, 
 /**
  * How many pull requests hold a durable attribution to this workspace
- * (decision 62). Absent when none do.
+ * (decision 77). Absent when none do.
  */
 pr_count?: number, 
 /**
@@ -1664,7 +1664,7 @@ activity?: CodeSessionActivity,
 pr_state?: PullRequestDigest, 
 /**
  * How many pull requests hold a durable attribution to this
- * workspace (decision 62). Absent when none do.
+ * workspace (decision 77). Absent when none do.
  */
 pr_count?: number, 
 /**
@@ -1794,7 +1794,7 @@ pushes_as_self?: boolean, watch?: CodeWatchSnapshot, };
 
 /**
  * One pull request attributed to a workspace, from the durable fact store
- * (decision 62). A projection of the stored snapshot — no live host read.
+ * (decision 77). A projection of the stored snapshot — no live host read.
  */
 export type CodeWorkspacePullRequestFact = { host: string, repo_owner: string, repo_name: string, number: number, url: string, title: string, 
 /**

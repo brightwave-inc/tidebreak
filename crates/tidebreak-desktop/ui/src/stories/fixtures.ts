@@ -996,7 +996,7 @@ export const deliveryWorkspaces: CodeWorkspaceSnapshot[] = [
 ];
 
 /**
- * A three-level stack plus an orphan child (decision 62): parent on main,
+ * A three-level stack plus an orphan child (decision 77): parent on main,
  * child on the parent's head, grandchild on the child's, and one row whose
  * parent is not loaded. Separate from `deliveryPullRequests`, whose stories
  * assert exact tone counts.

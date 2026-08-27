@@ -241,7 +241,7 @@ pub(crate) struct LiveSink {
     pending_resume_ref: std::sync::Mutex<Option<String>>,
     /// Where tests point `gh`; `None` outside tests. Snapshotted at attach so
     /// the post-turn fact detector confirms against the same binary every
-    /// other gh call in the process resolves (decision 62).
+    /// other gh call in the process resolves (decision 77).
     gh_search_path: Option<String>,
     /// Engine-lifetime unrecognized count already folded onto the session row.
     ///

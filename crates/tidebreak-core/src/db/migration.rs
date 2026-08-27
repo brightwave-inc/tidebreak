@@ -992,7 +992,7 @@ impl MigrationTrait for CodePullRequestLiveTier {
     }
 }
 
-/// Durable pull-request facts and workspace attribution (decision 62).
+/// Durable pull-request facts and workspace attribution (decision 77).
 ///
 /// `code_pull_request` records confirmed observations of pull requests,
 /// keyed by full repository identity so a pull request in a repository with
@@ -1793,7 +1793,7 @@ const BASELINE_TRIGGER_CONDITIONS: &[&str] = &[
     "closed",
 ];
 
-/// The condition tokens including the fact edges (decision 62).
+/// The condition tokens including the fact edges (decision 77).
 const FACT_TRIGGER_CONDITIONS: &[&str] = &[
     "checks_failed",
     "conflicts",
@@ -1807,7 +1807,7 @@ const FACT_TRIGGER_CONDITIONS: &[&str] = &[
     "pr_updated",
 ];
 
-/// Accept the fact-edge conditions `pr_opened` and `pr_updated` (decision 62).
+/// Accept the fact-edge conditions `pr_opened` and `pr_updated` (decision 77).
 ///
 /// Both condition CHECKs are table-level — `code_trigger.condition` from the
 /// frozen baseline and `code_trigger_fire.delivery_condition` from the outbox

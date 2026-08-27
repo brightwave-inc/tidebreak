@@ -553,7 +553,7 @@ export function repoAccentClass(id: string): string {
 
 /**
  * The chip suffix for a workspace's attributed pull-request set
- * (decision 62): a count once there is more than one, nothing otherwise —
+ * (decision 77): a count once there is more than one, nothing otherwise —
  * the single-PR chip already names its one pull request.
  */
 export function workspacePrChipSummary(
@@ -564,7 +564,7 @@ export function workspacePrChipSummary(
 }
 
 /**
- * The sibling workspace this one's branch is stacked on (decision 62): its
+ * The sibling workspace this one's branch is stacked on (decision 77): its
  * base ref names that sibling's branch in the same repository. An `origin/`
  * prefix strips, the way pull-request creation resolves the base. Stacks
  * are creatable today by basing a workspace on another's branch; this is

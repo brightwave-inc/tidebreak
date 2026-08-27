@@ -185,7 +185,7 @@ export function WorkspaceCard({
   visibleMeta: { repoChip: boolean; branch: boolean };
   commands: WorkspaceCommand[];
   childSessions?: CodeSessionDigest[];
-  /** The sibling workspace this branch is stacked on (decision 62). */
+  /** The sibling workspace this branch is stacked on (decision 77). */
   stackParent?: { id: string; title: string } | null;
   /** Open the hover detail at mount time. Stories use this for visual review. */
   detailDefaultOpen?: boolean;

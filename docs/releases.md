@@ -617,6 +617,14 @@ encodes that pre-1.0 behavior.
 For example, `0.3.2` becomes `0.3.3` for a fix and `0.4.0` for either a feature
 or a breaking pre-1.0 change.
 
+Desktop upgrades from **v0.61.0** onward keep local data. Schema changes after
+that pin are appended migrations
+([decision 61](decisions/0061-schema-changes-are-migrations.md)). An upgrade
+from **v0.60.0 or earlier** still rebuilds the SQLite profile once on first
+open of a post-pin binary, because those databases predate the recorded
+baseline. v0 will not reconstruct projects lost in that window. Hosted
+PostgreSQL never used the epoch; it upgrades in place.
+
 ## Preparing and shipping 1.0.0
 
 `1.0.0` is a deliberate compatibility commitment. The current desktop schema

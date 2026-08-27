@@ -1,4 +1,4 @@
-//! Fact-edge trigger conditions and stack-aware classification (decision 62).
+//! Fact-edge trigger conditions and stack-aware classification (decision 77).
 //!
 //! These drive the real sweeps against a shimmed `gh`: the reconcile sweep
 //! seeds durable facts, then the trigger sweep fires `pr_opened` and
@@ -394,7 +394,7 @@ async fn durable_facts_do_not_guess_stack_parents_from_branch_names() {
     assert_eq!(heads, vec!["ccc333".to_owned()]);
 }
 
-/// Host stack edges reach the trigger sweep's fetched path (decision 62):
+/// Host stack edges reach the trigger sweep's fetched path (decision 77):
 /// 416's base branch matches nothing on the page, so only the host stack can
 /// say it waits on 412 — and the sweep must hold its Behind fire there while
 /// an identical unstacked pull request still fires.

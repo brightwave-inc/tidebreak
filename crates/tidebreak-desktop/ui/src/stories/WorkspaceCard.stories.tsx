@@ -269,7 +269,7 @@ export const MergeQueued: Story = {
 };
 
 /**
- * A branch based on a sibling workspace's branch (decision 62): the stack
+ * A branch based on a sibling workspace's branch (decision 77): the stack
  * relationship nests as a child row that opens the parent workspace.
  */
 export const StackedOnSibling: Story = {
@@ -283,7 +283,7 @@ export const StackedOnSibling: Story = {
 };
 
 /**
- * A workspace that worked on several pull requests (decision 62): the chip
+ * A workspace that worked on several pull requests (decision 77): the chip
  * keeps its primary pull request and gains the attributed count.
  */
 export const SeveralPullRequests: Story = {

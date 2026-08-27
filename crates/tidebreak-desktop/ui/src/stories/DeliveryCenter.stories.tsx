@@ -587,7 +587,7 @@ export const PullRequestLifecycles: Story = {
 };
 
 /**
- * Stack lanes (decision 62): children indent under their parent in fact
+ * Stack lanes (decision 77): children indent under their parent in fact
  * order, and a child whose parent is not loaded stays flat with a
  * "stacked on" chip instead of a hidden edge.
  */

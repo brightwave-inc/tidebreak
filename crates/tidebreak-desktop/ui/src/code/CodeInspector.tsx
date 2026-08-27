@@ -349,7 +349,7 @@ export function inspectorTurnLabel(
 
 /**
  * The inspector's Pull request tab: the workspace's attributed set above the
- * single-PR panel (decision 62). With one or no attributed pull requests the
+ * single-PR panel (decision 77). With one or no attributed pull requests the
  * list stays hidden and this is exactly the live panel it always was.
  * Selecting a non-primary row shows its stored snapshot; the primary row
  * returns to the live resource.

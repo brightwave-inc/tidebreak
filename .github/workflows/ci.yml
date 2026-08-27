@@ -217,6 +217,7 @@ jobs:
               # before the documentation carve-out swallows them.
               legal/*|scripts/generate-third-party-notices.mjs|scripts/license-texts/*)
                 notices=true ;;
+              scripts/adr.py|scripts/adr_test.py) ;;
               *.md|docs/*|assets/*|.githooks/*|LICENSE|NOTICE) ;;
               .github/workflows/ci.yml)
                 docs_site=true
@@ -288,6 +289,16 @@ jobs:
             echo "windows=$windows"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
+
+  adr:
+    name: ADR numbering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check unique ADR numbers
+        run: python3 scripts/adr.py check
+      - name: Test ADR numbering
+        run: python3 scripts/adr_test.py
 
   secrets:
     name: secret scan (gitleaks)

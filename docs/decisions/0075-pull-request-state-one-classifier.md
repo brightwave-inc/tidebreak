@@ -4,7 +4,7 @@
 - Date: 2026-08-26
 - Owners: code mode, delivery
 - Related: [`0066-pull-request-state-is-one-store.md`](0066-pull-request-state-is-one-store.md),
-  [`0062-pull-request-facts-and-attribution.md`](0062-pull-request-facts-and-attribution.md)
+  [`0077-pull-request-facts-and-attribution.md`](0077-pull-request-facts-and-attribution.md)
 
 ## Context
 
