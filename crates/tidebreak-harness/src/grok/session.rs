@@ -328,7 +328,9 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     }
     argv.extend(launch.extra_argv.iter().cloned());
     let mut env = launch.extra_env.to_vec();
-    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
+    env.retain(|(key, _)| {
+        !BrowserChannelSpec::is_reserved_env_key(key) && key != RELAY_KEY_ENV && key != "PWD"
+    });
     // The relay key itself was consumed into `relay_auth` and the retain
     // above stripped its variable; the child learns only where the file is
     // and which issuer scope it names.
