@@ -85,6 +85,10 @@ import {
   type PullRequestCommentOrder,
 } from "./pullRequestPresentation";
 import {
+  isStackedPullRequest,
+  preservePullRequestStackMetadata,
+} from "./pullRequestStacks";
+import {
   PULL_REQUEST_LIFECYCLE_LABEL,
   PULL_REQUEST_LIFECYCLE_TONE,
   STATUS_TONE_BADGE_VARIANT,
@@ -293,9 +297,17 @@ export function PullRequestDetailPane({
     mounted.current && activeTarget.current === targetId;
 
   const adoptDetail = (next: CodeDeliveryPullRequestDetail) => {
-    setDetail(next);
-    onDetailRef.current?.(next);
-    onSummaryRef.current?.(next.summary);
+    const adoptedSummary = preservePullRequestStackMetadata(
+      summary,
+      next.summary,
+    );
+    const adopted =
+      adoptedSummary === next.summary
+        ? next
+        : { ...next, summary: adoptedSummary };
+    setDetail(adopted);
+    onDetailRef.current?.(adopted);
+    onSummaryRef.current?.(adopted.summary);
   };
 
   const load = async () => {
@@ -421,7 +433,12 @@ export function PullRequestDetailPane({
         // the layer must actually be mergeable now, not just open.
         const action = prDirectMergeAction(
           deliveryPullRequestDigest(fresh.summary),
-          { hasMergeQueue },
+          {
+            hasMergeQueue,
+            suppressAutoMerge:
+              isStackedPullRequest(fresh.summary) ||
+              (fresh.stack?.length ?? 0) > 1,
+          },
         );
         if (!action) {
           toast.warning(
@@ -1123,6 +1140,8 @@ function PrMergeBox({
     detail.can_merge && summary.head_sha
       ? prDirectMergeAction(deliveryPullRequestDigest(summary), {
           hasMergeQueue,
+          suppressAutoMerge:
+            isStackedPullRequest(summary) || (detail.stack?.length ?? 0) > 1,
         })
       : null;
   const canRerun = detail.can_rerun_failed && workflowRunIds.length > 0;

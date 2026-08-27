@@ -74,7 +74,7 @@ export type PrDirectMergeAction = {
  */
 export function prDirectMergeAction(
   pr: PullRequestDigest,
-  options?: { hasMergeQueue?: boolean },
+  options?: { hasMergeQueue?: boolean; suppressAutoMerge?: boolean },
 ): PrDirectMergeAction | null {
   const { state } = prWorkflowStatus(pr);
   const controls = prMergeControls(state);
@@ -98,6 +98,7 @@ export function prDirectMergeAction(
     return { kind: "merge", label: "Merge", auto: false };
   }
   if (controls.canEnableAutoMerge && !pr.auto_merge_enabled) {
+    if (options?.suppressAutoMerge) return null;
     return {
       kind: "enable_auto_merge",
       label: "Enable auto-merge",

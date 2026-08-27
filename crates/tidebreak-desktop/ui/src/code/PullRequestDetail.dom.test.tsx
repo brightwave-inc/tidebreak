@@ -532,6 +532,35 @@ describe("merge stack", () => {
     expect(screen.getByRole("button", { name: "Merge" })).toBeInTheDocument();
   });
 
+  it("does not offer auto-merge for a stacked pull request", async () => {
+    const stackedPending = {
+      ...stackedDeliveryPullRequests[1]!,
+      checks: [{ name: "ci", bucket: "pending" as const }],
+      mergeable: "unknown",
+      merge_state_status: "blocked",
+    };
+    await render(
+      <PullRequestDetailSheet
+        client={client({
+          getCodeDeliveryPullRequestDetail: async () => ({
+            ...deliveryPullRequestDetails[2302]!,
+            summary: stackedPending,
+            stack: undefined,
+          }),
+        })}
+        summary={stackedPending}
+        hasMergeQueue={false}
+        onClose={vi.fn()}
+        onChanged={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    await screen.findByRole("tab", { name: /Conversation/ });
+    expect(
+      screen.queryByRole("button", { name: "Enable auto-merge" }),
+    ).toBeNull();
+  });
+
   it("stops at a layer the merge gate refuses, merging nothing", async () => {
     vi.mocked(toast.warning).mockClear();
     const runAction = vi.fn(

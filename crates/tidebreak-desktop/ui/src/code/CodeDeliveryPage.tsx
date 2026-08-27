@@ -112,7 +112,12 @@ import {
   prStatus,
   type PullRequestListGroup,
 } from "./prState";
-import { arrangeStackLanes, type StackedRow } from "./pullRequestStacks";
+import {
+  arrangeStackLanes,
+  isStackedPullRequest,
+  preservePullRequestStackMetadata,
+  type StackedRow,
+} from "./pullRequestStacks";
 import {
   deliveryPullRequestDigest,
   deliveryRepositoryHasMergeQueue,
@@ -909,6 +914,7 @@ function PullRequestsSurface({
   const runListMerge = async (item: CodeDeliveryPullRequestSummary) => {
     const action = prDirectMergeAction(deliveryPullRequestDigest(item), {
       hasMergeQueue: deliveryRepositoryHasMergeQueue(items, item.repository),
+      suppressAutoMerge: isStackedPullRequest(item),
     });
     if (!action || !item.head_sha || busyId) return;
     if (action.kind === "merge") {
@@ -988,14 +994,24 @@ function PullRequestsSurface({
   };
 
   const applyAdopted = (rows: CodeDeliveryPullRequestSummary[]) =>
-    rows.map((item) => adoptedSummaries.current.get(item.id) ?? item);
+    rows.map((item) => {
+      const adopted = adoptedSummaries.current.get(item.id);
+      if (!adopted) return item;
+      const merged = preservePullRequestStackMetadata(item, adopted);
+      adoptedSummaries.current.set(item.id, merged);
+      return merged;
+    });
 
   const adoptSummary = (summary: CodeDeliveryPullRequestSummary) => {
-    adoptedSummaries.current.set(summary.id, summary);
+    const previous = items.find((item) => item.id === summary.id);
+    const adopted = previous
+      ? preservePullRequestStackMetadata(previous, summary)
+      : summary;
+    adoptedSummaries.current.set(adopted.id, adopted);
     setItems((current) =>
       current.map((item) =>
-        item.id === summary.id
-          ? summary
+        item.id === adopted.id
+          ? adopted
           : (adoptedSummaries.current.get(item.id) ?? item),
       ),
     );
@@ -1007,8 +1023,8 @@ function PullRequestsSurface({
       useCodeDeliveryStore.getState().rememberPullRequestPage({
         ...cached,
         items: cached.items.map((item) =>
-          item.id === summary.id
-            ? summary
+          item.id === adopted.id
+            ? adopted
             : (adoptedSummaries.current.get(item.id) ?? item),
         ),
       });
@@ -1048,18 +1064,26 @@ function PullRequestsSurface({
           .getCodeDeliveryPullRequestDetail(target)
           .then((detail) => {
             if (token === generation.current) {
-              rememberDetail(detail);
+              const previous = items.find(
+                (item) => item.id === detail.summary.id,
+              );
+              const summary = previous
+                ? preservePullRequestStackMetadata(previous, detail.summary)
+                : detail.summary;
+              const adoptedDetail =
+                summary === detail.summary ? detail : { ...detail, summary };
+              rememberDetail(adoptedDetail);
               setTargetDetailState({
                 key: requestKey,
                 pending: false,
-                detail,
+                detail: adoptedDetail,
               });
-              adoptedSummaries.current.set(detail.summary.id, detail.summary);
+              adoptedSummaries.current.set(summary.id, summary);
               setItems((current) =>
-                applyAdopted(dedupeRows([detail.summary, ...current])),
+                applyAdopted(dedupeRows([summary, ...current])),
               );
               if (!routeSelectionFenced.current) {
-                setSelectedId(detail.summary.id);
+                setSelectedId(summary.id);
               }
             }
             return { detail };
@@ -2146,7 +2170,10 @@ function PullRequestRow({
   const checks = checkSummary(checkCounts(item));
   const comments = item.comment_count;
   const mergeAction = item.head_sha
-    ? prDirectMergeAction(deliveryPullRequestDigest(item), { hasMergeQueue })
+    ? prDirectMergeAction(deliveryPullRequestDigest(item), {
+        hasMergeQueue,
+        suppressAutoMerge: isStackedPullRequest(item),
+      })
     : null;
   return (
     <div
