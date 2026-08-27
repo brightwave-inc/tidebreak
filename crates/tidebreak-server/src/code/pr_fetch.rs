@@ -32,7 +32,7 @@ use tidebreak_core::{
     PullRequestDigest,
 };
 
-use super::gh::{RawHttpResponse, run_gh, run_gh_http, summarize_checks};
+use super::gh::{run_gh, run_gh_http, summarize_checks, RawHttpResponse};
 
 /// Ceiling on concurrent GitHub reads through the gate, across every host.
 const GATE_PERMITS: usize = 4;

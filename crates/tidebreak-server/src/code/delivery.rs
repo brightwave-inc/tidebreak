@@ -17,16 +17,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
 use tidebreak_core::db::code::{
-    WorkflowRunFetchCondition, get_workflow_run_fetch_state, get_workspace,
-    insert_pull_request_attribution, list_attributions_for_pull_requests,
-    list_pull_request_facts_for_repo, list_workflow_run_facts_for_repo, save_pull_request_fact,
-    save_workflow_run_fact, set_workflow_run_fetch_state,
+    get_workflow_run_fetch_state, get_workspace, insert_pull_request_attribution,
+    list_attributions_for_pull_requests, list_pull_request_facts_for_repo,
+    list_workflow_run_facts_for_repo, save_pull_request_fact, save_workflow_run_fact,
+    set_workflow_run_fetch_state, WorkflowRunFetchCondition,
 };
 use tidebreak_core::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
@@ -5753,12 +5753,10 @@ mod tests {
             "headRefName": "stack-child",
             "baseRefName": "stack-parent"
         });
-        assert!(
-            parse_pull_request(&repository_ref(), &conflicting, &[])
-                .unwrap()
-                .head_repository
-                .is_none()
-        );
+        assert!(parse_pull_request(&repository_ref(), &conflicting, &[])
+            .unwrap()
+            .head_repository
+            .is_none());
     }
 
     #[test]
@@ -5870,17 +5868,15 @@ mod tests {
                 CodeDeliveryPrAttentionReason::Behind,
             ]
         );
-        assert!(
-            pull_request_attention(
-                "open",
-                true,
-                Some("changes_requested"),
-                Some("conflicting"),
-                Some("behind"),
-                &checks,
-            )
-            .is_empty()
-        );
+        assert!(pull_request_attention(
+            "open",
+            true,
+            Some("changes_requested"),
+            Some("conflicting"),
+            Some("behind"),
+            &checks,
+        )
+        .is_empty());
     }
 
     #[test]

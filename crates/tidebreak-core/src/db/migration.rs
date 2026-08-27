@@ -2594,12 +2594,12 @@ impl MigrationTrait for CodeQueuedTurns {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
-    use sea_orm_migration::MigratorTrait;
     use sea_orm_migration::prelude::{PostgresQueryBuilder, SchemaManager, SqliteQueryBuilder};
+    use sea_orm_migration::MigratorTrait;
 
-    use super::Migrator;
     #[cfg(feature = "sqlite")]
     use super::rebuild_sqlite_code_workspace_for_archiving_inner;
+    use super::Migrator;
 
     /// Every `CREATE TABLE` a fresh database runs comes from `sqlite_master`,
     /// which stores the statement verbatim and appends what `ALTER TABLE`
@@ -2663,15 +2663,14 @@ mod tests {
                 "m20260827_000021_code_workflow_runs",
             ]
         );
-        assert!(
-            db.query_one_raw(Statement::from_string(
+        assert!(db
+            .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT owner FROM app LIMIT 1".to_owned(),
             ))
             .await
             .unwrap()
-            .is_none()
-        );
+            .is_none());
     }
 
     #[cfg(feature = "sqlite")]
@@ -2711,11 +2710,9 @@ mod tests {
         let error = rebuild_sqlite_code_workspace_for_archiving_inner(&manager, true)
             .await
             .expect_err("the injected statement fails after the live table is dropped");
-        assert!(
-            error
-                .to_string()
-                .contains("missing_workspace_rebuild_table")
-        );
+        assert!(error
+            .to_string()
+            .contains("missing_workspace_rebuild_table"));
 
         let workspace = db
             .query_one_raw(Statement::from_string(
@@ -2726,17 +2723,16 @@ mod tests {
             .unwrap()
             .expect("the original workspace table and row survive");
         assert_eq!(workspace.try_get::<String>("", "status").unwrap(), "active");
-        assert!(
-            db.query_one_raw(Statement::from_string(
+        assert!(db
+            .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT 1 AS present FROM code_session WHERE id = 'session-archive'".to_owned(),
             ))
             .await
             .unwrap()
-            .is_some()
-        );
-        assert!(
-            db.query_one_raw(Statement::from_string(
+            .is_some());
+        assert!(db
+            .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
                  AND name = 'code_workspace_archiving'"
@@ -2744,8 +2740,7 @@ mod tests {
             ))
             .await
             .unwrap()
-            .is_none()
-        );
+            .is_none());
 
         rebuild_sqlite_code_workspace_for_archiving_inner(&manager, false)
             .await
@@ -2755,15 +2750,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            db.query_all_raw(Statement::from_string(
+        assert!(db
+            .query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "PRAGMA foreign_key_check".to_owned(),
             ))
             .await
             .unwrap()
-            .is_empty()
-        );
+            .is_empty());
         let foreign_keys = db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -3187,15 +3181,14 @@ mod tests {
             fire_primary_key,
             ["trigger_id", "workspace_id", "pr_number", "head_sha"]
         );
-        assert!(
-            db.execute_unprepared(
+        assert!(db
+            .execute_unprepared(
                 "UPDATE code_trigger_fire
                  SET state = 'pending', delivered_at = NULL, next_attempt_at = NULL
                  WHERE trigger_id = '00000000-0000-0000-0000-000000000106'"
             )
             .await
-            .is_err()
-        );
+            .is_err());
 
         let columns = db
             .query_all_raw(Statement::from_string(
@@ -3405,14 +3398,13 @@ mod tests {
         .unwrap();
 
         // ...and a token outside it still fails.
-        assert!(
-            db.execute_unprepared(
+        assert!(db
+            .execute_unprepared(
                 "INSERT INTO code_trigger (id, owner, repo_id, condition, action, enabled, \
                  created_at, updated_at) VALUES ('trig-3', 'local', 'repo-1', 'pr_sparkled', \
                  'notify', TRUE, '2026-08-22T00:00:00Z', '2026-08-22T00:00:00Z')",
             )
             .await
-            .is_err()
-        );
+            .is_err());
     }
 }

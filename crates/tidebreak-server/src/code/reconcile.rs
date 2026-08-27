@@ -20,7 +20,7 @@ use tidebreak_core::db::code::{
 };
 use tidebreak_core::{CodePullRequestFact, CodePullRequestId, CodePullRequestState, OwnerId};
 
-use super::delivery::{MAX_REPOSITORIES, query_pull_requests, repository_target_from_local};
+use super::delivery::{query_pull_requests, repository_target_from_local, MAX_REPOSITORIES};
 use super::runtime::CodeRuntime;
 use crate::routes::code::types::{
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestSummary, CodeGitHubRepositoryTarget,
