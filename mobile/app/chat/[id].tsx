@@ -16,6 +16,11 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  ChatPlanApprovalCard,
+  ChatToolApprovalCard,
+  ChatUserQuestionsCard,
+} from "../../src/components/ChatPromptCards";
 import { Button, LoadingState } from "../../src/components/Controls";
 import { ErrorText } from "../../src/components/Screen";
 import {
@@ -30,6 +35,16 @@ import {
   type MobileChatQueuedTurn,
   type MobileChatTurnIdentity,
 } from "../../src/lib/chatApi";
+import {
+  answerMobileUserQuestions,
+  decideMobilePlan,
+  decideMobileToolApproval,
+  listMobilePendingPlanApprovals,
+  listMobilePendingToolApprovals,
+  listMobilePendingUserQuestions,
+  type MobilePlanDecision,
+  type MobileUserQuestionAnswer,
+} from "../../src/lib/chatPrompts";
 import { useSessionStore } from "../../src/session/store";
 import { useMachineClient } from "../../src/session/useMachineClient";
 
@@ -42,8 +57,10 @@ export default function ChatDetailScreen() {
   const queryClient = useQueryClient();
   const scrollRef = useRef<ScrollView>(null);
   const sendingRef = useRef(false);
+  const refreshingRef = useRef(false);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<string | null>(null);
   const [pendingIdentity, setPendingIdentity] =
@@ -68,15 +85,125 @@ export default function ChatDetailScreen() {
     queryFn: () => listMobileChatQueuedTurns(client!, chatId!),
     refetchInterval: isFocused ? 3_000 : false,
   });
+  const approvalsKey = [
+    "mobile-chat-approvals",
+    machineKey,
+    chatId,
+  ] as const;
+  const approvalsQuery = useQuery({
+    queryKey: approvalsKey,
+    enabled: !!client && !!chatId && isFocused,
+    queryFn: () => listMobilePendingToolApprovals(client!, chatId!),
+    refetchInterval: isFocused ? 3_000 : false,
+  });
+  const questionsKey = [
+    "mobile-chat-questions",
+    machineKey,
+    chatId,
+  ] as const;
+  const questionsQuery = useQuery({
+    queryKey: questionsKey,
+    enabled: !!client && !!chatId && isFocused,
+    queryFn: () => listMobilePendingUserQuestions(client!, chatId!),
+    refetchInterval: isFocused ? 3_000 : false,
+  });
+  const plansKey = ["mobile-chat-plans", machineKey, chatId] as const;
+  const plansQuery = useQuery({
+    queryKey: plansKey,
+    enabled: !!client && !!chatId && isFocused,
+    queryFn: () => listMobilePendingPlanApprovals(client!, chatId!),
+    refetchInterval: isFocused ? 3_000 : false,
+  });
   const messages = transcriptQuery.data?.messages ?? [];
   const queued = queueQuery.data?.queued ?? [];
+  const approvals = approvalsQuery.data ?? [];
+  const questions = questionsQuery.data ?? [];
+  const plans = plansQuery.data ?? [];
+  const pendingPromptCount = questions.length + plans.length;
+  const promptQueriesLoading =
+    questionsQuery.isLoading || plansQuery.isLoading;
+  const promptQueriesFailed = questionsQuery.isError || plansQuery.isError;
 
   useEffect(() => {
     scrollRef.current?.scrollToEnd({ animated: true });
-  }, [messages.length, queued.length]);
+  }, [approvals.length, messages.length, queued.length]);
 
   async function refreshMessages() {
-    await Promise.all([transcriptQuery.refetch(), queueQuery.refetch()]);
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        chatQuery.refetch(),
+        transcriptQuery.refetch(),
+        queueQuery.refetch(),
+        approvalsQuery.refetch(),
+        questionsQuery.refetch(),
+        plansQuery.refetch(),
+      ]);
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  }
+
+  async function refreshPromptState(
+    queryKey: readonly unknown[],
+  ): Promise<void> {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey }),
+      queryClient.invalidateQueries({
+        queryKey: ["mobile-chat-transcript", machineKey, chatId],
+      }),
+      queryClient.invalidateQueries({
+        queryKey: ["mobile-chats", machineKey],
+      }),
+    ]);
+  }
+
+  async function decideApproval(
+    callId: string,
+    decision:
+      | { decision: "approve" }
+      | { decision: "reject"; feedback: string },
+  ): Promise<void> {
+    if (!client || !chatId) return;
+    try {
+      await decideMobileToolApproval(client, chatId, callId, decision);
+    } finally {
+      await refreshPromptState(approvalsKey);
+    }
+  }
+
+  async function answerQuestions(
+    callId: string,
+    answers: MobileUserQuestionAnswer[],
+    additionalUserContext?: string,
+  ): Promise<void> {
+    if (!client || !chatId) return;
+    try {
+      await answerMobileUserQuestions(
+        client,
+        chatId,
+        callId,
+        answers,
+        additionalUserContext,
+      );
+    } finally {
+      await refreshPromptState(questionsKey);
+    }
+  }
+
+  async function decidePlan(
+    callId: string,
+    decision: MobilePlanDecision,
+  ): Promise<void> {
+    if (!client || !chatId) return;
+    try {
+      await decideMobilePlan(client, chatId, callId, decision);
+    } finally {
+      await refreshPromptState(plansKey);
+    }
   }
 
   async function sendMessage() {
@@ -169,9 +296,7 @@ export default function ChatDetailScreen() {
           keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl
-              refreshing={
-                transcriptQuery.isRefetching || queueQuery.isRefetching
-              }
+              refreshing={refreshing}
               onRefresh={() => void refreshMessages()}
             />
           }
@@ -200,12 +325,35 @@ export default function ChatDetailScreen() {
                 : "The queued messages could not be loaded."}
             </ErrorText>
           ) : null}
+          {approvalsQuery.isError ? (
+            <ErrorText>
+              {approvalsQuery.error instanceof Error
+                ? approvalsQuery.error.message
+                : "The pending approvals could not be loaded."}
+            </ErrorText>
+          ) : null}
+          {questionsQuery.isError ? (
+            <ErrorText>
+              {questionsQuery.error instanceof Error
+                ? questionsQuery.error.message
+                : "The pending questions could not be loaded."}
+            </ErrorText>
+          ) : null}
+          {plansQuery.isError ? (
+            <ErrorText>
+              {plansQuery.error instanceof Error
+                ? plansQuery.error.message
+                : "The pending plans could not be loaded."}
+            </ErrorText>
+          ) : null}
           {!transcriptQuery.isLoading &&
           !transcriptQuery.isError &&
           !queueQuery.isLoading &&
           !queueQuery.isError &&
           messages.length === 0 &&
-          queued.length === 0 ? (
+          queued.length === 0 &&
+          approvals.length === 0 &&
+          pendingPromptCount === 0 ? (
             <View className="rounded-xl border border-border bg-background p-4">
               <Text className="text-base font-medium text-foreground">
                 Start the conversation
@@ -218,6 +366,15 @@ export default function ChatDetailScreen() {
           {messages.map((item) => (
             <ChatMessage key={item.id} message={item} />
           ))}
+          {approvals.map((approval) => (
+            <ChatToolApprovalCard
+              key={approval.callId}
+              approval={approval}
+              onDecide={(decision) =>
+                decideApproval(approval.callId, decision)
+              }
+            />
+          ))}
           {queued.map((turn) => (
             <QueuedChatMessage
               key={turn.id}
@@ -227,32 +384,84 @@ export default function ChatDetailScreen() {
           ))}
         </ScrollView>
 
-        <View className="gap-2 border-t border-border bg-background px-4 py-3">
-          {receipt ? (
-            <Text className="text-xs text-success-foreground">{receipt}</Text>
-          ) : null}
-          {sendError ? <ErrorText>{sendError}</ErrorText> : null}
-          <TextInput
-            multiline
-            value={message}
-            editable={!sending}
-            accessibilityLabel="Message"
-            placeholder="Message this chat"
-            placeholderTextColor="#697386"
-            textAlignVertical="top"
-            className="max-h-40 min-h-20 rounded-xl border border-border bg-page-background px-3 py-3 text-base text-foreground"
-            onChangeText={(next) => {
-              setMessage(next);
-              setReceipt(null);
-              setSendError(null);
-            }}
-          />
-          <Button
-            label="Send"
-            busy={sending}
-            disabled={!message.trim() || chatQuery.isError}
-            onPress={() => void sendMessage()}
-          />
+        <View className="border-t border-border bg-background">
+          {promptQueriesLoading ? (
+            <Text className="px-4 py-4 text-sm text-muted-foreground">
+              Checking for questions and plans…
+            </Text>
+          ) : promptQueriesFailed && pendingPromptCount === 0 ? (
+            <View className="gap-2 px-4 py-3">
+              <ErrorText>
+                The app could not verify whether this chat is waiting for a
+                question or plan decision.
+              </ErrorText>
+              <Button
+                label="Retry"
+                variant="secondary"
+                onPress={() => void refreshMessages()}
+              />
+            </View>
+          ) : pendingPromptCount > 0 ? (
+            <ScrollView
+              className="max-h-96"
+              contentContainerClassName="gap-3 px-4 py-3"
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+            >
+              {questions.map((request) => (
+                <ChatUserQuestionsCard
+                  key={request.callId}
+                  request={request}
+                  onAnswer={(answers, additionalUserContext) =>
+                    answerQuestions(
+                      request.callId,
+                      answers,
+                      additionalUserContext,
+                    )
+                  }
+                />
+              ))}
+              {plans.map((request) => (
+                <ChatPlanApprovalCard
+                  key={request.callId}
+                  request={request}
+                  onDecide={(decision) =>
+                    decidePlan(request.callId, decision)
+                  }
+                />
+              ))}
+            </ScrollView>
+          ) : (
+            <View className="gap-2 px-4 py-3">
+              {receipt ? (
+                <Text className="text-xs text-success-foreground">
+                  {receipt}
+                </Text>
+              ) : null}
+              {sendError ? <ErrorText>{sendError}</ErrorText> : null}
+              <TextInput
+                multiline
+                value={message}
+                editable={!sending}
+                accessibilityLabel="Message"
+                placeholder="Message this chat"
+                placeholderTextColor="#697386"
+                textAlignVertical="top"
+                className="max-h-40 min-h-20 rounded-xl border border-border bg-page-background px-3 py-3 text-base text-foreground"
+                onChangeText={(next) => {
+                  setMessage(next);
+                  setReceipt(null);
+                  setSendError(null);
+                }}
+              />
+              <Button
+                label="Send"
+                busy={sending}
+                disabled={!message.trim() || chatQuery.isError}
+                onPress={() => void sendMessage()}
+              />
+            </View>
+          )}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
