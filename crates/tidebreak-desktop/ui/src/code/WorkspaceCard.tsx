@@ -68,7 +68,7 @@ import {
   isPutAway,
   middleTruncate,
   repoAccentClass,
-  sessionRowLabel,
+  sessionActivityLineLabel,
   watchRowLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
@@ -765,23 +765,17 @@ function workspaceActivitySummary(
   const worthyDigest =
     digest && isSessionRowWorthy(digest) ? digest : undefined;
   const statusLabel = worthyDigest
-    ? sessionRowLabel(worthyDigest)
+    ? sessionActivityLineLabel(worthyDigest)
     : digest
       ? LIFECYCLE_LABELS[digest.lifecycle]
       : session
         ? LIFECYCLE_LABELS[session.lifecycle]
         : null;
-  const turnCount = digest?.turn_count;
-  const turnLabel =
-    turnCount !== undefined
-      ? `${turnCount} ${turnCount === 1 ? "turn" : "turns"}`
-      : null;
-  const sessionLine = [statusLabel, turnLabel].filter(Boolean).join(" · ");
-  const terminalOnly = terminalOpen && !sessionLine;
-  if (!sessionLine && !terminalOnly) return null;
+  const terminalOnly = terminalOpen && !statusLabel;
+  if (!statusLabel && !terminalOnly) return null;
 
   return {
-    label: sessionLine || "Terminal open",
+    label: statusLabel || "Terminal open",
     tone: digestStatusTone(digest),
     needsYou: false,
     terminalOnly,

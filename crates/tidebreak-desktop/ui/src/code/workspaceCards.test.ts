@@ -12,7 +12,10 @@ import {
   groupWorkspacesByRepo,
   listArchivedWorkspaces,
   middleTruncate,
+  isSessionRowWorthy,
   sessionActivityLabel,
+  sessionActivityLineLabel,
+  sessionRowLabel,
   workspaceCardLabel,
   workspacePrChipSummary,
   workspaceStackParent,
@@ -329,6 +332,58 @@ describe("formatCompactAge", () => {
     expect(formatCompactAge("2026-08-18T11:48:00.000Z", now)).toBe("12m");
     expect(formatCompactAge("2026-08-18T09:00:00.000Z", now)).toBe("3h");
     expect(formatCompactAge("2026-08-16T12:00:00.000Z", now)).toBe("2d");
+  });
+});
+
+describe("isSessionRowWorthy", () => {
+  it("keeps a parked idle agent on the rail", () => {
+    expect(isSessionRowWorthy(digest("ws-a", { turn_count: 2 }))).toBe(true);
+    expect(
+      isSessionRowWorthy(
+        digest("ws-a", { lifecycle: "created", turn_count: 0 }),
+      ),
+    ).toBe(false);
+    expect(isSessionRowWorthy(undefined)).toBe(false);
+  });
+});
+
+describe("sessionRowLabel", () => {
+  it("calls a parked turn Done once it has finished work", () => {
+    expect(sessionRowLabel(digest("ws-a", { turn_count: 2 }))).toBe("Done");
+    expect(
+      sessionRowLabel(digest("ws-a", { lifecycle: "created", turn_count: 0 })),
+    ).toBe("Created");
+  });
+});
+
+describe("sessionActivityLineLabel", () => {
+  it("prefers the recap on a parked turn", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          turn_count: 4,
+          recap: "Folded the backoff into refresh.",
+        }),
+      ),
+    ).toBe("Folded the backoff into refresh.");
+  });
+
+  it("keeps live activity and the turn count together", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          lifecycle: "running",
+          activity: "shell",
+          turn_count: 3,
+        }),
+      ),
+    ).toBe("Shell running · 3 turns");
+  });
+
+  it("falls back to Done and the turn count without a recap", () => {
+    expect(sessionActivityLineLabel(digest("ws-a", { turn_count: 2 }))).toBe(
+      "Done · 2 turns",
+    );
   });
 });
 

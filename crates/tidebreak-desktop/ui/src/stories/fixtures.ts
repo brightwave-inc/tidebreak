@@ -294,6 +294,11 @@ export const attentionDoneUnreviewed: Attention = {
   source: "lifecycle",
 };
 
+export const attentionIdle: Attention = {
+  state: { type: "idle" },
+  source: "lifecycle",
+};
+
 export const attentionFenced: Attention = {
   state: { type: "fenced", reason: { type: "orphan_alive" } },
   source: "lifecycle",
@@ -702,6 +707,32 @@ export const doneDigest: CodeSessionDigest = codeDigest({
   attention: attentionDoneUnreviewed,
   turn_count: 6,
 });
+
+/** Parked after a turn, still carrying Working from an older digest. */
+export const idleDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  turn_count: 2,
+});
+
+/** Parked after a turn, with the recap the rail uses as the complete read. */
+export const idleCompleteDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: attentionIdle,
+  harness_kind: "grok",
+  turn_count: 4,
+  recap: "Folded the backoff into refresh and left the retry passing.",
+});
+
+export const idleSession: CodeSessionSnapshot = {
+  ...codeSession,
+  lifecycle: "idle",
+};
+
+export const grokIdleSession: CodeSessionSnapshot = {
+  ...codeSession,
+  harness_kind: "grok",
+  lifecycle: "idle",
+};
 
 /** A watch-and-fix task riding under the workspace (decision 50). */
 export const watchDigest: CodeSessionDigest = codeDigest({

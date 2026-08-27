@@ -16,6 +16,10 @@ import {
   codeWorkspace,
   doneDigest,
   draftPrDigest,
+  grokIdleSession,
+  idleCompleteDigest,
+  idleDigest,
+  idleSession,
   mergedPrDigest,
   monitorDigest,
   needsYouDigest,
@@ -323,15 +327,10 @@ export const HoverIdleSession: Story = {
       branch_name: "tidebreak/idle-workspace",
     },
     digest: {
-      ...runningDigest,
+      ...idleDigest,
       title: "Idle workspace",
-      lifecycle: "idle",
-      turn_count: 1,
     },
-    session: {
-      ...codeSession,
-      lifecycle: "idle",
-    },
+    session: idleSession,
     active: true,
     visibleMeta: { repoChip: true, branch: true },
     commands: workspaceCommands({
@@ -340,6 +339,50 @@ export const HoverIdleSession: Story = {
       hasSession: true,
     }),
     detailDefaultOpen: true,
+  },
+};
+
+/**
+ * A parked agent still owns the row. The quiet Done mark and the harness
+ * keep it from looking like an empty workspace after the turn completes.
+ */
+export const ParkedComplete: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      title: "Parked exploration",
+      branch_name: "tidebreak/parked-exploration",
+    },
+    digest: {
+      ...idleCompleteDigest,
+      title: "Parked exploration",
+    },
+    session: grokIdleSession,
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+};
+
+/** Parked without a recap still names the agent and the completed turn. */
+export const ParkedIdle: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      title: "Product direction hypotheses",
+    },
+    digest: {
+      ...idleDigest,
+      title: "Product direction hypotheses",
+    },
+    session: idleSession,
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
   },
 };
 
@@ -541,22 +584,24 @@ export const PullRequestTones: Story = {
 /**
  * The status ramp on one screen, which is the only way to catch a tone drawn
  * at the wrong strength. Read down the glyph rail: working moves, needs-you is
- * the one red, stalled is amber, done is quiet, and merged is purple rather
- * than a second shade of green. Check this in both themes.
+ * the one red, stalled is amber, done is quiet, parked still shows the agent,
+ * and merged is purple rather than a second shade of green. Check this in both
+ * themes.
  */
 export const StatusTones: Story = {
   render: (args) => (
     <div className="flex flex-col gap-0.5">
       {(
         [
-          ["Working", runningDigest, undefined],
-          ["Needs you", needsYouDigest, undefined],
-          ["Stalled", stalledDigest, undefined],
-          ["Done, unreviewed", doneDigest, undefined],
-          ["PR merged", undefined, mergedPrDigest],
-          ["Idle", undefined, undefined],
+          ["Working", runningDigest, codeSession, undefined],
+          ["Needs you", needsYouDigest, codeSession, undefined],
+          ["Stalled", stalledDigest, codeSession, undefined],
+          ["Done, unreviewed", doneDigest, idleSession, undefined],
+          ["Parked, complete", idleCompleteDigest, grokIdleSession, undefined],
+          ["PR merged", undefined, undefined, mergedPrDigest],
+          ["No session", undefined, undefined, undefined],
         ] as const
-      ).map(([label, digest, pr]) => (
+      ).map(([label, digest, session, pr]) => (
         <WorkspaceCard
           {...args}
           key={label}
@@ -567,7 +612,7 @@ export const StatusTones: Story = {
             pr,
           }}
           digest={digest && { ...digest, title: label }}
-          session={digest ? codeSession : undefined}
+          session={session}
           commands={workspaceCommands({
             hasPr: Boolean(pr),
             archived: false,
@@ -630,6 +675,13 @@ export const Rail: Story = {
           title: "Parked exploration",
           branch_name: "tidebreak/parked-exploration",
         }}
+        digest={{ ...idleCompleteDigest, title: "Parked exploration" }}
+        session={grokIdleSession}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
       />
     </div>
   ),

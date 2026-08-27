@@ -260,7 +260,26 @@ describe("WorkspaceCard", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps idle lifecycle detail off the non-hover card", () => {
+  it("keeps a workspace without a session looking empty", () => {
+    renderCard();
+
+    expect(screen.queryByText("Idle")).not.toBeInTheDocument();
+    expect(screen.queryByText("Done")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Claude Code")).not.toBeInTheDocument();
+  });
+
+  it("keeps a parked agent visible as a completed turn", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      harness_kind: "claude_code",
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 1,
+      recap: "Folded the backoff into refresh.",
+    };
     const session: CodeSessionSnapshot = {
       id: "sess-1",
       workspace_id: workspace.id,
@@ -276,21 +295,34 @@ describe("WorkspaceCard", () => {
     render(
       <WorkspaceCard
         workspace={workspace}
-        digest={undefined}
+        digest={digest}
         session={session}
         repoName="app"
-        active={false}
+        active
         terminalOpen={false}
         density="detailed"
-        visibleMeta={{ repoChip: true, branch: false }}
-        commands={workspaceCommands({ hasPr: false, archived: false })}
+        visibleMeta={{ repoChip: true, branch: true }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
         onOpen={vi.fn()}
         onCommand={vi.fn()}
       />,
     );
 
-    expect(screen.queryByText("Idle")).not.toBeInTheDocument();
-    expect(screen.queryByTitle("Claude Code")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Working")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Done")).toBeInTheDocument();
+    expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
+    expect(
+      screen.getByText("Folded the backoff into refresh."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Fix login · Done · app · tidebreak/fix-login",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("does not show live motion when an older idle digest still says Working", () => {
@@ -325,10 +357,10 @@ describe("WorkspaceCard", () => {
     );
 
     expect(screen.queryByLabelText("Working")).not.toBeInTheDocument();
-    expect(screen.getByText("Idle · 1 turn")).toBeInTheDocument();
+    expect(screen.getAllByText("Done · 1 turn").length).toBeGreaterThan(0);
     expect(
       screen.getByRole("button", {
-        name: "Fix login · Idle · app · tidebreak/fix-login",
+        name: "Fix login · Done · app · tidebreak/fix-login",
       }),
     ).toBeInTheDocument();
   });

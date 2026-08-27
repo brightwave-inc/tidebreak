@@ -143,17 +143,28 @@ export function digestStatusTone(
  *
  * Older rows can still carry `Working` after their lifecycle settles. Motion
  * must agree with lifecycle, or the same workspace reads as live in one place
- * and idle in another. Idle itself has no mark because it asks for nothing.
+ * and idle in another. A parked turn with work behind it takes the quiet
+ * Done mark so the card still reads as an agent, not an empty workspace.
  */
 export function attentionMarkForDigest(
-  digest: Pick<CodeSessionDigest, "attention" | "lifecycle"> | undefined,
+  digest:
+    | Pick<CodeSessionDigest, "attention" | "lifecycle" | "turn_count">
+    | undefined,
 ): Attention | undefined {
-  if (!digest || digest.attention.state.type === "idle") return undefined;
+  if (!digest) return undefined;
   if (
     digest.attention.state.type === "working" &&
     digest.lifecycle !== "running"
   ) {
-    return undefined;
+    return digest.turn_count > 0 ? COMPLETED_TURN_MARK : undefined;
+  }
+  if (digest.attention.state.type === "idle") {
+    return digest.turn_count > 0 ? COMPLETED_TURN_MARK : undefined;
   }
   return digest.attention;
 }
+
+const COMPLETED_TURN_MARK: Attention = {
+  state: { type: "done_unreviewed" },
+  source: "lifecycle",
+};

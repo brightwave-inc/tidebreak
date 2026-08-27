@@ -278,11 +278,13 @@ export function isSessionRowWorthy(
   digest: CodeSessionDigest | undefined,
 ): digest is CodeSessionDigest {
   if (!digest) return false;
-  if (digest.lifecycle === "running" || digest.lifecycle === "fenced") {
-    return true;
+  // A created session with no turns and no engine is still an empty
+  // workspace. Everything else belongs to an agent, including a parked
+  // idle one — hiding that row makes the card look unused.
+  if (digest.lifecycle === "created" && digest.turn_count === 0) {
+    return digest.harness_kind !== undefined;
   }
-  const type = digest.attention.state.type;
-  return type === "needs_you" || type === "stalled";
+  return true;
 }
 
 /** Short lifecycle word for the nested session row. */
@@ -299,8 +301,36 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
     case "manual":
       return "Pinned";
     default:
+      if (
+        (digest.lifecycle === "idle" || digest.lifecycle === "ended") &&
+        digest.turn_count > 0
+      ) {
+        return "Done";
+      }
       return LIFECYCLE_LABELS[digest.lifecycle];
   }
+}
+
+/**
+ * Copy for the workspace card's session line.
+ *
+ * A live turn names the activity and the turn count. A parked turn prefers
+ * the recap when one exists — that is the complete-state read — and falls
+ * back to the short lifecycle word so the agent is still visible.
+ */
+export function sessionActivityLineLabel(digest: CodeSessionDigest): string {
+  if (digest.attention.state.type === "needs_you") {
+    return digest.attention.state.prompt || "Needs you";
+  }
+  const recap = digest.recap?.trim();
+  if (recap && digest.lifecycle !== "running") return recap;
+  const status =
+    digest.lifecycle === "running"
+      ? sessionActivityLabel(digest)
+      : sessionRowLabel(digest);
+  const turns =
+    digest.turn_count === 1 ? "1 turn" : `${digest.turn_count} turns`;
+  return `${status} · ${turns}`;
 }
 
 /** Precise running-state copy for a workspace row. */
@@ -391,7 +421,7 @@ export function workspaceCardLabel(input: {
   if (input.session?.lifecycle === "running") {
     parts.push(sessionActivityLabel(input.session));
   } else if (input.session && input.attention?.state.type === "working") {
-    parts.push(LIFECYCLE_LABELS[input.session.lifecycle]);
+    parts.push(sessionRowLabel(input.session));
   }
   if (input.pr) {
     parts.push(
