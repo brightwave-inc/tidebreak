@@ -373,7 +373,7 @@ pub(crate) async fn read_merge_queue_membership(
 
 /// The latest queue transition wins: a pull request added and then removed
 /// is out, whatever order history reports the rest in.
-fn queue_membership_from_events(events: &str) -> bool {
+pub(crate) fn queue_membership_from_events(events: &str) -> bool {
     events
         .lines()
         .map(str::trim)
