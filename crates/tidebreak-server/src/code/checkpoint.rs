@@ -463,9 +463,7 @@ pub(crate) async fn restore_checkpoint(
     )
     .await?;
 
-    if let Err(err) = apply_checkpoint_to_worktree(worktree, &before, &target).await {
-        return Err(rollback_restore(worktree, &target, &before, &safety_ref, err).await);
-    }
+    apply_checkpoint_to_worktree(worktree, &before, &target, &safety_ref).await?;
 
     let changed = collect_changes(worktree, &before, &target, DiffBounds::default()).await?;
     Ok(RestoredCheckpoint {
@@ -479,28 +477,48 @@ pub(crate) async fn restore_checkpoint(
 /// Ignored files that exist on disk are copied aside first and written back
 /// after `read-tree`. A later gitignore rule would otherwise omit them from
 /// the safety snapshot while `--reset -u` still overwrote the live copy.
+/// Rollback runs only after that apply; a failure before `read-tree` leaves
+/// the worktree alone. After a rollback the copied bytes are written back,
+/// because the snapshot never held them.
 async fn apply_checkpoint_to_worktree(
     worktree: &Path,
     before: &str,
     target: &str,
+    safety_ref: &str,
 ) -> Result<(), CheckpointError> {
     let removed = removed_by_restore(worktree, before, target).await?;
     let ignored_live = live_ignored_files_in_tree(worktree, target).await?;
     apply_tree(worktree, target).await?;
-    restore_file_backups(worktree, &ignored_live).await?;
+    if let Err(err) = finish_checkpoint_apply(worktree, &removed, &ignored_live).await {
+        return Err(
+            rollback_restore(worktree, target, before, safety_ref, &ignored_live, err).await,
+        );
+    }
+    Ok(())
+}
+
+async fn finish_checkpoint_apply(
+    worktree: &Path,
+    removed: &[GitPath],
+    ignored_live: &[(GitPath, Vec<u8>)],
+) -> Result<(), CheckpointError> {
+    restore_file_backups(worktree, ignored_live).await?;
     for path in removed {
-        remove_restored_path(worktree, &path).await?;
+        remove_restored_path(worktree, path).await?;
     }
     Ok(())
 }
 
 /// Put the worktree back to the pre-restore snapshot. The original error
 /// stays in front; every failure after the snapshot names the safety ref.
+/// Ignored live copies are written last: they are not in the snapshot, so
+/// the extra-delete set includes them.
 async fn rollback_restore(
     worktree: &Path,
     attempted: &str,
     previous: &str,
     safety_ref: &str,
+    ignored_live: &[(GitPath, Vec<u8>)],
     failed: CheckpointError,
 ) -> CheckpointError {
     if let Err(err) = apply_tree(worktree, previous).await {
@@ -508,21 +526,28 @@ async fn rollback_restore(
             "{failed}; rolling back from {safety_ref} also failed: {err}"
         ));
     }
-    match removed_by_restore(worktree, attempted, previous).await {
+    let extras_err = match removed_by_restore(worktree, attempted, previous).await {
         Ok(paths) => {
+            let mut extras_err = None;
             for path in paths {
                 if let Err(err) = remove_restored_path(worktree, &path).await {
-                    return CheckpointError::internal(format!(
-                        "{failed}; rolling back from {safety_ref} also failed: {err}"
-                    ));
+                    extras_err = Some(err);
+                    break;
                 }
             }
+            extras_err
         }
-        Err(err) => {
-            return CheckpointError::internal(format!(
-                "{failed}; rolling back from {safety_ref} also failed: {err}"
-            ));
-        }
+        Err(err) => Some(err),
+    };
+    if let Err(err) = restore_file_backups(worktree, ignored_live).await {
+        return CheckpointError::internal(format!(
+            "{failed}; rolling back from {safety_ref} also failed: {err}"
+        ));
+    }
+    if let Some(err) = extras_err {
+        return CheckpointError::internal(format!(
+            "{failed}; rolling back from {safety_ref} also failed: {err}"
+        ));
     }
     CheckpointError::internal(format!("{failed}; previous files are at {safety_ref}"))
 }
@@ -3665,6 +3690,74 @@ mod tests {
             std::fs::read_to_string(tree.join("README.md")).unwrap(),
             "after the checkpoint\n",
             "a failed delete must roll applied files back"
+        );
+    }
+
+    /// A post-apply delete failure must not drop a live ignored file the
+    /// checkpoint still names. That path is absent from the safety snapshot,
+    /// so rollback's extra-delete would otherwise remove it.
+    #[tokio::test]
+    async fn a_failed_restore_keeps_a_live_ignored_checkpoint_path() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "ignore-drift-rollback");
+        let workspace_id = ws();
+        std::fs::write(tree.join("secret.txt"), "at the checkpoint\n").unwrap();
+        std::fs::write(tree.join("README.md"), "at the checkpoint\n").unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            workspace_id,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(tree.join(".gitignore"), "secret.txt\n").unwrap();
+        std::fs::write(tree.join("secret.txt"), "live ignored\n").unwrap();
+        std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
+        std::fs::create_dir_all(tree.join("later")).unwrap();
+        std::fs::write(tree.join("later/new.txt"), "postdates it\n").unwrap();
+        std::fs::set_permissions(tree.join("later"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        if let Ok(index) = git_text(
+            &tree,
+            &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
+            GIT_TIMEOUT,
+        )
+        .await
+        {
+            let _ = std::fs::remove_file(tree.join(index));
+        }
+
+        let err = restore_checkpoint(
+            &tree,
+            workspace_id,
+            &turn_at(1, Some(recorded.checkpoint_ref.clone())),
+        )
+        .await
+        .unwrap_err();
+        let _ =
+            std::fs::set_permissions(tree.join("later"), std::fs::Permissions::from_mode(0o755));
+        let message = err.to_string();
+        assert!(
+            message.contains("/pre-restore/"),
+            "a post-apply failure must name the safety ref: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("secret.txt")).unwrap(),
+            "live ignored\n",
+            "rollback must not delete a live ignored file the checkpoint held"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("later/new.txt")).unwrap(),
+            "postdates it\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap(),
+            "after the checkpoint\n"
         );
     }
 
