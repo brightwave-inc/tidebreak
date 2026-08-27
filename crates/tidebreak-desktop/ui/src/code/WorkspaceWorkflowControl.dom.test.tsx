@@ -16,6 +16,10 @@ import type {
 } from "../api/types";
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
+import {
+  resetWorkflowPromptStore,
+  useWorkflowPromptStore,
+} from "./workflowPrompts";
 import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
 
 vi.mock("sonner", () => ({
@@ -103,9 +107,71 @@ beforeEach(() => {
     pendingComposerPrompt: null,
     composerActionScope: null,
   });
+  resetWorkflowPromptStore();
 });
 
 afterEach(cleanup);
+
+const dirtyLocal: CodeWorkspacePrSnapshot = {
+  dirty: true,
+  unpushed: false,
+  ahead: 0,
+  has_upstream: true,
+  suggested_commit_message: "improve login flow",
+  gh_found: true,
+  gh_authenticated: true,
+  remediation: "",
+};
+
+function renderDirtyControl() {
+  const dirtyResource: CodeWorkspacePrResource = {
+    ...resource(),
+    data: dirtyLocal,
+  };
+  render(
+    <WorkspaceWorkflowControl
+      client={
+        {
+          pushCodeWorkspace: vi.fn(),
+          createCodePullRequest: vi.fn(),
+          markCodePrReady: vi.fn(),
+          mergeCodePr: vi.fn(),
+          startCodeWatch: vi.fn(),
+          stopCodeWatch: vi.fn(),
+          writeCodeCheckLogs: vi.fn(),
+        } as unknown as ApiClient
+      }
+      workspaceId="ws-1"
+      branchName="tidebreak/fix-login"
+      baseRef="main"
+      resource={dirtyResource}
+      onOpenSourceControl={vi.fn()}
+    />,
+  );
+}
+
+describe("Create PR", () => {
+  it("submits the prompt instead of leaving it in the composer", async () => {
+    renderDirtyControl();
+    await userEvent.click(screen.getByRole("button", { name: "Create PR" }));
+    const pending = useCodeUiStore.getState().pendingComposerPrompt;
+    expect(pending?.submit).toBe(true);
+    expect(pending?.scope).toBe("ws-1");
+    expect(pending?.text).toContain("open a pull request against `main`");
+    expect(pending?.text).toContain("Do not merge.");
+  });
+
+  it("sends a prompt edited in settings", async () => {
+    useWorkflowPromptStore
+      .getState()
+      .setPrompt("compose_pr", "Ship this branch to {base}.");
+    renderDirtyControl();
+    await userEvent.click(screen.getByRole("button", { name: "Create PR" }));
+    expect(useCodeUiStore.getState().pendingComposerPrompt?.text).toBe(
+      "Ship this branch to `main`.",
+    );
+  });
+});
 
 describe("Fix CI", () => {
   it("downloads the failing job logs and names them in the prompt", async () => {

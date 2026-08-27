@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { HttpError } from "../api/client";
 import type { CodeWorkspacePrSnapshot, PullRequestDigest } from "../api/types";
+import { resetWorkflowPromptStore } from "./workflowPrompts";
 import {
   composePrPrompt,
   resolveWorkflowShortcut,
@@ -11,6 +12,10 @@ import {
   workspaceWorkflowModel,
   type WorkflowShortcut,
 } from "./workspaceWorkflow";
+
+afterEach(() => {
+  resetWorkflowPromptStore();
+});
 
 const CLEAN: CodeWorkspacePrSnapshot = {
   dirty: false,
@@ -41,8 +46,8 @@ describe("workspaceWorkflowModel", () => {
     expect(workspaceWorkflowActionLabel(dirty.primary!, dirty.stage)).toBe(
       "Create PR",
     );
-    // Hand review does not vanish behind the drafted request; it moves one
-    // step away into the menu.
+    // Hand review does not vanish behind Create PR; it moves one step away
+    // into the menu.
     expect(dirty.secondary).toEqual(["open_source"]);
     expect(workspaceWorkflowActionLabel("open_source", dirty.stage)).toBe(
       "Review & commit",

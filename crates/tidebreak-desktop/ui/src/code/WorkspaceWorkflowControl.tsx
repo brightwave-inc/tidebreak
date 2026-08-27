@@ -95,9 +95,6 @@ export function WorkspaceWorkflowControl({
   const popoverTitleId = useId();
   const { confirm, dialog: confirmDialog } = useConfirm();
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
-  const offerComposerPrompt = useCodeUiStore(
-    (state) => state.offerComposerPrompt,
-  );
   const workflowShortcutPending = useCodeUiStore(
     (state) => state.workflowShortcutPending,
   );
@@ -389,11 +386,10 @@ export function WorkspaceWorkflowControl({
         onOpenSourceControl();
         return;
       case "compose_pr":
-        // A draft, not a turn: the request lands in the composer for the
-        // reader to edit and send, because opening a pull request publishes
-        // the branch.
         setDetailsOpen(false);
-        offerComposerPrompt(workspaceId, composePrPrompt(baseRef));
+        if (!runComposerPrompt(workspaceId, composePrPrompt(baseRef))) {
+          toast.error("Another agent action is already running");
+        }
         return;
       case "open_pr": {
         setDetailsOpen(false);
@@ -748,7 +744,7 @@ export function WorkspaceWorkflowControl({
               primary === "watch_and_fix"
                 ? "Start an agent task that watches this pull request and fixes actionable failures."
                 : primary === "compose_pr"
-                  ? "Draft a request in the composer to commit, push, and open a pull request. You review and send it."
+                  ? "Send a request to commit, push, and open a pull request."
                   : primary === "mark_ready" ||
                       primary === "merge" ||
                       primary === "fix_errors" ||

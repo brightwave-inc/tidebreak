@@ -13,6 +13,7 @@ import {
   type CheckCounts,
   type PrGate,
 } from "./prState";
+import { renderWorkflowPrompt } from "./workflowPrompts";
 
 export type PrWorkflowAction =
   | "watch_and_fix"
@@ -288,6 +289,9 @@ export function prFreshAgentPrompt(
  * pull-request state changes, which decision 42 reserves for the user: they
  * run through their own endpoints, and excluding them from this type is what
  * stops a merge prompt from being wired back up by accident.
+ *
+ * Settings can replace the instruction. Live pull-request context is still
+ * appended after it.
  */
 export function prWorkflowPrompt(
   action: PrPromptAction,
@@ -297,24 +301,11 @@ export function prWorkflowPrompt(
   const number = `#${pr.number}`;
   const base = pr.base_branch?.trim() || "the base branch";
   const context = prWorkflowPromptContext(pr);
-  let instruction: string;
-  switch (action) {
-    case "fix_errors":
-      instruction =
-        logs.length > 0
-          ? `Pull request ${number} has failing checks, and their job logs are already downloaded — read them first. Reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`
-          : `Pull request ${number} has failing checks. Inspect the latest failing CI logs for the current head SHA, reproduce the cause when practical, make the smallest safe fix in this workspace, run focused validation, commit, and push. Do not merge.`;
-      break;
-    case "address_feedback":
-      instruction = `Pull request ${number} has requested changes. Inspect the latest unresolved review feedback, implement each actionable request in this workspace, run focused validation, commit, push, and reply where context is useful. Do not merge.`;
-      break;
-    case "update_branch":
-      instruction = `Update pull request ${number} from ${base}. Fetch the latest base branch, rebase this workspace branch onto it, resolve any conflicts, run focused validation, and push the updated head. Do not merge.`;
-      break;
-    case "resolve_conflicts":
-      instruction = `Pull request ${number} has merge conflicts with ${base}. Fetch and rebase onto ${base}, resolve every conflict in this workspace, run focused validation, commit if needed, and push the updated head. Do not merge the pull request.`;
-      break;
-  }
+  const instruction = renderWorkflowPrompt(
+    action,
+    { pr: number, base },
+    { logsAttached: logs.length > 0 },
+  );
   const attached = checkLogSection(logs);
   return `${instruction}\n\n${context}${attached}`;
 }

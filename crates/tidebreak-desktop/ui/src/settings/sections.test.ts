@@ -41,6 +41,14 @@ describe("settings sections", () => {
     }
   });
 
+  it("always exposes quick-action prompts", () => {
+    for (const managed of [false, true]) {
+      expect(
+        settingsSectionsFor(managed).map((section) => section.path),
+      ).toContain("quick-actions");
+    }
+  });
+
   it("keeps a providers deep link to what it can act on", () => {
     // The picker's CTAs address this route; anything else in the URL — a stale
     // link, a hand-edited one — must reach the panel as nothing rather than as
