@@ -65,14 +65,18 @@ export function codeSubmissionWasAccepted(
 }
 
 /**
- * HTTP failures are definitive. A transport or parser failure after dispatch
- * is ambiguous because code turns do not carry a client idempotency key.
+ * A structured Tidebreak refusal is definitive. An untyped proxy response,
+ * transport failure, or parser failure after dispatch is ambiguous because
+ * code turns do not carry a client idempotency key.
  */
 export function submissionFailure(
   error: unknown,
   requestDispatched: boolean,
 ): SubmissionFailure {
-  if (error instanceof MachineRequestError || !requestDispatched) {
+  if (
+    !requestDispatched ||
+    (error instanceof MachineRequestError && error.kind !== null)
+  ) {
     return {
       message:
         error instanceof Error ? error.message : "The request could not be sent.",

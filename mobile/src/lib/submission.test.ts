@@ -25,6 +25,12 @@ describe("code submission safety", () => {
     expect(submissionFailure(new TypeError("socket closed"), true)).toMatchObject(
       { deliveryUnknown: true },
     );
+    expect(
+      submissionFailure(
+        new MachineRequestError(502, null, "Machine request failed. (HTTP 502)"),
+        true,
+      ),
+    ).toMatchObject({ deliveryUnknown: true });
   });
 
   it("reconciles an ambiguous send only against rows created after it", () => {

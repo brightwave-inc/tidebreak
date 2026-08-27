@@ -163,9 +163,13 @@ export async function decideCodeApproval(
   decision: "approve" | "deny",
   feedback?: string,
 ): Promise<CodeApprovalSnapshot> {
+  const denialFeedback = decision === "deny" ? feedback?.trim() : undefined;
+  if (decision === "deny" && !denialFeedback) {
+    throw new Error("Denial feedback is required.");
+  }
   const body =
-    decision === "deny" && feedback !== undefined
-      ? { decision, feedback }
+    decision === "deny"
+      ? { decision, feedback: denialFeedback }
       : { decision };
   return required(
     parseCodeApproval(

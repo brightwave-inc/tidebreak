@@ -103,7 +103,7 @@ describe("mobile supervision API contracts", () => {
       denied.client,
       "approval/1",
       "deny",
-      "Use the focused test.",
+      "  Use the focused test.  ",
     );
     expect(denied.requestJson).toHaveBeenCalledWith(
       "/code/approvals/approval%2F1/decision",
@@ -113,6 +113,12 @@ describe("mobile supervision API contracts", () => {
         expectedStatus: 200,
       },
     );
+
+    const missingFeedback = fakeClient(undefined);
+    await expect(
+      decideCodeApproval(missingFeedback.client, "approval-1", "deny", "   "),
+    ).rejects.toThrow(/feedback is required/);
+    expect(missingFeedback.requestJson).not.toHaveBeenCalled();
 
     const approved = fakeClient({
       ...approval,
