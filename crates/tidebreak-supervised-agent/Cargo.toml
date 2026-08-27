@@ -9,12 +9,18 @@ homepage.workspace = true
 authors.workspace = true
 publish = false
 
+[[bin]]
+name = "tidebreak-supervised-agent"
+path = "src/main.rs"
+
 [dependencies]
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tidebreak-core = { path = "../tidebreak-core", default-features = false }
+tidebreak-harness = { path = "../tidebreak-harness" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
 
 [dev-dependencies]

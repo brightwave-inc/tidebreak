@@ -7512,6 +7512,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tidebreak-core",
+ "tidebreak-harness",
  "tokio",
 ]
 
