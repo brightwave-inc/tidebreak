@@ -128,6 +128,7 @@ vi.mock("react-resizable-panels", () => ({
     onLayoutChange: () => {},
     onLayoutChanged: () => {},
   }),
+  useGroupRef: () => ({ current: null }),
 }));
 
 const WORKSPACE: CodeWorkspaceSnapshot = {
@@ -1765,10 +1766,11 @@ describe("CodeWorkspacePage", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Review & commit" }),
     );
-    expect(screen.getByRole("tab", { name: "Source control" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(
+      within(
+        screen.getByRole("tablist", { name: "Workspace center" }),
+      ).getByRole("tab", { name: "Source control" }),
+    ).toHaveAttribute("aria-selected", "true");
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     await user.click(screen.getByRole("button", { name: "Review sidebar" }));
@@ -2609,7 +2611,7 @@ describe("CodeWorkspacePage", () => {
     expect(client.openCodeEvents.mock.calls[0]?.[0]).toBe(SESSION.id);
   });
 
-  it("opens source control and the pull request in the review sidebar", async () => {
+  it("opens source control and the pull request as center tabs", async () => {
     const client = makeClient();
     client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
     const user = userEvent.setup();
@@ -2623,18 +2625,20 @@ describe("CodeWorkspacePage", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Source control" }),
     );
-    const inspector = screen.getByTestId("code-inspector");
     await waitFor(() =>
       expect(
-        within(inspector).getByRole("tab", { name: "Source control" }),
+        within(
+          screen.getByRole("tablist", { name: "Workspace center" }),
+        ).getByRole("tab", { name: "Source control" }),
       ).toHaveAttribute("aria-selected", "true"),
     );
-    expect(
-      screen.queryByTestId("source-control-panel"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Send message" }),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("source-control-panel")).toBeInTheDocument();
+    await user.click(
+      within(
+        screen.getByRole("tablist", { name: "Workspace center" }),
+      ).getByRole("tab", { name: "Main agent" }),
+    );
+    expect(screen.getByRole("button", { name: "Send message" })).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "New tab" }));
     await user.click(
@@ -2642,13 +2646,18 @@ describe("CodeWorkspacePage", () => {
     );
     await waitFor(() =>
       expect(
-        within(inspector).getByRole("tab", { name: "Pull request" }),
+        within(
+          screen.getByRole("tablist", { name: "Workspace center" }),
+        ).getByRole("tab", { name: "Pull request" }),
       ).toHaveAttribute("aria-selected", "true"),
     );
-    expect(screen.queryByTestId("pr-details-panel")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Send message" }),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("pr-details-panel")).toBeInTheDocument();
+    await user.click(
+      within(
+        screen.getByRole("tablist", { name: "Workspace center" }),
+      ).getByRole("tab", { name: "Main agent" }),
+    );
+    expect(screen.getByRole("button", { name: "Send message" })).toBeVisible();
   });
 
   it("omits Pull request from the new-tab menu when there is no pull request", async () => {

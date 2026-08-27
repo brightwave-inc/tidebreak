@@ -336,7 +336,7 @@ function InspectorStory({
             ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
             : storySnapshot,
         )}
-        requestedTab={{ tab, revision: 1 }}
+        initialTab={tab}
         onOpenFile={fn()}
         onOpenDiff={fn()}
         onClose={fn()}
