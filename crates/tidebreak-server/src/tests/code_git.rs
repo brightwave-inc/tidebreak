@@ -2717,7 +2717,7 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
                 Some("old-head") => (
                     axum::http::StatusCode::CONFLICT,
                     axum::Json(serde_json::json!({
-                        "message": "The reviewed revision no longer matches."
+                        "message": "Head branch was modified. Review and try the merge again."
                     })),
                 ),
                 Some("blocked-head") => (
@@ -2799,7 +2799,7 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
     let (status, kind, message) = error_kind(response).await;
     assert_eq!(status, reqwest::StatusCode::CONFLICT);
     assert_eq!(kind, "pr_head_changed");
-    assert!(message.contains("reviewed revision"), "{message}");
+    assert!(message.contains("Head branch was modified"), "{message}");
 
     let response = client
         .post(format!("http://{addr}/code/delivery/pull-requests/action"))

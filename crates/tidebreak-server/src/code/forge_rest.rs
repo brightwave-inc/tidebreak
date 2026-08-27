@@ -50,10 +50,10 @@ const TIMELINE_PAGE_LIMIT: u32 = 20;
 
 /// Stable action classification kept beside the HTTP response that proves it.
 ///
-/// GitHub's merge endpoint assigns meaning to status codes even when an
-/// enterprise host replaces the English response text. Delivery must not
-/// lose `pr_head_changed` or `pr_not_mergeable` merely because that prose
-/// changed.
+/// 401 and 405 keep their meaning even when an enterprise host replaces the
+/// English body. 409 does not: GitHub uses it for a stale head and for a
+/// merge conflict, so Delivery reads the body before choosing
+/// `pr_head_changed` or `pr_not_mergeable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ForgeActionErrorKind {
     AuthFailed,
@@ -91,16 +91,21 @@ impl ForgeActionError {
     fn merge_response(status: reqwest::StatusCode, value: &Value) -> Self {
         let message = forge_message(status, value);
         let lower = message.to_ascii_lowercase();
+        let head_changed = lower.contains("head branch was modified")
+            || lower.contains("head sha")
+            || lower.contains("sha didn't match")
+            || lower.contains("sha did not match")
+            || (lower.contains("head commit") && lower.contains("match"))
+            || (lower.contains("expected head") && lower.contains("match"));
         let kind = if status == reqwest::StatusCode::UNAUTHORIZED {
             ForgeActionErrorKind::AuthFailed
-        } else if status == reqwest::StatusCode::CONFLICT
-            || lower.contains("head branch was modified")
-            || lower.contains("head sha")
-        {
+        } else if head_changed {
             ForgeActionErrorKind::HeadChanged
         } else if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            || status == reqwest::StatusCode::CONFLICT
             || lower.contains("not mergeable")
             || lower.contains("merge cannot be performed")
+            || lower.contains("merge conflict")
         {
             ForgeActionErrorKind::NotMergeable
         } else {
@@ -1004,6 +1009,45 @@ mod tests {
         assert_eq!(
             graphql_url("https://ghe.acme.test/api/v3"),
             "https://ghe.acme.test/api/graphql"
+        );
+    }
+
+    /// GitHub's merge endpoint uses 409 for both a stale head and a merge
+    /// conflict. Only a body that names the SHA mismatch is `HeadChanged`.
+    #[test]
+    fn a_merge_409_is_head_changed_only_when_the_body_names_a_stale_sha() {
+        let kind = |status: reqwest::StatusCode, message: &str| {
+            ForgeActionError::merge_response(status, &serde_json::json!({ "message": message }))
+                .kind()
+        };
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::CONFLICT,
+                "Head branch was modified. Review and try the merge again."
+            ),
+            ForgeActionErrorKind::HeadChanged
+        );
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::CONFLICT,
+                "Head sha didn't match current head of this branch."
+            ),
+            ForgeActionErrorKind::HeadChanged
+        );
+        assert_eq!(
+            kind(reqwest::StatusCode::CONFLICT, "Merge conflict"),
+            ForgeActionErrorKind::NotMergeable
+        );
+        assert_eq!(
+            kind(reqwest::StatusCode::CONFLICT, ""),
+            ForgeActionErrorKind::NotMergeable
+        );
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                "Pull Request is not mergeable"
+            ),
+            ForgeActionErrorKind::NotMergeable
         );
     }
 
