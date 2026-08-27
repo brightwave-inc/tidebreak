@@ -621,7 +621,7 @@ export function NewWorkspaceDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-3xl gap-0 overflow-hidden p-0 sm:rounded-xl"
+        className="max-h-[calc(100dvh-1rem)] max-w-4xl gap-0 overflow-hidden p-0 sm:max-h-[calc(100dvh-3rem)] sm:rounded-xl"
         withCloseButton={false}
         aria-describedby={undefined}
         onOpenAutoFocus={(event) => {
@@ -673,8 +673,8 @@ export function NewWorkspaceDialog({
         }}
       >
         <DialogTitle className="sr-only">New workspace</DialogTitle>
-        <form className="flex min-w-0 flex-col" onSubmit={submit}>
-          <div className="flex min-w-0 items-center gap-1 px-3 pt-3">
+        <form className="flex min-h-0 min-w-0 flex-col" onSubmit={submit}>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 px-3 pt-3">
             <DropdownMenu {...pickerProps("repo")}>
               <WithTooltip label={`Repo · ${command ? "⌘N" : "Ctrl+N"}`}>
                 <DropdownMenuTrigger asChild>
@@ -760,14 +760,13 @@ export function NewWorkspaceDialog({
                 </p>
               </PopoverContent>
             </Popover>
-            <div className="min-w-4 flex-1" />
             <Popover {...pickerProps("base")}>
               <WithTooltip label={`Base ref · ${alt("B")}`}>
                 <PopoverTrigger asChild>
                   <Button
                     type="button"
                     variant="ghost"
-                    className="text-muted-foreground h-8 max-w-56 gap-1.5 px-2"
+                    className="text-muted-foreground ml-auto h-8 max-w-56 gap-1.5 px-2"
                     disabled={!selectedRepo}
                     aria-label="Base ref"
                   >
@@ -812,7 +811,7 @@ export function NewWorkspaceDialog({
             }}
             aria-label="First message"
             placeholder="Describe the first task (optional)"
-            className="placeholder:text-muted-foreground max-h-[45vh] min-h-36 w-full resize-none bg-transparent px-4 py-3 text-base outline-none"
+            className="placeholder:text-muted-foreground max-h-[50vh] min-h-48 w-full resize-none bg-transparent px-4 py-3 text-base outline-none sm:min-h-52"
             onKeyDown={(event) => {
               if (!shouldSubmitComposerKey(event.nativeEvent)) return;
               event.preventDefault();
@@ -824,162 +823,171 @@ export function NewWorkspaceDialog({
               <HarnessInstallNote install={install} />
             </div>
           )}
-          <div className="flex min-w-0 items-center gap-1 px-3 pb-3">
-            <DropdownMenu {...pickerProps("engine")}>
-              <WithTooltip label={`Engine · ${alt("E")}`}>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-8 min-w-0 max-w-48 gap-2 px-2"
-                    disabled={allHarnesses.length === 0}
-                    aria-label={`Harness: ${HARNESS_LABELS[harness]}`}
-                  >
-                    <HarnessIcon className="size-4 shrink-0" />
-                    <span className="truncate">{HARNESS_LABELS[harness]}</span>
-                    <ChevronDown className="size-4 shrink-0 opacity-50" />
-                  </Button>
-                </DropdownMenuTrigger>
-              </WithTooltip>
-              <DropdownMenuContent
-                align="start"
-                side="top"
-                className="z-[60] w-64"
-              >
-                {allHarnesses.map((entry) => {
-                  const reason = harnessUnusableReason(entry);
-                  const Icon = HARNESS_ICONS[entry.kind];
-                  return (
-                    <DropdownMenuItem
-                      key={entry.kind}
-                      disabled={Boolean(reason)}
-                      onSelect={() => {
-                        setModelOptions([]);
-                        setModelLoading(true);
-                        setPickedHarness(entry.kind);
-                      }}
-                      className="flex items-start gap-2.5"
+          <div
+            className="flex min-w-0 flex-wrap items-end gap-x-2 gap-y-2 px-3 pb-3"
+            data-testid="new-workspace-controls"
+          >
+            <div className="flex min-w-0 flex-1 basis-80 flex-wrap items-center gap-1">
+              <DropdownMenu {...pickerProps("engine")}>
+                <WithTooltip label={`Engine · ${alt("E")}`}>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-8 min-w-0 max-w-48 gap-2 px-2"
+                      disabled={allHarnesses.length === 0}
+                      aria-label={`Harness: ${HARNESS_LABELS[harness]}`}
                     >
-                      <Icon className="mt-0.5 size-4 shrink-0" />
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span className="truncate font-medium">
-                          {HARNESS_LABELS[entry.kind]}
-                        </span>
-                        {reason && (
-                          <span className="text-muted-foreground text-xs">
-                            {reason}
-                          </span>
-                        )}
+                      <HarnessIcon className="size-4 shrink-0" />
+                      <span className="truncate">
+                        {HARNESS_LABELS[harness]}
                       </span>
-                      {entry.kind === harness && (
-                        <Check className="size-4 shrink-0" />
-                      )}
-                    </DropdownMenuItem>
-                  );
-                })}
-                {anyUnusable && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onSelect={() => void navigate({ to: harnessesPath })}
-                      className="text-muted-foreground text-sm"
-                    >
-                      Coding harnesses…
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-            {(modelOptions.length > 0 || modelLoading) && (
-              <WithTooltip label={`Model · ${alt("M")}`}>
-                <span className="inline-flex min-w-0">
-                  <HarnessModelMenu
-                    harness={harness}
-                    options={modelOptions}
-                    value={model}
-                    onChange={selectModel}
-                    loading={modelLoading}
-                    {...pickerProps("model")}
-                  />
-                </span>
-              </WithTooltip>
-            )}
-            {effortLevels.length > 0 && (
-              <ReasoningEffortMenu
-                levels={effortLevels}
-                value={postedEffort}
+                      <ChevronDown className="size-4 shrink-0 opacity-50" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </WithTooltip>
+                <DropdownMenuContent
+                  align="start"
+                  side="top"
+                  className="z-[60] w-64"
+                >
+                  {allHarnesses.map((entry) => {
+                    const reason = harnessUnusableReason(entry);
+                    const Icon = HARNESS_ICONS[entry.kind];
+                    return (
+                      <DropdownMenuItem
+                        key={entry.kind}
+                        disabled={Boolean(reason)}
+                        onSelect={() => {
+                          setModelOptions([]);
+                          setModelLoading(true);
+                          setPickedHarness(entry.kind);
+                        }}
+                        className="flex items-start gap-2.5"
+                      >
+                        <Icon className="mt-0.5 size-4 shrink-0" />
+                        <span className="flex min-w-0 flex-1 flex-col">
+                          <span className="truncate font-medium">
+                            {HARNESS_LABELS[entry.kind]}
+                          </span>
+                          {reason && (
+                            <span className="text-muted-foreground text-xs">
+                              {reason}
+                            </span>
+                          )}
+                        </span>
+                        {entry.kind === harness && (
+                          <Check className="size-4 shrink-0" />
+                        )}
+                      </DropdownMenuItem>
+                    );
+                  })}
+                  {anyUnusable && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={() => void navigate({ to: harnessesPath })}
+                        className="text-muted-foreground text-sm"
+                      >
+                        Coding harnesses…
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {(modelOptions.length > 0 || modelLoading) && (
+                <WithTooltip label={`Model · ${alt("M")}`}>
+                  <span className="inline-flex min-w-0">
+                    <HarnessModelMenu
+                      harness={harness}
+                      options={modelOptions}
+                      value={model}
+                      onChange={selectModel}
+                      loading={modelLoading}
+                      {...pickerProps("model")}
+                    />
+                  </span>
+                </WithTooltip>
+              )}
+              {effortLevels.length > 0 && (
+                <ReasoningEffortMenu
+                  levels={effortLevels}
+                  value={postedEffort}
+                  onChange={(next) => {
+                    setEffortByHarness((current) => {
+                      const nextMap = { ...current };
+                      if (next) nextMap[harness] = next;
+                      else delete nextMap[harness];
+                      return nextMap;
+                    });
+                  }}
+                />
+              )}
+              <FastModeToggle
+                available={fastModeAvailable}
+                value={postedFastMode}
                 onChange={(next) => {
-                  setEffortByHarness((current) => {
-                    const nextMap = { ...current };
-                    if (next) nextMap[harness] = next;
-                    else delete nextMap[harness];
-                    return nextMap;
-                  });
+                  setFastByHarness((current) => ({
+                    ...current,
+                    [harness]: next,
+                  }));
                 }}
               />
-            )}
-            <FastModeToggle
-              available={fastModeAvailable}
-              value={postedFastMode}
-              onChange={(next) => {
-                setFastByHarness((current) => ({
-                  ...current,
-                  [harness]: next,
-                }));
-              }}
-            />
-            <div className="flex min-w-0 flex-col">
-              <WithTooltip label={`Permissions · ${alt("P")}`}>
-                <span className="inline-flex min-w-0">
-                  <PermissionModeMenu
-                    scopeKey="code-create"
-                    value={postedMode}
-                    disabled={availableModes.length === 0}
-                    availableModes={availableModes}
-                    onChange={(mode) => setPermissionMode(mode)}
-                    {...pickerProps("mode")}
-                  />
-                </span>
-              </WithTooltip>
-              {selectedHarness?.relaunch_composes_permission_mode === false && (
-                <p className="text-muted-foreground px-2 text-xs">
-                  {CREATE_PERMISSION_MODE_FIXED}
-                </p>
-              )}
+              <div className="flex min-w-0 flex-col">
+                <WithTooltip label={`Permissions · ${alt("P")}`}>
+                  <span className="inline-flex min-w-0">
+                    <PermissionModeMenu
+                      scopeKey="code-create"
+                      value={postedMode}
+                      disabled={availableModes.length === 0}
+                      availableModes={availableModes}
+                      onChange={(mode) => setPermissionMode(mode)}
+                      {...pickerProps("mode")}
+                    />
+                  </span>
+                </WithTooltip>
+                {selectedHarness?.relaunch_composes_permission_mode ===
+                  false && (
+                  <p className="text-muted-foreground px-2 text-xs">
+                    {CREATE_PERMISSION_MODE_FIXED}
+                  </p>
+                )}
+              </div>
             </div>
 
-            <div className="min-w-4 flex-1" />
-            <WithTooltip label="Stay here after create to fire off another">
-              <label
-                className={cn(
-                  "flex h-8 shrink-0 cursor-pointer items-center gap-2 px-2 text-sm",
-                  createMore ? "text-foreground" : "text-muted-foreground",
-                )}
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              <WithTooltip label="Stay here after create to fire off another">
+                <label
+                  className={cn(
+                    "flex h-8 shrink-0 cursor-pointer items-center gap-2 px-2 text-sm",
+                    createMore ? "text-foreground" : "text-muted-foreground",
+                  )}
+                >
+                  <Switch
+                    checked={createMore}
+                    onCheckedChange={setCreateMore}
+                    aria-label="Create more"
+                    className="h-5 w-9"
+                    thumbClassName="size-4 data-[state=checked]:translate-x-4"
+                  />
+                  <span className="truncate">Create more</span>
+                </label>
+              </WithTooltip>
+              <Button
+                type="submit"
+                disabled={!canCreate}
+                className="h-8 shrink-0"
               >
-                <Switch
-                  checked={createMore}
-                  onCheckedChange={setCreateMore}
-                  aria-label="Create more"
-                  className="h-5 w-9"
-                  thumbClassName="size-4 data-[state=checked]:translate-x-4"
-                />
-                <span className="truncate">Create more</span>
-              </label>
-            </WithTooltip>
-            <Button
-              type="submit"
-              disabled={!canCreate}
-              className="h-8 shrink-0"
-            >
-              Create
-              <span
-                className="ml-1 inline-flex items-center gap-0.5 text-2xs font-medium opacity-60"
-                aria-hidden="true"
-              >
-                <kbd className="font-sans">{command ? "⌘" : "Ctrl"}</kbd>
-                <kbd className="font-sans">↩</kbd>
-              </span>
-            </Button>
+                Create
+                <span
+                  className="ml-1 inline-flex items-center gap-0.5 text-2xs font-medium opacity-60"
+                  aria-hidden="true"
+                >
+                  <kbd className="font-sans">{command ? "⌘" : "Ctrl"}</kbd>
+                  <kbd className="font-sans">↩</kbd>
+                </span>
+              </Button>
+            </div>
           </div>
         </form>
       </DialogContent>

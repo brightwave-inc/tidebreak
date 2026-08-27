@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -272,7 +272,27 @@ type Story = StoryObj<typeof meta>;
  * Every pill has a chord: Cmd+N repo, Alt+E engine, Alt+M model, Alt+P
  * permissions, Alt+B base ref, Alt+N name.
  */
-export const Default: Story = {};
+export const Default: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const dialog = await page.findByRole("dialog");
+    const prompt = page.getByRole("textbox", { name: "First message" });
+    await expect(dialog).toBeVisible();
+    expect(dialog.getBoundingClientRect().width).toBeGreaterThan(800);
+    expect(prompt.getBoundingClientRect().height).toBeGreaterThanOrEqual(200);
+  },
+};
+
+/** The minimum supported window wraps settings without clipping the actions. */
+export const MinimumWindow: Story = {
+  globals: { viewport: { value: "minimumWindow", isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const dialog = await page.findByRole("dialog");
+    await expect(page.getByRole("button", { name: /Create/ })).toBeVisible();
+    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth);
+  },
+};
 
 /**
  * Engines that cannot be fixed by waiting — no pin, or signed out — stay
