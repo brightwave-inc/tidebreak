@@ -50,6 +50,7 @@ type DeliveryScenario =
   | "pull-requests-empty"
   | "pull-requests-stacked"
   | "pull-requests-unregistered"
+  | "pull-requests-state-changed"
   | "pull-requests-partial"
   | "pull-requests-no-viewer"
   | "github-unavailable"
@@ -152,6 +153,12 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
           (workspace) => workspace.status !== "archived",
         )
       : deliveryWorkspaces;
+  const refreshedMergedPullRequest = {
+    ...deliveryPullRequests[0]!,
+    state: "merged" as const,
+    merged_at: "2026-08-27T19:45:00.000Z",
+    updated_at: "2026-08-27T19:45:00.000Z",
+  };
 
   return {
     openCodeUpdates: () => idleSocket(),
@@ -210,7 +217,9 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
               ? stackedDeliveryPullRequests
               : scenario === "pull-requests-unregistered"
                 ? unregisteredDeliveryPullRequests
-                : deliveryPullRequests,
+                : scenario === "pull-requests-state-changed"
+                  ? [deliveryPullRequests[0]!]
+                  : deliveryPullRequests,
         errors:
           scenario === "pull-requests-partial"
             ? [
@@ -232,7 +241,13 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     getCodeDeliveryPullRequestDetail: async ({
       number,
     }: CodeDeliveryPullRequestTarget) =>
-      deliveryPullRequestDetails[number] ?? deliveryPullRequestDetails[2251]!,
+      scenario === "pull-requests-state-changed" && number === 2251
+        ? {
+            ...deliveryPullRequestDetails[2251]!,
+            summary: refreshedMergedPullRequest,
+          }
+        : (deliveryPullRequestDetails[number] ??
+          deliveryPullRequestDetails[2251]!),
     runCodeDeliveryPullRequestAction: async ({
       action,
     }: CodeDeliveryPullRequestActionBody) => ({
@@ -642,6 +657,21 @@ export const PullRequestDetail: Story = {
   },
 };
 
+/** Opening stale list data adopts the merged state and moves the row to Done. */
+export const PullRequestStateChangedOnOpen: Story = {
+  args: { scenario: "pull-requests-state-changed" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await openPullRequest(canvasElement, "Build the delivery center");
+    await expect(
+      await canvas.findByLabelText("Pull request summary"),
+    ).toHaveTextContent("Merged");
+    const row = await canvas.findByRole("listitem");
+    await expect(row).toHaveAttribute("data-status-group", "done");
+    await expect(await canvas.findByText("Done")).toBeVisible();
+  },
+};
+
 /**
  * A stack-shaped chain the host has no stack for: every row carries the
  * unregistered marker, and the detail sheet offers to register the chain
@@ -936,6 +966,12 @@ export const PullRequestsWithoutViewerLogin: Story = {
 
 export const PullRequestsLoading: Story = {
   args: { scenario: "pull-requests-loading" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      await canvas.findByRole("status", { name: "Loading" }),
+    ).toHaveClass("w-full", "min-w-0", "flex-1");
+  },
 };
 
 export const PullRequestsEmpty: Story = {

@@ -802,6 +802,9 @@ type TargetDetailState<T> = {
   detail: T | null;
 };
 
+const PULL_REQUEST_DETAIL_SELECTION_DEBOUNCE_MS = 140;
+const MAX_PULL_REQUEST_DETAIL_CACHE = 24;
+
 function PullRequestsSurface({
   repositories,
   capability,
@@ -835,6 +838,7 @@ function PullRequestsSurface({
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detailLoadDelayMs, setDetailLoadDelayMs] = useState(0);
   const [targetDetailState, setTargetDetailState] =
     useState<TargetDetailState<CodeDeliveryPullRequestDetail> | null>(null);
   const [revision, setRevision] = useState(0);
@@ -856,6 +860,7 @@ function PullRequestsSurface({
   const adoptedSummaries = useRef(
     new Map<string, CodeDeliveryPullRequestSummary>(),
   );
+  const detailCache = useRef(new Map<string, CodeDeliveryPullRequestDetail>());
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(
@@ -953,19 +958,33 @@ function PullRequestsSurface({
   useEffect(() => {
     routeSelectionFenced.current = false;
     setSelectedId(null);
+    setDetailLoadDelayMs(0);
     setTargetDetailState(
       targetKey ? { key: targetKey, pending: true, detail: null } : null,
     );
   }, [targetKey]);
 
-  const selectItem = (id: string) => {
+  const selectItem = (id: string, debounceDetail = false) => {
     routeSelectionFenced.current = true;
+    setDetailLoadDelayMs(
+      debounceDetail ? PULL_REQUEST_DETAIL_SELECTION_DEBOUNCE_MS : 0,
+    );
     setSelectedId(id);
   };
 
   const closeDetail = () => {
     routeSelectionFenced.current = true;
+    setDetailLoadDelayMs(0);
     setSelectedId(null);
+  };
+
+  const rememberDetail = (detail: CodeDeliveryPullRequestDetail) => {
+    detailCache.current.delete(detail.summary.id);
+    detailCache.current.set(detail.summary.id, detail);
+    if (detailCache.current.size > MAX_PULL_REQUEST_DETAIL_CACHE) {
+      const oldest = detailCache.current.keys().next().value;
+      if (oldest) detailCache.current.delete(oldest);
+    }
   };
 
   const applyAdopted = (rows: CodeDeliveryPullRequestSummary[]) =>
@@ -973,7 +992,27 @@ function PullRequestsSurface({
 
   const adoptSummary = (summary: CodeDeliveryPullRequestSummary) => {
     adoptedSummaries.current.set(summary.id, summary);
-    setItems((current) => applyAdopted(current));
+    setItems((current) =>
+      current.map((item) =>
+        item.id === summary.id
+          ? summary
+          : (adoptedSummaries.current.get(item.id) ?? item),
+      ),
+    );
+
+    const cached = useCodeDeliveryStore
+      .getState()
+      .lastPullRequestPages.find((page) => page.key === pageKey);
+    if (cached) {
+      useCodeDeliveryStore.getState().rememberPullRequestPage({
+        ...cached,
+        items: cached.items.map((item) =>
+          item.id === summary.id
+            ? summary
+            : (adoptedSummaries.current.get(item.id) ?? item),
+        ),
+      });
+    }
   };
 
   const query = async (cursor?: string, append = false) => {
@@ -1009,6 +1048,7 @@ function PullRequestsSurface({
           .getCodeDeliveryPullRequestDetail(target)
           .then((detail) => {
             if (token === generation.current) {
+              rememberDetail(detail);
               setTargetDetailState({
                 key: requestKey,
                 pending: false,
@@ -1151,7 +1191,7 @@ function PullRequestsSurface({
         return;
       }
       const nextId = displayIds[nextIndex];
-      if (nextId) selectItem(nextId);
+      if (nextId) selectItem(nextId, true);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -1178,9 +1218,23 @@ function PullRequestsSurface({
     targetDetailState.pending &&
     !targetDetailState.detail &&
     pullRequestMatchesTarget(selected, target);
+  const cachedDetail = selected
+    ? detailCache.current.get(selected.id)
+    : undefined;
+  const initialDetail =
+    selected && targetDetailState?.detail?.summary.id === selected.id
+      ? targetDetailState.detail
+      : cachedDetail &&
+          selected &&
+          cachedDetail.summary.updated_at >= selected.updated_at
+        ? cachedDetail
+        : undefined;
 
   const list = (
-    <div ref={scrollRef} className="min-h-0 h-full overflow-auto">
+    <div
+      ref={scrollRef}
+      className="min-h-0 h-full min-w-0 flex-1 overflow-auto"
+    >
       {error && (
         <InlineLoadError message={error} onRetry={() => void query()} />
       )}
@@ -1248,17 +1302,15 @@ function PullRequestsSurface({
       key={selected.id}
       client={client}
       summary={selected}
+      loadDelayMs={detailLoadDelayMs}
       hasMergeQueue={deliveryRepositoryHasMergeQueue(
         items,
         selected.repository,
       )}
-      initialDetail={
-        targetDetailState?.detail?.summary.id === selected.id
-          ? targetDetailState.detail
-          : undefined
-      }
+      initialDetail={initialDetail}
       onClose={closeDetail}
       onChanged={refreshList}
+      onDetail={rememberDetail}
       onSummary={adoptSummary}
       onOpenWorkspace={(workspaceId) =>
         void navigate({
@@ -3682,7 +3734,11 @@ function InlineLoadError({
 
 function DeliveryListSkeleton() {
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-5" role="status">
+    <div
+      className="flex min-h-0 w-full min-w-0 flex-1 flex-col p-5"
+      role="status"
+      aria-label="Loading"
+    >
       <span className="sr-only">Loading</span>
       {Array.from({ length: 7 }, (_, index) => (
         <div
