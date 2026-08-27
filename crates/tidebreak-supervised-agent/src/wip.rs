@@ -347,6 +347,12 @@ async fn checkpoint_dirty_tree(
             ))
         }
     };
+    let index = match IndexSnapshot::capture(job, directory).await {
+        Ok(index) => index,
+        Err(error) => {
+            return Some(failure_after_head_push(tree, job, "index_unavailable", &error).await)
+        }
+    };
     if let Err(error) = git(
         job.trust,
         directory,
@@ -356,6 +362,7 @@ async fn checkpoint_dirty_tree(
     )
     .await
     {
+        let _ = index.restore();
         return Some(failure_after_head_push(tree, job, "stage_failed", &error).await);
     }
     // The tree id is both the snapshot's content and the dedup fingerprint:
@@ -371,12 +378,12 @@ async fn checkpoint_dirty_tree(
     {
         Ok(id) => id.trim().to_owned(),
         Err(error) => {
-            let _ = restore_index(job, directory).await;
+            let _ = index.restore();
             return Some(failure_after_head_push(tree, job, "snapshot_failed", &error).await);
         }
     };
     if tree.last_pushed_dirty.as_ref() == Some(&(tree_id.clone(), base_head.clone())) {
-        let _ = restore_index(job, directory).await;
+        let _ = index.restore();
         return None;
     }
     let snapshot = match git(
@@ -403,11 +410,11 @@ async fn checkpoint_dirty_tree(
     {
         Ok(sha) => sha.trim().to_owned(),
         Err(error) => {
-            let _ = restore_index(job, directory).await;
+            let _ = index.restore();
             return Some(failure_after_head_push(tree, job, "commit_failed", &error).await);
         }
     };
-    let restored = restore_index(job, directory).await.is_ok();
+    let restored = index.restore().is_ok();
     match git(
         job.trust,
         directory,
@@ -444,27 +451,77 @@ async fn checkpoint_dirty_tree(
     }
 }
 
-/// Unstages the snapshot staging so the engine's next turn sees the index it
-/// left behind. HEAD never moved, so this is an index-only reset.
-async fn restore_index(job: &TreeJob<'_>, directory: &Path) -> Result<String, String> {
-    git(
-        job.trust,
-        directory,
-        MUTATION_BOUND,
-        job.share,
-        &["reset", "--mixed", "--quiet"],
-    )
-    .await
+/// The engine's index exactly as it stood before the snapshot staged
+/// anything, restored by writing the bytes back. A `git reset` is not an
+/// index-only restore: it aborts an in-progress merge, rebase, or
+/// cherry-pick and flattens unmerged entries, so the engine's next turn
+/// would resume in a repository state it never created.
+struct IndexSnapshot {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+impl IndexSnapshot {
+    async fn capture(job: &TreeJob<'_>, directory: &Path) -> Result<Self, String> {
+        let raw = git(
+            job.trust,
+            directory,
+            PLUMBING_BOUND,
+            job.share,
+            &["rev-parse", "--git-path", "index"],
+        )
+        .await?;
+        let mut path = PathBuf::from(raw.trim());
+        if path.is_relative() {
+            path = directory.join(path);
+        }
+        let contents = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "the index at {} could not be read: {error}",
+                    path.display()
+                ))
+            }
+        };
+        Ok(Self { path, contents })
+    }
+
+    fn restore(&self) -> Result<(), String> {
+        match &self.contents {
+            Some(bytes) => std::fs::write(&self.path, bytes).map_err(|error| {
+                format!(
+                    "the index at {} could not be restored: {error}",
+                    self.path.display()
+                )
+            }),
+            None => match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!(
+                    "the staged index at {} could not be removed: {error}",
+                    self.path.display()
+                )),
+            },
+        }
+    }
 }
 
 /// A step failed mid-checkpoint; the last committed head may still be worth
-/// preserving, so try to push it before reporting.
+/// preserving, so try to push it before reporting — unless the checkpoint
+/// ref holds a dirty snapshot, whose work HEAD does not contain.
 async fn failure_after_head_push(
     tree: &TreeState,
     job: &TreeJob<'_>,
     reason: &str,
     error: &str,
 ) -> Event {
+    if tree.last_pushed_dirty.is_some() {
+        let mut event = failure_event(tree, job, reason, error, None, Some(false), None);
+        event.1["head_push_skipped"] = serde_json::json!("would_replace_dirty_snapshot");
+        return event;
+    }
     let head = match git(
         job.trust,
         &tree.directory,
@@ -816,6 +873,105 @@ mod tests {
         assert_eq!(events[0].1["commit"], head);
         // The engine's own commit stays on the branch.
         assert_eq!(run(&clone, &["rev-parse", "HEAD"]), head);
+    }
+
+    /// A mid-checkpoint failure must not push HEAD over a dirty snapshot the
+    /// ref already preserves: HEAD does not contain that work.
+    #[tokio::test]
+    async fn a_failure_never_pushes_head_over_a_dirty_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let clone = fixture(root.path());
+        let mut context = context(root.path(), &clone).await;
+        std::fs::write(clone.join("draft.txt"), "unfinished\n").unwrap();
+        let events = context
+            .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 1 })
+            .await;
+        let snapshot = events[0].1["commit"].as_str().unwrap().to_owned();
+        let origin = root.path().join("origin");
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/mg-wip/sb-1-i1"]),
+            snapshot
+        );
+
+        let trust = trust(root.path());
+        let job = TreeJob {
+            trust: &trust,
+            reference: checkpoint_ref("sb-1", 1, 0),
+            message: "m".to_owned(),
+            point: serde_json::json!({}),
+            share: Instant::now() + CHECKPOINT_BUDGET,
+        };
+        let (kind, payload) =
+            failure_after_head_push(&context.trees[0], &job, "status_failed", "boom").await;
+        assert_eq!(kind, "wip_push_failed");
+        assert_eq!(payload["reason"], "status_failed");
+        assert_eq!(payload["head_pushed"], false);
+        assert_eq!(payload["head_push_skipped"], "would_replace_dirty_snapshot");
+        // The snapshot still owns the ref.
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/mg-wip/sb-1-i1"]),
+            snapshot
+        );
+    }
+
+    /// A checkpoint during a conflicted merge must hand the merge back
+    /// exactly as the engine left it: MERGE_HEAD intact, entries still
+    /// unmerged. A reset-based restore aborts the merge instead.
+    #[tokio::test]
+    async fn a_conflicted_merge_survives_the_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let clone = fixture(root.path());
+        run(&clone, &["checkout", "-b", "side"]);
+        std::fs::write(clone.join("README.md"), "side\n").unwrap();
+        run(&clone, &["add", "-A"]);
+        run(
+            &clone,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-m",
+                "side",
+            ],
+        );
+        run(&clone, &["checkout", "main"]);
+        std::fs::write(clone.join("README.md"), "main\n").unwrap();
+        run(&clone, &["add", "-A"]);
+        run(
+            &clone,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-m",
+                "main",
+            ],
+        );
+        let merge = Command::new("git")
+            .args(["merge", "side"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge must conflict");
+        let head = run(&clone, &["rev-parse", "HEAD"]);
+        let mut context = context(root.path(), &clone).await;
+
+        let events = context
+            .checkpoint(&CheckpointPoint::SuccessfulTurn { turn: 1 })
+            .await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "wip_pushed");
+        assert_eq!(events[0].1["created_commit"], true);
+        assert_eq!(events[0].1["task_branch_restored"], true);
+
+        // The merge is still in progress, entries still unmerged.
+        assert_eq!(run(&clone, &["rev-parse", "HEAD"]), head);
+        assert!(clone.join(".git").join("MERGE_HEAD").is_file());
+        assert!(run(&clone, &["status", "--porcelain"]).contains("UU README.md"));
     }
 
     #[tokio::test]
