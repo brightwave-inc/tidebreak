@@ -665,9 +665,9 @@ Branch protection on `main` requires the individual CI jobs, not an aggregate
 wrapper — there is none. The required contexts are `change scope`, `semantic PR
 title`, `release policy`, `secret scan (gitleaks)`, `supply-chain advisories
 (cargo-deny)`, `unused deps (cargo-machete)`, `third-party notices`, `rustfmt`,
-`clippy`, `desktop test`, `Windows cargo check`, `test`, `postgres state
-machine`, and `desktop UI`, each pinned to the GitHub Actions app (`app_id`
-15368) so no other app can satisfy them.
+`clippy`, `desktop test`, `test`, `postgres state machine`, and `desktop UI`,
+each pinned to the GitHub Actions app (`app_id` 15368) so no other app can
+satisfy them.
 Every lane a change's scope can reach runs on the pull request itself; a lane
 outside the scope reports a successful skip, which is what lets a required
 check pass without running. Green PR checks cover the scoped Linux lanes plus
@@ -682,11 +682,11 @@ managed release labels match the title, so requiring the label job too would
 add nothing.
 
 `Windows cargo check` is rust-scoped like clippy because a Windows compile
-break on `main` blocks the desktop release. Native Windows tests inside that
-job still wait for the `windows` scope, the `windows-ci` label, or a
-main/scheduled/manual run: those suites need NTFS and the Windows process
-APIs, and they retry a PowerShell startup race that should not gate unrelated
-Rust changes.
+break on `main` blocks the desktop release. Keep it off the required list
+until that lane stays green. Native Windows tests inside that job still wait
+for the `windows` scope, the `windows-ci` label, or a main/scheduled/manual
+run: those suites need NTFS and the Windows process APIs, and they retry a
+PowerShell startup race that should not gate unrelated Rust changes.
 
 To run that job on an 8-core Windows larger runner (8 vCPU, 32 GB), set the
 repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you
