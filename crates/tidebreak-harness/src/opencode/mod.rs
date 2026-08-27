@@ -88,8 +88,11 @@ impl HarnessAdapter for OpencodeAdapter {
             auto_mode: CapLevel::Supported,
             // build agent with every permission rule allow; not `--auto`.
             allow_mode: CapLevel::Supported,
-            // 1.18.18 `--help` lists no effort or reasoning flag, and the
-            // server's session and prompt bodies carry no field for one.
+            // 1.18.18 `--help` lists no effort flag. Re-checked through
+            // opencode-ai@1.18.23: top-level `--help` still has none, and
+            // `run --variant` / prompt_async `variant` are provider-specific
+            // model variants with no captured round-trip, so this stays
+            // Unsupported.
             reasoning_levels: CapLevel::Unsupported,
             // session.diff was empty arrays; file.edited was not seen.
             native_file_change_events: CapLevel::Unknown,
@@ -97,9 +100,10 @@ impl HarnessAdapter for OpencodeAdapter {
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
         };
-        // Off the captured 1.18 line the missing-effort-flag finding no
-        // longer applies: a later minor may have grown the flag, so the
-        // verdict drops back to Unknown (decision 31 rule 3).
+        // Off the captured 1.18 line the missing-effort finding no longer
+        // applies: a later minor may grow an engine ladder, so the verdict
+        // drops back to Unknown (decision 31 rule 3). 1.18.19–1.18.23 stay
+        // on this line and stay Unsupported.
         if crate::probe::off_pinned_line(probe.version.as_deref(), (1, 18)) {
             caps.reasoning_levels = CapLevel::Unknown;
         }
