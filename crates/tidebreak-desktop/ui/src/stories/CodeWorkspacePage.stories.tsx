@@ -649,8 +649,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
         },
         number: prSnapshot.pr?.number ?? 0,
         url:
-          prSnapshot.pr?.url ??
-          "https://github.com/example/tidebreak/pull/41",
+          prSnapshot.pr?.url ?? "https://github.com/example/tidebreak/pull/41",
         title: prSnapshot.pr?.title ?? "Pull request",
         state: prSnapshot.pr?.state ?? "open",
         draft: prSnapshot.pr?.draft ?? false,
