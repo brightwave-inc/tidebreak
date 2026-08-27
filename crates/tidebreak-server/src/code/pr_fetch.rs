@@ -1,12 +1,18 @@
 //! One conditional REST fetcher for pull-request state (decision 66).
 //!
-//! Every background pull-request read runs through here: one `gh api` read
-//! of the pull request, one of its head's check runs, one of its reviews,
-//! and — only for base branches observed to run a merge queue — one
-//! timeline read for queue membership. Each read sends the stored ETag, so
-//! an unchanged answer is a 304 that GitHub does not count against the
+//! Every background pull-request read runs through here: one read of the
+//! pull request, one of its head's check runs, one of its reviews, and —
+//! only for base branches observed to run a merge queue — one timeline
+//! read for queue membership. Each read sends the stored ETag, so an
+//! unchanged answer is a 304 that GitHub does not count against the
 //! primary rate limit: sustained cost tracks how often pull requests
 //! change, not how often Tidebreak asks.
+//!
+//! The reads ride one of two transports ([`FetchTransport`]): `gh api` on
+//! a machine with an authenticated `gh`, or the forge REST API with a
+//! borrowed credential on a gateway-hosted machine that has none
+//! (decision 65). Both answer in one [`RawHttpResponse`] shape, so the
+//! conditional discipline is a single code path however the host is asked.
 //!
 //! One [`HostGate`] paces every call. It holds a small global concurrency,
 //! spaces requests per host, and treats a secondary-rate-limit answer or a
@@ -20,6 +26,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::obo_gateway::GitCredential;
 use tidebreak_core::{
     CodePullRequestFact, CodePullRequestState, PullRequestCheck, PullRequestCheckBucket,
     PullRequestDigest,
@@ -38,6 +45,33 @@ const DEFAULT_PARK: Duration = Duration::from_secs(60);
 const MAX_PARK: Duration = Duration::from_secs(15 * 60);
 /// Bound on one `gh api` call — the same bound the general runner uses.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cap on one direct REST response body — the same ceiling the hosted forge
+/// reader applies, so a confused origin cannot grow the process.
+const REST_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Ceiling on timeline pages one membership read walks. The timeline pages
+/// oldest-first and membership is the last queue transition, so the walk
+/// must reach the end; past this depth the read states nothing rather than
+/// reporting an older transition as current.
+const TIMELINE_PAGE_CAP: u32 = 30;
+
+/// How one gated read reaches the forge: `gh api` where an authenticated
+/// `gh` exists, or the REST API with a borrowed per-operation credential on
+/// a gateway-hosted machine that has none (decision 65). Either way the
+/// answer is the same [`RawHttpResponse`], so ETags, 304s, and parks are
+/// one discipline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FetchTransport<'a> {
+    /// `gh api --include` run in `cwd` on `binary`.
+    Gh { cwd: &'a Path, binary: &'a Path },
+    /// A direct conditional GET against `api_base` with a borrowed
+    /// credential as the bearer.
+    Rest {
+        api_base: &'a str,
+        credential: &'a GitCredential,
+    },
+}
 
 /// Pace and park GitHub reads, one state per host (decision 66).
 #[derive(Debug)]
@@ -185,11 +219,9 @@ pub(crate) struct BranchRules {
 }
 
 /// GET `repos/{owner}/{name}/pulls/{number}`, conditionally.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_pull_request(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     owner: &str,
     name: &str,
@@ -197,7 +229,7 @@ pub(crate) async fn read_pull_request(
     etag: Option<&str>,
 ) -> Result<EndpointRead<RestPull>, FetchFailure> {
     let path = format!("repos/{owner}/{name}/pulls/{number}");
-    let response = gated_read(gate, cwd, binary, host, &path, etag).await?;
+    let response = gated_read(gate, transport, host, &path, etag).await?;
     match response.status {
         200 => match rest_pull_from_value(&parse_body(&response)?) {
             Some(pull) => Ok(EndpointRead::Fresh {
@@ -220,15 +252,14 @@ pub(crate) async fn read_pull_request(
 /// `gh pr view` applied to a branch.
 pub(crate) async fn read_pull_request_for_head(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     owner: &str,
     name: &str,
     branch: &str,
 ) -> Result<Option<RestPull>, FetchFailure> {
     let path = format!("repos/{owner}/{name}/pulls?head={owner}:{branch}&state=all&per_page=10");
-    let response = gated_read(gate, cwd, binary, host, &path, None).await?;
+    let response = gated_read(gate, transport, host, &path, None).await?;
     match response.status {
         200 => {
             let listed = parse_body(&response)?;
@@ -246,11 +277,9 @@ pub(crate) async fn read_pull_request_for_head(
 }
 
 /// GET `repos/{owner}/{name}/commits/{sha}/check-runs`, conditionally.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_check_runs(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     owner: &str,
     name: &str,
@@ -258,7 +287,7 @@ pub(crate) async fn read_check_runs(
     etag: Option<&str>,
 ) -> Result<EndpointRead<Vec<PullRequestCheck>>, FetchFailure> {
     let path = format!("repos/{owner}/{name}/commits/{sha}/check-runs?per_page=100");
-    let response = gated_read(gate, cwd, binary, host, &path, etag).await?;
+    let response = gated_read(gate, transport, host, &path, etag).await?;
     match response.status {
         200 => {
             let value = parse_body(&response)?;
@@ -277,11 +306,9 @@ pub(crate) async fn read_check_runs(
 ///
 /// One page of one hundred: a pull request with more reviews than that has
 /// long since answered the only question this read asks.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_reviews(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     owner: &str,
     name: &str,
@@ -289,7 +316,7 @@ pub(crate) async fn read_reviews(
     etag: Option<&str>,
 ) -> Result<EndpointRead<ReviewTally>, FetchFailure> {
     let path = format!("repos/{owner}/{name}/pulls/{number}/reviews?per_page=100");
-    let response = gated_read(gate, cwd, binary, host, &path, etag).await?;
+    let response = gated_read(gate, transport, host, &path, etag).await?;
     match response.status {
         200 => {
             let value = parse_body(&response)?;
@@ -308,15 +335,14 @@ pub(crate) async fn read_reviews(
 /// this branch requires. `Missing` on hosts that predate rulesets.
 pub(crate) async fn read_branch_rules(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     owner: &str,
     name: &str,
     branch: &str,
 ) -> Result<EndpointRead<BranchRules>, FetchFailure> {
     let path = format!("repos/{owner}/{name}/rules/branches/{branch}");
-    let response = gated_read(gate, cwd, binary, host, &path, None).await?;
+    let response = gated_read(gate, transport, host, &path, None).await?;
     match response.status {
         200 => {
             let value = parse_body(&response)?;
@@ -337,13 +363,47 @@ pub(crate) async fn read_branch_rules(
 /// nothing rather than guessing.
 pub(crate) async fn read_merge_queue_membership(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     owner: &str,
     name: &str,
     number: u64,
 ) -> Option<bool> {
+    let (cwd, binary) = match transport {
+        FetchTransport::Gh { cwd, binary } => (cwd, binary),
+        FetchTransport::Rest { .. } => {
+            // The timeline pages oldest-first and membership is the last
+            // queue transition, so walk to the end the way the `gh` arm's
+            // `--paginate` does. A short page is the end.
+            let mut membership = None;
+            for page in 1..=TIMELINE_PAGE_CAP {
+                let path = format!(
+                    "repos/{owner}/{name}/issues/{number}/timeline?per_page=100&page={page}"
+                );
+                let response = gated_read(gate, transport, host, &path, None).await.ok()?;
+                if response.status != 200 {
+                    return None;
+                }
+                let value: Value = serde_json::from_str(&response.body).ok()?;
+                let events = value.as_array()?;
+                if let Some(last) = events.iter().rev().find_map(|event| {
+                    match event.get("event").and_then(Value::as_str) {
+                        Some(event @ ("added_to_merge_queue" | "removed_from_merge_queue")) => {
+                            Some(event)
+                        }
+                        _ => None,
+                    }
+                }) {
+                    membership = Some(last == "added_to_merge_queue");
+                }
+                if events.len() < 100 {
+                    return Some(membership.unwrap_or(false));
+                }
+            }
+            // Deeper than the cap: state nothing rather than guessing.
+            return None;
+        }
+    };
     let _permit = gate.admit(host).await.ok()?;
     let path = format!("repos/{owner}/{name}/issues/{number}/timeline?per_page=100");
     let mut args = vec!["api"];
@@ -437,31 +497,103 @@ pub(crate) fn digest_from_parts(
     }
 }
 
-/// One gated conditional GET of `path` on `host`.
+/// One gated conditional GET of `path` on `host`, over either transport.
 async fn gated_read(
     gate: &HostGate,
-    cwd: &Path,
-    binary: &Path,
+    transport: FetchTransport<'_>,
     host: &str,
     path: &str,
     etag: Option<&str>,
 ) -> Result<RawHttpResponse, FetchFailure> {
     let _permit = gate.admit(host).await.map_err(FetchFailure::Parked)?;
-    let mut args = vec!["api", "--include"];
-    let hostname = host_argument(host);
-    if let Some(hostname) = &hostname {
-        args.extend(["--hostname", hostname.as_str()]);
-    }
-    let conditional = etag.map(|etag| format!("If-None-Match: {etag}"));
-    if let Some(conditional) = &conditional {
-        args.extend(["-H", conditional.as_str()]);
-    }
-    args.push(path);
-    let response = run_gh_http(cwd, binary, &args, FETCH_TIMEOUT)
-        .await
-        .map_err(FetchFailure::Transport)?;
+    let response = match transport {
+        FetchTransport::Gh { cwd, binary } => {
+            let mut args = vec!["api", "--include"];
+            let hostname = host_argument(host);
+            if let Some(hostname) = &hostname {
+                args.extend(["--hostname", hostname.as_str()]);
+            }
+            let conditional = etag.map(|etag| format!("If-None-Match: {etag}"));
+            if let Some(conditional) = &conditional {
+                args.extend(["-H", conditional.as_str()]);
+            }
+            args.push(path);
+            run_gh_http(cwd, binary, &args, FETCH_TIMEOUT)
+                .await
+                .map_err(FetchFailure::Transport)?
+        }
+        FetchTransport::Rest {
+            api_base,
+            credential,
+        } => rest_conditional_get(api_base, credential, path, etag).await?,
+    };
     apply_limit_answer(gate, host, &response);
     Ok(response)
+}
+
+/// One conditional GET against the forge REST API with a borrowed
+/// credential (decision 65), answered in the same [`RawHttpResponse`] shape
+/// `gh api --include` produces — status, ETag, pacing headers, body — so
+/// the caller's 304 and park handling never knows which transport ran.
+async fn rest_conditional_get(
+    api_base: &str,
+    credential: &GitCredential,
+    path: &str,
+    etag: Option<&str>,
+) -> Result<RawHttpResponse, FetchFailure> {
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("tidebreak/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| {
+            FetchFailure::Transport(format!("the forge REST client could not be built: {error}"))
+        })?;
+    let mut request = client
+        .get(format!("{api_base}/{path}"))
+        .bearer_auth(&credential.secret)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("x-github-api-version", "2022-11-28");
+    if let Some(etag) = etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let mut response = request.send().await.map_err(|error| {
+        FetchFailure::Transport(format!("the forge could not be reached: {error}"))
+    })?;
+    let header = |response: &reqwest::Response, name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .map(ToOwned::to_owned)
+    };
+    let status = response.status().as_u16();
+    let etag = header(&response, "etag");
+    let retry_after_secs = header(&response, "retry-after").and_then(|value| value.parse().ok());
+    let ratelimit_remaining =
+        header(&response, "x-ratelimit-remaining").and_then(|value| value.parse().ok());
+    let ratelimit_reset_epoch =
+        header(&response, "x-ratelimit-reset").and_then(|value| value.parse().ok());
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        FetchFailure::Transport(format!("the forge response broke mid-read: {error}"))
+    })? {
+        if bytes.len() + chunk.len() > REST_RESPONSE_LIMIT {
+            return Err(FetchFailure::Transport(
+                "the forge response passed the size ceiling".to_owned(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(RawHttpResponse {
+        status,
+        etag,
+        retry_after_secs,
+        ratelimit_remaining,
+        ratelimit_reset_epoch,
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+    })
 }
 
 /// Park the host when the answer orders it: a `Retry-After`, a secondary
@@ -826,6 +958,205 @@ mod tests {
         assert!(tokio::time::Instant::now() - first >= HOST_SPACING);
     }
 
+    async fn serve_forge(router: axum::Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    /// The hosted transport keeps the same conditional discipline as `gh`
+    /// (decision 65 meets decision 66): the borrowed credential rides as the
+    /// bearer, a stored ETag goes out as `If-None-Match`, and an unchanged
+    /// answer comes back as a 304 rather than a paid re-read.
+    #[tokio::test]
+    async fn the_rest_transport_sends_the_stored_etag_and_reads_the_304() {
+        type Seen = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+        let seen: Seen = Arc::default();
+        let recorded = Arc::clone(&seen);
+        let pull = move |headers: axum::http::HeaderMap| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let header = |name: axum::http::HeaderName| {
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned)
+                };
+                let conditional = header(axum::http::header::IF_NONE_MATCH);
+                recorded.lock().unwrap().push((
+                    header(axum::http::header::AUTHORIZATION),
+                    conditional.clone(),
+                ));
+                let unchanged = conditional.as_deref() == Some("W/\"pull-1\"");
+                let body = if unchanged {
+                    String::new()
+                } else {
+                    serde_json::json!({
+                        "number": 12,
+                        "html_url": "https://github.com/acme/demo/pull/12",
+                        "state": "open",
+                        "head": { "ref": "feature", "sha": "aaa" },
+                        "base": { "ref": "main" },
+                    })
+                    .to_string()
+                };
+                axum::http::Response::builder()
+                    .status(if unchanged { 304 } else { 200 })
+                    .header("etag", "W/\"pull-1\"")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        };
+        let api = serve_forge(
+            axum::Router::new().route("/repos/acme/demo/pulls/12", axum::routing::get(pull)),
+        )
+        .await;
+
+        let credential = GitCredential {
+            username: "x-access-token".into(),
+            secret: "ghs_test_borrowed".into(),
+        };
+        let api_base = format!("http://{api}");
+        let transport = FetchTransport::Rest {
+            api_base: &api_base,
+            credential: &credential,
+        };
+        let gate = HostGate::default();
+        let first = read_pull_request(&gate, transport, "github.com", "acme", "demo", 12, None)
+            .await
+            .unwrap();
+        let EndpointRead::Fresh { value, etag } = first else {
+            panic!("expected fresh: {first:?}");
+        };
+        assert_eq!(value.number, 12);
+        let etag = etag.expect("a 200 carries the etag to send next time");
+        let second = read_pull_request(
+            &gate,
+            transport,
+            "github.com",
+            "acme",
+            "demo",
+            12,
+            Some(&etag),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second, EndpointRead::NotModified);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0],
+            (Some("Bearer ghs_test_borrowed".into()), None),
+            "the first read is unconditional and authenticated"
+        );
+        assert_eq!(
+            seen[1],
+            (
+                Some("Bearer ghs_test_borrowed".into()),
+                Some("W/\"pull-1\"".into())
+            ),
+            "the second read sends the stored ETag"
+        );
+    }
+
+    /// A limit answer over the hosted transport parks the host exactly as
+    /// one over `gh` does: the next read waits out the stated window.
+    #[tokio::test]
+    async fn a_rest_limit_answer_parks_the_host() {
+        let limited = || async {
+            axum::http::Response::builder()
+                .status(403)
+                .header("retry-after", "120")
+                .body(axum::body::Body::from(
+                    r#"{"message":"You have exceeded a secondary rate limit. Please wait."}"#,
+                ))
+                .unwrap()
+        };
+        let api = serve_forge(
+            axum::Router::new().route("/repos/acme/demo/pulls/12", axum::routing::get(limited)),
+        )
+        .await;
+
+        let credential = GitCredential {
+            username: "x-access-token".into(),
+            secret: "ghs_test_borrowed".into(),
+        };
+        let api_base = format!("http://{api}");
+        let transport = FetchTransport::Rest {
+            api_base: &api_base,
+            credential: &credential,
+        };
+        let gate = HostGate::default();
+        let refused =
+            read_pull_request(&gate, transport, "github.com", "acme", "demo", 12, None).await;
+        assert!(
+            matches!(refused, Err(FetchFailure::Refused(403, _))),
+            "{refused:?}"
+        );
+        let parked = gate.admit("github.com").await;
+        assert!(
+            matches!(parked, Err(remaining) if remaining.as_secs() > 100),
+            "{parked:?}"
+        );
+    }
+
+    /// The timeline pages oldest-first, so the membership read walks to the
+    /// last page: a queue entry on page one that a later page removes reads
+    /// as out, exactly as the `gh` arm's `--paginate` reports it.
+    #[tokio::test]
+    async fn the_rest_membership_read_walks_the_timeline_to_its_last_page() {
+        let timeline = |axum::extract::Query(params): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >| async move {
+            let page: u32 = params
+                .get("page")
+                .map_or(1, |page| page.parse().expect("a numeric page"));
+            let events = match page {
+                1 => {
+                    let mut events: Vec<serde_json::Value> = (0..99)
+                        .map(|_| serde_json::json!({ "event": "labeled" }))
+                        .collect();
+                    events.push(serde_json::json!({ "event": "added_to_merge_queue" }));
+                    events
+                }
+                2 => vec![
+                    serde_json::json!({ "event": "labeled" }),
+                    serde_json::json!({ "event": "removed_from_merge_queue" }),
+                ],
+                page => panic!("the walk must stop at the short page, read page {page}"),
+            };
+            axum::Json(serde_json::Value::Array(events))
+        };
+        let api = serve_forge(axum::Router::new().route(
+            "/repos/acme/demo/issues/12/timeline",
+            axum::routing::get(timeline),
+        ))
+        .await;
+
+        let credential = GitCredential {
+            username: "x-access-token".into(),
+            secret: "ghs_test_borrowed".into(),
+        };
+        let api_base = format!("http://{api}");
+        let transport = FetchTransport::Rest {
+            api_base: &api_base,
+            credential: &credential,
+        };
+        let gate = HostGate::default();
+        let membership =
+            read_merge_queue_membership(&gate, transport, "github.com", "acme", "demo", 12).await;
+        assert_eq!(
+            membership,
+            Some(false),
+            "the removal on the last page wins over the addition on the first"
+        );
+    }
+
     #[cfg(unix)]
     mod shim {
         use super::*;
@@ -857,18 +1188,13 @@ esac
 "#,
             );
             let gate = HostGate::default();
-            let first = read_pull_request(
-                &gate,
-                dir.path(),
-                &gh,
-                "github.com",
-                "acme",
-                "demo",
-                12,
-                None,
-            )
-            .await
-            .unwrap();
+            let transport = FetchTransport::Gh {
+                cwd: dir.path(),
+                binary: &gh,
+            };
+            let first = read_pull_request(&gate, transport, "github.com", "acme", "demo", 12, None)
+                .await
+                .unwrap();
             let EndpointRead::Fresh { value, etag } = first else {
                 panic!("expected fresh: {first:?}");
             };
@@ -877,8 +1203,7 @@ esac
             let etag = etag.expect("a 200 carries the etag to send next time");
             let second = read_pull_request(
                 &gate,
-                dir.path(),
-                &gh,
+                transport,
                 "github.com",
                 "acme",
                 "demo",
@@ -901,8 +1226,10 @@ esac
             let gate = HostGate::default();
             let refused = read_pull_request(
                 &gate,
-                dir.path(),
-                &gh,
+                FetchTransport::Gh {
+                    cwd: dir.path(),
+                    binary: &gh,
+                },
                 "github.com",
                 "acme",
                 "demo",

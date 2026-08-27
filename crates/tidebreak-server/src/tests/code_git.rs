@@ -907,9 +907,9 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
     let lender = Arc::new(FakeLender::offering("acme-ship[bot]"));
     let (router, token, runtime, dir) =
         code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
-    // Status reads on a forge checkout now refresh the digest over REST
-    // (decision 65); a dead loopback port keeps this test off the network
-    // while the borrow accounting below stays observable.
+    // Status reads answer from the stored row; only the background refresher
+    // fetches over REST. A dead loopback port keeps any stray fetch off the
+    // network while the borrow accounting below stays observable.
     runtime.set_forge_api_base(Some("http://127.0.0.1:9/".to_owned()));
     let addr = serve(router).await;
     let client = reqwest::Client::new();
@@ -975,16 +975,11 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
         body["pushes_as_self"].is_null(),
         "the App's identity is never claimed as the caller's own: {body}"
     );
-    // The forge checkout's status read borrows once for the REST digest
-    // (decision 65); the read fails on the dead port and degrades silently.
-    let digest_borrows = lender.minted().len();
-    assert!(digest_borrows > 0, "the digest read borrows per operation");
+    // The status read serves the stored row and borrows nothing: the
+    // background refresher owns the digest fetch now.
     assert!(
-        lender
-            .minted()
-            .iter()
-            .all(|repository| repository == "acme/demo"),
-        "every borrow names the one forge repository: {:?}",
+        lender.minted().is_empty(),
+        "the status read must not borrow: {:?}",
         lender.minted()
     );
 
@@ -1009,9 +1004,8 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
         .unwrap();
     let body: serde_json::Value = status.json().await.unwrap();
     assert!(body["pushes_as"].is_null(), "{body}");
-    assert_eq!(
-        lender.minted().len(),
-        digest_borrows,
+    assert!(
+        lender.minted().is_empty(),
         "a foreign host must never reach the gateway"
     );
     run(
@@ -1040,8 +1034,8 @@ async fn a_hosted_push_borrows_only_for_forge_origins_and_fails_closed() {
     assert!(message.contains("no git forge"), "{message}");
     assert_eq!(
         lender.minted().len(),
-        digest_borrows + 1,
-        "the refused push asked exactly once more"
+        1,
+        "the refused push asked exactly once"
     );
     assert!(
         lender
@@ -1500,6 +1494,278 @@ exit 3
         .await
         .unwrap();
     assert_eq!(fresh["pr"]["head_sha"], "bbbbbbbb");
+}
+
+/// Decision 65 meets decision 66 on a hosted machine: the request path
+/// answers from the stored row without an inline forge fetch, and the
+/// refresher drives the same conditional fetcher over the forge REST API —
+/// unconditionally the first time, then with `If-None-Match` from the fact
+/// row's stored ETags, keeping the row on the 304.
+#[tokio::test]
+async fn a_hosted_digest_reads_the_row_and_refreshes_conditionally() {
+    use tidebreak_core::db::code::save_pull_request_fact;
+    use tidebreak_core::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
+
+    type Seen = Arc<std::sync::Mutex<Vec<(&'static str, Option<String>)>>>;
+    let seen: Seen = Arc::default();
+
+    fn conditional_answer(
+        seen: &Seen,
+        endpoint: &'static str,
+        headers: &axum::http::HeaderMap,
+        etag: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        let conditional = headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let unchanged = conditional.as_deref() == Some(etag);
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((endpoint, conditional));
+        axum::http::Response::builder()
+            .status(if unchanged { 304 } else { 200 })
+            .header("etag", etag)
+            .body(axum::body::Body::from(if unchanged {
+                String::new()
+            } else {
+                body.to_string()
+            }))
+            .unwrap()
+    }
+
+    let pull_seen = Arc::clone(&seen);
+    let pull = move |headers: axum::http::HeaderMap| {
+        let seen = Arc::clone(&pull_seen);
+        async move {
+            conditional_answer(
+                &seen,
+                "pull",
+                &headers,
+                "W/\"pull-1\"",
+                serde_json::json!({
+                    "number": 12,
+                    "html_url": "https://github.com/acme/demo/pull/12",
+                    "title": "Hosted change",
+                    "state": "open",
+                    "draft": false,
+                    "mergeable": true,
+                    "mergeable_state": "clean",
+                    "head": { "ref": "feature", "sha": "feedfeedfeedfeedfeed" },
+                    "base": { "ref": "main" },
+                    "auto_merge": null,
+                }),
+            )
+        }
+    };
+    let checks_seen = Arc::clone(&seen);
+    let checks = move |headers: axum::http::HeaderMap| {
+        let seen = Arc::clone(&checks_seen);
+        async move {
+            conditional_answer(
+                &seen,
+                "checks",
+                &headers,
+                "W/\"checks-1\"",
+                serde_json::json!({
+                    "check_runs": [
+                        { "name": "lint", "status": "completed", "conclusion": "success",
+                          "html_url": "https://github.com/acme/demo/runs/1" },
+                    ]
+                }),
+            )
+        }
+    };
+    let reviews_seen = Arc::clone(&seen);
+    let reviews = move |headers: axum::http::HeaderMap| {
+        let seen = Arc::clone(&reviews_seen);
+        async move {
+            conditional_answer(
+                &seen,
+                "reviews",
+                &headers,
+                "W/\"reviews-1\"",
+                serde_json::json!([]),
+            )
+        }
+    };
+    let timeline = || async { axum::Json(serde_json::json!([])) };
+    let fallback_seen = Arc::clone(&seen);
+    let fallback = move |uri: axum::http::Uri| {
+        let seen = Arc::clone(&fallback_seen);
+        async move {
+            seen.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(("other", Some(uri.path().to_owned())));
+            axum::http::StatusCode::NOT_FOUND
+        }
+    };
+    let forge = axum::Router::new()
+        .route("/repos/acme/demo/pulls/12", axum::routing::get(pull))
+        .route(
+            "/repos/acme/demo/commits/{sha}/check-runs",
+            axum::routing::get(checks),
+        )
+        .route(
+            "/repos/acme/demo/pulls/12/reviews",
+            axum::routing::get(reviews),
+        )
+        .route(
+            "/repos/acme/demo/issues/12/timeline",
+            axum::routing::get(timeline),
+        )
+        .fallback(fallback);
+    let api = serve(forge).await;
+
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_gh_search_path(Some("/path/with/no/gh".into()));
+    runtime.set_forge_api_base(Some(format!("http://{api}")));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "hosted digest").await;
+    let id = json_id(&workspace).to_owned();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+
+    // The decision-62 fact row the stored ETags live on.
+    let owner = tidebreak_core::OwnerId::local();
+    let now = chrono::Utc::now();
+    save_pull_request_fact(
+        &runtime.db,
+        &CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: owner.clone(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "demo".into(),
+            number: 12,
+            url: "https://github.com/acme/demo/pull/12".into(),
+            title: "Hosted change".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+            head_sha: Some("feedfeedfeedfeedfeed".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        },
+    )
+    .await
+    .unwrap();
+    seed_workspace_pull_request(&runtime, &id, "https://github.com/acme/demo/pull/12", 12).await;
+
+    // The request path answers from the stored row: the seeded digest comes
+    // back untouched, and the forge sees no read at all.
+    let first = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(first["pr"]["number"], 12);
+    assert!(
+        first["pr"]["title"].is_null(),
+        "the request path serves the row, not a fresh fetch: {first}"
+    );
+    assert!(
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "the request path never reached the forge"
+    );
+
+    // The refresher tick fetches over REST — unconditionally, no ETag is
+    // stored yet — and the result lands on the row the next read serves.
+    let workspace_id: tidebreak_core::WorkspaceId = id.parse().unwrap();
+    runtime.refresh_workspace_pr_row(&owner, workspace_id).await;
+    let refreshed = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(refreshed["pr"]["title"], "Hosted change");
+    assert_eq!(refreshed["pr"]["head_sha"], "feedfeedfeedfeedfeed");
+    assert_eq!(
+        refreshed["pr"]["checks_summary"],
+        "1 passing, 0 pending, 0 failing"
+    );
+
+    // The next tick sends `If-None-Match` from the stored ETags, and the
+    // 304 answers keep the row intact.
+    runtime.refresh_workspace_pr_row(&owner, workspace_id).await;
+    let unchanged = client
+        .get(format!("http://{addr}/code/workspaces/{id}/pr"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(unchanged["pr"]["title"], "Hosted change");
+    assert_eq!(
+        unchanged["pr"]["checks_summary"],
+        "1 passing, 0 pending, 0 failing"
+    );
+
+    let seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let sent = |endpoint: &str| {
+        seen.iter()
+            .filter(|(name, _)| *name == endpoint)
+            .map(|(_, conditional)| conditional.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sent("pull"),
+        vec![None, Some("W/\"pull-1\"".to_owned())],
+        "the first pull read is unconditional; the second sends the stored ETag"
+    );
+    assert_eq!(
+        sent("checks"),
+        vec![None, Some("W/\"checks-1\"".to_owned())]
+    );
+    assert_eq!(
+        sent("reviews"),
+        vec![None, Some("W/\"reviews-1\"".to_owned())]
+    );
+    assert!(
+        lender
+            .minted()
+            .iter()
+            .all(|repository| repository == "acme/demo"),
+        "every borrow names the one repository: {:?}",
+        lender.minted()
+    );
 }
 
 /// One host read updates every workspace holding the pull request

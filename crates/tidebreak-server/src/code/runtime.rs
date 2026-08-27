@@ -2033,27 +2033,6 @@ impl CodeRuntime {
         )
         .await
         .map_err(map_gh)?;
-        // On a hosted machine the digest comes from the forge REST API with
-        // a borrowed credential (decision 65) — there is no `gh` here for
-        // the hot refresher to drive, so this read stays in the request
-        // path. Failures leave the persisted digest and the next read asks
-        // again.
-        if self.git_credentials().is_some() {
-            let worktree = std::path::Path::new(&workspace.worktree_path);
-            if let Ok(Some((target, credential))) = self.forge_rest_context(owner, worktree).await {
-                let api_base = self.forge_api_base_for(&target.host);
-                if let Ok(Some(digest)) = super::forge_rest::pull_request_digest(
-                    &api_base,
-                    &target,
-                    &credential,
-                    &workspace.branch_name,
-                )
-                .await
-                {
-                    status.pr = Some(digest);
-                }
-            }
-        }
         // On a hosted machine, say whose identity a push would act as
         // (decisions 63 and 65) — only for a checkout the machine would
         // actually lend an identity to, so the sentence is never wider than
@@ -2105,6 +2084,11 @@ impl CodeRuntime {
     /// and take the new digest as this workspace's column. Quiet on every
     /// failure — the caller's row keeps whatever it had, and the next tick
     /// or sweep corrects.
+    ///
+    /// The fetch rides an authenticated `gh` where one exists; a
+    /// gateway-hosted machine has none (decision 65), so there the same
+    /// refresh drives the forge REST API with a borrowed credential —
+    /// same gate, same stored ETags, same 304-shaped traffic.
     pub(crate) async fn refresh_workspace_pr_row(&self, owner: &OwnerId, id: WorkspaceId) {
         let Ok(mut workspace) = self.get_workspace(owner, id).await else {
             return;
@@ -2113,13 +2097,32 @@ impl CodeRuntime {
             return;
         }
         let gh_path = self.gh_search_path_owned();
-        let Some(binary) = gh::authenticated_gh_binary(gh_path.as_deref()).await else {
-            return;
+        let worktree = std::path::PathBuf::from(&workspace.worktree_path);
+        let digest = match gh::authenticated_gh_binary(gh_path.as_deref()).await {
+            Some(binary) => {
+                let transport = super::pr_fetch::FetchTransport::Gh {
+                    cwd: &worktree,
+                    binary: &binary,
+                };
+                self.fetched_workspace_digest(owner, &workspace, transport)
+                    .await
+            }
+            None => {
+                let Ok(Some((target, credential))) =
+                    self.forge_rest_context(owner, &worktree).await
+                else {
+                    return;
+                };
+                let api_base = self.forge_api_base_for(&target.host);
+                let transport = super::pr_fetch::FetchTransport::Rest {
+                    api_base: &api_base,
+                    credential: &credential,
+                };
+                self.fetched_workspace_digest(owner, &workspace, transport)
+                    .await
+            }
         };
-        let Some(digest) = self
-            .fetched_workspace_digest(owner, &workspace, &binary)
-            .await
-        else {
+        let Some(digest) = digest else {
             return;
         };
         if workspace.pr.as_ref() != Some(&digest) {
@@ -2185,7 +2188,9 @@ impl CodeRuntime {
             .ok()
     }
 
-    /// The workspace's digest through the conditional fetcher (decision 66).
+    /// The workspace's digest through the conditional fetcher (decision 66),
+    /// over whichever transport the caller resolved — `gh` or the hosted
+    /// forge REST API.
     ///
     /// Identity comes from the stored digest's URL, or a head lookup when
     /// the workspace knows no pull request yet. Each endpoint sends the
@@ -2197,11 +2202,10 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         workspace: &CodeWorkspace,
-        binary: &Path,
+        transport: super::pr_fetch::FetchTransport<'_>,
     ) -> Option<PullRequestDigest> {
         use super::pr_fetch::{self, EndpointRead};
 
-        let cwd = std::path::Path::new(&workspace.worktree_path);
         let gate = &self.host_gate;
         let stored_identity = workspace
             .pr
@@ -2214,8 +2218,7 @@ impl CodeRuntime {
                 let target = self.workspace_repository_target(owner, workspace).await?;
                 let found = match pr_fetch::read_pull_request_for_head(
                     gate,
-                    cwd,
-                    binary,
+                    transport,
                     &target.host,
                     &target.owner,
                     &target.name,
@@ -2254,8 +2257,7 @@ impl CodeRuntime {
         };
         let pull = match pr_fetch::read_pull_request(
             gate,
-            cwd,
-            binary,
+            transport,
             &host,
             &repo_owner,
             &repo_name,
@@ -2291,8 +2293,7 @@ impl CodeRuntime {
                 };
                 match pr_fetch::read_check_runs(
                     gate,
-                    cwd,
-                    binary,
+                    transport,
                     &host,
                     &repo_owner,
                     &repo_name,
@@ -2323,8 +2324,7 @@ impl CodeRuntime {
         let open = pull.state == "open";
         let rules = if open {
             self.branch_rules_for(
-                cwd,
-                binary,
+                transport,
                 &host,
                 &repo_owner,
                 &repo_name,
@@ -2337,8 +2337,7 @@ impl CodeRuntime {
         let review_decision = if open {
             match pr_fetch::read_reviews(
                 gate,
-                cwd,
-                binary,
+                transport,
                 &host,
                 &repo_owner,
                 &repo_name,
@@ -2373,8 +2372,7 @@ impl CodeRuntime {
                 _ => {
                     pr_fetch::read_merge_queue_membership(
                         gate,
-                        cwd,
-                        binary,
+                        transport,
                         &host,
                         &repo_owner,
                         &repo_name,
@@ -2410,8 +2408,7 @@ impl CodeRuntime {
     /// The base branch's rules, cached per branch for [`BRANCH_RULES_TTL`].
     async fn branch_rules_for(
         &self,
-        cwd: &Path,
-        binary: &Path,
+        transport: super::pr_fetch::FetchTransport<'_>,
         host: &str,
         repo_owner: &str,
         repo_name: &str,
@@ -2435,8 +2432,7 @@ impl CodeRuntime {
         }
         let rules = match super::pr_fetch::read_branch_rules(
             &self.host_gate,
-            cwd,
-            binary,
+            transport,
             host,
             repo_owner,
             repo_name,
