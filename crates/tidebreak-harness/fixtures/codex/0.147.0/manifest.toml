@@ -22,6 +22,11 @@ observed_auth = "Logged in using ChatGPT"
 # `collab-agents` is a later capture (2026-08-25) from the same pinned 0.147.0
 # binary with `[features] multi_agent = true` in the isolated $CODEX_HOME. It
 # is the only capture where one connection carries two threads.
+# `reconnect-storm` is a reconstruction, not a teed capture: the same 0.147.0
+# binary on the hosted machine (the #2613 smoke test) emitted nine
+# error-notification frames of `Reconnecting websocket... attempt N/5` across
+# two retry rounds and then failed the turn with the vendor 401. The frames
+# were rebuilt from that transcript with simplified ids (#2654).
 
 integration_path = "app-server-stdio"
 model = "gpt-5.6-luna"
@@ -37,6 +42,7 @@ scenarios = [
   "error",
   "posture-retry",
   "collab-agents",
+  "reconnect-storm",
 ]
 
 [permission_mode_mapping]

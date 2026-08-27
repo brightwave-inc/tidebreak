@@ -50,6 +50,9 @@ pub struct CodexStreamParser {
     outbound_methods: HashMap<String, String>,
     /// itemId → JSON-RPC request id for a parked approval.
     pending_approvals: HashMap<String, Value>,
+    /// Counter-stripped text of the reconnect notice most recently emitted,
+    /// while its retry storm is still the latest thing the engine said.
+    open_reconnect: Option<String>,
 }
 
 /// Result of parsing a whole fixture or a finished stream.
@@ -183,6 +186,22 @@ impl CodexStreamParser {
     }
 
     fn push_inbound(&mut self, value: &Value) -> Vec<HarnessEvent> {
+        let events = self.dispatch_inbound(value);
+        // Anything transcript-visible that is not itself a notice proves the
+        // engine got through again, so a later flap is a new degradation
+        // episode and must re-announce. Silent state notifications (token
+        // usage, rate limits) emit nothing and could plausibly interleave a
+        // single storm, so they leave the window open.
+        if events
+            .iter()
+            .any(|event| !matches!(event, HarnessEvent::HarnessNotice { .. }))
+        {
+            self.open_reconnect = None;
+        }
+        events
+    }
+
+    fn dispatch_inbound(&mut self, value: &Value) -> Vec<HarnessEvent> {
         if value.get("error").is_some() && value.get("id").is_some() {
             return self.parse_rpc_error(value);
         }
@@ -245,6 +264,25 @@ impl CodexStreamParser {
                     .and_then(Value::as_str)
                     .or_else(|| params.pointer("/error/message").and_then(Value::as_str))
                     .unwrap_or(method);
+                // A flapping transport announces every attempt ("Reconnecting
+                // websocket... attempt 3/5"), and a failed round starts over
+                // at 1/5. One flap is one fact; repeat announcements for the
+                // same endpoint drown the terminal failure that follows them
+                // (#2654). Emit the first as a warning — the turn is degraded,
+                // not dead — and swallow the rest until the engine says
+                // something else. Exhaustion and the terminal error carry no
+                // attempt counter, so they pass through at error level.
+                if let Some(stripped) = strip_reconnect_attempt(message) {
+                    if self.open_reconnect.as_deref() == Some(&stripped) {
+                        return Vec::new();
+                    }
+                    self.open_reconnect = Some(stripped.clone());
+                    return vec![HarnessEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Warning,
+                        message: bound(&stripped, MAX_NOTICE_CHARS),
+                    }];
+                }
+                self.open_reconnect = None;
                 vec![HarnessEvent::HarnessNotice {
                     level: if method == "error" {
                         HarnessNoticeLevel::Error
@@ -969,6 +1007,39 @@ fn thread_id(params: &Value) -> Option<&str> {
     params.get("threadId").and_then(Value::as_str)
 }
 
+/// The text of a transport reconnect-attempt notice with its `attempt N/M`
+/// counter removed, or `None` for any other message.
+///
+/// `Reconnecting websocket... attempt 3/5` strips to
+/// `Reconnecting websocket...`, and every attempt against the same endpoint
+/// strips to the same text — including a later round restarting at 1/5 —
+/// which is what lets consecutive attempts coalesce. A gave-up message has
+/// no `N/M` counter and stays untouched.
+fn strip_reconnect_attempt(message: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("reconnecting") {
+        return None;
+    }
+    let at = lower.rfind("attempt")?;
+    let counter = message[at + "attempt".len()..].trim_start();
+    let made = counter.find(|c: char| !c.is_ascii_digit())?;
+    if made == 0 || !counter[made..].starts_with('/') {
+        return None;
+    }
+    let of = &counter[made + 1..];
+    let of_end = of.find(|c: char| !c.is_ascii_digit()).unwrap_or(of.len());
+    if of_end == 0 {
+        return None;
+    }
+    let prefix = message[..at].trim_end();
+    let suffix = of[of_end..].trim_start();
+    if suffix.is_empty() {
+        Some(prefix.to_owned())
+    } else {
+        Some(format!("{prefix} {suffix}"))
+    }
+}
+
 fn collab_targets(item: &Value) -> Vec<String> {
     item.get("receiverThreadIds")
         .and_then(Value::as_array)
@@ -1531,6 +1602,106 @@ mod tests {
         assert!(matches!(
             out.events.last(),
             Some(HarnessEvent::TurnFailed { .. })
+        ));
+    }
+
+    /// Attempts against one endpoint collapse into a single warning, but the
+    /// coalescing must not eat a later, separate storm — or the non-retry
+    /// notice that interrupts it, which keeps its own level.
+    #[test]
+    fn reconnect_coalescing_resets_when_the_engine_says_something_else() {
+        let mut parser = CodexStreamParser::new();
+        let mut events = Vec::new();
+        for message in [
+            "Reconnecting websocket... attempt 1/5",
+            "Reconnecting websocket... attempt 2/5",
+            "Gave up reconnecting after 5 attempts",
+            "Reconnecting websocket... attempt 1/5",
+        ] {
+            let line = serde_json::json!({
+                "method": "error",
+                "params": {"error": {"message": message}}
+            });
+            events.extend(parser.push_line(&line.to_string()));
+        }
+
+        assert_eq!(parser.unrecognized(), 0);
+        let notices = events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::HarnessNotice { level, message } => Some((*level, message.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices,
+            vec![
+                (HarnessNoticeLevel::Warning, "Reconnecting websocket..."),
+                (
+                    HarnessNoticeLevel::Error,
+                    "Gave up reconnecting after 5 attempts"
+                ),
+                (HarnessNoticeLevel::Warning, "Reconnecting websocket..."),
+            ]
+        );
+    }
+
+    /// A storm that recovers — assistant text streams again — and then flaps
+    /// a second time is two degradation episodes, not one. Every attempt
+    /// strips to the same text, so only real engine activity in between can
+    /// distinguish them; silent telemetry like a token-usage update must not.
+    #[test]
+    fn a_recovered_stream_reannounces_the_next_reconnect_storm() {
+        let reconnect = |attempt: u64| {
+            serde_json::json!({
+                "method": "error",
+                "params": {"error": {
+                    "message": format!("Reconnecting websocket... attempt {attempt}/5")
+                }}
+            })
+            .to_string()
+        };
+        let usage = serde_json::json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"total": {"inputTokens": 10, "outputTokens": 1}}}
+        })
+        .to_string();
+        let delta = serde_json::json!({
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "back online"}
+        })
+        .to_string();
+
+        let mut parser = CodexStreamParser::new();
+        let mut events = Vec::new();
+        for line in [
+            reconnect(1),
+            usage.clone(),
+            reconnect(2),
+            delta,
+            reconnect(1),
+            reconnect(2),
+        ] {
+            events.extend(parser.push_line(&line));
+        }
+
+        assert_eq!(parser.unrecognized(), 0);
+        let notices = events
+            .iter()
+            .filter(|event| matches!(event, HarnessEvent::HarnessNotice { .. }))
+            .count();
+        assert_eq!(
+            notices, 2,
+            "the storm after recovery must announce itself; the usage update \
+             inside the first storm must not split it"
+        );
+        assert!(matches!(
+            &events[..],
+            [
+                HarnessEvent::HarnessNotice { .. },
+                HarnessEvent::AssistantDelta { .. },
+                HarnessEvent::HarnessNotice { .. },
+            ]
         ));
     }
 

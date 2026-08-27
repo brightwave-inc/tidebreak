@@ -1,0 +1,13 @@
+{"dir":"out","msg":{"id":51,"method":"turn/start","params":{"threadId":"thread-1","input":[{"type":"text","text":"hello"}]}}}
+{"dir":"in","msg":{"id":51,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress"}}}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 1/5"}},"emittedAtMs":1787222401101}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 2/5"}},"emittedAtMs":1787222402113}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 3/5"}},"emittedAtMs":1787222404126}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 4/5"}},"emittedAtMs":1787222408141}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 5/5"}},"emittedAtMs":1787222416158}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 1/5"}},"emittedAtMs":1787222417163}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 2/5"}},"emittedAtMs":1787222418171}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 3/5"}},"emittedAtMs":1787222420184}}
+{"dir":"in","msg":{"method":"error","params":{"threadId":"thread-1","error":{"message":"Reconnecting websocket... attempt 4/5"}},"emittedAtMs":1787222424199}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"Missing bearer or basic authentication in header"}}}}}

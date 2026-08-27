@@ -1,0 +1,16 @@
+[
+  {
+    "type": "turn_started"
+  },
+  {
+    "type": "harness_notice",
+    "level": "warning",
+    "message": "Reconnecting websocket..."
+  },
+  {
+    "type": "turn_failed",
+    "error": {
+      "message": "Missing bearer or basic authentication in header"
+    }
+  }
+]
