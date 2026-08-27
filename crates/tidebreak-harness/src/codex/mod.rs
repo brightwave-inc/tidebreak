@@ -700,6 +700,38 @@ mod tests {
             .any(|event| matches!(event, HarnessEvent::TurnFailed { .. })));
     }
 
+    /// Nine `Reconnecting websocket... attempt N/5` error notifications across
+    /// two retry rounds read as one warning, and the terminal 401 stays the
+    /// error-level row (#2654).
+    #[test]
+    fn fixture_replay_reconnect_storm() {
+        let (events, unrecognized) = replay("reconnect-storm");
+        assert_eq!(unrecognized, 0, "reconnect chatter is recognized protocol");
+        let notices = events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::HarnessNotice { level, message } => Some((level, message)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "nine reconnect attempts must coalesce into one notice"
+        );
+        assert_eq!(
+            *notices[0].0,
+            tidebreak_core::HarnessNoticeLevel::Warning,
+            "transport retry chatter is degradation, not the failure itself"
+        );
+        assert!(notices[0].1.contains("Reconnecting websocket"));
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnFailed { error })
+                if error.message.contains("Missing bearer or basic authentication")
+        ));
+    }
+
     #[test]
     fn posture_retry_fixture_repeats_the_same_policy_after_rejection() {
         let (events, unrecognized) = replay("posture-retry");
