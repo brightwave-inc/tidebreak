@@ -64,6 +64,7 @@ use super::worktree::{
     run_archive_script, run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
+use crate::managed_policy::ManagedPolicy;
 use crate::routes::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
 
 const MANAGED_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -368,6 +369,11 @@ pub(crate) struct NewSessionSettings {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Whether the session starts armed for the engine's fast mode.
     pub fast_mode: bool,
+    /// The managed permission-mode ceiling in force at create, when one is
+    /// asserted. Copied from resolved policy so this path can refuse a
+    /// ceiling that permits no mode the engine offers, after probe, on the
+    /// same ceiling the route already clamps against.
+    pub permission_mode_ceiling: Option<PermissionMode>,
 }
 
 struct SelectedModelCapabilities {
@@ -3115,6 +3121,7 @@ impl CodeRuntime {
             model,
             reasoning_effort,
             fast_mode,
+            permission_mode_ceiling,
         }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
         let lifecycle = self.workspace_lifecycle_lock(workspace_id);
@@ -3188,6 +3195,19 @@ impl CodeRuntime {
             ));
         }
         let caps = adapter.capabilities(&probe);
+        refuse_ceiling_with_no_offered_mode(permission_mode_ceiling, harness, &caps)?;
+        if let Some(ceiling) = permission_mode_ceiling {
+            if permission_mode > ceiling {
+                return Err(ServerError::conflict_kind(
+                    "permission_mode_locked",
+                    format!(
+                        "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
+                        permission_mode.as_str(),
+                        ceiling.as_str()
+                    ),
+                ));
+            }
+        }
         refuse_unhonored_mode(harness, permission_mode, &caps)?;
         if probe.binary_path.is_none() {
             return Err(ServerError::unprocessable_kind(
@@ -5828,21 +5848,55 @@ fn normalize_model(model: Option<String>) -> Option<String> {
     })
 }
 
+fn offered_permission_modes(caps: &tidebreak_core::HarnessCaps) -> Vec<PermissionMode> {
+    PermissionMode::ALL
+        .iter()
+        .copied()
+        .filter(|&mode| honors_permission_mode(mode, caps))
+        .collect()
+}
+
+fn honors_permission_mode(mode: PermissionMode, caps: &tidebreak_core::HarnessCaps) -> bool {
+    // Each mode stands on its own capability flag (decision 0038): Auto is
+    // never derived from the approval channel, so an engine whose only
+    // honest posture is unsupervised Auto can still be driven.
+    match mode {
+        PermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
+        PermissionMode::Ask => caps.structured_approvals == CapLevel::Supported,
+        PermissionMode::Auto => caps.auto_mode == CapLevel::Supported,
+        PermissionMode::Allow => caps.allow_mode == CapLevel::Supported,
+    }
+}
+
+fn refuse_ceiling_with_no_offered_mode(
+    ceiling: Option<PermissionMode>,
+    harness: HarnessKind,
+    caps: &tidebreak_core::HarnessCaps,
+) -> Result<(), ServerError> {
+    let Some(ceiling) = ceiling else {
+        return Ok(());
+    };
+    if !ManagedPolicy::permission_mode_ceiling_excludes_all(
+        Some(ceiling),
+        offered_permission_modes(caps),
+    ) {
+        return Ok(());
+    }
+    Err(ServerError::conflict_kind(
+        "permission_mode_locked",
+        format!(
+            "{harness} offers no permission mode at or below the managed ceiling (`{}`)",
+            ceiling.as_str()
+        ),
+    ))
+}
+
 fn refuse_unhonored_mode(
     harness: HarnessKind,
     mode: PermissionMode,
     caps: &tidebreak_core::HarnessCaps,
 ) -> Result<(), ServerError> {
-    // Each mode stands on its own capability flag (decision 0038): Auto is
-    // never derived from the approval channel, so an engine whose only
-    // honest posture is unsupervised Auto can still be driven.
-    let ok = match mode {
-        PermissionMode::Plan => caps.plan_mode == CapLevel::Supported,
-        PermissionMode::Ask => caps.structured_approvals == CapLevel::Supported,
-        PermissionMode::Auto => caps.auto_mode == CapLevel::Supported,
-        PermissionMode::Allow => caps.allow_mode == CapLevel::Supported,
-    };
-    if ok {
+    if honors_permission_mode(mode, caps) {
         return Ok(());
     }
     let reason = match mode {

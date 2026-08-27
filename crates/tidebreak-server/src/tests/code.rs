@@ -783,6 +783,54 @@ async fn a_managed_ceiling_refuses_over_ceiling_code_session_modes() {
     assert_eq!(body["permission_mode"], "plan", "{body}");
 }
 
+/// A Plan-only ceiling against an engine that only offers Auto/Allow is not
+/// a missing picker: create must name the ceiling and the engine.
+#[tokio::test]
+async fn a_managed_ceiling_that_permits_no_engine_mode_is_named() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_kind(HarnessKind::Grok)
+        .with_plan_mode(CapLevel::Unsupported)
+        .with_auto_mode(CapLevel::Supported)
+        .with_allow_mode(CapLevel::Supported);
+    let (router, token, _runtime, dir) = code_app_with_ceiling(adapter, PermissionMode::Plan).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+
+    let sessions_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+    // Posting the engine's default (Auto) or a below-ceiling Plan must both
+    // name the empty intersection — not look like a lone over-ceiling pick
+    // or an engine that simply cannot honor Plan.
+    for mode in ["auto", "plan"] {
+        let refused = client
+            .post(&sessions_url)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "harness": "grok",
+                "permission_mode": mode,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+        let body: serde_json::Value = refused.json().await.unwrap();
+        assert_eq!(body["kind"], "permission_mode_locked", "{body}");
+        let message = body["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("grok") && message.contains("plan") && message.contains("ceiling"),
+            "{mode}: {message}"
+        );
+        assert!(
+            !message.contains("exceeds the maximum"),
+            "{mode}: {message}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn plan_is_the_only_session_mode_and_a_turn_journals_end_to_end() {
     let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
