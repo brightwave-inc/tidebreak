@@ -31,6 +31,7 @@ pub mod opencode;
 pub mod pin;
 pub mod probe;
 mod text;
+pub mod wiring;
 
 pub use budget::{BudgetTick, StreamBudget, StreamLineBuffer};
 pub use child::{
@@ -503,15 +504,28 @@ impl BrowserChannelSpec {
     /// Whether a settings environment key belongs to Tidebreak rather than
     /// the user. Adapters must reject these keys before composing a launch.
     ///
-    /// The session relay key (decision 71) is the one exception: the server
-    /// itself hands an engine child `TIDEBREAK_LLM_KEY`, and codex resolves
-    /// its provider credential from exactly that name, so it must survive
-    /// the reserved-namespace strip. Every other key in the namespace still
-    /// belongs to Tidebreak, not the user.
+    /// The whole namespace is reserved. The session relay key
+    /// ([`crate::wiring`], decision 71) is carried under a caller-chosen
+    /// name in [`crate::SessionSpec::relay_key_env`]; adapters that must let
+    /// it through use [`Self::is_reserved_env_key_except`] with exactly that
+    /// name.
     #[must_use]
     pub fn is_reserved_env_key(key: &str) -> bool {
-        let key = key.to_ascii_uppercase();
-        key.starts_with("TIDEBREAK_") && key != "TIDEBREAK_LLM_KEY"
+        key.to_ascii_uppercase().starts_with("TIDEBREAK_")
+    }
+
+    /// [`Self::is_reserved_env_key`] with one exact exemption: the relay key
+    /// variable the caller wired ([`crate::SessionSpec::relay_key_env`]).
+    ///
+    /// The exemption matches case-sensitively — the wiring writes one exact
+    /// name, and a differently-cased look-alike from settings stays
+    /// reserved.
+    #[must_use]
+    pub fn is_reserved_env_key_except(key: &str, relay_key_env: Option<&str>) -> bool {
+        if relay_key_env.is_some_and(|allowed| key == allowed) {
+            return false;
+        }
+        Self::is_reserved_env_key(key)
     }
 
     /// Inject the capability-file path as the final environment value on a
@@ -542,6 +556,14 @@ pub struct SessionSpec {
     pub extra_argv: Vec<String>,
     /// Extra environment from settings. Cannot override adapter-owned keys.
     pub extra_env: Vec<(String, String)>,
+    /// Environment variable name in `extra_env` that carries the session
+    /// inference relay key, when the caller wired one ([`crate::wiring`],
+    /// decision 71). Adapters let exactly this key survive the
+    /// reserved-namespace strip — or, for an engine that reads credentials
+    /// from a file, consume the value under this name instead of passing it
+    /// through. `None` means no relay is wired and the whole reserved
+    /// namespace is stripped.
+    pub relay_key_env: Option<String>,
     /// Shell-resolved environment captured by the probe. Children run under
     /// this snapshot, not the GUI process environment.
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,

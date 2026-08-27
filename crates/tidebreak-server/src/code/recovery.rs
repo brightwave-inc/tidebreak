@@ -1048,6 +1048,7 @@ mod tests {
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
+            relay_key_env: None,
             env: Vec::new(),
             approval: None,
             binary: std::path::PathBuf::from("/scripted/engine"),

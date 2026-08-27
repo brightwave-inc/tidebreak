@@ -5269,7 +5269,7 @@ impl CodeRuntime {
         // On a gateway-authenticated machine, point the engine's own
         // inference at this server's relay (decision 71): a per-session key
         // stands in for provider credentials the hosted image does not have.
-        let (extra_argv, extra_env) = match self.harness_llm.as_ref() {
+        let (extra_argv, extra_env, relay_key_env) = match self.harness_llm.as_ref() {
             Some(relay) => {
                 let base = self
                     .loopback_base
@@ -5283,9 +5283,15 @@ impl CodeRuntime {
                     owner: session.owner.clone(),
                     session: session.id,
                 });
-                super::harness_llm::spawn_wiring(session.harness_kind, &base, &key)
+                let (argv, env) =
+                    super::harness_llm::spawn_wiring(session.harness_kind, &base, &key);
+                (
+                    argv,
+                    env,
+                    Some(super::harness_llm::RELAY_KEY_ENV.to_owned()),
+                )
             }
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), None),
         };
 
         let spec = SessionSpec {
@@ -5298,6 +5304,7 @@ impl CodeRuntime {
             resume_ref: session.harness_resume_ref.clone(),
             extra_argv,
             extra_env,
+            relay_key_env,
             env: probe.env.clone(),
             approval,
             binary,

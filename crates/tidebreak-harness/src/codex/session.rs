@@ -770,12 +770,18 @@ impl CodexSession {
 }
 
 /// Argv for the long-lived app-server child. Prompt never appears here.
+///
+/// `relay_key_env` is the one reserved-namespace variable allowed to reach
+/// the child: the provider config the spawn wiring emits reads the session
+/// relay key through `env_key={relay_key_env}`, so stripping it would leave
+/// a hosted session with no credential at all.
 pub(crate) fn compose_app_server_plan(
     binary: &std::path::Path,
     extra_argv: &[String],
     cwd: &std::path::Path,
     extra_env: &[(String, String)],
     browser: Option<&BrowserChannelSpec>,
+    relay_key_env: Option<&str>,
 ) -> Result<LaunchPlan, HarnessError> {
     let mut argv = vec![
         binary.to_string_lossy().into_owned(),
@@ -802,7 +808,9 @@ pub(crate) fn compose_app_server_plan(
         );
     }
     let mut env = extra_env.to_vec();
-    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
+    env.retain(|(key, _)| {
+        !BrowserChannelSpec::is_reserved_env_key_except(key, relay_key_env) && key != "PWD"
+    });
     let plan = LaunchPlan {
         argv,
         cwd: cwd.to_path_buf(),
@@ -863,6 +871,7 @@ impl CodexSession {
             &self.spec.worktree,
             &self.spec.extra_env,
             self.spec.browser.as_ref(),
+            self.spec.relay_key_env.as_deref(),
         )?;
         let mut command = Command::new(&plan.argv[0]);
         command
@@ -1640,6 +1649,7 @@ mod tests {
             std::path::Path::new("/workspace"),
             &[],
             None,
+            None,
         )
         .unwrap();
         assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -1653,6 +1663,7 @@ mod tests {
             &["--dangerously-bypass-approvals-and-sandbox".into()],
             std::path::Path::new("/workspace"),
             &[],
+            None,
             None,
         )
         .unwrap_err();
@@ -1892,6 +1903,7 @@ done
             resume_ref: Some("THREAD-1".into()),
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
+            relay_key_env: None,
             env: Vec::new(),
             approval: None,
             binary: PathBuf::from("codex"),
@@ -1947,6 +1959,7 @@ done
                 "FAKE_CODEX_CALLS".into(),
                 dir.join("calls").to_string_lossy().into_owned(),
             )],
+            relay_key_env: None,
             env: Vec::new(),
             approval: None,
             binary: binary.to_path_buf(),
@@ -2686,6 +2699,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             None,
+            None,
         )
         .unwrap();
         assert_eq!(plan.argv, ["/usr/bin/codex", "app-server", "--stdio"]);
@@ -2703,6 +2717,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .unwrap();
         let overrides: Vec<_> = plan
@@ -2735,6 +2750,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .unwrap();
         let browser_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -2755,6 +2771,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .unwrap();
         let capfile_str = capfile.to_string_lossy();
@@ -2776,6 +2793,7 @@ done
             std::path::Path::new("/workspace"),
             &[("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into())],
             Some(&spec),
+            None,
         )
         .unwrap();
         let has_reserved = plan
@@ -2789,8 +2807,9 @@ done
     fn session_relay_key_survives_the_reserved_namespace_strip() {
         // Decision 71 hands the codex child its per-session relay key by env
         // (the provider config spawn_wiring emits reads it through
-        // env_key=TIDEBREAK_LLM_KEY); stripping it as a reserved key left
-        // hosted codex sessions with no credential at all.
+        // env_key={relay_key_env}); stripping it as a reserved key left
+        // hosted codex sessions with no credential at all. Only the exact
+        // wired name survives; the rest of the namespace stays reserved.
         let plan = compose_app_server_plan(
             std::path::Path::new("/usr/bin/codex"),
             &[],
@@ -2800,6 +2819,7 @@ done
                 ("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into()),
             ],
             None,
+            Some("TIDEBREAK_LLM_KEY"),
         )
         .unwrap();
         let relay = plan.env.iter().find(|(key, _)| key == "TIDEBREAK_LLM_KEY");
@@ -2814,6 +2834,23 @@ done
     }
 
     #[test]
+    fn relay_key_is_stripped_when_no_relay_is_wired() {
+        // Without a wired relay there is no exception: a settings value
+        // squatting on a relay-shaped name is Tidebreak's namespace, not
+        // the user's.
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[("TIDEBREAK_LLM_KEY".into(), "from-settings".into())],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(plan.env.is_empty(), "{:?}", plan.env);
+    }
+
+    #[test]
     fn bridge_command_with_spaces_remains_one_command_value() {
         let spec = BrowserChannelSpec::new(
             std::path::PathBuf::from("/tmp/browser-cap.json"),
@@ -2825,6 +2862,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .unwrap();
         let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -2849,6 +2887,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .unwrap();
         let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -2876,6 +2915,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .unwrap();
         let override_idx = plan.argv.iter().position(|arg| arg == "-c").unwrap();
@@ -2904,6 +2944,7 @@ done
             std::path::Path::new("/workspace"),
             &[],
             Some(&spec),
+            None,
         )
         .expect_err("non-UTF-8 bridge paths must fail closed");
 

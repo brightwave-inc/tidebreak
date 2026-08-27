@@ -1087,6 +1087,7 @@ mod tests {
             Path::new("/workspace"),
             &[],
             None,
+            None,
         )
         .unwrap();
         assert!(!plan
