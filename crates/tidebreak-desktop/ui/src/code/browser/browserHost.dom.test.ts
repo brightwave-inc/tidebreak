@@ -6,6 +6,7 @@ import {
   browserUnavailableMessage,
   closeCodeBrowser,
   nativeCodeBrowserHost,
+  resetCodeBrowserProfile,
   type CodeBrowserHost,
 } from "./browserHost";
 import {
@@ -65,6 +66,45 @@ describe("browser host lifecycle", () => {
     await closeCodeBrowser("workspace-1", "browser-1", host);
 
     expect(readStoredBrowserSession("browser-1")).toBeNull();
+    expect(command).not.toHaveBeenCalled();
+  });
+});
+
+describe("managed browser profile reset", () => {
+  it("sends only the trusted session identity and reset command", async () => {
+    const command = vi.fn().mockResolvedValue({
+      exists: false,
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+    });
+    const host: CodeBrowserHost = {
+      available: () => true,
+      command,
+      subscribe: vi.fn(async () => () => undefined),
+      openExternal: vi.fn(async () => undefined),
+    };
+
+    await resetCodeBrowserProfile("workspace-1", "browser-1", host);
+
+    expect(command).toHaveBeenCalledWith("workspace-1", "browser-1", {
+      type: "reset_profile",
+    });
+  });
+
+  it("refuses reset when this renderer has no local host authority", async () => {
+    const command = vi.fn();
+    const host: CodeBrowserHost = {
+      available: () => false,
+      command,
+      subscribe: vi.fn(async () => () => undefined),
+      openExternal: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      resetCodeBrowserProfile("workspace-1", "browser-1", host),
+    ).rejects.toThrow(
+      "The managed browser profile is available only on this computer",
+    );
     expect(command).not.toHaveBeenCalled();
   });
 });

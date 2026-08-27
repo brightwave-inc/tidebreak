@@ -18,26 +18,18 @@ pub(crate) use tidebreak_core::{
     BrowserEngineDescriptor, BrowserLoadState, BrowserSessionSummary,
 };
 use tidebreak_core::{
-    BrowserEngineName, BrowserGrantCapability, BrowserOrigin, BrowserOriginScope,
+    BrowserEngineName, BrowserGrantCapability, BrowserOrigin, BrowserOriginScope, OwnerId,
 };
+#[cfg(any(target_os = "macos", test))]
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
-pub(crate) const BROWSER_PROFILE_ID: &str = "tidebreak-browser-v1";
 const BROWSER_AUDIT_FILE: &str = "browser-audit.jsonl";
 const AGENT_CAPABILITY_TTL: Duration = Duration::from_secs(90);
 const AGENT_CONFIRMATION_TTL: Duration = Duration::from_secs(30);
 const MAX_AUDIT_ACTION_CHARS: usize = 64;
 const MAX_AUDIT_TARGET_CHARS: usize = 160;
-
-/// Stable UUID bytes for Tidebreak's browser-only WKWebsiteDataStore.
-///
-/// Wry uses this named store on macOS 14+ and falls back to Tidebreak's
-/// app-private default store on older supported macOS versions.
-#[cfg(target_os = "macos")]
-pub(crate) const BROWSER_DATA_STORE_IDENTIFIER: [u8; 16] = [
-    0x74, 0x69, 0x64, 0x65, 0x62, 0x72, 0x65, 0x61, 0x6b, 0x2d, 0x62, 0x72, 0x6f, 0x77, 0x73, 0x65,
-];
 
 fn platform_default_engine() -> BrowserEngineDescriptor {
     #[cfg(target_os = "macos")]
@@ -66,7 +58,7 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // Tidebreak can prove that their rendered content is safe.
             screenshot: false,
             cross_origin_frames: false,
-            profile_reset: false,
+            profile_reset: cfg!(target_os = "macos"),
         },
     }
 }
@@ -246,6 +238,7 @@ impl BrowserAuditLog {
 #[derive(Clone)]
 struct BrowserRecord {
     instance_id: u64,
+    owner_id: OwnerId,
     workspace_id: String,
     profile_id: String,
     url: Option<String>,
@@ -262,6 +255,7 @@ struct BrowserRecord {
     semantic_snapshot: Option<StoredSemanticSnapshot>,
     screenshot_epoch: Option<u64>,
     inspect_enabled: bool,
+    resetting: bool,
 }
 
 #[derive(Clone)]
@@ -410,6 +404,57 @@ pub(crate) struct BrowserRegistry {
     audit: BrowserAuditLog,
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BrowserProfileResetSession {
+    pub(crate) browser_id: String,
+    instance_id: u64,
+    previous_halt: bool,
+}
+
+/// Exclusive native reset lease for every live session using one managed
+/// profile. The dispatch guards keep agent work drained until the profile is
+/// either deleted or the reset aborts. Dropping an unfinished lease releases
+/// the temporary halt latch on any session that is still the same instance.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct BrowserProfileResetLease {
+    registry: BrowserRegistry,
+    owner_id: OwnerId,
+    profile_id: String,
+    sessions: Vec<BrowserProfileResetSession>,
+    _dispatch_guards: Vec<OwnedMutexGuard<()>>,
+    finished: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl BrowserProfileResetLease {
+    pub(crate) fn owner_id(&self) -> &OwnerId {
+        &self.owner_id
+    }
+
+    pub(crate) fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub(crate) fn sessions(&self) -> &[BrowserProfileResetSession] {
+        &self.sessions
+    }
+
+    pub(crate) fn finish(mut self) {
+        self.registry.finish_profile_reset(&self);
+        self.finished = true;
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for BrowserProfileResetLease {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.registry.cancel_profile_reset(self);
+        }
+    }
+}
+
 impl Default for BrowserRegistry {
     fn default() -> Self {
         Self {
@@ -424,10 +469,12 @@ impl BrowserRegistry {
         self.audit.initialize(data_dir)
     }
 
-    pub(crate) fn register(
+    pub(crate) fn register_managed(
         &self,
         browser_id: &str,
         workspace_id: &str,
+        owner_id: OwnerId,
+        profile_id: String,
         url: String,
         visible: bool,
     ) -> Result<u64, String> {
@@ -443,8 +490,9 @@ impl BrowserRegistry {
             browser_id.to_owned(),
             BrowserRecord {
                 instance_id,
+                owner_id,
                 workspace_id: workspace_id.to_owned(),
-                profile_id: BROWSER_PROFILE_ID.to_owned(),
+                profile_id,
                 url: Some(url),
                 title: None,
                 load_state: BrowserLoadState::Loading,
@@ -459,9 +507,123 @@ impl BrowserRegistry {
                 semantic_snapshot: None,
                 screenshot_epoch: None,
                 inspect_enabled: false,
+                resetting: false,
             },
         );
         Ok(instance_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+        url: String,
+        visible: bool,
+    ) -> Result<u64, String> {
+        self.register_managed(
+            browser_id,
+            workspace_id,
+            OwnerId::local(),
+            "00000000-0000-4000-8000-000000000001".to_owned(),
+            url,
+            visible,
+        )
+    }
+
+    /// Halt and drain every live session on the exact profile selected by the
+    /// trusted triggering browser. No owner or profile selector is accepted
+    /// from renderer IPC.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) async fn begin_profile_reset(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<BrowserProfileResetLease, String> {
+        let (owner_id, profile_id, sessions, gates) = {
+            let mut state = self.lock();
+            let trigger = state
+                .records
+                .get(browser_id)
+                .ok_or_else(|| "browser session is not registered".to_owned())?;
+            ensure_workspace(browser_id, workspace_id, trigger)?;
+            let owner_id = trigger.owner_id.clone();
+            let profile_id = trigger.profile_id.clone();
+            let mut sessions = state
+                .records
+                .iter()
+                .filter(|(_, record)| {
+                    record.owner_id == owner_id && record.profile_id == profile_id
+                })
+                .map(|(browser_id, record)| BrowserProfileResetSession {
+                    browser_id: browser_id.clone(),
+                    instance_id: record.instance_id,
+                    previous_halt: *record.dispatch.halt.borrow(),
+                })
+                .collect::<Vec<_>>();
+            sessions.sort_by(|left, right| left.browser_id.cmp(&right.browser_id));
+            let gates = sessions
+                .iter()
+                .map(|session| {
+                    let record = state
+                        .records
+                        .get_mut(&session.browser_id)
+                        .expect("reset session was collected from the same registry lock");
+                    record.dispatch.halt.send_replace(true);
+                    record.resetting = true;
+                    Arc::clone(&record.dispatch.gate)
+                })
+                .collect::<Vec<_>>();
+            (owner_id, profile_id, sessions, gates)
+        };
+
+        let mut lease = BrowserProfileResetLease {
+            registry: self.clone(),
+            owner_id,
+            profile_id,
+            sessions,
+            _dispatch_guards: Vec::with_capacity(gates.len()),
+            finished: false,
+        };
+        for gate in gates {
+            lease._dispatch_guards.push(gate.lock_owned().await);
+        }
+        Ok(lease)
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn cancel_profile_reset(&self, reset: &BrowserProfileResetLease) {
+        let mut state = self.lock();
+        for session in &reset.sessions {
+            let Some(record) = state.records.get_mut(&session.browser_id) else {
+                continue;
+            };
+            if record.instance_id == session.instance_id
+                && record.owner_id == reset.owner_id
+                && record.profile_id == reset.profile_id
+            {
+                record.dispatch.halt.send_replace(session.previous_halt);
+                record.resetting = false;
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn finish_profile_reset(&self, reset: &BrowserProfileResetLease) {
+        let reset_instances = reset
+            .sessions
+            .iter()
+            .map(|session| (session.browser_id.as_str(), session.instance_id))
+            .collect::<HashMap<_, _>>();
+        let mut state = self.lock();
+        state.records.retain(|browser_id, record| {
+            !(record.owner_id == reset.owner_id
+                && record.profile_id == reset.profile_id
+                && reset_instances.get(browser_id.as_str()) == Some(&record.instance_id))
+        });
+        state.confirmations.retain(|_, confirmation| {
+            !reset_instances.contains_key(confirmation.browser_id.as_str())
+        });
     }
 
     pub(crate) fn ensure_workspace(
@@ -499,7 +661,7 @@ impl BrowserRegistry {
         let mut sessions: Vec<_> = state
             .records
             .iter()
-            .filter(|(_, record)| record.workspace_id == workspace_id)
+            .filter(|(_, record)| record.workspace_id == workspace_id && !record.resetting)
             .map(|(browser_id, record)| record.summary(browser_id))
             .collect();
         sessions.sort_by(|left, right| left.browser_id.cmp(&right.browser_id));
@@ -822,7 +984,11 @@ impl BrowserRegistry {
         let mut sessions: Vec<_> = state
             .records
             .iter()
-            .filter(|(_, record)| record.workspace_id == capability.workspace_id && record.visible)
+            .filter(|(_, record)| {
+                record.workspace_id == capability.workspace_id
+                    && record.visible
+                    && !record.resetting
+            })
             .filter(|(_, record)| {
                 current_origin(record).is_some_and(|origin| {
                     grants_cover(
@@ -1291,6 +1457,9 @@ impl BrowserRegistry {
         if record.workspace_id != workspace_id || record.instance_id != instance_id {
             return BrowserNavigationDecision::Deny;
         }
+        if record.resetting {
+            return BrowserNavigationDecision::Deny;
+        }
         if record.controller.kind != BrowserControllerKind::Agent {
             return BrowserNavigationDecision::Allow;
         }
@@ -1391,6 +1560,7 @@ impl BrowserRegistry {
             if record.workspace_id != workspace_id
                 || record.instance_id != instance_id
                 || record.document_epoch != document_epoch
+                || record.resetting
                 || record.url.as_deref() == Some(url.as_str())
             {
                 return None;
@@ -1415,6 +1585,7 @@ impl BrowserRegistry {
             let record = state.records.get_mut(browser_id)?;
             if record.workspace_id != workspace_id
                 || record.instance_id != instance_id
+                || record.resetting
                 || url
                     .as_ref()
                     .is_some_and(|url| record.url.as_ref() != Some(url))
@@ -1466,7 +1637,10 @@ impl BrowserRegistry {
         let Some(record) = state.records.get_mut(browser_id) else {
             return Err(BrowserTargetError::StaleTarget);
         };
-        if record.workspace_id != workspace_id || record.document_epoch != document_epoch {
+        if record.workspace_id != workspace_id
+            || record.document_epoch != document_epoch
+            || record.resetting
+        {
             return Err(BrowserTargetError::StaleTarget);
         }
         record.semantic_snapshot = Some(StoredSemanticSnapshot {
@@ -1744,6 +1918,7 @@ impl BrowserRegistry {
         };
         if record.workspace_id != workspace_id
             || record.document_epoch != document_epoch
+            || record.resetting
             || record.load_state != BrowserLoadState::Ready
         {
             return Err(BrowserTargetError::StaleTarget);
@@ -1775,6 +1950,7 @@ impl BrowserRegistry {
             return;
         };
         if record.workspace_id == workspace_id
+            && !record.resetting
             && record
                 .semantic_snapshot
                 .as_ref()
@@ -1795,7 +1971,10 @@ impl BrowserRegistry {
         let mut state = self.lock();
         {
             let record = state.records.get_mut(browser_id)?;
-            if record.workspace_id != workspace_id || record.instance_id != instance_id {
+            if record.workspace_id != workspace_id
+                || record.instance_id != instance_id
+                || record.resetting
+            {
                 return None;
             }
             update(record);
@@ -1986,12 +2165,14 @@ fn ensure_workspace(
     workspace_id: &str,
     record: &BrowserRecord,
 ) -> Result<(), String> {
-    if record.workspace_id == workspace_id {
-        Ok(())
-    } else {
+    if record.workspace_id != workspace_id {
         Err(format!(
             "browser session {browser_id} belongs to a different workspace"
         ))
+    } else if record.resetting {
+        Err("browser profile is being reset".to_owned())
+    } else {
+        Ok(())
     }
 }
 
@@ -2142,6 +2323,132 @@ mod tests {
             .is_err());
     }
 
+    #[tokio::test]
+    async fn profile_reset_drains_and_removes_only_matching_native_sessions() {
+        let registry = BrowserRegistry::default();
+        let owner = OwnerId::local();
+        let other_owner = OwnerId::new("other-owner").unwrap();
+        let profile_id = Uuid::new_v4().to_string();
+        registry
+            .register_managed(
+                "browser-1",
+                "workspace-1",
+                owner.clone(),
+                profile_id.clone(),
+                "https://example.com/one".to_owned(),
+                true,
+            )
+            .unwrap();
+        registry
+            .register_managed(
+                "browser-2",
+                "workspace-2",
+                owner.clone(),
+                profile_id.clone(),
+                "https://example.org/two".to_owned(),
+                true,
+            )
+            .unwrap();
+        registry
+            .register_managed(
+                "other-owner",
+                "workspace-3",
+                other_owner,
+                profile_id.clone(),
+                "https://owner.example/".to_owned(),
+                true,
+            )
+            .unwrap();
+        registry
+            .register_managed(
+                "other-profile",
+                "workspace-1",
+                owner.clone(),
+                Uuid::new_v4().to_string(),
+                "https://unrelated.example/".to_owned(),
+                true,
+            )
+            .unwrap();
+        let origin = BrowserOrigin::from_url("https://example.com/one").unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserObserveOrigin],
+            )
+            .unwrap();
+
+        let reset = registry
+            .begin_profile_reset("browser-1", "workspace-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reset
+                .sessions()
+                .iter()
+                .map(|session| session.browser_id.as_str())
+                .collect::<Vec<_>>(),
+            ["browser-1", "browser-2"]
+        );
+        assert_eq!(reset.profile_id(), profile_id);
+        assert_eq!(
+            registry.snapshot("browser-1", "workspace-1").unwrap_err(),
+            "browser profile is being reset"
+        );
+
+        reset.finish();
+
+        assert!(registry.snapshot("browser-1", "workspace-1").is_err());
+        assert!(registry.snapshot("browser-2", "workspace-2").is_err());
+        assert!(registry.snapshot("other-owner", "workspace-3").is_ok());
+        assert!(registry.snapshot("other-profile", "workspace-1").is_ok());
+
+        registry
+            .register_managed(
+                "fresh-browser",
+                "workspace-1",
+                owner,
+                Uuid::new_v4().to_string(),
+                "https://example.com/fresh".to_owned(),
+                true,
+            )
+            .unwrap();
+        assert!(
+            registry
+                .snapshot("fresh-browser", "workspace-1")
+                .unwrap()
+                .agent_access
+                .unwrap()
+                .can_observe
+        );
+    }
+
+    #[tokio::test]
+    async fn aborted_profile_reset_restores_the_previous_dispatch_latch() {
+        let (registry, _) = ready_registry(true);
+        {
+            let reset = registry
+                .begin_profile_reset("browser-1", "workspace-1")
+                .await
+                .unwrap();
+            assert_eq!(reset.sessions().len(), 1);
+        }
+
+        assert!(registry.snapshot("browser-1", "workspace-1").is_ok());
+        assert!(!*registry
+            .lock()
+            .records
+            .get("browser-1")
+            .unwrap()
+            .dispatch
+            .halt
+            .borrow());
+    }
     #[test]
     fn model_facing_lists_are_workspace_scoped_and_stably_ordered() {
         let registry = BrowserRegistry::default();
@@ -2721,6 +3028,10 @@ mod tests {
         let descriptor = platform_default_engine();
         assert!(!descriptor.capabilities.semantic_actions);
         assert!(!descriptor.capabilities.screenshot);
+        assert_eq!(
+            descriptor.capabilities.profile_reset,
+            cfg!(target_os = "macos")
+        );
     }
 
     #[tokio::test]
