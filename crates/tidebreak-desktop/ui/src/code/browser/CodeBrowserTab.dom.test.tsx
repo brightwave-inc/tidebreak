@@ -1472,6 +1472,94 @@ describe("CodeBrowserTab", () => {
     ).toHaveLength(2);
   });
 
+  it("rejects pre-reset document epochs after native closing is acknowledged", async () => {
+    const user = userEvent.setup();
+    let releaseReset: (() => void) | undefined;
+    const resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    const runtime = browserHost({
+      resetGate,
+      runtime: { engine: resetEngine },
+    });
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com/app"
+        host={runtime.host}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Browser options" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: "Reset development profile",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Reset development profile",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        runtime.calls.some(({ action }) => action.type === "reset_profile"),
+      ).toBe(true),
+    );
+    const resetId = resetIdFrom(runtime.calls);
+
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/app",
+        documentEpoch: 9,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_deleting_data",
+        resetId,
+      });
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_reconstruct",
+        resetId,
+      });
+      releaseReset?.();
+    });
+
+    await waitFor(() =>
+      expect(
+        runtime.calls.filter(({ action }) => action.type === "create"),
+      ).toHaveLength(2),
+    );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/fresh",
+        documentEpoch: 1,
+      });
+    });
+
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("example.com/fresh");
+  });
+
   it("reconstructs the native view before showing a deletion failure", async () => {
     const user = userEvent.setup();
     let releaseReset: (() => void) | undefined;

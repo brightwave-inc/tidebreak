@@ -135,6 +135,7 @@ function CodeBrowserTabSession({
   const nativeCreateRequestedUrl = useRef<string | null>(null);
   const activeProfileResetId = useRef<number | null>(null);
   const locallyInitiatedProfileResetId = useRef<number | null>(null);
+  const nativeClosingConfirmedProfileResetId = useRef<number | null>(null);
   const completedProfileResetIds = useRef(new Set<number>());
   const profileResetRecovery = useRef<{
     resetId: number;
@@ -244,6 +245,7 @@ function CodeBrowserTabSession({
       if (completedProfileResetIds.current.has(resetId)) return false;
       if (activeProfileResetId.current !== resetId) {
         activeProfileResetId.current = resetId;
+        nativeClosingConfirmedProfileResetId.current = null;
         profileResetRecovery.current = null;
         markNativeClosedForProfileReset();
       }
@@ -251,6 +253,23 @@ function CodeBrowserTabSession({
       return true;
     },
     [markNativeClosedForProfileReset],
+  );
+
+  const confirmNativeProfileResetClosing = useCallback(
+    (resetId: number) => {
+      const resetWasAlreadyActive = activeProfileResetId.current === resetId;
+      if (!beginProfileResetCycle(resetId, "closing")) return;
+      if (nativeClosingConfirmedProfileResetId.current === resetId) return;
+      nativeClosingConfirmedProfileResetId.current = resetId;
+      if (resetWasAlreadyActive) {
+        // A locally initiated reset hides the surface before native acquires
+        // the reset lease. Fence again once native has marked the records as
+        // resetting, so no response or document epoch from that short window
+        // can be mistaken for the reconstructed view.
+        markNativeClosedForProfileReset();
+      }
+    },
+    [beginProfileResetCycle, markNativeClosedForProfileReset],
   );
 
   const finishProfileResetCycle = useCallback((resetId: number) => {
@@ -262,6 +281,9 @@ function CodeBrowserTabSession({
     }
     if (activeProfileResetId.current !== resetId) return;
     activeProfileResetId.current = null;
+    if (nativeClosingConfirmedProfileResetId.current === resetId) {
+      nativeClosingConfirmedProfileResetId.current = null;
+    }
     if (profileResetRecovery.current?.resetId === resetId) {
       profileResetRecovery.current = null;
     }
@@ -659,7 +681,7 @@ function CodeBrowserTabSession({
     function handleHostEvent(event: BrowserHostEvent) {
       if (event.type === "profile_reset_closing") {
         if (event.resetId !== undefined) {
-          beginProfileResetCycle(event.resetId, "closing");
+          confirmNativeProfileResetClosing(event.resetId);
         }
         return;
       }
@@ -795,6 +817,7 @@ function CodeBrowserTabSession({
   }, [
     beginProfileResetCycle,
     browserId,
+    confirmNativeProfileResetClosing,
     createAndReconcileNative,
     finishProfileResetCycle,
     host,
