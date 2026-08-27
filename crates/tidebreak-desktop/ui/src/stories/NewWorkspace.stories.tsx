@@ -12,8 +12,9 @@ import {
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { CodeRepoSnapshot, HarnessKind } from "@/api/types";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
-import { NewWorkspaceDialog } from "@/code/NewWorkspaceDialog";
+import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "@/code/CodeUiStore";
 import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
+import { NewWorkspaceDialog } from "@/code/NewWorkspaceDialog";
 import {
   harnessDoctor,
   harnessDoctorCold,
@@ -175,6 +176,7 @@ function NewWorkspace({
       workspaces: [],
     });
     useCodeUpdatesStore.setState({ harnessInstalls: installs ?? {} });
+    useCodeUiStore.setState({ newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT });
     setSeeded(true);
   }, [doctor, installs]);
   if (!seeded) return null;

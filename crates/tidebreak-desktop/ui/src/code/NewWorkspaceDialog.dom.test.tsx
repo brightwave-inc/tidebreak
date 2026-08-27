@@ -22,7 +22,7 @@ import {
   OPTIMISTIC_WORKSPACE_ID_PREFIX,
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
-import { useCodeUiStore } from "./CodeUiStore";
+import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
 import type { CodeTurnSubmission, ParsedHarnessModel } from "./parsers";
@@ -42,6 +42,7 @@ afterEach(() => {
   useCodeUiStore.setState({
     lastCreate: null,
     pendingComposerPrompt: null,
+    newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
   });
   toastError.mockReset();
   toastSuccess.mockReset();
@@ -516,6 +517,39 @@ describe("NewWorkspaceDialog", () => {
     await waitFor(() => expect(createCodeWorkspace).toHaveBeenCalled());
   });
 
+  it("keeps the first message after the dialog is dismissed", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const value = app({ listCodeHarnessModels: claudeModels() });
+
+    await renderWithRouter(
+      <AppContextProvider value={value}>
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "keep this task" },
+    });
+    cleanup();
+
+    await renderWithRouter(
+      <AppContextProvider value={value}>
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue(
+      "keep this task",
+    );
+  });
+
   it("sends the first message as the session's first turn", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
@@ -565,6 +599,9 @@ describe("NewWorkspaceDialog", () => {
     );
     // Sent, not parked: nothing left for the workspace composer to take.
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+    expect(useCodeUiStore.getState().newWorkspaceDraft).toEqual(
+      EMPTY_NEW_WORKSPACE_DRAFT,
+    );
   });
 
   it("hands the message to the workspace composer when the turn cannot be sent", async () => {

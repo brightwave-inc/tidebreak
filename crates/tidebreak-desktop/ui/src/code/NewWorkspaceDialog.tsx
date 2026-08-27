@@ -43,7 +43,7 @@ import {
   OPTIMISTIC_WORKSPACE_ID_PREFIX,
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
-import { useCodeUiStore } from "./CodeUiStore";
+import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
 import { HarnessModelMenu } from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
 import { useWarmHarnessInstall } from "./useHarnessInstall";
@@ -74,9 +74,11 @@ import {
  *
  * A typed message is posted as the session's first turn once the session
  * exists. If the session or the turn fails, the text is handed to the
- * workspace composer as a draft instead — never dropped. "Create more" keeps
- * the dialog open after a create, clearing only the message and name, for
- * firing off several tasks on the same sticky settings.
+ * workspace composer as a draft instead — never dropped. Dismissing the
+ * dialog keeps the message and name for the next Cmd+N; a create consumes
+ * them. "Create more" keeps the dialog open after a create, clearing only
+ * the message and name, for firing off several tasks on the same sticky
+ * settings.
  *
  * The title is optional: left blank, the server generates a two-word name and
  * later replaces it with one derived from the first turn, the same way chats
@@ -171,9 +173,10 @@ export function NewWorkspaceDialog({
   );
   const lastCreate = useCodeUiStore((state) => state.lastCreate);
   const rememberCreate = useCodeUiStore((state) => state.rememberCreate);
+  const draft = useCodeUiStore((state) => state.newWorkspaceDraft);
+  const startingPrompt = draft.startingPrompt;
+  const title = draft.title;
   const [repoId, setRepoId] = useState("");
-  const [startingPrompt, setStartingPrompt] = useState("");
-  const [title, setTitle] = useState("");
   const [baseRef, setBaseRef] = useState("");
   const [pickedHarness, setPickedHarness] = useState<HarnessKind | null>(null);
   const [permissionMode, setPermissionMode] = useState<PermissionMode | null>(
@@ -219,8 +222,12 @@ export function NewWorkspaceDialog({
       defaultRepoId ??
       recentRepoId(repos, known, lastCreate?.repoId);
     setRepoId(nextRepo);
-    setStartingPrompt(retry?.startingPrompt ?? "");
-    setTitle(retry?.title ?? "");
+    if (retry) {
+      useCodeUiStore.getState().setNewWorkspaceDraft({
+        startingPrompt: retry.startingPrompt,
+        title: retry.title,
+      });
+    }
     setBaseRef(
       retry?.baseRef ??
         repos.find((repo) => repo.id === nextRepo)?.default_base_ref ??
@@ -392,9 +399,8 @@ export function NewWorkspaceDialog({
       createMore,
       originPath: pathnameRef.current,
     };
+    useCodeUiStore.getState().setNewWorkspaceDraft(EMPTY_NEW_WORKSPACE_DRAFT);
     if (createMore) {
-      setStartingPrompt("");
-      setTitle("");
       focusPrompt();
       queueMicrotask(() => {
         createLocked.current = false;
@@ -444,6 +450,12 @@ export function NewWorkspaceDialog({
     } catch (error) {
       removeWorkspace(pending.id);
       retryAttempt.current = attempt;
+      if (!attempt.createMore) {
+        useCodeUiStore.getState().setNewWorkspaceDraft({
+          startingPrompt: attempt.startingPrompt,
+          title: attempt.title,
+        });
+      }
       toast.error(
         friendlyErrorMessage(error, "Could not create the workspace"),
         {
@@ -672,7 +684,13 @@ export function NewWorkspaceDialog({
                 <span className="text-xs font-medium">Name</span>
                 <Input
                   value={title}
-                  onChange={(event) => setTitle(event.target.value)}
+                  onChange={(event) => {
+                    const current = useCodeUiStore.getState().newWorkspaceDraft;
+                    useCodeUiStore.getState().setNewWorkspaceDraft({
+                      ...current,
+                      title: event.target.value,
+                    });
+                  }}
                   placeholder="Named automatically"
                   aria-label="Name"
                   onKeyDown={(event) => {
@@ -730,7 +748,13 @@ export function NewWorkspaceDialog({
           <textarea
             ref={promptInput}
             value={startingPrompt}
-            onChange={(event) => setStartingPrompt(event.target.value)}
+            onChange={(event) => {
+              const current = useCodeUiStore.getState().newWorkspaceDraft;
+              useCodeUiStore.getState().setNewWorkspaceDraft({
+                ...current,
+                startingPrompt: event.target.value,
+              });
+            }}
             aria-label="First message"
             placeholder="Describe the first task (optional)"
             className="placeholder:text-muted-foreground max-h-[45vh] min-h-36 w-full resize-none bg-transparent px-4 py-3 text-base outline-none"

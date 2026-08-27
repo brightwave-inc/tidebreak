@@ -60,6 +60,20 @@ export type CodeCreateSelection = {
   permissionMode?: PermissionMode;
 };
 
+/**
+ * Unsent first message and name in the new-workspace composer. Closing the
+ * dialog keeps them; the next Cmd+N restores them. A create consumes them.
+ */
+export type NewWorkspaceDraft = {
+  startingPrompt: string;
+  title: string;
+};
+
+export const EMPTY_NEW_WORKSPACE_DRAFT: NewWorkspaceDraft = {
+  startingPrompt: "",
+  title: "",
+};
+
 /** Inspector filter for one turn's files and diff. `label` is the ordinal, never the id. */
 export type InspectorScope = {
   turnId: string;
@@ -223,6 +237,12 @@ export type CodeUiStore = {
   newWorkspaceOpen: boolean;
   /** The repo the dialog opens on, when it was opened from one. */
   newWorkspaceRepoId: string | undefined;
+  /**
+   * Typed words still sitting in the new-workspace composer after a dismiss.
+   * Settings stick via `lastCreate`; this is only the message and name.
+   */
+  newWorkspaceDraft: NewWorkspaceDraft;
+  setNewWorkspaceDraft: (draft: NewWorkspaceDraft) => void;
   addRepoOpen: boolean;
   reviewSidebarOpen: boolean;
   /** Files and diff scoped to one turn, or the whole worktree when null. */
@@ -346,6 +366,7 @@ export type WorkflowSuggestion = {
 export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   newWorkspaceOpen: false,
   newWorkspaceRepoId: undefined,
+  newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
   addRepoOpen: false,
   reviewSidebarOpen: readStoredReviewSidebarOpen(),
   inspectorScope: null,
@@ -439,6 +460,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ newWorkspaceOpen: true, newWorkspaceRepoId: known });
   },
   setNewWorkspaceOpen: (open) => set({ newWorkspaceOpen: open }),
+  setNewWorkspaceDraft: (newWorkspaceDraft) => set({ newWorkspaceDraft }),
   setAddRepoOpen: (open) => set({ addRepoOpen: open }),
   toggleReviewSidebar: () =>
     set((state) => {
@@ -487,6 +509,7 @@ export function resetCodeUiHostState(): void {
   useCodeUiStore.setState({
     newWorkspaceOpen: false,
     newWorkspaceRepoId: undefined,
+    newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
     addRepoOpen: false,
     inspectorScope: null,
     terminalPending: false,
