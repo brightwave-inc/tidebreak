@@ -291,9 +291,9 @@ function deferred<T>() {
 
 function makeClient() {
   return {
-    getCodeWorkspace: vi.fn(async () => WORKSPACE),
+    getCodeWorkspace: vi.fn(async (_id: string) => WORKSPACE),
     listCodeWorkspaceSessions: vi.fn(
-      async (): Promise<(typeof SESSION)[]> => [],
+      async (_id: string): Promise<(typeof SESSION)[]> => [],
     ),
     listCodeSessionTurns: vi.fn(async (_sessionId: string) => [TURN]),
     listCodeApprovals: vi.fn(async () => []),
@@ -305,6 +305,19 @@ function makeClient() {
       ) => codeEventSocket(onFrame),
     ),
     getCodeRepo: vi.fn(async () => REPO),
+    getCodeSessionDebug: vi.fn(async () => ({
+      session: { id: "sess-1" },
+      turns: [],
+      events: [],
+    })),
+    createCodeWorkspace: vi.fn(async () => ({
+      ...WORKSPACE,
+      id: "ws-uneff",
+      repo_id: "repo-tb",
+      title: "Uneff: Fix login",
+      worktree_path: "/tmp/tidebreak/.worktrees/uneff",
+      branch_name: "tidebreak/uneff-fix-login",
+    })),
     createCodeSession: vi.fn(async () => CREATED_SESSION),
     forkCodeSession: vi.fn(async () => FORK_SOURCE),
     archiveCodeWorkspace: vi.fn(async () => ({
@@ -1782,6 +1795,60 @@ describe("CodeWorkspacePage", () => {
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/code"));
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", true);
+  });
+
+  it("starts a Tidebreak fix workspace from Uneff me", async () => {
+    const client = makeClient();
+    const created = {
+      ...WORKSPACE,
+      id: "ws-uneff",
+      repo_id: "repo-tb",
+      title: "Uneff: Fix login",
+      worktree_path: "/tmp/tidebreak/.worktrees/uneff",
+      branch_name: "tidebreak/uneff-fix-login",
+    };
+    const tidebreakRepo = {
+      ...REPO,
+      id: "repo-tb",
+      display_name: "tidebreak",
+      root_path: "/tmp/tidebreak",
+    };
+    client.listCodeRepos.mockResolvedValue([REPO, tidebreakRepo]);
+    client.listCodeWorkspaceSessions.mockImplementation(async (id: string) =>
+      id === WORKSPACE.id ? [SESSION] : [],
+    );
+    client.createCodeWorkspace.mockResolvedValue(created);
+    client.getCodeWorkspace.mockImplementation(async (id: string) =>
+      id === created.id ? created : WORKSPACE,
+    );
+    useCodeCatalogStore.setState({
+      repos: [REPO, tidebreakRepo],
+    });
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    await screen.findByRole("heading", { name: /Fix login/ });
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Uneff me" }));
+
+    await waitFor(() =>
+      expect(client.createCodeWorkspace).toHaveBeenCalledWith({
+        repo_id: "repo-tb",
+        title: "Uneff: Fix login",
+      }),
+    );
+    expect(client.getCodeSessionDebug).toHaveBeenCalledWith("sess-1");
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(`/code/w/${created.id}`),
+    );
+    await waitFor(() => {
+      const pending = useCodeUiStore.getState().pendingComposerPrompt;
+      const composer = screen.queryByRole("textbox", {
+        name: "Message",
+      }) as HTMLTextAreaElement | null;
+      const text = pending?.text ?? composer?.value ?? "";
+      expect(text).toContain("Open a pull request against main");
+    });
   });
 
   it("keeps git and comments in the review sidebar, and opens the terminal as a tab", async () => {

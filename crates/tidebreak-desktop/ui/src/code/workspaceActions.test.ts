@@ -67,6 +67,45 @@ describe("workspace worktree actions", () => {
     ).toEqual({ id: "copy-worktree", label: "Copy worktree path" });
   });
 
+  it("offers Uneff me next to Copy debug JSON when Tidebreak is connected", () => {
+    const commands = workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+      canUneff: true,
+    });
+    const copy = commands.findIndex(
+      (command) => command.id === "copy-debug-json",
+    );
+    const uneff = commands.findIndex((command) => command.id === "uneff-me");
+    expect(commands[copy]?.label).toBe("Copy debug JSON");
+    expect(commands[uneff]?.label).toBe("Uneff me");
+    expect(uneff).toBe(copy + 1);
+
+    expect(
+      workspaceCommands({
+        hasPr: false,
+        archived: false,
+        hasSession: true,
+      }).some((command) => command.id === "uneff-me"),
+    ).toBe(false);
+
+    const header = workspaceHeaderCommands({
+      archived: false,
+      hasSession: true,
+      attentionPinned: false,
+      quickActions: [],
+      canUneff: true,
+    });
+    const headerCopy = header.findIndex(
+      (command) => command.id === "copy-debug-json",
+    );
+    expect(header[headerCopy + 1]).toEqual({
+      id: "uneff-me",
+      label: "Uneff me",
+    });
+  });
+
   it("turns a typed failure into a recoverable notice", () => {
     expect(
       worktreeOpenFailureNotice({

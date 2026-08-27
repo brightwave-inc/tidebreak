@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { MoreHorizontal } from "lucide-react";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import type {
   Attention,
@@ -9,9 +8,12 @@ import type {
   CodeWorkspacePrSnapshot,
 } from "@/api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { AttentionBadge } from "@/code/AttentionBadge";
 import { SessionLifecycleIndicator } from "@/code/SessionLifecycleIndicator";
+import {
+  WorkspaceOverflowMenu,
+  workspaceHeaderCommands,
+} from "@/code/workspaceActions";
 import { WorkspaceHeader } from "@/code/WorkspaceHeader";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
 import type {
@@ -127,15 +129,21 @@ function HeaderState({
       onToggleTerminal={() => setTerminalOpen((open) => !open)}
       onToggleReview={() => setReviewOpen((open) => !open)}
       overflowAction={
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="rounded-lg"
-          aria-label="Workspace actions"
-        >
-          <MoreHorizontal />
-        </Button>
+        <WorkspaceOverflowMenu
+          commands={workspaceHeaderCommands({
+            archived: false,
+            hasSession: true,
+            attentionPinned: false,
+            canFork: true,
+            canUneff: true,
+            quickActions: [],
+          })}
+          context={{
+            repoName: "tidebreak",
+            worktreePath: "/Users/sam/tidebreak/worktrees/ui-pane-redesign",
+          }}
+          onCommand={fn()}
+        />
       }
     />
   );
@@ -227,6 +235,23 @@ export const UnrecognizedEngineEvents: Story = {
 
 export const Loading: Story = {
   args: { snapshot: null, loading: true },
+};
+
+/** Session overflow: copy debug JSON, then Uneff me. */
+export const OverflowActions: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Workspace actions" }),
+    );
+    const menu = within(document.body);
+    await expect(
+      await menu.findByRole("menuitem", { name: "Copy debug JSON" }),
+    ).toBeVisible();
+    await expect(
+      await menu.findByRole("menuitem", { name: "Uneff me" }),
+    ).toBeVisible();
+  },
 };
 
 export const ReviewClosed: Story = {

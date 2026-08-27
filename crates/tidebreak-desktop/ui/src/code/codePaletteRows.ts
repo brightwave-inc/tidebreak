@@ -8,6 +8,7 @@ import {
   Play,
   Plus,
   Terminal,
+  Wrench,
 } from "lucide-react";
 
 import type {
@@ -168,6 +169,7 @@ export function workspaceActionPaletteRows(input: {
   hasSession: boolean;
   attentionPinned: boolean;
   quickActions: readonly { name: string }[];
+  canUneff?: boolean;
   onCommand: (command: WorkspaceCommand) => void;
 }): PaletteRow[] {
   const archived = input.workspace.status === "archived";
@@ -176,6 +178,7 @@ export function workspaceActionPaletteRows(input: {
     archived,
     hasSession: input.hasSession,
     attentionPinned: input.attentionPinned,
+    canUneff: input.canUneff,
   });
   const quick: WorkspaceCommand[] = archived
     ? []
@@ -204,6 +207,7 @@ const ACTION_ICONS: Partial<Record<WorkspaceCommandId, PaletteRow["icon"]>> = {
   "new-session": Plus,
   "toggle-terminal": Terminal,
   "open-pr": GitPullRequest,
+  "uneff-me": Wrench,
   "run-quick-action": Play,
   archive: Archive,
   "force-archive": Archive,
