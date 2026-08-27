@@ -1,0 +1,25 @@
+[package]
+name = "tidebreak-supervised-agent"
+description = "UNSTABLE: the externally supervised Tidebreak agent — polls a sandbox control endpoint, drives an engine CLI through tidebreak-harness, and reports lifecycle events outward. Decision 0077 names the shape."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util"] }
+
+[lints]
+workspace = true
