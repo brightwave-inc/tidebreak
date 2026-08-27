@@ -290,9 +290,9 @@ function deferred<T>() {
 
 function makeClient() {
   return {
-    getCodeWorkspace: vi.fn(async () => WORKSPACE),
+    getCodeWorkspace: vi.fn(async (_id: string) => WORKSPACE),
     listCodeWorkspaceSessions: vi.fn(
-      async (): Promise<(typeof SESSION)[]> => [],
+      async (_id: string): Promise<(typeof SESSION)[]> => [],
     ),
     listCodeSessionTurns: vi.fn(async (_sessionId: string) => [TURN]),
     listCodeApprovals: vi.fn(async () => []),
