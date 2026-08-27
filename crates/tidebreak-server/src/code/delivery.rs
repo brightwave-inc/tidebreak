@@ -127,6 +127,10 @@ enum DeliveryApi {
 }
 
 impl DeliveryApi {
+    fn can_mark_pull_request_ready(&self) -> bool {
+        matches!(self, Self::Gh { .. })
+    }
+
     async fn get(&self, endpoint: &str) -> Result<Value, String> {
         match self {
             Self::Gh {
@@ -474,6 +478,29 @@ async fn delivery_api(
             })
         }
     }
+}
+
+/// Build the same transport as reads, while preserving the forge-specific
+/// refusal kind if a credential mint fails after the availability probe.
+///
+/// The probe and mint are separate gateway calls. A disconnect or expired
+/// caller session between them must remain a hosted-forge refusal, not turn
+/// into a generic GitHub request error.
+async fn delivery_action_api(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    reader: &DeliveryReader,
+    target: &CodeGitHubRepositoryTarget,
+) -> Result<DeliveryApi, ServerError> {
+    delivery_api(runtime, owner, reader, target)
+        .await
+        .map_err(|message| {
+            if matches!(reader, DeliveryReader::Forge) {
+                ServerError::conflict_kind("git_forge_not_offered", message)
+            } else {
+                ServerError::bad_request_kind("github", message)
+            }
+        })
 }
 
 async fn resolve_repository_for_api(
@@ -1428,7 +1455,7 @@ pub(crate) async fn pull_request_detail(
 
     let open = summary.state == "open";
     Ok(CodeDeliveryPullRequestDetail {
-        can_mark_ready: open && summary.draft,
+        can_mark_ready: open && summary.draft && api.can_mark_pull_request_ready(),
         can_merge: open && !summary.draft,
         can_rerun_failed: summary.checks.iter().any(|check| {
             check.bucket == PullRequestCheckBucket::Fail && check.workflow_run_id.is_some()
@@ -1583,9 +1610,7 @@ pub(crate) async fn act_on_pull_request(
             _ => {}
         }
     }
-    let api = delivery_api(runtime, owner, &reader, &target.repository)
-        .await
-        .map_err(map_forge_action_error)?;
+    let api = delivery_action_api(runtime, owner, &reader, &target.repository).await?;
     // The canonical URL of the pull request being acted on: the key the
     // workspace-side digest refresh matches on (decision 66).
     let pull_request_url = format!(
@@ -1983,9 +2008,7 @@ pub(crate) async fn act_on_run(
     }
     let access = delivery_access(runtime, owner, false).await;
     let reader = access.require_reader()?;
-    let api = delivery_api(runtime, owner, &reader, &body.target.repository)
-        .await
-        .map_err(map_forge_action_error)?;
+    let api = delivery_action_api(runtime, owner, &reader, &body.target.repository).await?;
     match body.action {
         CodeDeliveryRunAction::Rerun => {
             api.rerun_workflow(&body.target.repository, body.target.id)
@@ -4321,14 +4344,21 @@ fn map_gh_error(error: gh::GhError) -> ServerError {
     }
 }
 
-fn map_forge_action_error(message: String) -> ServerError {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("head branch was modified") || lower.contains("head sha") {
-        ServerError::conflict_kind("pr_head_changed", message)
-    } else if lower.contains("not mergeable") || lower.contains("merge cannot be performed") {
-        ServerError::conflict_kind("pr_not_mergeable", message)
-    } else {
-        ServerError::bad_request_kind("github", message)
+fn map_forge_action_error(error: super::forge_rest::ForgeActionError) -> ServerError {
+    let message = error.message().to_owned();
+    match error.kind() {
+        super::forge_rest::ForgeActionErrorKind::AuthFailed => {
+            ServerError::conflict_kind("git_auth_failed", message)
+        }
+        super::forge_rest::ForgeActionErrorKind::HeadChanged => {
+            ServerError::conflict_kind("pr_head_changed", message)
+        }
+        super::forge_rest::ForgeActionErrorKind::NotMergeable => {
+            ServerError::conflict_kind("pr_not_mergeable", message)
+        }
+        super::forge_rest::ForgeActionErrorKind::Other => {
+            ServerError::bad_request_kind("github", message)
+        }
     }
 }
 

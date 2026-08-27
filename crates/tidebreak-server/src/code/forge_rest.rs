@@ -48,6 +48,66 @@ const CHECK_RUN_CONCURRENCY: usize = 4;
 const TIMELINE_PAGE_SIZE: u32 = 100;
 const TIMELINE_PAGE_LIMIT: u32 = 20;
 
+/// Stable action classification kept beside the HTTP response that proves it.
+///
+/// This module always sends `sha` to GitHub's pull-request merge endpoint,
+/// whose contract defines 409 as a head mismatch and 405 as a merge refusal.
+/// Delivery must not lose `pr_head_changed` or `pr_not_mergeable` merely
+/// because an enterprise host replaces the English response text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForgeActionErrorKind {
+    AuthFailed,
+    HeadChanged,
+    NotMergeable,
+    Other,
+}
+
+/// One failed forge mutation, with the user-facing host message and the
+/// stable classification Delivery exposes on the wire.
+#[derive(Debug)]
+pub(crate) struct ForgeActionError {
+    kind: ForgeActionErrorKind,
+    message: String,
+}
+
+impl ForgeActionError {
+    fn transport(message: String) -> Self {
+        Self {
+            kind: ForgeActionErrorKind::Other,
+            message,
+        }
+    }
+
+    fn response(status: reqwest::StatusCode, value: &Value) -> Self {
+        let message = forge_message(status, value);
+        let kind = if status == reqwest::StatusCode::UNAUTHORIZED {
+            ForgeActionErrorKind::AuthFailed
+        } else {
+            ForgeActionErrorKind::Other
+        };
+        Self { kind, message }
+    }
+
+    fn pull_request_merge_response(status: reqwest::StatusCode, value: &Value) -> Self {
+        let message = forge_message(status, value);
+        let kind = match status {
+            reqwest::StatusCode::UNAUTHORIZED => ForgeActionErrorKind::AuthFailed,
+            reqwest::StatusCode::CONFLICT => ForgeActionErrorKind::HeadChanged,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED => ForgeActionErrorKind::NotMergeable,
+            _ => ForgeActionErrorKind::Other,
+        };
+        Self { kind, message }
+    }
+
+    pub(crate) fn kind(&self) -> ForgeActionErrorKind {
+        self.kind
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 /// The REST base for a forge host: `api.github.com` for github.com, the
 /// GHES `/api/v3/` convention for anything else.
 ///
@@ -337,16 +397,17 @@ pub(crate) async fn create_stack(
     target: &CodeGitHubRepositoryTarget,
     credential: &GitCredential,
     numbers: &[u64],
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     let (status, value) = request(
         reqwest::Method::POST,
         format!("{api_base}/repos/{}/{}/stacks", target.owner, target.name),
         credential,
         Some(&serde_json::json!({ "pull_requests": numbers })),
     )
-    .await?;
+    .await
+    .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(forge_message(status, &value));
+        return Err(ForgeActionError::response(status, &value));
     }
     Ok(())
 }
@@ -359,7 +420,7 @@ pub(crate) async fn merge_pull_request(
     number: u64,
     method: &str,
     expected_head_sha: &str,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     let (status, value) = request(
         reqwest::Method::PUT,
         format!(
@@ -372,9 +433,18 @@ pub(crate) async fn merge_pull_request(
             "merge_method": method,
         })),
     )
-    .await?;
-    if !status.is_success() || value.get("merged").and_then(Value::as_bool) != Some(true) {
-        return Err(forge_message(status, &value));
+    .await
+    .map_err(ForgeActionError::transport)?;
+    if !status.is_success() {
+        return Err(ForgeActionError::pull_request_merge_response(
+            status, &value,
+        ));
+    }
+    if value.get("merged").and_then(Value::as_bool) != Some(true) {
+        return Err(ForgeActionError {
+            kind: ForgeActionErrorKind::NotMergeable,
+            message: forge_message(status, &value),
+        });
     }
     Ok(())
 }
@@ -389,7 +459,7 @@ pub(crate) async fn enable_pull_request_auto_merge(
     number: u64,
     method: &str,
     expected_head_sha: &str,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     let (status, pull) = request(
         reqwest::Method::GET,
         format!(
@@ -399,16 +469,19 @@ pub(crate) async fn enable_pull_request_auto_merge(
         credential,
         None,
     )
-    .await?;
+    .await
+    .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(forge_message(status, &pull));
+        return Err(ForgeActionError::response(status, &pull));
     }
     let node_id = pull
         .get("node_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| "the forge pull request did not name a node id".to_owned())?;
+        .ok_or_else(|| {
+            ForgeActionError::transport("the forge pull request did not name a node id".to_owned())
+        })?;
     let merge_method = match method {
         "squash" => "SQUASH",
         "rebase" => "REBASE",
@@ -428,7 +501,8 @@ pub(crate) async fn enable_pull_request_auto_merge(
         credential,
         Some(&body),
     )
-    .await?;
+    .await
+    .map_err(ForgeActionError::transport)?;
     if !status.is_success()
         || value
             .get("errors")
@@ -438,7 +512,7 @@ pub(crate) async fn enable_pull_request_auto_merge(
             .pointer("/data/enablePullRequestAutoMerge")
             .is_none_or(Value::is_null)
     {
-        return Err(forge_message(status, &value));
+        return Err(ForgeActionError::response(status, &value));
     }
     Ok(())
 }
@@ -450,7 +524,7 @@ pub(crate) async fn update_pull_request_state(
     credential: &GitCredential,
     number: u64,
     state: &str,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     let (status, value) = request(
         reqwest::Method::PATCH,
         format!(
@@ -460,9 +534,10 @@ pub(crate) async fn update_pull_request_state(
         credential,
         Some(&serde_json::json!({ "state": state })),
     )
-    .await?;
+    .await
+    .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(forge_message(status, &value));
+        return Err(ForgeActionError::response(status, &value));
     }
     Ok(())
 }
@@ -474,7 +549,7 @@ pub(crate) async fn comment_on_pull_request(
     credential: &GitCredential,
     number: u64,
     body: &str,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     let (status, value) = request(
         reqwest::Method::POST,
         format!(
@@ -484,9 +559,10 @@ pub(crate) async fn comment_on_pull_request(
         credential,
         Some(&serde_json::json!({ "body": body })),
     )
-    .await?;
+    .await
+    .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(forge_message(status, &value));
+        return Err(ForgeActionError::response(status, &value));
     }
     Ok(())
 }
@@ -497,7 +573,7 @@ pub(crate) async fn rerun_workflow(
     target: &CodeGitHubRepositoryTarget,
     credential: &GitCredential,
     run_id: u64,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     rerun(api_base, target, credential, run_id, "rerun").await
 }
 
@@ -507,7 +583,7 @@ pub(crate) async fn rerun_failed_jobs(
     target: &CodeGitHubRepositoryTarget,
     credential: &GitCredential,
     run_id: u64,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     rerun(api_base, target, credential, run_id, "rerun-failed-jobs").await
 }
 
@@ -517,7 +593,7 @@ async fn rerun(
     credential: &GitCredential,
     run_id: u64,
     action: &str,
-) -> Result<(), String> {
+) -> Result<(), ForgeActionError> {
     let (status, value) = request(
         reqwest::Method::POST,
         format!(
@@ -527,9 +603,10 @@ async fn rerun(
         credential,
         None,
     )
-    .await?;
+    .await
+    .map_err(ForgeActionError::transport)?;
     if !status.is_success() {
-        return Err(forge_message(status, &value));
+        return Err(ForgeActionError::response(status, &value));
     }
     Ok(())
 }
@@ -919,6 +996,41 @@ mod tests {
         assert_eq!(
             graphql_url("https://ghe.acme.test/api/v3"),
             "https://ghe.acme.test/api/graphql"
+        );
+    }
+
+    /// The pull-request merge endpoint's status contract is independent of
+    /// response prose: with the `sha` request field, 409 is a stale reviewed
+    /// head and 405 is an unmergeable pull request.
+    #[test]
+    fn pull_request_merge_statuses_ignore_rewritten_messages() {
+        let kind = |status: reqwest::StatusCode, message: &str| {
+            ForgeActionError::pull_request_merge_response(
+                status,
+                &serde_json::json!({ "message": message }),
+            )
+            .kind()
+        };
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::CONFLICT,
+                "Pull Request is not mergeable"
+            ),
+            ForgeActionErrorKind::HeadChanged
+        );
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                "Head sha did not match the reviewed revision"
+            ),
+            ForgeActionErrorKind::NotMergeable
+        );
+        assert_eq!(
+            kind(
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "Head branch was modified"
+            ),
+            ForgeActionErrorKind::Other
         );
     }
 
