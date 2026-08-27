@@ -33,6 +33,7 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -235,18 +236,48 @@ async fn reset_pre_v1_state(database: &Path) -> Result<()> {
 
 fn remove_sqlite_files(database: &Path) -> Result<()> {
     for path in sqlite_files(database) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
+        remove_reset_file(&path, "local SQLite database file")?;
+    }
+    Ok(())
+}
+
+/// Delete one reset target. Windows can still hold the SQLite files for a
+/// beat after `close()` returns (WAL mapping), so a sharing violation retries
+/// instead of failing the epoch reset.
+fn remove_reset_file(path: &Path, kind: &str) -> Result<()> {
+    let delays_ms: &[u64] = if cfg!(windows) {
+        &[0, 10, 50, 100, 250]
+    } else {
+        &[0]
+    };
+    let mut last_error = None;
+    for (attempt, delay_ms) in delays_ms.iter().enumerate() {
+        if *delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(*delay_ms));
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) if attempt + 1 < delays_ms.len() && is_windows_sharing_violation(&error) => {
+                last_error = Some(error);
+            }
             Err(error) => {
                 return Err(AgentError::config(format!(
-                    "failed to reset local SQLite database file {}: {error}",
+                    "failed to reset {kind} {}: {error}",
                     path.display()
                 )))
             }
         }
     }
-    Ok(())
+    Err(AgentError::config(format!(
+        "failed to reset {kind} {}: {}",
+        path.display(),
+        last_error.expect("a sharing-violation retry keeps the last error")
+    )))
+}
+
+fn is_windows_sharing_violation(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(32)
 }
 
 /// Durable host-broker files that outlive SQLite unless explicitly cleared.
