@@ -47,9 +47,13 @@ export const LockedAfterStart: Story = {
 
 /** Create-time hint next to a still-live picker. */
 export const FixedAtCreate: Story = {
-  render: () => (
+  args: {
+    value: "allow",
+    onChange: () => {},
+  },
+  render: (args) => (
     <div className="flex min-w-0 flex-col">
-      <PermissionModePicker value="allow" onChange={() => {}} />
+      <PermissionModePicker {...args} />
       <p className="text-muted-foreground px-2 text-xs">
         {CREATE_PERMISSION_MODE_FIXED}
       </p>
