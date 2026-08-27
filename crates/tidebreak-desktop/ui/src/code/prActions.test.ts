@@ -305,6 +305,37 @@ describe("prDirectMergeAction", () => {
     });
   });
 
+  it("hides automatic merge actions for stacked pull requests", () => {
+    const blocked = pr({
+      head_sha: "abc",
+      checks: [{ name: "ci", bucket: "pending" }],
+    });
+    expect(
+      prDirectMergeAction(blocked, { suppressAutoMerge: true }),
+    ).toBeNull();
+    expect(
+      prDirectMergeAction(
+        {
+          ...blocked,
+          mergeable: "mergeable",
+          merge_state_status: "clean",
+          checks: [{ name: "ci", bucket: "pass" }],
+        },
+        { suppressAutoMerge: true },
+      ),
+    ).toEqual({ kind: "merge", label: "Merge", auto: false });
+    expect(
+      prDirectMergeAction(blocked, {
+        hasMergeQueue: true,
+        suppressAutoMerge: true,
+      }),
+    ).toEqual({
+      kind: "merge_when_ready",
+      label: "Merge when ready",
+      auto: true,
+    });
+  });
+
   it("offers merge when ready on a merge-queue repository", () => {
     expect(
       prDirectMergeAction(

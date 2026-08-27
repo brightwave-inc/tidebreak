@@ -49,6 +49,7 @@ type DeliveryScenario =
   | "pull-requests-loading"
   | "pull-requests-empty"
   | "pull-requests-stacked"
+  | "pull-requests-stacked-auto-merge-unavailable"
   | "pull-requests-unregistered"
   | "pull-requests-state-changed"
   | "pull-requests-partial"
@@ -80,7 +81,7 @@ async function openListRow(
   list: string,
   title: string,
 ) {
-  const rows = within(canvasElement).getByRole("list", { name: list });
+  const rows = await within(canvasElement).findByRole("list", { name: list });
   await userEvent.click(await within(rows).findByText(title));
 }
 
@@ -159,6 +160,17 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     merged_at: "2026-08-27T19:45:00.000Z",
     updated_at: "2026-08-27T19:45:00.000Z",
   };
+  const stackedAutoMergeUnavailable = stackedDeliveryPullRequests.map((item) =>
+    item.number === 2302
+      ? {
+          ...item,
+          checks: [{ name: "desktop UI", bucket: "pending" as const }],
+          ready_to_merge: false,
+          mergeable: "unknown",
+          merge_state_status: "blocked",
+        }
+      : item,
+  );
 
   return {
     openCodeUpdates: () => idleSocket(),
@@ -215,11 +227,13 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
             ? []
             : scenario === "pull-requests-stacked"
               ? stackedDeliveryPullRequests
-              : scenario === "pull-requests-unregistered"
-                ? unregisteredDeliveryPullRequests
-                : scenario === "pull-requests-state-changed"
-                  ? [deliveryPullRequests[0]!]
-                  : deliveryPullRequests,
+              : scenario === "pull-requests-stacked-auto-merge-unavailable"
+                ? stackedAutoMergeUnavailable
+                : scenario === "pull-requests-unregistered"
+                  ? unregisteredDeliveryPullRequests
+                  : scenario === "pull-requests-state-changed"
+                    ? [deliveryPullRequests[0]!]
+                    : deliveryPullRequests,
         errors:
           scenario === "pull-requests-partial"
             ? [
@@ -246,8 +260,22 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
             ...deliveryPullRequestDetails[2251]!,
             summary: refreshedMergedPullRequest,
           }
-        : (deliveryPullRequestDetails[number] ??
-          deliveryPullRequestDetails[2251]!),
+        : scenario === "pull-requests-stacked-auto-merge-unavailable" &&
+            number === 2302
+          ? {
+              ...deliveryPullRequestDetails[2302]!,
+              summary: {
+                ...stackedAutoMergeUnavailable.find(
+                  (item) => item.number === 2302,
+                )!,
+                stack_parent_number: undefined,
+                stack_number: undefined,
+                stack_size: undefined,
+              },
+              stack: undefined,
+            }
+          : (deliveryPullRequestDetails[number] ??
+            deliveryPullRequestDetails[2251]!),
     runCodeDeliveryPullRequestAction: async ({
       action,
     }: CodeDeliveryPullRequestActionBody) => ({
@@ -642,6 +670,31 @@ export const PullRequestStackDetail: Story = {
     await expect(
       await body.findByRole("button", { name: /Merge stack \(2 layers\)/ }),
     ).toBeVisible();
+  },
+};
+
+/**
+ * Detail hydration may omit optional stack enrichment. The list keeps its
+ * lane, and a stacked pull request with pending checks offers no unsupported
+ * GitHub auto-merge action.
+ */
+export const PullRequestStackDetailWithoutAutoMerge: Story = {
+  args: { scenario: "pull-requests-stacked-auto-merge-unavailable" },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await openPullRequest(canvasElement, "Stack middle: reconcile sweep");
+    await expect(
+      await body.findByRole("heading", {
+        name: "Stack middle: reconcile sweep",
+      }),
+    ).toBeVisible();
+    const depths = [...canvasElement.querySelectorAll("[data-depth]")].map(
+      (row) => row.getAttribute("data-depth"),
+    );
+    await expect(depths).toEqual(["0", "1", "2", "0"]);
+    await expect(
+      body.queryByRole("button", { name: "Enable auto-merge" }),
+    ).toBeNull();
   },
 };
 

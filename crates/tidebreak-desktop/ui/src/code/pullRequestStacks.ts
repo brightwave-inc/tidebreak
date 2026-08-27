@@ -1,5 +1,62 @@
 import type { CodeDeliveryPullRequestSummary } from "../api/types";
 
+/** Preserve list-known stack facts when a detail read omits enrichment. */
+export function preservePullRequestStackMetadata(
+  previous: CodeDeliveryPullRequestSummary,
+  next: CodeDeliveryPullRequestSummary,
+): CodeDeliveryPullRequestSummary {
+  const nextHasRegisteredStack =
+    next.stack_number !== undefined || next.stack_size !== undefined;
+  if (nextHasRegisteredStack) return next;
+
+  const previousHasRegisteredStack =
+    previous.stack_number !== undefined || previous.stack_size !== undefined;
+  if (previousHasRegisteredStack) {
+    return {
+      ...next,
+      ...(previous.stack_number !== undefined
+        ? { stack_number: previous.stack_number }
+        : {}),
+      ...(previous.stack_size !== undefined
+        ? { stack_size: previous.stack_size }
+        : {}),
+      ...(next.stack_parent_number !== undefined
+        ? { stack_parent_number: next.stack_parent_number }
+        : previous.stack_parent_number !== undefined
+          ? { stack_parent_number: previous.stack_parent_number }
+          : {}),
+    };
+  }
+
+  const previousHasInferredStack =
+    previous.stack_parent_number !== undefined ||
+    previous.unregistered_stack_numbers !== undefined;
+  if (!previousHasInferredStack) return next;
+
+  return {
+    ...next,
+    ...(next.stack_parent_number === undefined &&
+    previous.stack_parent_number !== undefined
+      ? { stack_parent_number: previous.stack_parent_number }
+      : {}),
+    ...(next.unregistered_stack_numbers === undefined &&
+    previous.unregistered_stack_numbers !== undefined
+      ? { unregistered_stack_numbers: previous.unregistered_stack_numbers }
+      : {}),
+  };
+}
+
+/** True when the pull request belongs to a registered or inferred stack. */
+export function isStackedPullRequest(
+  item: CodeDeliveryPullRequestSummary,
+): boolean {
+  return (
+    item.stack_parent_number !== undefined ||
+    item.unregistered_stack_numbers !== undefined ||
+    (item.stack_number !== undefined && (item.stack_size ?? 0) > 1)
+  );
+}
+
 /** One delivery row placed in its stack lane. */
 export type StackedRow = {
   /** The summary's own id, so a virtualized list can key on the row. */

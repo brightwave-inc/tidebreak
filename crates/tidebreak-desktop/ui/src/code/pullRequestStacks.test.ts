@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { CodeDeliveryPullRequestSummary } from "../api/types";
-import { arrangeStackLanes } from "./pullRequestStacks";
+import {
+  arrangeStackLanes,
+  isStackedPullRequest,
+  preservePullRequestStackMetadata,
+} from "./pullRequestStacks";
 
 function summary(
   number: number,
@@ -91,5 +95,53 @@ describe("arrangeStackLanes", () => {
     const rows = arrangeStackLanes(items);
     expect(rows).toHaveLength(15);
     expect(Math.max(...rows.map((row) => row.depth))).toBe(10);
+  });
+});
+
+describe("stack metadata", () => {
+  it("keeps list stack metadata when detail omits optional enrichment", () => {
+    const previous = summary(2, {
+      stack_parent_number: 1,
+      unregistered_stack_numbers: [1, 2, 3],
+    });
+    const next = summary(2, { title: "Fresh detail title" });
+
+    expect(preservePullRequestStackMetadata(previous, next)).toMatchObject({
+      title: "Fresh detail title",
+      stack_parent_number: 1,
+      unregistered_stack_numbers: [1, 2, 3],
+    });
+  });
+
+  it("keeps registered stack identity when detail only reaffirms the parent", () => {
+    const previous = summary(2, {
+      stack_parent_number: 1,
+      stack_number: 7,
+      stack_size: 3,
+    });
+    const next = summary(2, { stack_parent_number: 1 });
+
+    expect(preservePullRequestStackMetadata(previous, next)).toMatchObject({
+      stack_parent_number: 1,
+      stack_number: 7,
+      stack_size: 3,
+    });
+  });
+
+  it("trusts detail stack metadata when the host reports a bottom layer", () => {
+    const previous = summary(1, { stack_parent_number: 99 });
+    const next = summary(1, { stack_number: 7, stack_size: 2 });
+
+    expect(preservePullRequestStackMetadata(previous, next)).toEqual(next);
+  });
+
+  it("recognizes registered and inferred stack members", () => {
+    expect(isStackedPullRequest(summary(1))).toBe(false);
+    expect(isStackedPullRequest(summary(2, { stack_parent_number: 1 }))).toBe(
+      true,
+    );
+    expect(
+      isStackedPullRequest(summary(3, { stack_number: 7, stack_size: 2 })),
+    ).toBe(true);
   });
 });

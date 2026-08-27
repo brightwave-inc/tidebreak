@@ -1315,4 +1315,40 @@ describe("stack lanes", () => {
     // above never do.
     expect(screen.getAllByText("Unregistered stack")).toHaveLength(3);
   });
+
+  it("keeps stack lanes after opening detail without stack enrichment", async () => {
+    const user = userEvent.setup();
+    const detail = deliveryPullRequestDetails[2302]!;
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: async () => ({
+        capability: deliveryRepositoriesSnapshot.capability,
+        items: stackedDeliveryPullRequests,
+        errors: [],
+        fetched_at: "2026-08-21T15:00:00.000Z",
+      }),
+      getCodeDeliveryPullRequestDetail: async () => ({
+        ...detail,
+        summary: {
+          ...detail.summary,
+          stack_parent_number: undefined,
+          stack_number: undefined,
+          stack_size: undefined,
+        },
+        stack: undefined,
+      }),
+    } as unknown as ApiClient);
+
+    await user.click(await screen.findByText("Stack middle: reconcile sweep"));
+    await screen.findByTestId("pull-request-detail-pane");
+    await waitFor(() => {
+      const list = screen.getByRole("list", { name: "Pull requests" });
+      expect(
+        [...list.querySelectorAll("[data-depth]")].map((row) =>
+          row.getAttribute("data-depth"),
+        ),
+      ).toEqual(["0", "1", "2", "0"]);
+    });
+    expect(screen.getByText("Stacked on #2288")).toBeInTheDocument();
+  });
 });
