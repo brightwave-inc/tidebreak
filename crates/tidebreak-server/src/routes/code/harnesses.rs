@@ -117,13 +117,7 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
             let install_error = code.pin_install_error(*kind);
             let installable = tidebreak_harness::pin_for(*kind).is_some();
             let label = harness_label(*kind);
-            let auth_mode = if !hosted {
-                HarnessAuthMode::LocalSignIn
-            } else if relay_covered(*kind) {
-                HarnessAuthMode::GatewayRelay
-            } else {
-                HarnessAuthMode::HostedUnavailable
-            };
+            let auth_mode = resolve_auth_mode(hosted, *kind, &probe);
             let remediation = if let Some(err) = install_error {
                 format!("could not download the pinned {kind} binary: {err}")
             } else if auth_mode == HarnessAuthMode::HostedUnavailable {
@@ -134,6 +128,11 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 // The relay carries each turn as the caller, so no local
                 // sign-in stands between the reader and a session. A missing
                 // binary is the lazy pin's download, not a fault.
+                String::new()
+            } else if auth_mode == HarnessAuthMode::GatewayManaged {
+                // Credentials are already wired on this machine. Asking the
+                // reader to sign in would send them after a login that
+                // nothing here needs (issue 2749).
                 String::new()
             } else if probe.found && probe.authenticated == Some(false) {
                 format!("Sign in to {label} in your own terminal, then re-check.")
@@ -170,4 +169,121 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
     }))
     .await;
     Ok(HarnessDoctorReport { harnesses })
+}
+
+/// How a session of this engine authenticates on this machine.
+///
+/// The vendor login is one mode of three, not the question. A hosted machine
+/// runs every covered engine through the relay (decision 71). Elsewhere, a
+/// machine whose engines are pointed at a gateway carries inference on a
+/// credential nobody logged in for: the engine's own login check reports
+/// signed out, and the machine works. Reading that as "signed out" told
+/// every picker to disable the engine (issue 2749), so a confirmed vendor
+/// login answers first and an observed credential override answers next.
+///
+/// The observation is deliberately narrower than the one the create path
+/// consults: engines whose override surfaces Tidebreak does not read stay on
+/// `LocalSignIn` rather than claim a credential the reader cannot see.
+fn resolve_auth_mode(
+    hosted: bool,
+    kind: HarnessKind,
+    probe: &tidebreak_harness::HarnessProbe,
+) -> HarnessAuthMode {
+    if hosted {
+        return if relay_covered(kind) {
+            HarnessAuthMode::GatewayRelay
+        } else {
+            HarnessAuthMode::HostedUnavailable
+        };
+    }
+    if probe.authenticated != Some(true)
+        && tidebreak_harness::observe_auth_mode(kind, &probe.env).is_override()
+    {
+        return HarnessAuthMode::GatewayManaged;
+    }
+    HarnessAuthMode::LocalSignIn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use tidebreak_harness::HarnessProbe;
+
+    fn probe(authenticated: Option<bool>, env: Vec<(OsString, OsString)>) -> HarnessProbe {
+        HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: None,
+            authenticated,
+            stderr: String::new(),
+            env,
+            commands: Vec::new(),
+        }
+    }
+
+    fn gateway_env() -> Vec<(OsString, OsString)> {
+        vec![(
+            OsString::from("ANTHROPIC_BASE_URL"),
+            OsString::from("https://gateway.example"),
+        )]
+    }
+
+    #[test]
+    fn a_credential_override_reads_as_gateway_managed() {
+        assert_eq!(
+            resolve_auth_mode(
+                false,
+                HarnessKind::ClaudeCode,
+                &probe(Some(false), gateway_env())
+            ),
+            HarnessAuthMode::GatewayManaged
+        );
+        // The unverified case is the one the doctor used to call "Unverified"
+        // and disable.
+        assert_eq!(
+            resolve_auth_mode(false, HarnessKind::ClaudeCode, &probe(None, gateway_env())),
+            HarnessAuthMode::GatewayManaged
+        );
+    }
+
+    #[test]
+    fn a_confirmed_vendor_login_stays_local() {
+        assert_eq!(
+            resolve_auth_mode(
+                false,
+                HarnessKind::ClaudeCode,
+                &probe(Some(true), gateway_env())
+            ),
+            HarnessAuthMode::LocalSignIn
+        );
+        assert_eq!(
+            resolve_auth_mode(false, HarnessKind::ClaudeCode, &probe(Some(false), vec![])),
+            HarnessAuthMode::LocalSignIn
+        );
+    }
+
+    #[test]
+    fn engines_with_no_override_surface_stay_local() {
+        // `auth_override_present` answers `true` for these to avoid refusing a
+        // session; the doctor must not turn that into a credential claim.
+        for kind in [HarnessKind::Opencode, HarnessKind::Grok] {
+            assert_eq!(
+                resolve_auth_mode(false, kind, &probe(Some(false), gateway_env())),
+                HarnessAuthMode::LocalSignIn
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosted_machine_still_reports_the_relay() {
+        assert_eq!(
+            resolve_auth_mode(
+                true,
+                HarnessKind::ClaudeCode,
+                &probe(Some(false), gateway_env())
+            ),
+            HarnessAuthMode::GatewayRelay
+        );
+    }
 }

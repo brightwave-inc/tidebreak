@@ -127,6 +127,10 @@ function statusBadge(
     return { label: "Downloading", variant: "info" };
   }
   if (install?.error) return { label: "Download failed", variant: "critical" };
+  // Ready, and worth naming why: nobody signed in here, and nobody has to.
+  if (entry.auth_mode === "gateway_managed" && entry.found) {
+    return { label: "Gateway-managed", variant: "success" };
+  }
   if (isHarnessReady(entry)) return { label: "Ready", variant: "success" };
   if (entry.auth_mode === "hosted_unavailable") {
     return { label: "Unavailable", variant: "warning" };
@@ -159,11 +163,13 @@ function subtitle(
   }
   if (install?.error) return install.error;
   if (entry.remediation) return entry.remediation;
-  // A relay-covered engine on a hosted machine needs no sign-in, so the
-  // fallback below must not demand one; say where its turns run instead.
+  // Neither a relay-covered engine on a hosted machine nor a gateway-managed
+  // one needs a sign-in, so the fallback below must not demand one; say what
+  // carries its turns instead.
   if (
     entry.found &&
     entry.auth_mode !== "gateway_relay" &&
+    entry.auth_mode !== "gateway_managed" &&
     entry.authenticated !== true
   ) {
     return "Sign in via your terminal, then re-check.";
@@ -173,6 +179,9 @@ function subtitle(
   }
   if (entry.auth_mode === "gateway_relay") {
     return "Turns run as you through the Model Gateway.";
+  }
+  if (entry.auth_mode === "gateway_managed") {
+    return "Credentials are managed for this machine.";
   }
   return TIER_NOTES[entry.tier];
 }
@@ -282,11 +291,13 @@ function DoctorRow({
           <Detail label="Signed in">
             {entry.auth_mode === "gateway_relay"
               ? "as you, through the gateway"
-              : entry.authenticated === undefined
-                ? "not observed"
-                : entry.authenticated
-                  ? "yes"
-                  : "no"}
+              : entry.auth_mode === "gateway_managed"
+                ? "not needed — credentials are managed here"
+                : entry.authenticated === undefined
+                  ? "not observed"
+                  : entry.authenticated
+                    ? "yes"
+                    : "no"}
           </Detail>
           {entry.path && (
             <Detail label="Path">

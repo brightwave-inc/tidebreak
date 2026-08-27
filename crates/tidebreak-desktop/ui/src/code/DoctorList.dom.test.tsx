@@ -188,6 +188,43 @@ describe("DoctorList", () => {
       screen.queryByText("Sign in via your terminal, then re-check."),
     ).not.toBeInTheDocument();
   });
+  it("names a gateway-managed engine instead of demanding a sign-in", async () => {
+    render(
+      <DoctorList
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              // A machine pointed at the gateway has no vendor login, and
+              // the engine's own check says so (issue 2749).
+              authenticated: false,
+              auth_mode: "gateway_managed",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Gateway-managed")).toBeInTheDocument();
+    expect(
+      screen.getByText("Credentials are managed for this machine."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 of 1 engine ready.")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Sign in via your terminal, then re-check."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Signed out")).toBeNull();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Details for Claude Code" }));
+    expect(
+      screen.getByText("not needed — credentials are managed here"),
+    ).toBeInTheDocument();
+  });
+
   /** An engine still downloading offers no second Download button. */
   it("reports a download in flight instead of offering another", () => {
     render(

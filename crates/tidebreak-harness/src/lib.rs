@@ -68,6 +68,71 @@ pub fn auth_override_present(
     }
 }
 
+/// Which surface carried the credential override Tidebreak observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthOverrideSignal {
+    /// An API key, auth token, or endpoint override in the captured shell
+    /// environment.
+    Environment,
+    /// The engine's own configuration file points inference at an endpoint
+    /// the vendor login does not cover.
+    EngineConfig,
+}
+
+/// What Tidebreak observed about how one engine authenticates on this
+/// machine, beyond the vendor login the probe reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessAuthObservation {
+    /// Nothing observed: the surfaces Tidebreak reads carry no override, or
+    /// it reads none for this engine.
+    Unknown,
+    /// A credential or endpoint override is present, carried by this signal.
+    Override(AuthOverrideSignal),
+}
+
+impl HarnessAuthObservation {
+    /// Whether an override is present. `false` means unobserved, not absent.
+    #[must_use]
+    pub fn is_override(self) -> bool {
+        matches!(self, Self::Override(_))
+    }
+
+    /// The signal that carried the override, when one is present.
+    #[must_use]
+    pub fn signal(self) -> Option<AuthOverrideSignal> {
+        match self {
+            Self::Unknown => None,
+            Self::Override(signal) => Some(signal),
+        }
+    }
+}
+
+/// Observe how this engine authenticates here, for a caller that displays
+/// the answer rather than one that decides whether to refuse a session.
+///
+/// Unlike [`auth_override_present`], this never grants the benefit of the
+/// doubt: an engine whose override surfaces Tidebreak does not read answers
+/// [`HarnessAuthObservation::Unknown`], because claiming a machine is
+/// gateway-managed on no evidence would tell the reader their engine works
+/// when nothing says it does. Claude Code and Codex read the same
+/// environment and engine config the create path reads; opencode and Grok
+/// answer `Unknown`.
+#[must_use]
+pub fn observe_auth_mode(
+    kind: HarnessKind,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> HarnessAuthObservation {
+    let signal = match kind {
+        HarnessKind::ClaudeCode => claude::observe_auth_override(env),
+        HarnessKind::Codex => codex::observe_auth_override(env),
+        HarnessKind::Opencode | HarnessKind::Grok => None,
+    };
+    signal.map_or(
+        HarnessAuthObservation::Unknown,
+        HarnessAuthObservation::Override,
+    )
+}
+
 /// Normalized, unpersisted event. Maps 1:1 onto [`tidebreak_core::CodeEvent`]
 /// minus persistence ids (turn id, approval id).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

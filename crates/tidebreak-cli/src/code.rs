@@ -23,7 +23,7 @@ use crate::api::client::Client;
 use crate::api::code::{
     decode_event_frame, decode_update_notice, is_turn_terminal, supported_caps_summary,
     turn_exit_code, CodeApprovalSnapshot, CodeSessionDigest, CodeSessionSnapshot, CodeTurnSnapshot,
-    CodeUpdateNotice, CodeWorkspaceSnapshot, SubmitTurnResponse,
+    CodeUpdateNotice, CodeWorkspaceSnapshot, HarnessAuthMode, SubmitTurnResponse,
 };
 use crate::connect::Server;
 use crate::print::OutputFormat;
@@ -282,10 +282,18 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
                 let found = if entry.found { "yes" } else { "no" };
                 let path = entry.path.as_deref().unwrap_or("-");
                 let version = entry.version.as_deref().unwrap_or("-");
-                let auth = match entry.authenticated {
-                    Some(true) => "yes",
-                    Some(false) => "no",
-                    None => "-",
+                let auth = match entry.auth_mode {
+                    // The vendor login is one mode of three. A machine whose
+                    // engines run on gateway credentials has no login to
+                    // report, and printing "no" there reads as broken.
+                    HarnessAuthMode::GatewayManaged => "gw",
+                    HarnessAuthMode::GatewayRelay => "relay",
+                    HarnessAuthMode::HostedUnavailable => "n/a",
+                    HarnessAuthMode::LocalSignIn => match entry.authenticated {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "-",
+                    },
                 };
                 let tier = format!("{:?}", entry.tier).to_ascii_lowercase();
                 println!(
