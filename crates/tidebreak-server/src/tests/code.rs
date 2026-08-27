@@ -180,13 +180,17 @@ async fn code_app_with_options(
     let browser_bridge_command = installed_browser_runtime
         .as_ref()
         .map(|_| crate::code::browser_channel::test_bridge_command());
-    let runtime = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
+    let mut runtime = CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().to_path_buf(),
         registry,
         installed_browser_runtime,
         browser_bridge_command,
-    ));
+    );
+    if let Some(ceiling) = permission_mode_ceiling {
+        runtime = runtime.with_os_policy(Arc::new(CappedOsPolicy(ceiling)));
+    }
+    let runtime = Arc::new(runtime);
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store_trait,

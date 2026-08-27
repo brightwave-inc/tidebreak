@@ -269,6 +269,10 @@ impl CodeRuntime {
         owner: &OwnerId,
         workspace_id: WorkspaceId,
     ) -> Result<CodeWatch, ServerError> {
+        // Watches always start Auto. Bind the ceiling before refresh or
+        // persistence so a managed profile never forks an over-ceiling
+        // session through this path.
+        self.refuse_permission_mode_over_ceiling(PermissionMode::Auto)?;
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(ServerError::conflict_kind(

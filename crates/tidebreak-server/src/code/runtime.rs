@@ -192,6 +192,9 @@ pub(crate) struct CodeRuntime {
     /// machine (decision 71). `None` everywhere else: a machine whose engines
     /// carry their own provider credentials keeps using them.
     harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
+    /// OS-asserted managed policy, including the permission-mode ceiling.
+    /// Session create reads it so watch forks cannot bypass the picker route.
+    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -435,6 +438,7 @@ impl CodeRuntime {
             host_tool_broker,
             git_credentials,
             harness_llm,
+            os_policy: Arc::new(crate::managed_policy::NoOsPolicy),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -488,6 +492,48 @@ impl CodeRuntime {
     /// The engine inference relay, on a machine that has one.
     pub(crate) fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
         self.harness_llm.clone()
+    }
+
+    /// Bind the OS-asserted policy this runtime enforces at session create.
+    #[must_use]
+    pub(crate) fn with_os_policy(
+        mut self,
+        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    ) -> Self {
+        self.os_policy = os_policy;
+        self
+    }
+
+    /// Refuse a mode above the managed permission-mode ceiling.
+    ///
+    /// Interactive create binds this at the picker route. Watch sessions
+    /// never hit that route: they fork through [`Self::create_session_of_kind`],
+    /// so the same ceiling has to bind here or Auto watches run uncapped.
+    pub(crate) fn refuse_permission_mode_over_ceiling(
+        &self,
+        mode: PermissionMode,
+    ) -> Result<(), ServerError> {
+        let ceiling = match self.os_policy.permission_mode_ceiling() {
+            Ok(ceiling) => ceiling,
+            Err(error) => {
+                tracing::warn!(
+                    "OS-managed permission-mode ceiling is present but unusable: {error}; \
+                     clamping to the default mode"
+                );
+                Some(PermissionMode::Ask)
+            }
+        };
+        if ceiling.is_some_and(|ceiling| mode > ceiling) {
+            return Err(ServerError::conflict_kind(
+                "permission_mode_locked",
+                format!(
+                    "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
+                    mode.as_str(),
+                    ceiling.unwrap_or(PermissionMode::Allow).as_str()
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Boot: publish the bound loopback base now, and hand back the recovery
@@ -568,6 +614,7 @@ impl CodeRuntime {
             host_tool_broker: None,
             git_credentials: None,
             harness_llm: None,
+            os_policy: Arc::new(crate::managed_policy::NoOsPolicy),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -3103,7 +3150,8 @@ impl CodeRuntime {
     /// A workspace holds any number of interactive sessions and at most one
     /// watch session, so the guard below covers watch only. The worktree they
     /// share is protected by the per-workspace turn lock rather than by a cap
-    /// on conversations; see record 55.
+    /// on conversations; see record 55. The managed permission-mode ceiling
+    /// binds here so a watch fork cannot skip the picker route's clamp.
     pub(crate) async fn create_session_of_kind(
         &self,
         owner: &OwnerId,
@@ -3138,6 +3186,7 @@ impl CodeRuntime {
                 ));
             }
         }
+        self.refuse_permission_mode_over_ceiling(permission_mode)?;
         let adapter = self.adapter(harness)?;
         #[cfg(not(test))]
         {

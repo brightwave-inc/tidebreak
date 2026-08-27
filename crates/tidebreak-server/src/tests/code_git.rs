@@ -72,6 +72,9 @@ async fn code_app_with_options(
     if let Some(lender) = lender {
         runtime = runtime.with_git_credentials(lender);
     }
+    if let Some(ceiling) = permission_mode_ceiling {
+        runtime = runtime.with_os_policy(Arc::new(CappedOsPolicy(ceiling)));
+    }
     let runtime = Arc::new(runtime);
     let mut config = Config::desktop(dir.path());
     if let Some(member_token) = member_token {
@@ -333,6 +336,45 @@ async fn a_managed_ceiling_below_auto_refuses_watch_before_refresh_or_persistenc
         .unwrap();
         assert!(watch.is_none(), "the refused watch created a watch row");
     }
+}
+
+/// Watch create goes through the runtime, not the session-create route. The
+/// ceiling has to bind on that shared path or a fork skips the picker clamp.
+#[tokio::test]
+async fn a_managed_ceiling_refuses_a_runtime_watch_fork() {
+    let fixture = watch_fixture(PermissionMode::Ask).await;
+    let owner = tidebreak_core::OwnerId::local();
+    let err = fixture
+        .runtime
+        .start_watch(&owner, fixture.workspace_id)
+        .await
+        .expect_err("over-ceiling watch");
+    assert_eq!(err.kind(), "permission_mode_locked");
+    assert!(
+        !fixture.refresh_log.exists(),
+        "the refused watch refreshed pull-request state"
+    );
+    let sessions = tidebreak_core::db::code::list_sessions_for_workspace(
+        &fixture.runtime.db,
+        &owner,
+        fixture.workspace_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session.kind == CodeSessionKind::Watch),
+        "the refused watch created a session"
+    );
+    let watch = tidebreak_core::db::code::latest_watch_for_workspace(
+        &fixture.runtime.db,
+        &owner,
+        fixture.workspace_id,
+    )
+    .await
+    .unwrap();
+    assert!(watch.is_none(), "the refused watch created a watch row");
 }
 
 #[tokio::test]
