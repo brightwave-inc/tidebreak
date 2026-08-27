@@ -152,8 +152,9 @@ pub async fn retry_workspace_setup(
 /// branch and `HEAD` stay where they are, and ignored files are left alone.
 /// The worktree as it stands is snapshotted into a hidden ref first. 409
 /// kinds: `workspace_busy` (a turn holds the workspace's checkout),
-/// `workspace_not_ready`, `turn_running`, and `no_checkpoint` (the turn ended
-/// before checkpoints, or its ref was reaped).
+/// `workspace_not_ready`, `turn_running`, `session_fenced`,
+/// `workspace_fenced` (a sibling is fenced until it is reaped), and
+/// `no_checkpoint` (the turn ended before checkpoints, or its ref was reaped).
 pub async fn restore_workspace_checkpoint(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,

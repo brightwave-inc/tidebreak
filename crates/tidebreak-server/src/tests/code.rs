@@ -6643,6 +6643,119 @@ async fn a_running_turn_refuses_a_checkpoint_restore() {
     let _ = turn.await;
 }
 
+/// A fenced engine may still be writing the checkout. The turn lock cannot
+/// see it, so a restore is the same write a turn is and answers the same
+/// conflict until a reap settles the process.
+#[tokio::test]
+async fn a_fenced_session_refuses_a_checkpoint_restore() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "edit the tree" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(turn["status"], "completed");
+
+    let owner = tidebreak_core::OwnerId::local();
+    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    mark_as_exited_orphan(&mut row);
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/restore-checkpoint",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "turn_id": json_id(&turn) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "session_fenced");
+}
+
+#[tokio::test]
+async fn a_fenced_sibling_closes_the_workspace_to_a_checkpoint_restore() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
+    let turn = client
+        .post(format!("http://{addr}/code/sessions/{}/turns", ids[1]))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "edit the tree" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(turn["status"], "completed");
+
+    let owner = tidebreak_core::OwnerId::local();
+    let fenced_id: CodeSessionId = ids[0].parse().unwrap();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, fenced_id)
+        .await
+        .unwrap()
+        .unwrap();
+    mark_as_exited_orphan(&mut row);
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/restore-checkpoint",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "turn_id": json_id(&turn) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "workspace_fenced");
+}
+
 fn git_head(worktree: &std::path::Path) -> String {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])

@@ -188,6 +188,7 @@ import {
 } from "./inspectorLayout";
 import {
   createPermissionModes,
+  fenceBlocksWorkspace,
   fenceReasonText,
   gatewayCodeModels,
   harnessCodeModels,
@@ -781,6 +782,18 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   const fenced =
     session?.lifecycle === "fenced" || session?.fence_reason !== undefined;
+  // A fenced engine may still be writing the checkout. Restore is a write,
+  // so it stays hidden until a reap settles that process — this session, or
+  // a sibling fenced for an unaccounted engine.
+  const restoreClosed =
+    fenced ||
+    workspace?.status !== "active" ||
+    sessions.some(
+      (entry) =>
+        entry.id !== session?.id &&
+        entry.lifecycle === "fenced" &&
+        fenceBlocksWorkspace(entry.fence_reason),
+    );
   const doctorHarnesses = catalog.doctor?.harnesses ?? [];
   const title = digest?.title ?? workspace?.title;
   const repoName = repo?.display_name;
@@ -1455,8 +1468,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                       ? (turnId) => void forkConversation(session.id, turnId)
                       : undefined
                   }
-                  onRestoreToTurn={(turnId) =>
-                    void restoreToTurn(session.id, turnId)
+                  onRestoreToTurn={
+                    restoreClosed
+                      ? undefined
+                      : (turnId) => void restoreToTurn(session.id, turnId)
                   }
                   subagentCallId={subagentParam}
                   subagentSummary={digest?.subagents?.find(

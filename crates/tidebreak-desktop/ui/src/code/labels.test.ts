@@ -10,6 +10,7 @@ import {
   createPermissionModes,
   defaultCreatePermissionMode,
   effortLadder,
+  fenceBlocksWorkspace,
   gatewayCodeModels,
   groupCodeModelOptions,
   harnessCanStartNow,
@@ -30,6 +31,26 @@ function caps(
 ): ModeCaps {
   return { plan_mode, structured_approvals, auto_mode, allow_mode };
 }
+
+describe("fenceBlocksWorkspace", () => {
+  it("stops the workspace for an unaccounted engine, not for failed turns", () => {
+    expect(fenceBlocksWorkspace(undefined)).toBe(true);
+    expect(fenceBlocksWorkspace({ type: "orphan_alive" })).toBe(true);
+    expect(
+      fenceBlocksWorkspace({ type: "probe_ambiguous", detail: "pid reuse" }),
+    ).toBe(true);
+    expect(fenceBlocksWorkspace({ type: "resume_lost", detail: "gone" })).toBe(
+      true,
+    );
+    expect(
+      fenceBlocksWorkspace({
+        type: "repeated_turn_failures",
+        count: 3,
+        detail: "auth expired",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("sessionLifecycleTooltip", () => {
   it("joins the harness version and recorded unrecognized engine events", () => {

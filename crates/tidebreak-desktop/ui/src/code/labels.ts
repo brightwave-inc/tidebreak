@@ -155,6 +155,18 @@ export type ModeCaps = Pick<
   "plan_mode" | "structured_approvals" | "auto_mode" | "allow_mode"
 >;
 
+/**
+ * True when this fence also stops every other session in the workspace.
+ *
+ * Matches the server: a missing reason still blocks, because an unaccounted
+ * engine may be writing the checkout. Repeated turn failures do not — that
+ * engine answered, so a sibling can keep working.
+ */
+export function fenceBlocksWorkspace(reason: FenceReason | undefined): boolean {
+  if (!reason) return true;
+  return reason.type !== "repeated_turn_failures";
+}
+
 export function fenceReasonText(reason: FenceReason): string {
   if (reason.type === "orphan_alive") {
     return "An engine process is still running from a previous session. Reap it before starting another turn.";

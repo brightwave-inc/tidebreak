@@ -3103,6 +3103,18 @@ impl CodeRuntime {
                 "this turn has not finished, so it has no checkpoint yet",
             ));
         }
+        // The turn lock cannot see a fenced engine. That process may still
+        // be writing this checkout from outside this process, so a restore
+        // would rewrite files underneath it the same way a turn would.
+        if session.lifecycle == CodeSessionLifecycle::Fenced {
+            return Err(ServerError::conflict_kind(
+                "session_fenced",
+                "session is fenced until it is reaped",
+            ));
+        }
+        if let Some(reason) = self.workspace_fence_reason(owner, &session).await? {
+            return Err(ServerError::conflict_kind("workspace_fenced", reason));
+        }
 
         let restored = restore_checkpoint(
             std::path::Path::new(&workspace.worktree_path),
