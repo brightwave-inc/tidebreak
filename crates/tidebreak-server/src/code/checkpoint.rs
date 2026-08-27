@@ -463,20 +463,8 @@ pub(crate) async fn restore_checkpoint(
     )
     .await?;
 
-    // The removal set is read off the two trees before either is touched, so
-    // it describes the worktree the reader asked about rather than a
-    // half-applied one.
-    let removed = removed_by_restore(worktree, &before, &target).await?;
-
-    // Apply first, delete second. `read-tree -u` writes every path the
-    // checkpoint holds but knows nothing about the ones it does not, because
-    // the private index it transitions from starts empty — so files created
-    // since the checkpoint are this function's own work. Doing that work
-    // after the apply means a failed apply has destroyed nothing: everything
-    // the reader had is still on disk, and the safety ref covers the rest.
-    apply_tree(worktree, &target).await?;
-    for path in removed {
-        remove_restored_path(worktree, &path).await?;
+    if let Err(err) = apply_checkpoint_to_worktree(worktree, &before, &target).await {
+        return Err(rollback_restore(worktree, &target, &before, &safety_ref, err).await);
     }
 
     let changed = collect_changes(worktree, &before, &target, DiffBounds::default()).await?;
@@ -484,6 +472,146 @@ pub(crate) async fn restore_checkpoint(
         safety_ref,
         diffstat: changed.stat,
     })
+}
+
+/// Apply the checkpoint tree, then drop paths it does not hold.
+///
+/// Ignored files that exist on disk are copied aside first and written back
+/// after `read-tree`. A later gitignore rule would otherwise omit them from
+/// the safety snapshot while `--reset -u` still overwrote the live copy.
+async fn apply_checkpoint_to_worktree(
+    worktree: &Path,
+    before: &str,
+    target: &str,
+) -> Result<(), CheckpointError> {
+    let removed = removed_by_restore(worktree, before, target).await?;
+    let ignored_live = live_ignored_files_in_tree(worktree, target).await?;
+    apply_tree(worktree, target).await?;
+    restore_file_backups(worktree, &ignored_live).await?;
+    for path in removed {
+        remove_restored_path(worktree, &path).await?;
+    }
+    Ok(())
+}
+
+/// Put the worktree back to the pre-restore snapshot. The original error
+/// stays in front; every failure after the snapshot names the safety ref.
+async fn rollback_restore(
+    worktree: &Path,
+    attempted: &str,
+    previous: &str,
+    safety_ref: &str,
+    failed: CheckpointError,
+) -> CheckpointError {
+    if let Err(err) = apply_tree(worktree, previous).await {
+        return CheckpointError::internal(format!(
+            "{failed}; rolling back from {safety_ref} also failed: {err}"
+        ));
+    }
+    match removed_by_restore(worktree, attempted, previous).await {
+        Ok(paths) => {
+            for path in paths {
+                if let Err(err) = remove_restored_path(worktree, &path).await {
+                    return CheckpointError::internal(format!(
+                        "{failed}; rolling back from {safety_ref} also failed: {err}"
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            return CheckpointError::internal(format!(
+                "{failed}; rolling back from {safety_ref} also failed: {err}"
+            ));
+        }
+    }
+    CheckpointError::internal(format!("{failed}; previous files are at {safety_ref}"))
+}
+
+/// Files the checkpoint holds that exist on disk and are ignored now.
+///
+/// `add -A` never sees them, so the safety snapshot omits them. `read-tree
+/// --reset -u` still overwrites them, which is why restore writes these bytes
+/// back after apply.
+async fn live_ignored_files_in_tree(
+    worktree: &Path,
+    tree: &str,
+) -> Result<Vec<(GitPath, Vec<u8>)>, CheckpointError> {
+    let raw = git_bytes(
+        worktree,
+        &["ls-tree", "-r", "--name-only", "-z", tree],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    let mut backups = Vec::new();
+    for part in raw.split(|byte| *byte == 0).filter(|part| !part.is_empty()) {
+        if part == b".git" || part.starts_with(b".git/") {
+            continue;
+        }
+        let path = GitPath::from_bytes(part);
+        let relative = PathBuf::from(path.to_os_string().map_err(CheckpointError::internal)?);
+        if !relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let full = worktree.join(&relative);
+        if !full.is_file() {
+            continue;
+        }
+        if !path_is_ignored(worktree, &path).await? {
+            continue;
+        }
+        let bytes = tokio::fs::read(&full).await.map_err(|err| {
+            CheckpointError::internal(format!("could not read {}: {err}", path.to_wire()))
+        })?;
+        backups.push((path, bytes));
+    }
+    Ok(backups)
+}
+
+async fn path_is_ignored(worktree: &Path, path: &GitPath) -> Result<bool, CheckpointError> {
+    // `check-ignore` rejects `--literal-pathspecs`. `-q` is silent: exit 0
+    // means ignored, exit 1 means not, and both print nothing.
+    match git_text(
+        worktree,
+        &["check-ignore", "-q", "--", &path.to_wire()],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(_) => Ok(true),
+        Err(err) if err.is_empty() => Ok(false),
+        Err(err) => Err(CheckpointError::internal(err)),
+    }
+}
+
+async fn restore_file_backups(
+    worktree: &Path,
+    backups: &[(GitPath, Vec<u8>)],
+) -> Result<(), CheckpointError> {
+    for (path, bytes) in backups {
+        let relative = PathBuf::from(path.to_os_string().map_err(CheckpointError::internal)?);
+        let full = worktree.join(&relative);
+        if full.is_dir() {
+            tokio::fs::remove_dir_all(&full).await.map_err(|err| {
+                CheckpointError::internal(format!(
+                    "could not replace {} with the ignored file: {err}",
+                    path.to_wire()
+                ))
+            })?;
+        }
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
+                CheckpointError::internal(format!("could not restore {}: {err}", path.to_wire()))
+            })?;
+        }
+        tokio::fs::write(&full, bytes).await.map_err(|err| {
+            CheckpointError::internal(format!("could not restore {}: {err}", path.to_wire()))
+        })?;
+    }
+    Ok(())
 }
 
 /// Hidden ref for the worktree as it stood just before a restore.
@@ -540,6 +668,7 @@ async fn remove_restored_path(worktree: &Path, path: &GitPath) -> Result<(), Che
     if !relative
         .components()
         .all(|part| matches!(part, std::path::Component::Normal(_)))
+        || relative.components().any(|part| part.as_os_str() == ".git")
     {
         return Err(CheckpointError::internal(format!(
             "git reported a path outside the worktree: {}",
@@ -3414,6 +3543,129 @@ mod tests {
         .await
         .unwrap();
         assert!(listed.contains("later/new.txt"), "{listed}");
+    }
+
+    /// A path the checkpoint holds can later match a new ignore rule. The
+    /// safety snapshot then omits it, so restore must not let `read-tree`
+    /// overwrite the live ignored file.
+    #[tokio::test]
+    async fn a_restore_does_not_overwrite_a_file_that_became_ignored() {
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "ignore-drift");
+        let workspace_id = ws();
+        std::fs::write(tree.join("secret.txt"), "at the checkpoint\n").unwrap();
+        std::fs::write(tree.join("README.md"), "at the checkpoint\n").unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            workspace_id,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(tree.join(".gitignore"), "secret.txt\n").unwrap();
+        std::fs::write(tree.join("secret.txt"), "live ignored\n").unwrap();
+        std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
+        // A cold index is the case the safety snapshot actually omits: the
+        // reusable checkpoint index still lists `secret.txt` from the earlier
+        // record, and `add -A` will not untrack it just because it is ignored
+        // now. Dropping that index matches a restore after a process restart.
+        if let Ok(index) = git_text(
+            &tree,
+            &["rev-parse", "--git-path", "tidebreak-checkpoint-index"],
+            GIT_TIMEOUT,
+        )
+        .await
+        {
+            let _ = std::fs::remove_file(tree.join(index));
+        }
+
+        let restored = restore_checkpoint(
+            &tree,
+            workspace_id,
+            &turn_at(1, Some(recorded.checkpoint_ref.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tree.join("secret.txt")).unwrap(),
+            "live ignored\n",
+            "an ignored file must survive restore even when the checkpoint held it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap(),
+            "at the checkpoint\n"
+        );
+        let listed = git_text(
+            &tree,
+            &["ls-tree", "-r", "--name-only", &restored.safety_ref],
+            GIT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !listed.contains("secret.txt"),
+            "the safety snapshot still respects gitignore: {listed}"
+        );
+    }
+
+    /// After apply, extras are deleted. If that delete fails, the worktree
+    /// must go back to the pre-restore snapshot and the error must name it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_delete_that_fails_rolls_back_and_names_the_safety_ref() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, repo) = init_repo();
+        let tree = add_worktree(&repo, "delete-fails");
+        let workspace_id = ws();
+        std::fs::write(tree.join("README.md"), "at the checkpoint\n").unwrap();
+        let recorded = record_checkpoint(
+            &tree,
+            workspace_id,
+            sess(),
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(tree.join("README.md"), "after the checkpoint\n").unwrap();
+        std::fs::create_dir_all(tree.join("later")).unwrap();
+        std::fs::write(tree.join("later/new.txt"), "postdates it\n").unwrap();
+        std::fs::set_permissions(tree.join("later"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        let err = restore_checkpoint(
+            &tree,
+            workspace_id,
+            &turn_at(1, Some(recorded.checkpoint_ref.clone())),
+        )
+        .await
+        .unwrap_err();
+        let _ =
+            std::fs::set_permissions(tree.join("later"), std::fs::Permissions::from_mode(0o755));
+        let message = err.to_string();
+        assert!(
+            message.contains("/pre-restore/"),
+            "a post-apply failure must name the safety ref: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("later/new.txt")).unwrap(),
+            "postdates it\n",
+            "a failed delete must roll the extras back"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tree.join("README.md")).unwrap(),
+            "after the checkpoint\n",
+            "a failed delete must roll applied files back"
+        );
     }
 
     /// Build a tree from raw index entries, bypassing the path checks `add`
