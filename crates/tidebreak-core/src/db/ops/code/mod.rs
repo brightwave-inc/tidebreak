@@ -7,6 +7,7 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
 use crate::code::CodeSessionId;
 use crate::error::{AgentError, Result};
+use crate::OwnerId;
 
 use super::super::{entities, store_err};
 
@@ -39,7 +40,7 @@ pub use workspace::*;
 /// Insert a Code notification when an interactive session turn settles.
 pub async fn record_code_turn_notification(
     store: &super::super::DbStore,
-    owner: &crate::OwnerId,
+    owner: &OwnerId,
     session_id: crate::code::CodeSessionId,
     workspace_id: crate::code::WorkspaceId,
     turn_id: crate::code::CodeTurnId,
