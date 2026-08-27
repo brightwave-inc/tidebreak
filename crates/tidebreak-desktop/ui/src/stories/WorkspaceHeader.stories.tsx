@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 
 import type {
   Attention,
@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { AttentionBadge } from "@/code/AttentionBadge";
 import { SessionLifecycleIndicator } from "@/code/SessionLifecycleIndicator";
 import { SessionPermissionIndicator } from "@/code/SessionPermissionIndicator";
+import { setEditorPreference } from "@/code/editorPreference";
 import {
   WorkspaceOverflowMenu,
   workspaceHeaderCommands,
@@ -62,6 +63,8 @@ function HeaderState({
   pendingApprovals = 0,
   unrecognizedEventCount = 0,
   permissionMode = "allow",
+  canOpenWorktree = false,
+  canOpenInEditor = false,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   loading?: boolean;
@@ -72,6 +75,10 @@ function HeaderState({
   pendingApprovals?: number;
   unrecognizedEventCount?: number;
   permissionMode?: PermissionMode;
+  /** This window hosts the worktree, so the folder action is truthful. */
+  canOpenWorktree?: boolean;
+  /** An editor on this machine can open the worktree's files. */
+  canOpenInEditor?: boolean;
 }) {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(initialReviewOpen);
@@ -144,6 +151,8 @@ function HeaderState({
             attentionPinned: false,
             canFork: true,
             canUneff: true,
+            canOpenWorktree,
+            canOpenInEditor,
             quickActions: [],
           })}
           context={{
@@ -286,4 +295,34 @@ export const OverflowActions: Story = {
 
 export const ReviewClosed: Story = {
   args: { snapshot: openPrGit, initialReviewOpen: false },
+};
+
+/**
+ * Local overflow: the folder action, then the editor by name. The two sit
+ * together because they answer the same question — get me out of this window
+ * and into these files.
+ */
+export const OpenInEditorOverflow: Story = {
+  args: { canOpenWorktree: true, canOpenInEditor: true },
+  beforeEach: () => {
+    setEditorPreference({ editor: "cursor", customProgram: "" });
+    return () => setEditorPreference({ editor: "vscode", customProgram: "" });
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Workspace actions" }),
+    );
+    const menu = within(document.body);
+    await waitFor(async () =>
+      expect(
+        await menu.findByRole("menuitem", { name: "Open worktree folder" }),
+      ).toBeVisible(),
+    );
+    await waitFor(async () =>
+      expect(
+        await menu.findByRole("menuitem", { name: "Open in Cursor" }),
+      ).toBeVisible(),
+    );
+  },
 };

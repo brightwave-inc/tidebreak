@@ -33,10 +33,14 @@ import { ToolOutputPreview } from "@/ToolOutputPreview";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { openInBrowser } from "@/openInBrowser";
 import {
+  canOpenInExternalEditor,
   canOpenLocalCodeWorktree,
+  codeEditorOpenFailureMessage,
   codeWorktreeOpenFailureMessage,
   openCodeWorktree,
+  openInEditor,
 } from "./codeWorktreeHost";
+import { openInEditorLabel } from "./editorPreference";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
 import { nextWorkspaceAfterLeaving, railWorkspaceIds } from "./railNavigation";
@@ -53,6 +57,7 @@ export type WorkspaceCommandId =
   | "rename"
   | "copy-branch"
   | "open-worktree"
+  | "open-in-editor"
   | "copy-worktree"
   | "copy-debug-json"
   | "uneff-me"
@@ -99,6 +104,8 @@ export function workspaceCommands(input: {
   hasSession?: boolean;
   attentionPinned?: boolean;
   canOpenWorktree?: boolean;
+  /** This window can start an editor on the machine holding the worktree. */
+  canOpenInEditor?: boolean;
   /** Tidebreak's own checkout is connected, so a debug dump can become a fix. */
   canUneff?: boolean;
 }): WorkspaceCommand[] {
@@ -120,6 +127,8 @@ export function workspaceCommands(input: {
     { id: "copy-branch", label: "Copy branch name" },
     worktreePathCommand(input.canOpenWorktree ?? canOpenLocalCodeWorktree()),
   ];
+  const editor = editorCommand(input.canOpenInEditor);
+  if (editor) items.push(editor);
   if (input.hasPr) {
     items.push({ id: "open-pr", label: "Open pull request" });
   }
@@ -159,6 +168,7 @@ export function workspaceHeaderCommands(input: {
   attentionPinned: boolean;
   quickActions: readonly { name: string }[];
   canOpenWorktree?: boolean;
+  canOpenInEditor?: boolean;
   /** The shown agent has a transcript worth handing to a sibling. */
   canFork?: boolean;
   canUneff?: boolean;
@@ -169,6 +179,10 @@ export function workspaceHeaderCommands(input: {
     ),
     { id: "rename", label: "Rename…" },
   ];
+  const editor = input.archived
+    ? undefined
+    : editorCommand(input.canOpenInEditor);
+  if (editor) items.splice(1, 0, editor);
   if (input.hasSession) {
     items.push(
       input.attentionPinned
@@ -212,6 +226,36 @@ function worktreePathCommand(canOpenWorktree: boolean): WorkspaceCommand {
   return canOpenWorktree
     ? { id: "open-worktree", label: "Open worktree folder" }
     : { id: "copy-worktree", label: "Copy worktree path" };
+}
+
+/**
+ * "Open in Zed", not "Open in editor": the reader picked one, and naming it is
+ * the difference between a menu item they trust and one they have to try. A
+ * custom command has no name worth showing, so that one stays generic. A window
+ * attached to another machine gets no row at all — its editor would open
+ * nothing.
+ */
+function editorCommand(
+  canOpenInEditor?: boolean,
+): WorkspaceCommand | undefined {
+  if (!(canOpenInEditor ?? canOpenInExternalEditor())) return undefined;
+  return { id: "open-in-editor", label: openInEditorLabel() };
+}
+
+/**
+ * Start the reader's editor on one worktree file, and say so plainly when it
+ * does not start. Shared by the workspace command and by the file and diff
+ * panels, which pass the path and line they are already showing.
+ */
+export function openWorkspaceFileInEditor(input: {
+  workspaceId: string;
+  relativePath?: string;
+  line?: number;
+}): void {
+  void openInEditor(input).catch((error) => {
+    const notice = externalEditorOpenFailureNotice(error);
+    toast.error(notice.title, { description: notice.description });
+  });
 }
 
 export function WorkspaceOverflowMenu({
@@ -575,6 +619,9 @@ export function useWorkspaceCardCommands(): {
           });
         });
         return;
+      case "open-in-editor":
+        openWorkspaceFileInEditor({ workspaceId: context.workspace.id });
+        return;
       case "copy-worktree":
         void copyPlainText(context.workspace.worktree_path)
           .then(() => toast.success("Worktree path copied"))
@@ -777,6 +824,16 @@ export function worktreeOpenFailureNotice(error: unknown): {
     title: "Could not open worktree folder",
     description: codeWorktreeOpenFailureMessage(error),
     actionLabel: "Copy path",
+  };
+}
+
+export function externalEditorOpenFailureNotice(error: unknown): {
+  title: string;
+  description: string;
+} {
+  return {
+    title: "Could not open that file in your editor",
+    description: codeEditorOpenFailureMessage(error),
   };
 }
 

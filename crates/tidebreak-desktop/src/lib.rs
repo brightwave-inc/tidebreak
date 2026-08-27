@@ -34,6 +34,7 @@ mod channel;
 mod chat_debug;
 mod client_execution;
 mod code_browser;
+mod code_editor;
 mod code_worktree;
 #[cfg(test)]
 mod command_parity;
@@ -854,6 +855,8 @@ pub fn run() {
             present_native_notification,
             code_browser::code_browser_command,
             code_worktree::open_code_worktree,
+            code_editor::open_in_editor,
+            code_editor::detect_external_editors,
             attachments::attach_chat_files,
             attachments::attach_dropped_chat_files,
             image_attachments::publish_chat_image,
