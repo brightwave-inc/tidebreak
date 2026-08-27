@@ -244,7 +244,7 @@ export function WorkspaceCard({
             side={compactDetail ? "bottom" : "right"}
             align="start"
             sideOffset={10}
-            className="w-[22rem] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-[0_18px_48px_color-mix(in_oklch,var(--foreground)_16%,transparent)]"
+            className="w-[22rem] overflow-hidden rounded-xl border-border bg-popover p-0"
           >
             <WorkspaceDetailPanel
               workspace={workspace}
