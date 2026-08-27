@@ -163,6 +163,23 @@ async function rowFor(title: string): Promise<HTMLElement> {
 }
 
 describe("delivery pull request list", () => {
+  it("fills the available width before a pull request is open", async () => {
+    renderList();
+
+    const list = await screen.findByRole("list", { name: "Pull requests" });
+    expect(list.parentElement).toHaveClass("min-w-0", "flex-1");
+  });
+
+  it("fills the available width while pull requests load", async () => {
+    renderList({
+      ...storyClient(),
+      queryCodeDeliveryPullRequests: async () => deferred().promise,
+    } as unknown as ApiClient);
+
+    const skeleton = await screen.findByRole("status", { name: "Loading" });
+    expect(skeleton).toHaveClass("w-full", "min-w-0", "flex-1");
+  });
+
   it("re-reads when the server nudges the delivery channel", async () => {
     // The server says when the pull-request store moved (decision 66). The
     // list is a projection of that nudge, not a clock of its own: without
@@ -397,6 +414,59 @@ describe("delivery pull request list", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("moves a pull request when its opened detail reports a new state", async () => {
+    const user = userEvent.setup();
+    const listed = deliveryPullRequests[0]!;
+    const merged = {
+      ...listed,
+      state: "merged" as const,
+      merged_at: "2026-08-27T19:45:00.000Z",
+      updated_at: "2026-08-27T19:45:00.000Z",
+    };
+    const client = deliveryClient({
+      queryCodeDeliveryPullRequests: async () => ({
+        capability: deliveryRepositoriesSnapshot.capability,
+        items: [listed],
+        errors: [],
+        fetched_at: "2026-08-27T19:44:00.000Z",
+      }),
+      getCodeDeliveryPullRequestDetail: async () => ({
+        ...deliveryPullRequestDetails[2251]!,
+        summary: merged,
+      }),
+    });
+    await renderDeliveryRoute(
+      "pull_requests",
+      client,
+      "/code/delivery/pull-requests?view=all",
+    );
+
+    expect(await rowFor(listed.title)).toHaveAttribute(
+      "data-status-group",
+      "attention",
+    );
+    await user.click(await rowFor(listed.title));
+    const detail = await screen.findByTestId("pull-request-detail-pane");
+    expect(
+      within(detail).getByLabelText("Pull request summary"),
+    ).toHaveTextContent("Merged");
+    await waitFor(async () => {
+      expect(await rowFor(listed.title)).toHaveAttribute(
+        "data-status-group",
+        "done",
+      );
+    });
+    expect(
+      useCodeDeliveryStore
+        .getState()
+        .lastPullRequestPages.flatMap((page) => page.items)
+        .find((item) => item.id === listed.id),
+    ).toMatchObject({ state: "merged" });
+    expect(
+      screen.getByText("Done").closest('[data-pull-request-group="Done"]'),
+    ).not.toBeNull();
+  });
+
   it("moves the open pane with ArrowDown and ArrowUp", async () => {
     const user = userEvent.setup();
     await renderDeliveryRoute(
@@ -418,6 +488,61 @@ describe("delivery pull request list", () => {
         "Build the delivery center",
       ),
     );
+  });
+
+  it("reuses cached detail when arrow navigation returns to a pull request", async () => {
+    const user = userEvent.setup();
+    const getDetail = vi.fn(async ({ number }: { number: number }) =>
+      Promise.resolve(deliveryPullRequestDetails[number]!),
+    );
+    await renderDeliveryRoute(
+      "pull_requests",
+      deliveryClient({ getCodeDeliveryPullRequestDetail: getDetail as never }),
+      "/code/delivery/pull-requests?view=all",
+    );
+
+    await user.click(await rowFor("Build the delivery center"));
+    await screen.findByRole("tab", { name: /Conversation/ });
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() =>
+      expect(
+        getDetail.mock.calls.some(([request]) => request.number === 2229),
+      ).toBe(true),
+    );
+    await screen.findByRole("tab", { name: /Conversation/ });
+    await user.keyboard("{ArrowUp}");
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+
+    expect(
+      getDetail.mock.calls.filter(([request]) => request.number === 2251),
+    ).toHaveLength(1);
+    expect(screen.getByTestId("pull-request-detail-pane")).toHaveTextContent(
+      "Build the delivery center",
+    );
+  });
+
+  it("debounces uncached detail reads during rapid arrow navigation", async () => {
+    const user = userEvent.setup();
+    const getDetail = vi.fn(async ({ number }: { number: number }) =>
+      Promise.resolve(deliveryPullRequestDetails[number]!),
+    );
+    await renderDeliveryRoute(
+      "pull_requests",
+      deliveryClient({ getCodeDeliveryPullRequestDetail: getDetail as never }),
+      "/code/delivery/pull-requests?view=all",
+    );
+
+    await user.click(await rowFor("Build the delivery center"));
+    await screen.findByRole("tab", { name: /Conversation/ });
+    await user.keyboard("{ArrowDown}{ArrowUp}");
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+
+    expect(
+      getDetail.mock.calls.filter(([request]) => request.number === 2229),
+    ).toHaveLength(0);
+    expect(
+      getDetail.mock.calls.filter(([request]) => request.number === 2251),
+    ).toHaveLength(1);
   });
 
   it("leaves the open pane alone while typing a comment", async () => {

@@ -171,9 +171,11 @@ export function PullRequestDetailSheet({
   client,
   summary,
   initialDetail,
+  loadDelayMs = 0,
   hasMergeQueue = false,
   onClose,
   onChanged,
+  onDetail,
   onSummary,
   onOpenWorkspace,
 }: {
@@ -187,8 +189,10 @@ export function PullRequestDetailSheet({
   summary: CodeDeliveryPullRequestSummary;
   hasMergeQueue?: boolean;
   initialDetail?: CodeDeliveryPullRequestDetail;
+  loadDelayMs?: number;
   onClose: () => void;
   onChanged: () => void;
+  onDetail?: (detail: CodeDeliveryPullRequestDetail) => void;
   onSummary?: (summary: CodeDeliveryPullRequestSummary) => void;
   onOpenWorkspace: (workspaceId: string) => void;
 }) {
@@ -201,9 +205,11 @@ export function PullRequestDetailSheet({
         client={client}
         summary={summary}
         initialDetail={initialDetail}
+        loadDelayMs={loadDelayMs}
         hasMergeQueue={hasMergeQueue}
         onClose={onClose}
         onChanged={onChanged}
+        onDetail={onDetail}
         onSummary={onSummary}
         onOpenWorkspace={onOpenWorkspace}
       />
@@ -222,9 +228,11 @@ export function PullRequestDetailPane({
   client,
   summary,
   initialDetail,
+  loadDelayMs = 0,
   hasMergeQueue = false,
   onClose,
   onChanged,
+  onDetail,
   onSummary,
   onOpenWorkspace,
 }: {
@@ -239,8 +247,12 @@ export function PullRequestDetailPane({
   /** True when this repository already uses a merge queue. */
   hasMergeQueue?: boolean;
   initialDetail?: CodeDeliveryPullRequestDetail;
+  /** Delay an uncached read while keyboard selection is still moving. */
+  loadDelayMs?: number;
   onClose?: () => void;
   onChanged: () => void;
+  /** Keep loaded detail available when the reader returns to this row. */
+  onDetail?: (detail: CodeDeliveryPullRequestDetail) => void;
   /** The list row should follow this summary so its action matches the pane. */
   onSummary?: (summary: CodeDeliveryPullRequestSummary) => void;
   onOpenWorkspace: (workspaceId: string) => void;
@@ -264,7 +276,9 @@ export function PullRequestDetailPane({
   const generation = useRef(0);
   const activeTarget = useRef(summary.id);
   const mounted = useRef(true);
+  const onDetailRef = useRef(onDetail);
   const onSummaryRef = useRef(onSummary);
+  onDetailRef.current = onDetail;
   onSummaryRef.current = onSummary;
   activeTarget.current = summary.id;
 
@@ -280,6 +294,7 @@ export function PullRequestDetailPane({
 
   const adoptDetail = (next: CodeDeliveryPullRequestDetail) => {
     setDetail(next);
+    onDetailRef.current?.(next);
     onSummaryRef.current?.(next.summary);
   };
 
@@ -319,13 +334,17 @@ export function PullRequestDetailPane({
       setLoading(false);
     } else {
       setDetail(null);
-      void load();
+      const timer = window.setTimeout(() => void load(), loadDelayMs);
+      return () => {
+        window.clearTimeout(timer);
+        generation.current += 1;
+      };
     }
     return () => {
       generation.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, initialDetail, summary.id]);
+  }, [client, initialDetail, loadDelayMs, summary.id]);
 
   const runAction = async (
     name: string,
