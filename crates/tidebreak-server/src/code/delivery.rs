@@ -155,13 +155,29 @@ impl DeliveryApi {
         number: u64,
     ) -> Option<bool> {
         match self {
-            Self::Gh { .. } => {
+            Self::Gh {
+                observation, host, ..
+            } => {
+                let binary = observation.binary.as_deref()?;
                 let endpoint = format!(
                     "repos/{}/{}/issues/{number}/timeline?per_page=100",
                     target.owner, target.name
                 );
-                let value = self.get(&endpoint).await.ok()?;
-                super::forge_rest::queue_membership_from_timeline(&value)
+                let mut args = vec!["api".to_owned()];
+                if host != "github.com" {
+                    args.extend(["--hostname".to_owned(), host.clone()]);
+                }
+                args.extend([
+                    endpoint,
+                    "--paginate".to_owned(),
+                    "--jq".to_owned(),
+                    ".[] | select(.event == \"added_to_merge_queue\" or .event == \"removed_from_merge_queue\") | .event".to_owned(),
+                ]);
+                let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+                let raw = gh::run_gh(Path::new("."), binary, &borrowed, GH_READ_TIMEOUT)
+                    .await
+                    .ok()?;
+                Some(super::pr_fetch::queue_membership_from_events(&raw))
             }
             Self::Rest {
                 api_base,

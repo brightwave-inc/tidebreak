@@ -42,6 +42,12 @@ mutation($id: ID!, $oid: GitObjectID!, $method: PullRequestMergeMethod!) {\
 /// Bound the check-run fan-out within one repository list read.
 const CHECK_RUN_CONCURRENCY: usize = 4;
 
+/// Timeline pages GitHub returns at once, and the ceiling on how many this
+/// path will fetch. Membership is the last queue event, so a truncated read
+/// would report the wrong state.
+const TIMELINE_PAGE_SIZE: u32 = 100;
+const TIMELINE_PAGE_LIMIT: u32 = 20;
+
 /// The REST base for a forge host: `api.github.com` for github.com, the
 /// GHES `/api/v3/` convention for anything else.
 ///
@@ -761,29 +767,44 @@ async fn check_run_values(
 }
 
 /// Whether the pull request currently sits in a merge queue, from the same
-/// timeline events the `gh` loader reads. `None` when the read fails — the
-/// digest states nothing rather than guessing.
+/// timeline events the `gh` loader reads. Pages until GitHub stops, because
+/// membership is the last queue event and the first page is the oldest.
+/// `None` when the read fails — the digest states nothing rather than guessing.
 pub(crate) async fn merge_queue_state(
     api_base: &str,
     target: &CodeGitHubRepositoryTarget,
     credential: &GitCredential,
     number: u64,
 ) -> Option<bool> {
-    let (status, value) = request(
-        reqwest::Method::GET,
-        format!(
-            "{api_base}/repos/{}/{}/issues/{number}/timeline?per_page=100",
-            target.owner, target.name
-        ),
-        credential,
-        None,
-    )
-    .await
-    .ok()?;
-    if !status.is_success() {
-        return None;
+    let mut events = Vec::new();
+    for page in 1..=TIMELINE_PAGE_LIMIT {
+        let (status, value) = request(
+            reqwest::Method::GET,
+            format!(
+                "{api_base}/repos/{}/{}/issues/{number}/timeline?per_page={TIMELINE_PAGE_SIZE}&page={page}",
+                target.owner, target.name
+            ),
+            credential,
+            None,
+        )
+        .await
+        .ok()?;
+        if !status.is_success() {
+            return None;
+        }
+        let Some(page_events) = value.as_array() else {
+            return None;
+        };
+        let page_len = page_events.len();
+        events.extend(page_events.iter().cloned());
+        if page_len < TIMELINE_PAGE_SIZE as usize {
+            break;
+        }
+        if page == TIMELINE_PAGE_LIMIT {
+            return None;
+        }
     }
-    queue_membership_from_timeline(&value)
+    queue_membership_from_timeline(&Value::Array(events))
 }
 
 /// Latest queue transition wins: added after removed is in, the reverse is
@@ -931,5 +952,15 @@ mod tests {
             Some(false)
         );
         assert_eq!(queue_membership_from_timeline(&Value::Null), None);
+        let across_pages = {
+            let mut events = vec![serde_json::json!({ "event": "added_to_merge_queue" })];
+            events.extend(std::iter::repeat_n(
+                serde_json::json!({ "event": "committed" }),
+                100,
+            ));
+            events.push(serde_json::json!({ "event": "removed_from_merge_queue" }));
+            queue_membership_from_timeline(&Value::Array(events))
+        };
+        assert_eq!(across_pages, Some(false));
     }
 }
