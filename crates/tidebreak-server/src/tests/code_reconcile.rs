@@ -632,6 +632,60 @@ async fn a_delivery_read_serves_durable_links_with_the_relation() {
     let _ = db;
 }
 
+#[tokio::test]
+async fn a_delivery_list_reads_attributed_facts_when_the_host_page_omits_them() {
+    let (dir, runtime, _db, _repo_id, tracked, _fuzzy) = seeded_runtime().await;
+    let owner = OwnerId::local();
+
+    crate::code::reconcile::sweep_reconcile(&runtime).await;
+    write_gh_shim_responding(&dir.path().join("bin"), "[]", None);
+    runtime.delivery_cache.invalidate_owner(&owner);
+
+    let page = crate::code::delivery::query_pull_requests(
+        &runtime,
+        &owner,
+        true,
+        crate::routes::code::types::CodeDeliveryPullRequestQuery {
+            repositories: vec![crate::routes::code::types::CodeGitHubRepositoryTarget {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "tools".into(),
+            }],
+            search: None,
+            states: Vec::new(),
+            review_states: Vec::new(),
+            check_states: Vec::new(),
+            authors: Vec::new(),
+            attention_only: false,
+            ready_only: false,
+            tidebreak_linked: Some(true),
+            updated_after: None,
+            cursor: None,
+            limit: None,
+            refresh: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let item = page
+        .items
+        .iter()
+        .find(|item| item.number == 412)
+        .expect("an attributed fact stays on the delivery page without a host row");
+    let link = item
+        .workspace_links
+        .iter()
+        .find(|link| link.workspace_id == tracked)
+        .expect("the stored attribution is the link, not a heuristic");
+    assert!(link.exact);
+    assert_eq!(link.relation, Some(CodePullRequestRelation::Contributed));
+    assert!(
+        page.items.iter().all(|item| item.number != 500),
+        "a branch-name guess never becomes a fact and must not reappear"
+    );
+}
+
 /// One unscoped list read of the fixture repository, as the delivery page
 /// issues it.
 async fn delivery_list_read(

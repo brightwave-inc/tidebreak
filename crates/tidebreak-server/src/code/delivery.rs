@@ -1,8 +1,12 @@
 //! Install-wide GitHub delivery reads and guarded user actions.
 //!
-//! The database remains the source of truth for registered repositories and
-//! Tidebreak workspaces. Remote pull requests, Actions runs, and deployments
-//! are live GitHub observations held only in short in-memory caches.
+//! The database remains the source of truth for registered repositories,
+//! Tidebreak workspaces, and attributed pull-request facts. Delivery's
+//! pull-request aggregate reads those facts (decision 77) so a workspace
+//! link is a stored relation rather than a per-request heuristic. Remote
+//! Actions runs and deployments stay live GitHub observations in a short
+//! in-memory cache; volatile check and review fields on a pull request
+//! still overlay from the host when the list read has them.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,7 +25,7 @@ use tidebreak_core::db::code::{
     list_pull_request_facts_for_repo, save_pull_request_fact,
 };
 use tidebreak_core::{
-    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestId,
+    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
     CodePullRequestRelation, CodePullRequestState, CodeRepo, CodeWorkspace, CodeWorkspaceStatus,
     OwnerId, PullRequestCheck, PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind,
     PullRequestDigest, RepoId, WorkspaceId,
@@ -581,6 +585,10 @@ struct PullRequestObservation {
     /// pass applies it — the host edge is the authority over branch
     /// inference there.
     host_stack: Option<HostStackMembership>,
+    /// True when this row came from a host list or view this request.
+    /// Stored facts folded onto the page are not host observations: the
+    /// persist pass must not treat them as a fresh confirm.
+    from_host: bool,
 }
 
 impl PullRequestObservation {
@@ -1238,6 +1246,16 @@ pub(crate) async fn query_pull_requests(
                     Err((target, message)) => errors.push(source_error(Some(target), message)),
                 }
             }
+            items.sort_by(|left, right| {
+                right
+                    .summary
+                    .updated_at
+                    .cmp(&left.summary.updated_at)
+                    .then_with(|| left.summary.id.cmp(&right.summary.id))
+            });
+            // Attributed facts that fell off the host page (cap, filter, or
+            // a later empty list) still belong on the aggregate.
+            fold_stored_pull_request_facts(runtime, owner, &targets, &mut items).await;
             items.sort_by(|left, right| {
                 right
                     .summary
@@ -2770,6 +2788,144 @@ async fn fetch_pull_requests(
         .collect())
 }
 
+/// Fold durable facts onto the live page so the delivery aggregate is a
+/// projection of `code_pull_request` plus this request's host rows.
+///
+/// A fact whose number is already on the page stays the host observation —
+/// GitHub is still authoritative for volatile fields. A fact the host did
+/// not return becomes a stored row with empty heuristic links; attribution
+/// is applied in [`persist_and_augment_pull_request_facts`].
+async fn fold_stored_pull_request_facts(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    targets: &[CodeGitHubRepositoryTarget],
+    items: &mut Vec<PullRequestObservation>,
+) {
+    for target in targets {
+        let facts = match list_pull_request_facts_for_repo(
+            &runtime.db,
+            owner,
+            &target.host,
+            &target.owner,
+            &target.name,
+        )
+        .await
+        {
+            Ok(facts) => facts,
+            Err(err) => {
+                tracing::debug!("fact fold failed for a delivery page: {err}");
+                continue;
+            }
+        };
+        if facts.is_empty() {
+            continue;
+        }
+        let present: HashSet<u64> = items
+            .iter()
+            .filter(|item| repository_key_ref(&item.summary.repository) == repository_key(target))
+            .map(|item| item.summary.number)
+            .collect();
+        let repository = items
+            .iter()
+            .find(|item| repository_key_ref(&item.summary.repository) == repository_key(target))
+            .map(|item| item.summary.repository.clone())
+            .unwrap_or_else(|| repository_ref_from_target(target, None));
+        for fact in facts {
+            if present.contains(&fact.number) {
+                continue;
+            }
+            items.push(observation_from_fact(&fact, repository.clone()));
+        }
+    }
+}
+
+fn observation_from_fact(
+    fact: &CodePullRequestFact,
+    repository: CodeGitHubRepositoryRef,
+) -> PullRequestObservation {
+    let live = fact.live.as_ref();
+    let checks: Vec<CodeDeliveryCheck> = live
+        .and_then(|live| live.checks.as_ref())
+        .map(|checks| {
+            checks
+                .iter()
+                .map(|check| CodeDeliveryCheck {
+                    name: check.name.clone(),
+                    bucket: check.bucket,
+                    detail: check.detail.clone(),
+                    url: check.url.clone(),
+                    workflow_run_id: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let checks_loaded = live.and_then(|live| live.checks.as_ref()).is_some();
+    let review_decision = live.and_then(|live| live.review_decision.clone());
+    let mergeable = live.and_then(|live| live.mergeable.clone());
+    let merge_state_status = live.and_then(|live| live.merge_state_status.clone());
+    let auto_merge_enabled = live
+        .and_then(|live| live.auto_merge_enabled)
+        .unwrap_or(false);
+    let in_merge_queue = live.and_then(|live| live.in_merge_queue);
+    let state = fact.state.as_str().to_owned();
+    let attention_reasons = pull_request_attention(
+        &state,
+        fact.draft,
+        review_decision.as_deref(),
+        mergeable.as_deref(),
+        merge_state_status.as_deref(),
+        &checks,
+    );
+    let ready_to_merge = state == "open"
+        && !fact.draft
+        && !auto_merge_enabled
+        && in_merge_queue != Some(true)
+        && checks_loaded
+        && attention_reasons.is_empty()
+        && !checks
+            .iter()
+            .any(|check| check.bucket == PullRequestCheckBucket::Pending)
+        && !matches!(review_decision.as_deref(), Some("review_required"));
+    PullRequestObservation {
+        summary: CodeDeliveryPullRequestSummary {
+            id: format!("{}#{}", repository_key_ref(&repository), fact.number),
+            repository,
+            number: fact.number,
+            url: fact.url.clone(),
+            title: fact.title.clone(),
+            state,
+            draft: fact.draft,
+            author: fact.author.clone(),
+            author_avatar_url: None,
+            head_branch: fact.head_branch.clone(),
+            base_branch: fact.base_branch.clone(),
+            head_sha: fact.head_sha.clone(),
+            review_decision,
+            mergeable,
+            merge_state_status,
+            auto_merge_enabled,
+            in_merge_queue,
+            comment_count: None,
+            checks,
+            attention_reasons,
+            ready_to_merge,
+            workspace_links: Vec::new(),
+            stack_parent_number: None,
+            stack_number: None,
+            stack_size: None,
+            unregistered_stack_numbers: None,
+            labels: Vec::new(),
+            created_at: fact.created_at,
+            updated_at: fact.updated_at,
+            merged_at: fact.merged_at,
+            closed_at: fact.closed_at,
+        },
+        head_repository: None,
+        host_stack: None,
+        from_host: false,
+    }
+}
+
 fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequestRemotePlan {
     let state = if query.attention_only
         || query.ready_only
@@ -2968,6 +3124,7 @@ fn parse_pull_request(
         },
         head_repository: parse_head_repository(repository, value),
         host_stack: None,
+        from_host: true,
     })
 }
 
@@ -3681,6 +3838,7 @@ async fn persist_and_augment_pull_request_facts(
             })
             .collect();
         for &index in indices {
+            let from_host = items[index].from_host;
             let item = &mut items[index].summary;
             if item.in_merge_queue.is_none() {
                 item.in_merge_queue = known_queue.get(&item.number).copied();
@@ -3698,6 +3856,12 @@ async fn persist_and_augment_pull_request_facts(
                 .map(|link| link.workspace_id)
                 .collect();
             if exact_workspaces.is_empty() && !known.contains_key(&item.number) {
+                continue;
+            }
+            if !from_host {
+                if let Some(id) = known.get(&item.number) {
+                    fact_ids.insert(index, *id);
+                }
                 continue;
             }
             let Some(fact) = super::reconcile::fact_from_summary(owner, item, now) else {
@@ -4602,6 +4766,39 @@ mod tests {
             let parsed = parse_repository_input(input).unwrap();
             assert_eq!(repository_key(&parsed), expected);
         }
+    }
+
+    #[test]
+    fn a_stored_fact_projects_a_delivery_row_without_heuristic_links() {
+        let now = Utc::now();
+        let fact = CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: OwnerId::local(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "tools".into(),
+            number: 412,
+            url: "https://github.com/acme/tools/pull/412".into(),
+            title: "Tracked work".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: Some("octocat".into()),
+            head_branch: "tidebreak/tracked".into(),
+            base_branch: "main".into(),
+            head_sha: Some("aaa111".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        };
+        let observation = observation_from_fact(&fact, repository_ref());
+        assert!(!observation.from_host);
+        assert_eq!(observation.summary.number, 412);
+        assert!(observation.summary.workspace_links.is_empty());
+        assert_eq!(observation.summary.head_sha.as_deref(), Some("aaa111"));
     }
 
     #[test]
