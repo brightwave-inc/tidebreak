@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 
 import {
   BrowserAgentControlRow,
@@ -626,7 +626,8 @@ export const ManagedProfileResetConfirmation: Story = {
         name: "Reset development profile",
       }),
     );
-    await expect(await body.findByRole("alertdialog")).toBeVisible();
+    const dialog = await body.findByRole("alertdialog");
+    await waitFor(() => expect(dialog).toBeVisible());
   },
 };
 
@@ -800,7 +801,8 @@ export const ToolbarNarrow320ManagedProfileReset: Story = {
         name: "Reset development profile",
       }),
     );
-    await expect(await body.findByRole("alertdialog")).toBeVisible();
+    const dialog = await body.findByRole("alertdialog");
+    await waitFor(() => expect(dialog).toBeVisible());
   },
 };
 
