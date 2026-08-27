@@ -123,6 +123,12 @@ export default function HomeScreen() {
       </View>
       <Pressable
         className="rounded-lg border border-border bg-background px-4 py-3"
+        onPress={() => router.push("/chats")}
+      >
+        <Text className="text-center text-base text-foreground">Chats</Text>
+      </Pressable>
+      <Pressable
+        className="rounded-lg border border-border bg-background px-4 py-3"
         onPress={() => router.push("/approvals")}
       >
         <Text className="text-center text-base text-foreground">Approvals</Text>

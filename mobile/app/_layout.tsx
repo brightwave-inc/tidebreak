@@ -46,6 +46,8 @@ export default function RootLayout() {
             name="workspace/[id]/start"
             options={{ title: "Start session" }}
           />
+          <Stack.Screen name="chats" options={{ title: "Chats" }} />
+          <Stack.Screen name="chat/[id]" options={{ title: "Chat" }} />
           <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
           <Stack.Screen name="session/[id]" options={{ title: "Session" }} />
           <Stack.Screen name="approvals" options={{ title: "Approvals" }} />
