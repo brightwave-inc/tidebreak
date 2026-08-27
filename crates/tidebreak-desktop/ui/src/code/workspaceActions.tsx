@@ -39,6 +39,8 @@ import {
 } from "./codeWorktreeHost";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { nextWorkspaceAfterLeaving, railWorkspaceIds } from "./railNavigation";
+import { codeWorkspaceIdFromPath } from "./routes";
 import { startUneffMeWorkspace } from "./uneffMe";
 
 /**
@@ -357,16 +359,31 @@ export function useWorkspaceCardCommands(): {
     });
   }
 
-  async function afterArchive(archived: CodeWorkspaceSnapshot) {
+  async function afterArchive(
+    archived: CodeWorkspaceSnapshot,
+    liveIds: readonly string[],
+  ) {
+    const viewing = codeWorkspaceIdFromPath(pathname) === archived.id;
+    const nextId = viewing
+      ? nextWorkspaceAfterLeaving(liveIds, archived.id)
+      : null;
     upsertWorkspace(archived);
     forgetWorkspaceSession(archived.id);
     toast.success("Workspace archived");
-    if (pathname === `/code/w/${archived.id}`) {
-      await navigate({ to: "/code", replace: true });
+    if (!viewing) return;
+    if (nextId) {
+      await navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: nextId },
+        replace: true,
+      });
+      return;
     }
+    await navigate({ to: "/code", replace: true });
   }
 
   async function runArchive(workspace: CodeWorkspaceSnapshot) {
+    const liveIds = railWorkspaceIds();
     const onOptimisticChange = (archived: boolean) => {
       upsertWorkspace(
         archived
@@ -386,7 +403,7 @@ export function useWorkspaceCardCommands(): {
         onOptimisticChange,
       });
       if (!archived) return;
-      await afterArchive(archived);
+      await afterArchive(archived, liveIds);
     } catch (error) {
       toast.error(friendlyErrorMessage(error, "Could not archive"));
     }
@@ -399,6 +416,7 @@ export function useWorkspaceCardCommands(): {
    * confirmation still stands between the click and the worktree going away.
    */
   async function runForceArchive(workspace: CodeWorkspaceSnapshot) {
+    const liveIds = railWorkspaceIds();
     const ok = await confirm({
       title: "Discard changes and archive?",
       description:
@@ -414,7 +432,10 @@ export function useWorkspaceCardCommands(): {
     };
     upsertWorkspace(optimistic);
     try {
-      await afterArchive(await client.archiveCodeWorkspace(workspace.id, true));
+      await afterArchive(
+        await client.archiveCodeWorkspace(workspace.id, true),
+        liveIds,
+      );
     } catch (error) {
       upsertWorkspace(workspace);
       toast.error(friendlyErrorMessage(error, "Could not archive"));

@@ -348,6 +348,11 @@ export function AppShell() {
       // workspace page answers it.
       useCodeUiStore.getState().requestTerminal();
     },
+    "code-new-tab": () => {
+      const { pathname } = router.state.location;
+      if (!codeWorkspaceIdFromPath(pathname)) return false;
+      useCodeUiStore.getState().requestNewTabMenu();
+    },
     "code-quick-open": () => {
       const { pathname } = router.state.location;
       if (!codeWorkspaceIdFromPath(pathname)) return false;

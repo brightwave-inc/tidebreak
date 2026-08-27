@@ -54,3 +54,18 @@ export const HighlightedPassage: Story = {
     highlightRange: { start: 4, end: 18 },
   },
 };
+
+/** A localhost URL must stay one link even when the line wraps at the query. */
+export const WrappedLocalUrl: Story = {
+  args: {
+    children:
+      "Storybook is still at http://127.0.0.1:6031/?path=/story/code-workspace-card--hover-idle-session if you want another look.",
+  },
+  decorators: [
+    (Story) => (
+      <article className="message message-assistant mx-auto w-80 rounded-xl bg-background px-4 py-3">
+        <Story />
+      </article>
+    ),
+  ],
+};

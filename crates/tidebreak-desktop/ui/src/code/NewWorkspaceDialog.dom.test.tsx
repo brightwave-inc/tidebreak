@@ -234,6 +234,47 @@ describe("NewWorkspaceDialog", () => {
     expect(useCodeCatalogStore.getState().workspaces).toEqual([created]);
   });
 
+  it("opens the workspace as soon as it exists, before the session starts", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const created = workspace(
+      "ws-early",
+      "repo-new",
+      "2026-08-24T12:00:00.000Z",
+    );
+    const sessionStart = deferred<CodeSessionSnapshot>();
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(async () => created),
+          createCodeSession: vi.fn(() => sessionStart.promise),
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code/w/ws-old" },
+    );
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-early"),
+    );
+    sessionStart.resolve(
+      session("ws-early", "claude_code", "2026-08-24T12:00:00.000Z"),
+    );
+  });
+
   it("removes a failed create and retries the captured request", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({

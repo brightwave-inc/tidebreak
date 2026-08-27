@@ -16,6 +16,7 @@ export type ShellShortcutAction =
   | "code-new-workspace"
   | "toggle-code-review"
   | "toggle-code-terminal"
+  | "code-new-tab"
   | "code-quick-open"
   | "code-find"
   | "code-prev-tab"
@@ -224,13 +225,12 @@ export const SHELL_SHORTCUTS: readonly ShellShortcutDef[] = [
     allowInEditable: true,
   },
   {
-    // The tab strip's plus control opens the file picker first, so the chord
-    // that means "new tab" everywhere else opens the same thing here rather
-    // than a blank tab there is nothing to put in.
-    id: "code-quick-open",
+    // The tab strip's plus control offers what a new tab can be, so the chord
+    // that means "new tab" elsewhere opens that menu rather than file search.
+    id: "code-new-tab",
     codes: ["KeyT"],
     mod: true,
-    description: "New tab: open a file by name",
+    description: "New tab",
     group: "Code",
     scope: "code",
     allowInEditable: true,

@@ -780,14 +780,16 @@ body {
   }
 
   .message-user-frame {
+    display: flex;
     width: 100%;
     max-width: 100%;
-    align-self: flex-start;
+    flex-direction: column;
+    align-items: flex-end;
   }
 
   .message-user {
     width: fit-content;
-    max-width: 100%;
+    max-width: min(36rem, 85%);
     border-radius: var(--radius);
     padding: 0.625rem 0.75rem;
     background: var(--muted);
@@ -1444,6 +1446,7 @@ body {
   .message-markdown a {
     color: inherit;
     font-weight: 500;
+    overflow-wrap: anywhere;
     text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
     text-underline-offset: 0.16em;
   }

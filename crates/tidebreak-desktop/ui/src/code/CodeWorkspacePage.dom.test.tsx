@@ -666,6 +666,8 @@ afterEach(() => {
     composerActionScope: null,
     workflowShortcutPending: null,
     archivePending: false,
+    newTabMenuPending: false,
+    quickOpenPending: false,
   });
   resetWorkflowPromptStore();
   browserMocks.close.mockClear();
@@ -1328,6 +1330,9 @@ describe("CodeWorkspacePage", () => {
 
     expect(useCodeUiStore.getState().reviewSidebarOpen).toBe(false);
     expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a quick-action exit code on the result toast", async () => {
@@ -1794,6 +1799,37 @@ describe("CodeWorkspacePage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("opens the next live workspace after archiving the one on screen", async () => {
+    const other: CodeWorkspaceSnapshot = {
+      ...WORKSPACE,
+      id: "ws-2",
+      title: "Fix logout",
+      created_at: "2026-08-16T00:00:00.000Z",
+    };
+    const client = Object.assign(makeClient(), {
+      listCodeRepos: vi.fn(async () => [REPO]),
+      listCodeWorkspaces: vi.fn(async () => [WORKSPACE, other]),
+      getHarnessDoctor: vi.fn(async () => ({ harnesses: [] })),
+    });
+    client.getCodeWorkspace.mockImplementation(async (id: string) =>
+      id === "ws-2" ? other : WORKSPACE,
+    );
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Archive" }));
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-2"),
+    );
+    expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", false);
+  });
+
   it("asks once before discarding changes during archive", async () => {
     const client = makeClient();
     client.archiveCodeWorkspace
@@ -1926,8 +1962,8 @@ describe("CodeWorkspacePage", () => {
       within(inspector).getByRole("tab", { name: "Files" }),
     ).toBeInTheDocument();
     expect(
-      within(inspector).getByRole("tab", { name: "Pull request" }),
-    ).toBeInTheDocument();
+      within(inspector).queryByRole("tab", { name: "Pull request" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Terminal" }));
 
@@ -1943,10 +1979,9 @@ describe("CodeWorkspacePage", () => {
       }),
     );
 
-    await user.click(screen.getByRole("tab", { name: "Pull request" }));
     expect(
-      within(inspector).getByText("No pull request yet"),
-    ).toBeInTheDocument();
+      within(inspector).queryByText("No pull request yet"),
+    ).not.toBeInTheDocument();
   });
 
   it("does not promote a stale files catalog into the conversation strip", async () => {
@@ -2249,6 +2284,24 @@ describe("CodeWorkspacePage", () => {
       "aria-selected",
       "true",
     );
+  });
+
+  it("opens the New tab menu from the chord instead of the file picker", async () => {
+    const client = makeClient();
+    await mountWorkspace(client);
+    await screen.findByRole("tab", { name: "Main agent" });
+
+    act(() => useCodeUiStore.getState().requestNewTabMenu());
+
+    expect(
+      await screen.findByRole("menuitem", { name: "Open file…" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "New agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Search files by name" }),
+    ).not.toBeInTheDocument();
   });
 
   it("starts on the main-agent tab and opens a file from the visible new-tab control", async () => {
@@ -2556,34 +2609,31 @@ describe("CodeWorkspacePage", () => {
     expect(client.openCodeEvents.mock.calls[0]?.[0]).toBe(SESSION.id);
   });
 
-  it("opens source control and PR details as center tabs from the + menu", async () => {
+  it("opens source control and the pull request in the review sidebar", async () => {
     const client = makeClient();
     client.getCodeWorkspace.mockResolvedValue({ ...WORKSPACE, pr: PR });
     const user = userEvent.setup();
     await mountWorkspace(client);
 
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "New tab" }));
     await user.click(
       await screen.findByRole("menuitem", { name: "Source control" }),
     );
-    // The inspector also names a Source control tab; the center's tab is the
-    // one controlling the primary editor panel.
-    const centerTab = (name: string) =>
-      screen
-        .getAllByRole("tab", { name })
-        .find(
-          (tab) =>
-            tab.getAttribute("aria-controls") ===
-            "code-center-panel-editor-primary",
-        );
+    const inspector = screen.getByTestId("code-inspector");
     await waitFor(() =>
-      expect(centerTab("Source control")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      ),
+      expect(
+        within(inspector).getByRole("tab", { name: "Source control" }),
+      ).toHaveAttribute("aria-selected", "true"),
     );
     expect(
-      await screen.findByTestId("source-control-panel"),
+      screen.queryByTestId("source-control-panel"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Send message" }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "New tab" }));
@@ -2591,12 +2641,31 @@ describe("CodeWorkspacePage", () => {
       await screen.findByRole("menuitem", { name: "Pull request" }),
     );
     await waitFor(() =>
-      expect(centerTab("Pull request")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      ),
+      expect(
+        within(inspector).getByRole("tab", { name: "Pull request" }),
+      ).toHaveAttribute("aria-selected", "true"),
     );
-    expect(await screen.findByTestId("pr-details-panel")).toBeInTheDocument();
+    expect(screen.queryByTestId("pr-details-panel")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Send message" }),
+    ).toBeInTheDocument();
+  });
+
+  it("omits Pull request from the new-tab menu when there is no pull request", async () => {
+    const client = makeClient();
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "New tab" }));
+    expect(
+      screen.queryByRole("menuitem", { name: "Pull request" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Source control" }),
+    ).toBeInTheDocument();
   });
 
   it("opens, restores, and retitles a browser as a center editor tab", async () => {

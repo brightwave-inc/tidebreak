@@ -1,4 +1,10 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { useDroppable } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -114,6 +120,7 @@ export function CodeCenterTabs({
   onCloseEditorsToRight,
   onCopyPath,
   onNewTab,
+  openMenuRequest = 0,
   onNewBrowser,
   onNewDiff,
   onNewSourceControl,
@@ -150,6 +157,8 @@ export function CodeCenterTabs({
   onCopyPath: (path: string) => void;
   /** Open the file picker; the menu's "Open file" entry. */
   onNewTab: () => void;
+  /** Increment to open the plus menu from the shell keymap (Cmd+T). */
+  openMenuRequest?: number;
   onNewBrowser?: () => void;
   /** Open the all-changes diff as a center tab. */
   onNewDiff?: () => void;
@@ -175,9 +184,13 @@ export function CodeCenterTabs({
   onCloseGroup?: () => void;
 }) {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
   const { setNodeRef: setStripRef } = useDroppable({
     id: editorStripDropId(region),
   });
+  useEffect(() => {
+    if (openMenuRequest > 0) setMenuOpen(true);
+  }, [openMenuRequest]);
   const tabOffset = conversations.length;
   const panelId =
     region === "primary" ? EDITOR_PANEL_ID : SPLIT_EDITOR_PANEL_ID;
@@ -358,7 +371,7 @@ export function CodeCenterTabs({
       {/* One + for everything the center can open. A bare click must say
           what it will do, so the button offers the choices instead of
           jumping into the file picker. */}
-      <DropdownMenu>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button
             type="button"

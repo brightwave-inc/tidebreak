@@ -88,7 +88,8 @@ const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
  * dialog keeps the message and name for the next Cmd+N; a create consumes
  * them. "Create more" keeps the dialog open after a create, clearing only
  * the message and name, for firing off several tasks on the same sticky
- * settings.
+ * settings. A create that is not "Create more" opens the workspace as soon
+ * as it exists, so the reader is already on it while the first session starts.
  *
  * The title is optional: left blank, the server generates a two-word name and
  * later replaces it with one derived from the first turn, the same way chats
@@ -153,7 +154,6 @@ type CreateAttempt = {
   fastMode: boolean;
   fastModeByHarness: Partial<Record<HarnessKind, boolean>>;
   createMore: boolean;
-  originPath: string;
 };
 
 export function NewWorkspaceDialog({
@@ -443,7 +443,6 @@ export function NewWorkspaceDialog({
       fastMode: postedFastMode,
       fastModeByHarness: { ...fastByHarness },
       createMore,
-      originPath: pathnameRef.current,
     };
     useCodeUiStore.getState().setNewWorkspaceDraft(EMPTY_NEW_WORKSPACE_DRAFT);
     if (createMore) {
@@ -517,6 +516,7 @@ export function NewWorkspaceDialog({
       return;
     }
     replaceWorkspace(pending.id, workspace);
+    await revealCreatedWorkspace(workspace, attempt);
     const prompt = attempt.startingPrompt.trim();
     try {
       const gateway = gatewayCodeModels(
@@ -575,13 +575,14 @@ export function NewWorkspaceDialog({
         `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
       );
     }
+  }
+
+  async function revealCreatedWorkspace(
+    workspace: CodeWorkspaceSnapshot,
+    attempt: CreateAttempt,
+  ) {
     const workspaceId = workspace.id;
-    const workspacePath = `/code/w/${workspaceId}`;
-    if (
-      attempt.createMore ||
-      (pathnameRef.current !== attempt.originPath &&
-        pathnameRef.current !== workspacePath)
-    ) {
+    if (attempt.createMore) {
       toast.success(`Started ${workspace.title}`, {
         action: {
           label: "Open",
@@ -594,10 +595,10 @@ export function NewWorkspaceDialog({
       });
       return;
     }
-    if (pathnameRef.current === workspacePath) return;
+    if (pathnameRef.current === `/code/w/${workspaceId}`) return;
     await navigate({
       to: "/code/w/$workspaceId",
-      params: { workspaceId: workspace.id },
+      params: { workspaceId },
     });
   }
 
