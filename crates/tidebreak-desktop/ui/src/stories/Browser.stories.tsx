@@ -787,11 +787,7 @@ export const ToolbarNarrow390Paused: Story = {
 export const ToolbarNarrow320ManagedProfileReset: Story = {
   args: { scenario: "profile-reset-confirmation" },
   render: () => (
-    <NarrowToolbarStory
-      width={320}
-      access={unsharedAccess}
-      resetProfile
-    />
+    <NarrowToolbarStory width={320} access={unsharedAccess} resetProfile />
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);

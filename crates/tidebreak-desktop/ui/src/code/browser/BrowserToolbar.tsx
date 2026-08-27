@@ -166,8 +166,8 @@ export function BrowserToolbar({
       description: (
         <>
           This closes every Tidebreak browser tab and deletes the managed
-          development-profile cookies, site data, and cache. Safari, Chrome,
-          and your personal browser profiles are never read or changed.
+          development-profile cookies, site data, and cache. Safari, Chrome, and
+          your personal browser profiles are never read or changed.
         </>
       ),
       confirmLabel: "Reset development profile",
