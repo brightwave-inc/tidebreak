@@ -2736,7 +2736,6 @@ async fn fetch_pull_requests(
         .as_ref()
         .map(parse_stack_memberships)
         .unwrap_or_default();
-    let mut values = values;
     attach_merge_queue_membership(&api, target, &mut values).await;
     Ok(values
         .iter()
