@@ -216,7 +216,7 @@ pub(crate) struct CodeRuntime {
     /// Per-owner delivery nudge debounce, including one pending trailing edge.
     delivery_nudges: DeliveryNudgeDebounce,
     /// Paces and parks every conditional GitHub read (decision 66).
-    host_gate: super::pr_fetch::HostGate,
+    pub(crate) host_gate: super::pr_fetch::HostGate,
     /// Base-branch rules, cached per branch: whether a merge queue runs
     /// decides if the timeline read is worth paying, and the required
     /// approval count anchors the review-decision word (decision 66).
@@ -2219,7 +2219,7 @@ impl CodeRuntime {
     /// One delivery nudge on the updates channel, debounced per owner
     /// (decision 66): a sweep that moves several rows costs one re-read,
     /// not one per row.
-    fn nudge_delivery_update(&self, owner: &OwnerId) {
+    pub(crate) fn nudge_delivery_update(&self, owner: &OwnerId) {
         self.delivery_nudges.publish(&self.bus, owner);
     }
 

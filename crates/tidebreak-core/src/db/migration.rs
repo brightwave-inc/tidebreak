@@ -58,6 +58,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeWorkspaceArchiving),
             Box::new(CodePermissionModeIntent),
             Box::new(AgentNotification),
+            Box::new(CodeWorkflowRuns),
         ]
     }
 }
@@ -477,6 +478,197 @@ impl MigrationTrait for AgentNotification {
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // Dropping the table would lose unread agent-finished rows.
         Ok(())
+    }
+}
+
+/// Durable workflow-run summaries (decision 66, issue 2578).
+///
+/// `code_workflow_run` records confirmed observations of GitHub Actions
+/// runs, keyed by full repository identity the way `code_pull_request`
+/// is. `code_workflow_run_fetch` holds the list-endpoint ETag so the
+/// reconcile sweep can send `If-None-Match` and a 304 costs nothing.
+struct CodeWorkflowRuns;
+
+impl MigrationName for CodeWorkflowRuns {
+    fn name(&self) -> &str {
+        "m20260827_000021_code_workflow_runs"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeWorkflowRuns {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeWorkflowRun::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::Host)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::RepoOwner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::RepoName)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::GithubId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::RunAttempt).big_integer())
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::Name)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::Url)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::Status)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::Conclusion).text())
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::Workflow).text())
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::Branch).text())
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::Sha).text())
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::Event).text())
+                    .col(ColumnDef::new(idens::CodeWorkflowRun::Actor).text())
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::FirstSeenAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRun::LastSeenAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .check(Expr::col(idens::CodeWorkflowRun::GithubId).gte(1))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .unique()
+                    .name("uq_code_workflow_run_identity")
+                    .table(idens::CodeWorkflowRun::Table)
+                    .col(idens::CodeWorkflowRun::Owner)
+                    .col(idens::CodeWorkflowRun::Host)
+                    .col(idens::CodeWorkflowRun::RepoOwner)
+                    .col(idens::CodeWorkflowRun::RepoName)
+                    .col(idens::CodeWorkflowRun::GithubId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_code_workflow_run_owner_updated")
+                    .table(idens::CodeWorkflowRun::Table)
+                    .col(idens::CodeWorkflowRun::Owner)
+                    .col(idens::CodeWorkflowRun::UpdatedAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeWorkflowRunFetch::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRunFetch::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRunFetch::Host)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRunFetch::RepoOwner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRunFetch::RepoName)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeWorkflowRunFetch::ListEtag).text())
+                    .col(
+                        ColumnDef::new(idens::CodeWorkflowRunFetch::ObservedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(idens::CodeWorkflowRunFetch::Owner)
+                            .col(idens::CodeWorkflowRunFetch::Host)
+                            .col(idens::CodeWorkflowRunFetch::RepoOwner)
+                            .col(idens::CodeWorkflowRunFetch::RepoName),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodeWorkflowRunFetch::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodeWorkflowRun::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -2402,12 +2594,12 @@ impl MigrationTrait for CodeQueuedTurns {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
-    use sea_orm_migration::prelude::{PostgresQueryBuilder, SchemaManager, SqliteQueryBuilder};
     use sea_orm_migration::MigratorTrait;
+    use sea_orm_migration::prelude::{PostgresQueryBuilder, SchemaManager, SqliteQueryBuilder};
 
+    use super::Migrator;
     #[cfg(feature = "sqlite")]
     use super::rebuild_sqlite_code_workspace_for_archiving_inner;
-    use super::Migrator;
 
     /// Every `CREATE TABLE` a fresh database runs comes from `sqlite_master`,
     /// which stores the statement verbatim and appends what `ALTER TABLE`
@@ -2468,16 +2660,18 @@ mod tests {
                 "m20260826_000018_code_workspace_archiving",
                 "m20260826_000019_code_permission_mode_intent",
                 "m20260826_000020_agent_notification",
+                "m20260827_000021_code_workflow_runs",
             ]
         );
-        assert!(db
-            .query_one_raw(Statement::from_string(
+        assert!(
+            db.query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT owner FROM app LIMIT 1".to_owned(),
             ))
             .await
             .unwrap()
-            .is_none());
+            .is_none()
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -2517,9 +2711,11 @@ mod tests {
         let error = rebuild_sqlite_code_workspace_for_archiving_inner(&manager, true)
             .await
             .expect_err("the injected statement fails after the live table is dropped");
-        assert!(error
-            .to_string()
-            .contains("missing_workspace_rebuild_table"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing_workspace_rebuild_table")
+        );
 
         let workspace = db
             .query_one_raw(Statement::from_string(
@@ -2530,16 +2726,17 @@ mod tests {
             .unwrap()
             .expect("the original workspace table and row survive");
         assert_eq!(workspace.try_get::<String>("", "status").unwrap(), "active");
-        assert!(db
-            .query_one_raw(Statement::from_string(
+        assert!(
+            db.query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT 1 AS present FROM code_session WHERE id = 'session-archive'".to_owned(),
             ))
             .await
             .unwrap()
-            .is_some());
-        assert!(db
-            .query_one_raw(Statement::from_string(
+            .is_some()
+        );
+        assert!(
+            db.query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
                  AND name = 'code_workspace_archiving'"
@@ -2547,7 +2744,8 @@ mod tests {
             ))
             .await
             .unwrap()
-            .is_none());
+            .is_none()
+        );
 
         rebuild_sqlite_code_workspace_for_archiving_inner(&manager, false)
             .await
@@ -2557,14 +2755,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(db
-            .query_all_raw(Statement::from_string(
+        assert!(
+            db.query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "PRAGMA foreign_key_check".to_owned(),
             ))
             .await
             .unwrap()
-            .is_empty());
+            .is_empty()
+        );
         let foreign_keys = db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -2988,14 +3187,15 @@ mod tests {
             fire_primary_key,
             ["trigger_id", "workspace_id", "pr_number", "head_sha"]
         );
-        assert!(db
-            .execute_unprepared(
+        assert!(
+            db.execute_unprepared(
                 "UPDATE code_trigger_fire
                  SET state = 'pending', delivered_at = NULL, next_attempt_at = NULL
                  WHERE trigger_id = '00000000-0000-0000-0000-000000000106'"
             )
             .await
-            .is_err());
+            .is_err()
+        );
 
         let columns = db
             .query_all_raw(Statement::from_string(
@@ -3205,13 +3405,14 @@ mod tests {
         .unwrap();
 
         // ...and a token outside it still fails.
-        assert!(db
-            .execute_unprepared(
+        assert!(
+            db.execute_unprepared(
                 "INSERT INTO code_trigger (id, owner, repo_id, condition, action, enabled, \
                  created_at, updated_at) VALUES ('trig-3', 'local', 'repo-1', 'pr_sparkled', \
                  'notify', TRUE, '2026-08-22T00:00:00Z', '2026-08-22T00:00:00Z')",
             )
             .await
-            .is_err());
+            .is_err()
+        );
     }
 }

@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { monitorSince } from "./CodeDeliveryMonitor";
+import { monitorSince, nextMonitorDelayMs } from "./CodeDeliveryMonitor";
+
+describe("nextMonitorDelayMs", () => {
+  it("has no safety or hidden poll clock", () => {
+    expect(nextMonitorDelayMs({ rerunRequested: false })).toBeNull();
+  });
+
+  it("reruns immediately when a pass was skipped because one was already running", () => {
+    expect(nextMonitorDelayMs({ rerunRequested: true })).toBe(0);
+  });
+});
 
 describe("monitorSince", () => {
   const now = Date.parse("2026-08-20T12:00:00.000Z");

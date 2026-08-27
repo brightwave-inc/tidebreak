@@ -4211,3 +4211,129 @@ async fn another_owner_cannot_see_or_touch_a_code_queue() {
         1
     );
 }
+
+/// Workflow-run facts (issue 2578): identity upsert keeps first_seen_at,
+/// snapshot_differs drives change, and a 304 cannot restore a moved ETag.
+#[tokio::test]
+async fn workflow_run_facts_upsert_and_conditional_etag() {
+    use crate::code::{CodeWorkflowRunFact, CodeWorkflowRunId};
+    use crate::db::code::{
+        get_workflow_run_fact, get_workflow_run_fetch_state, list_workflow_run_facts_for_repo,
+        save_workflow_run_fact, set_workflow_run_fetch_state, WorkflowRunFetchCondition,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let first_seen = now();
+    let fact = CodeWorkflowRunFact {
+        id: CodeWorkflowRunId::new(),
+        owner: owner.clone(),
+        host: "github.com".into(),
+        repo_owner: "acme".into(),
+        repo_name: "tools".into(),
+        github_id: 77,
+        run_attempt: Some(1),
+        name: "Desktop CI".into(),
+        url: "https://github.com/acme/tools/actions/runs/77".into(),
+        status: "in_progress".into(),
+        conclusion: None,
+        workflow: Some("Desktop CI".into()),
+        branch: Some("main".into()),
+        sha: Some("aaa111".into()),
+        event: Some("push".into()),
+        actor: Some("octocat".into()),
+        created_at: first_seen,
+        updated_at: first_seen,
+        first_seen_at: first_seen,
+        last_seen_at: first_seen,
+    };
+    let (id, inserted) = save_workflow_run_fact(&store, &fact).await.unwrap();
+    assert!(inserted, "the first write is a real change");
+
+    let later = now();
+    let refreshed = CodeWorkflowRunFact {
+        id: CodeWorkflowRunId::new(),
+        status: "completed".into(),
+        conclusion: Some("failure".into()),
+        sha: Some("bbb222".into()),
+        first_seen_at: later,
+        last_seen_at: later,
+        updated_at: later,
+        ..fact.clone()
+    };
+    let (same_id, changed) = save_workflow_run_fact(&store, &refreshed).await.unwrap();
+    assert_eq!(id, same_id);
+    assert!(changed, "status and conclusion moved");
+    let stored = get_workflow_run_fact(&store, &owner, "github.com", "acme", "tools", 77)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.id, id);
+    assert_eq!(stored.status, "completed");
+    assert_eq!(stored.conclusion.as_deref(), Some("failure"));
+    assert_eq!(stored.first_seen_at, first_seen);
+    assert_eq!(stored.last_seen_at, later);
+
+    let unchanged = CodeWorkflowRunFact {
+        last_seen_at: now(),
+        ..stored.clone()
+    };
+    let (_, moved) = save_workflow_run_fact(&store, &unchanged).await.unwrap();
+    assert!(!moved, "last_seen_at alone is not a snapshot change");
+
+    assert!(set_workflow_run_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        Some("W/\"runs-1\""),
+        later,
+        WorkflowRunFetchCondition::Unconditional,
+    )
+    .await
+    .unwrap());
+    let fetch = get_workflow_run_fetch_state(&store, &owner, "github.com", "acme", "tools")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetch.list_etag.as_deref(), Some("W/\"runs-1\""));
+
+    // A 304 for a validator that is no longer stored updates zero rows.
+    assert!(!set_workflow_run_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        Some("W/\"runs-stale\""),
+        now(),
+        WorkflowRunFetchCondition::ListEtag(Some("W/\"runs-stale\"")),
+    )
+    .await
+    .unwrap());
+    let fetch = get_workflow_run_fetch_state(&store, &owner, "github.com", "acme", "tools")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetch.list_etag.as_deref(), Some("W/\"runs-1\""));
+
+    assert!(set_workflow_run_fetch_state(
+        &store,
+        &owner,
+        "github.com",
+        "acme",
+        "tools",
+        Some("W/\"runs-1\""),
+        now(),
+        WorkflowRunFetchCondition::ListEtag(Some("W/\"runs-1\"")),
+    )
+    .await
+    .unwrap());
+
+    let listed = list_workflow_run_facts_for_repo(&store, &owner, "github.com", "acme", "tools")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].github_id, 77);
+}
