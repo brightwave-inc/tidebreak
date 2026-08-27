@@ -197,6 +197,7 @@ pub async fn get_workflow_run_fetch_state(
 /// A 304 passes `WorkflowRunFetchCondition::ListEtag` so a concurrent 200
 /// that already moved the validator is not rolled back. `Ok(false)` when no
 /// fetch row matches the identity and condition.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_workflow_run_fetch_state(
     store: &DbStore,
     owner: &OwnerId,
