@@ -20,3 +20,8 @@ export function memoryStorage(): SecureStorage {
     },
   };
 }
+
+/** expo-secure-store's web module is an empty stub, so persist in memory there. */
+export function storageForOs(os: string, native: SecureStorage): SecureStorage {
+  return os === "web" ? memoryStorage() : native;
+}
