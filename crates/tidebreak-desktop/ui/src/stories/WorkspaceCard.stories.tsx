@@ -1,13 +1,24 @@
+import { useState, type ComponentProps, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, waitFor, within } from "storybook/test";
+import {
+  expect,
+  fireEvent,
+  fn,
+  userEvent,
+  waitFor,
+  within,
+} from "storybook/test";
 import { toast } from "sonner";
 
 import { setEditorPreference } from "@/code/editorPreference";
 import {
+  workspaceBulkCommands,
   workspaceCommands,
   worktreeOpenFailureNotice,
 } from "@/code/workspaceActions";
-import { WorkspaceCard } from "@/code/WorkspaceCard";
+import { WorkspaceCard, WorkspaceStatusMark } from "@/code/WorkspaceCard";
+import type { WorkspaceStatusRank } from "@/code/workspaceCards";
+import { WORKSPACE_STATUS_RANK_LABELS } from "@/code/workspaceCards";
 import { Toaster } from "@/components/ui/sonner";
 import {
   archivedWorkspace,
@@ -67,6 +78,14 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Idle: Story = {};
+
+export const Selected: Story = {
+  args: { selected: true },
+};
+
+export const SelectedAndActive: Story = {
+  args: { selected: true, active: true },
+};
 
 /** A create appears in the rail while the worktree and first session start. */
 export const Creating: Story = {
@@ -607,9 +626,9 @@ export const PullRequestTones: Story = {
 /**
  * The status ramp on one screen, which is the only way to catch a tone drawn
  * at the wrong strength. Read down the glyph rail: working moves, needs-you is
- * the one red, stalled is amber, done is quiet, parked still shows the agent,
- * and merged is purple rather than a second shade of green. Check this in both
- * themes.
+ * the one red, stalled joins needs-you, done is quiet, an empty workspace
+ * still has an outline circle, and merged is purple rather than a second
+ * shade of green. Check this in both themes.
  */
 export const StatusTones: Story = {
   render: (args) => (
@@ -621,6 +640,7 @@ export const StatusTones: Story = {
           ["Stalled", stalledDigest, codeSession, undefined],
           ["Done, unreviewed", doneDigest, idleSession, undefined],
           ["Parked, complete", idleCompleteDigest, grokIdleSession, undefined],
+          ["PR open", undefined, undefined, openPrDigest],
           ["PR merged", undefined, undefined, mergedPrDigest],
           ["No session", undefined, undefined, undefined],
         ] as const
@@ -708,6 +728,203 @@ export const Rail: Story = {
       />
     </div>
   ),
+};
+
+function StatusGroup({
+  rank,
+  count,
+  children,
+}: {
+  rank: WorkspaceStatusRank;
+  count: number;
+  children: ReactNode;
+}) {
+  const label = WORKSPACE_STATUS_RANK_LABELS[rank];
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5 px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90">
+        <WorkspaceStatusMark rank={rank} />
+        <span>
+          {label} · {count}
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** By-status rail: each live rank as a labeled group. */
+export const GroupedByStatus: Story = {
+  render: (args) => (
+    <div className="flex flex-col">
+      <StatusGroup rank="needs_you" count={1}>
+        <WorkspaceCard
+          {...args}
+          workspace={{
+            ...codeWorkspace,
+            id: "ws-a",
+            title: "Needs a decision",
+          }}
+          digest={{ ...needsYouDigest, title: "Needs a decision" }}
+          session={codeSession}
+          commands={workspaceCommands({
+            hasPr: false,
+            archived: false,
+            hasSession: true,
+          })}
+        />
+      </StatusGroup>
+      <StatusGroup rank="running" count={1}>
+        <WorkspaceCard
+          {...args}
+          workspace={{ ...codeWorkspace, id: "ws-b", title: "Turn in flight" }}
+          digest={{ ...runningDigest, title: "Turn in flight" }}
+          session={codeSession}
+          commands={workspaceCommands({
+            hasPr: false,
+            archived: false,
+            hasSession: true,
+          })}
+        />
+      </StatusGroup>
+      <StatusGroup rank="pr_open" count={1}>
+        <WorkspaceCard
+          {...args}
+          workspace={{
+            ...codeWorkspace,
+            id: "ws-c",
+            title: "Shipped, checks green",
+            pr: openPrDigest,
+          }}
+          commands={workspaceCommands({ hasPr: true, archived: false })}
+        />
+      </StatusGroup>
+      <StatusGroup rank="done_unreviewed" count={1}>
+        <WorkspaceCard
+          {...args}
+          workspace={{
+            ...codeWorkspace,
+            id: "ws-d",
+            title: "Parked exploration",
+          }}
+          digest={{ ...idleCompleteDigest, title: "Parked exploration" }}
+          session={grokIdleSession}
+          commands={workspaceCommands({
+            hasPr: false,
+            archived: false,
+            hasSession: true,
+          })}
+        />
+      </StatusGroup>
+      <StatusGroup rank="idle" count={1}>
+        <WorkspaceCard
+          {...args}
+          workspace={{ ...codeWorkspace, id: "ws-e", title: "Empty workspace" }}
+        />
+      </StatusGroup>
+    </div>
+  ),
+};
+
+/** Three selected cards in a Needs you group. */
+export const MultiSelected: Story = {
+  render: (args) => (
+    <StatusGroup rank="needs_you" count={3}>
+      {["Slack integration", "Reasoning effort", "Hosted tidebreak"].map(
+        (title, index) => (
+          <WorkspaceCard
+            {...args}
+            key={title}
+            workspace={{
+              ...codeWorkspace,
+              id: `ws-sel-${index}`,
+              title,
+            }}
+            digest={{ ...needsYouDigest, title }}
+            session={codeSession}
+            selected
+            commands={workspaceBulkCommands(3)}
+            contextMenuLabel="Workspace"
+          />
+        ),
+      )}
+    </StatusGroup>
+  ),
+};
+
+function BulkMenuDemo({
+  args,
+}: {
+  args: ComponentProps<typeof WorkspaceCard>;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const ids = ["ws-bulk-a", "ws-bulk-b"] as const;
+  const bulk = selected.length > 1;
+  return (
+    <div className="flex flex-col gap-0.5 pt-14">
+      {ids.map((id, index) => (
+        <WorkspaceCard
+          {...args}
+          key={id}
+          workspace={{
+            ...codeWorkspace,
+            id,
+            title: index === 0 ? "First workspace" : "Second workspace",
+          }}
+          selected={selected.includes(id)}
+          contextMenuLabel={
+            bulk && selected.includes(id) ? "Workspace" : undefined
+          }
+          commands={
+            bulk && selected.includes(id)
+              ? workspaceBulkCommands(selected.length)
+              : workspaceCommands({ hasPr: false, archived: false })
+          }
+          onSelectPointer={(event) => {
+            if (event.shiftKey || event.metaKey || event.ctrlKey) {
+              setSelected((current) =>
+                current.includes(id)
+                  ? current.filter((item) => item !== id)
+                  : [...current, id],
+              );
+            }
+          }}
+          onMenuOpen={() => {
+            if (!selected.includes(id)) setSelected([id]);
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Cmd-click two cards, then right-click: archive and force-archive with a count. */
+export const BulkMenu: Story = {
+  render: (args) => <BulkMenuDemo args={args} />,
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    const first = await body.findByRole("button", {
+      name: /^First workspace/,
+    });
+    const second = await body.findByRole("button", {
+      name: /^Second workspace/,
+    });
+    fireEvent.click(first, { metaKey: true });
+    fireEvent.click(second, { metaKey: true });
+    await userEvent.pointer({ keys: "[MouseRight]", target: first });
+    await waitFor(() =>
+      expect(
+        body.getByRole("menuitem", { name: "Archive 2 workspaces" }),
+      ).toBeVisible(),
+    );
+    await expect(
+      body.getByRole("menuitem", { name: "Force archive 2 workspaces" }),
+    ).toBeVisible();
+    await expect(body.queryByRole("menuitem", { name: "Rename…" })).toBeNull();
+    await expect(
+      body.queryByRole("menuitem", { name: "New session" }),
+    ).toBeNull();
+  },
 };
 
 /** A local workspace leads with the file manager action in its hover detail. */

@@ -51,16 +51,23 @@ export function stepRailWorkspace(
 }
 
 /**
- * The workspace to open after `leftId` leaves the rail, or `null` for `/code`.
+ * The workspace to open after cards leave the rail, or `null` for `/code`.
  *
  * Archiving the open workspace must not leave the reader on a page the rail
  * no longer draws. The next live card is the replacement; an empty rail falls
- * through to the code home.
+ * through to the code home. Pass every id that left in this pass so a bulk
+ * archive does not land on another card the same pass just archived.
  */
 export function nextWorkspaceAfterLeaving(
   ids: readonly string[],
-  leftId: string,
+  fromId: string,
+  leaving: ReadonlySet<string> = new Set([fromId]),
 ): string | null {
-  const next = stepWorkspaceId(ids, leftId, 1);
-  return next && next !== leftId ? next : null;
+  const remaining = ids.filter((id) => !leaving.has(id));
+  if (remaining.length === 0) return null;
+  const fromIndex = ids.indexOf(fromId);
+  if (fromIndex < 0) return remaining[0] ?? null;
+  return (
+    remaining.find((id) => ids.indexOf(id) > fromIndex) ?? remaining[0] ?? null
+  );
 }

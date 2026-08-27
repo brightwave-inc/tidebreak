@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { workspaceCommands } from "./workspaceActions";
+import { workspaceBulkCommands, workspaceCommands } from "./workspaceActions";
 import { WorkspaceCard } from "./WorkspaceCard";
 import type {
   CodeSessionDigest,
@@ -39,9 +39,14 @@ function renderCard(overrides?: {
   visibleMeta?: { repoChip: boolean; branch: boolean };
   detailDefaultOpen?: boolean;
   canOpenWorktree?: boolean;
+  active?: boolean;
+  selected?: boolean;
+  commands?: ReturnType<typeof workspaceCommands>;
+  contextMenuLabel?: string;
 }) {
   const onOpen = vi.fn();
   const onCommand = vi.fn();
+  const onSelectPointer = vi.fn();
   const merged = {
     ...workspace,
     ...overrides?.workspace,
@@ -53,21 +58,27 @@ function renderCard(overrides?: {
       digest={undefined}
       session={undefined}
       repoName="app"
-      active={false}
+      active={overrides?.active ?? false}
+      selected={overrides?.selected}
       terminalOpen={false}
       density={overrides?.density ?? "detailed"}
       visibleMeta={overrides?.visibleMeta ?? { repoChip: true, branch: false }}
-      commands={workspaceCommands({
-        hasPr: Boolean(overrides?.pr),
-        archived: merged.status === "archived",
-        canOpenWorktree: overrides?.canOpenWorktree,
-      })}
+      commands={
+        overrides?.commands ??
+        workspaceCommands({
+          hasPr: Boolean(overrides?.pr),
+          archived: merged.status === "archived",
+          canOpenWorktree: overrides?.canOpenWorktree,
+        })
+      }
+      contextMenuLabel={overrides?.contextMenuLabel}
       detailDefaultOpen={overrides?.detailDefaultOpen}
       onOpen={onOpen}
+      onSelectPointer={onSelectPointer}
       onCommand={onCommand}
     />,
   );
-  return { onOpen, onCommand };
+  return { onOpen, onCommand, onSelectPointer };
 }
 
 describe("WorkspaceCard", () => {
@@ -263,9 +274,52 @@ describe("WorkspaceCard", () => {
   it("keeps a workspace without a session looking empty", () => {
     renderCard();
 
+    expect(screen.getByLabelText("Idle")).toBeInTheDocument();
     expect(screen.queryByText("Idle")).not.toBeInTheDocument();
     expect(screen.queryByText("Done")).not.toBeInTheDocument();
     expect(screen.queryByTitle("Claude Code")).not.toBeInTheDocument();
+  });
+
+  it("does not open on a modifier click so the rail can select", async () => {
+    const { onOpen, onSelectPointer } = renderCard();
+    const row = screen.getByRole("button", { name: /^Fix login/ });
+    fireEvent.click(row, { metaKey: true });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(onSelectPointer).toHaveBeenCalledTimes(1);
+    fireEvent.click(row);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the active shadow when the open workspace is also selected", () => {
+    renderCard({ selected: true });
+    const selectedOnly = document.querySelector("[data-workspace-card]");
+    expect(selectedOnly).toHaveAttribute("data-selected");
+    expect(selectedOnly).not.toHaveAttribute("data-active");
+    const selectedOnlyClass = selectedOnly?.className ?? "";
+    cleanup();
+
+    renderCard({ selected: true, active: true });
+    const selectedAndActive = document.querySelector("[data-workspace-card]");
+    expect(selectedAndActive).toHaveAttribute("data-selected");
+    expect(selectedAndActive).toHaveAttribute("data-active");
+    expect(selectedAndActive?.className).not.toBe(selectedOnlyClass);
+    expect(selectedAndActive?.className).toContain("shadow-[");
+    expect(selectedOnlyClass).not.toContain("shadow-[");
+  });
+
+  it("names a bulk menu without the single-card commands", async () => {
+    renderCard({
+      selected: true,
+      contextMenuLabel: "Workspace",
+      commands: workspaceBulkCommands(2),
+    });
+    fireEvent.contextMenu(screen.getByRole("button", { name: /^Fix login/ }));
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("Workspace");
+    expect(menu).toHaveTextContent("Archive 2 workspaces");
+    expect(menu).toHaveTextContent("Force archive 2 workspaces");
+    expect(menu).not.toHaveTextContent("Rename");
+    expect(menu).not.toHaveTextContent("New session");
   });
 
   it("keeps a parked agent visible as a completed turn", () => {

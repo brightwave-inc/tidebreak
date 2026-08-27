@@ -17,6 +17,7 @@ import {
   sessionActivityLineLabel,
   sessionRowLabel,
   workspaceCardLabel,
+  workspaceCardStatus,
   workspacePrChipSummary,
   workspaceStackParent,
   workspaceStatusRank,
@@ -322,6 +323,74 @@ describe("workspaceStatusRank", () => {
         digest("ws-a", { lifecycle: "running" }),
       ),
     ).toBe("running");
+  });
+
+  it("ranks stalled and fenced with needs-you", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          attention: {
+            state: { type: "stalled", idle_secs: 90 },
+            source: "heuristic",
+          },
+        }),
+      ),
+    ).toBe("needs_you");
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          attention: {
+            state: { type: "fenced", reason: { type: "orphan_alive" } },
+            source: "structured",
+          },
+        }),
+      ),
+    ).toBe("needs_you");
+  });
+
+  it("ranks an idle session with turns as done, and an empty one as idle", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", { lifecycle: "idle", turn_count: 3 }),
+      ),
+    ).toBe("done_unreviewed");
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", { lifecycle: "idle", turn_count: 0 }),
+      ),
+    ).toBe("idle");
+    expect(workspaceStatusRank(workspace("ws-a", "app"), undefined)).toBe(
+      "idle",
+    );
+  });
+});
+
+describe("workspaceCardStatus", () => {
+  it("pairs each rank with the label and tone the rail paints", () => {
+    expect(
+      workspaceCardStatus(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "an approval is waiting",
+              source: "structured",
+            },
+            source: "structured",
+          },
+        }),
+      ),
+    ).toEqual({ rank: "needs_you", tone: "critical", label: "Needs you" });
+    expect(workspaceCardStatus(workspace("ws-a", "app"), undefined)).toEqual({
+      rank: "idle",
+      tone: "neutral",
+      label: "Idle",
+    });
   });
 });
 

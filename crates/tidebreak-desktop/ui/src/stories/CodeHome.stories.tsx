@@ -99,6 +99,22 @@ function storyClient(scenario: HomeScenario): ApiClient {
       chooses_destination: false,
     }),
     openCodeUpdates: storySocket,
+    getGatewayStatus: async () => ({
+      signed_in: false,
+      model_count: 0,
+      sign_in: { state: "idle" as const },
+    }),
+    getCodeDeliveryRepositories: async () => ({
+      capability: {
+        found: true,
+        authenticated: true,
+        viewer_login: "github",
+        remediation: "",
+      },
+      repositories: [],
+      errors: [],
+      fetched_at: "2026-08-15T00:00:00.000Z",
+    }),
   } as unknown as ApiClient;
 }
 

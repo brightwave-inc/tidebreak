@@ -7,6 +7,7 @@ import type {
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
 import { prCompactStatusLabel, pullRequestLifecycle } from "./prState";
+import type { StatusTone } from "./statusTone";
 
 /**
  * Pure presentation logic for workspace cards: grouping by repo, the state
@@ -126,33 +127,83 @@ export const WORKSPACE_STATUS_RANK_LABELS: Record<WorkspaceStatusRank, string> =
     archived: "Archived",
   };
 
+export const WORKSPACE_STATUS_RANK_TONES: Record<
+  WorkspaceStatusRank,
+  StatusTone
+> = {
+  needs_you: "critical",
+  running: "running",
+  pr_open: "ready",
+  done_unreviewed: "neutral",
+  setup_failed: "warning",
+  idle: "neutral",
+  archived: "neutral",
+};
+
+export function isWorkspaceStatusRank(
+  value: string,
+): value is WorkspaceStatusRank {
+  return (WORKSPACE_STATUS_RANK_ORDER as readonly string[]).includes(value);
+}
+
 /**
  * Rank a workspace for the by-status rail. Needs-you wins, then a running
  * engine, then an open PR, then done-unreviewed, then a workspace whose setup
  * script failed, then idle. Archived is last. A digest may change the rank;
  * viewing or selecting never does.
  *
- * A failed setup ranks below live work because the checkout survives and the
- * engine can still run in it — but above idle, because nothing else on the
- * card says the script never finished.
+ * Stalled and fenced join needs-you so the card mark and the group agree.
+ * Idle or ended sessions with turns join Done, matching
+ * `attentionMarkForDigest`. A failed setup ranks below live work because the
+ * checkout survives — but above idle, because nothing else on the card says
+ * the script never finished.
  */
 export function workspaceStatusRank(
   workspace: CodeWorkspaceSnapshot,
   digest: CodeSessionDigest | undefined,
 ): WorkspaceStatusRank {
   if (isPutAway(workspace)) return "archived";
-  if (digest?.attention.state.type === "needs_you") return "needs_you";
+  const attentionType = digest?.attention.state.type;
+  if (
+    attentionType === "needs_you" ||
+    attentionType === "stalled" ||
+    attentionType === "fenced"
+  ) {
+    return "needs_you";
+  }
   if (digest?.lifecycle === "running") return "running";
   const pr = digest?.pr_state ?? workspace.pr;
   if (pr) {
     const lifecycle = pullRequestLifecycle(pr);
     if (lifecycle === "open" || lifecycle === "draft") return "pr_open";
   }
-  if (digest?.attention.state.type === "done_unreviewed") {
+  if (
+    attentionType === "done_unreviewed" ||
+    (digest !== undefined && digest.turn_count > 0)
+  ) {
     return "done_unreviewed";
   }
   if (workspace.status === "setup_failed") return "setup_failed";
   return "idle";
+}
+
+export type WorkspaceCardStatus = {
+  rank: WorkspaceStatusRank;
+  tone: StatusTone;
+  label: string;
+};
+
+/** The rank, tone, and label the card and by-status headers share. */
+export function workspaceCardStatus(
+  workspace: CodeWorkspaceSnapshot,
+  digest: CodeSessionDigest | undefined,
+): WorkspaceCardStatus {
+  const rank = workspaceStatusRank(workspace, digest);
+  return {
+    rank,
+    tone: WORKSPACE_STATUS_RANK_TONES[rank],
+    label: WORKSPACE_STATUS_RANK_LABELS[rank],
+  };
 }
 
 export type StatusWorkspaceGroup = {

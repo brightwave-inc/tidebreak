@@ -405,6 +405,17 @@ export type CodeUiStore = {
   openFilePending: string | null;
   requestOpenFilePath: (path: string) => void;
   takeOpenFilePath: () => string | null;
+  /**
+   * Ephemeral rail selection. Cmd/Ctrl-click and shift-click write it;
+   * unmodified click, Escape, and a bulk archive clear it. Not persisted.
+   */
+  selectedWorkspaceIds: string[];
+  selectionAnchorId: string | null;
+  replaceWorkspaceSelection: (
+    ids: readonly string[],
+    anchorId: string | null,
+  ) => void;
+  clearWorkspaceSelection: () => void;
 };
 
 /** The header's primary action, as the palette's leading row. */
@@ -473,6 +484,15 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   publishWorkflowSuggestion: (workflowSuggestion) =>
     set({ workflowSuggestion }),
   openFilePending: null,
+  selectedWorkspaceIds: [],
+  selectionAnchorId: null,
+  replaceWorkspaceSelection: (ids, anchorId) =>
+    set({
+      selectedWorkspaceIds: [...ids],
+      selectionAnchorId: anchorId,
+    }),
+  clearWorkspaceSelection: () =>
+    set({ selectedWorkspaceIds: [], selectionAnchorId: null }),
   requestOpenFilePath: (path) => set({ openFilePending: path }),
   takeOpenFilePath: () => {
     const pending = get().openFilePending;
@@ -600,5 +620,7 @@ export function resetCodeUiHostState(): void {
     archivePending: false,
     workflowSuggestion: null,
     openFilePending: null,
+    selectedWorkspaceIds: [],
+    selectionAnchorId: null,
   });
 }

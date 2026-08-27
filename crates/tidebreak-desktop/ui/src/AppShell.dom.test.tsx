@@ -992,7 +992,8 @@ describe("app shell", () => {
     await screen.findByTestId("transcript");
     await waitFor(() => expect(listPendingUserQuestions).toHaveBeenCalled());
 
-    await user.click(screen.getByText("Settings"));
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Settings" }));
     expect(await screen.findByTestId("settings")).toBeInTheDocument();
     // A bare /settings redirects to the first section, so that is where the URL
     // lands rather than on /settings itself.
@@ -1046,7 +1047,8 @@ describe("app shell", () => {
     const user = userEvent.setup();
     const { router } = await mountApp({ at: "/c/chat-1" });
     await screen.findByTestId("transcript");
-    await user.click(screen.getByText("Settings"));
+    await user.click(screen.getByRole("button", { name: "Account menu" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Settings" }));
     await screen.findByTestId("settings");
 
     // Browsing sections must not bury the way out: section hops replace the
