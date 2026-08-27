@@ -2499,6 +2499,9 @@ async fn register_delivery_repository(
 /// request stays pinned to the registered host and repository.
 #[tokio::test]
 async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
+    use tidebreak_core::db::code::save_pull_request_fact;
+    use tidebreak_core::{CodePullRequestFact, CodePullRequestId, CodePullRequestState, OwnerId};
+
     type RecordedActions = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
     let recorded_actions: RecordedActions = Arc::default();
 
@@ -2900,6 +2903,38 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     );
     register_delivery_repository(&client, addr, &token, &root).await;
 
+    // The aggregate starts from the durable identity, then refreshes this
+    // stale row through the borrowed conditional REST transport.
+    let observed = chrono::Utc::now();
+    save_pull_request_fact(
+        &runtime.db,
+        &CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: OwnerId::local(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "demo".into(),
+            number: 17,
+            url: "https://github.com/acme/demo/pull/17".into(),
+            title: "Stored hosted delivery".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: Some("mira-chen".into()),
+            head_branch: "hosted-delivery".into(),
+            base_branch: "main".into(),
+            head_sha: Some("stale".into()),
+            created_at: observed,
+            updated_at: observed,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: observed,
+            last_seen_at: observed,
+            live: None,
+        },
+    )
+    .await
+    .unwrap();
+
     let repositories: serde_json::Value = client
         .get(format!("http://{addr}/code/delivery/repositories"))
         .bearer_auth(&token)
@@ -2937,7 +2972,10 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         .unwrap();
     assert_eq!(pull_requests["items"][0]["number"], 17);
     assert_eq!(pull_requests["items"][0]["in_merge_queue"], true);
-    assert_eq!(pull_requests["items"][0]["comment_count"], 2);
+    assert!(
+        pull_requests["items"][0].get("comment_count").is_none(),
+        "the fact store does not invent list-only comment metadata"
+    );
     assert_eq!(
         pull_requests["items"][0]["checks"][0]["name"],
         "desktop test"

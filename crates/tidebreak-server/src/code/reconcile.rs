@@ -1,13 +1,9 @@
-//! Reconcile sweep: keep pull-request facts fresh and complete (decision 62).
+//! Reconcile sweep: keep stored pull-request facts fresh (decision 66).
 //!
-//! The post-turn detector catches the acts it can see. This sweep owns the
-//! rest: it re-reads every tracked repository through the delivery read path
-//! on its own interval, which refreshes fact snapshots, mints exact-tier
-//! attribution the detector missed (auxiliary terminals, forks landing in
-//! tracked repositories, pushes that became pull requests later), and keeps
-//! `code_repo`'s origin identity current. Fact persistence itself lives on
-//! the delivery read path, so a user-driven page read and a sweep tick do
-//! the same work through the same seam.
+//! Facts are the delivery aggregate. The sweep therefore walks those rows
+//! directly and refreshes only identities whose live tier has aged out,
+//! through the same gated conditional fetcher used by the hot workspace tier.
+//! It never enumerates repositories or performs a pull-request list read.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
@@ -15,16 +11,12 @@ use std::time::Duration;
 
 use tracing::debug;
 
-use tidebreak_core::db::code::{
-    list_fact_repo_identities_all_owners, list_repos_all_owners, set_repo_origin,
-};
+use tidebreak_core::db::code::list_pull_request_facts_all_owners;
 use tidebreak_core::{CodePullRequestFact, CodePullRequestId, CodePullRequestState, OwnerId};
 
-use super::delivery::{query_pull_requests, repository_target_from_local, MAX_REPOSITORIES};
+use super::delivery::refresh_stale_pull_request_facts;
 use super::runtime::CodeRuntime;
-use crate::routes::code::types::{
-    CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestSummary, CodeGitHubRepositoryTarget,
-};
+use crate::routes::code::types::CodeDeliveryPullRequestSummary;
 
 /// Coprime with the 47s watch and 53s trigger sweeps, so three GitHub-reading
 /// sweeps never land on the same tick.
@@ -74,126 +66,41 @@ impl Drop for ReconcileSweepGuard {
     }
 }
 
-/// One reconcile pass: per owner, read every tracked repository through the
-/// delivery path so facts persist and durable links refresh.
+/// One reconcile pass: group every fact row by owner, then refresh only the
+/// stale identities through Delivery's normal transport selection.
 ///
-/// Tracked means a live registered repository whose origin resolves to
-/// GitHub, plus every repository identity that already holds a fact row —
-/// which is how a cross-repo pull request the detector observed keeps
-/// itself fresh without a local checkout.
+/// This is deliberately a row sweep. Repository discovery, fact creation,
+/// attribution, and aggregate projection have their own writers; reconciling
+/// an existing row neither lists repositories nor writes the snapshot back.
 pub(crate) async fn sweep_reconcile(runtime: &Arc<CodeRuntime>) {
-    let mut targets_by_owner: HashMap<String, Vec<CodeGitHubRepositoryTarget>> = HashMap::new();
-
-    match list_repos_all_owners(&runtime.db).await {
-        Ok(repos) => {
-            for repo in repos {
-                if repo.removed_at.is_some() {
-                    continue;
-                }
-                let target = match repository_target_from_local(&repo).await {
-                    Ok(target) => target,
-                    Err(reason) => {
-                        debug!(repo = %repo.id, "reconcile skipped a repository: {reason}");
-                        continue;
-                    }
-                };
-                let stored = (
-                    repo.origin_host.as_deref(),
-                    repo.origin_owner.as_deref(),
-                    repo.origin_name.as_deref(),
-                );
-                if stored
-                    != (
-                        Some(target.host.as_str()),
-                        Some(target.owner.as_str()),
-                        Some(target.name.as_str()),
-                    )
-                {
-                    let _ = set_repo_origin(
-                        &runtime.db,
-                        &repo.owner,
-                        repo.id,
-                        &target.host,
-                        &target.owner,
-                        &target.name,
-                    )
-                    .await;
-                }
-                targets_by_owner
-                    .entry(repo.owner.as_str().to_owned())
-                    .or_default()
-                    .push(target);
-            }
-        }
+    let facts = match list_pull_request_facts_all_owners(&runtime.db).await {
+        Ok(facts) => facts,
         Err(err) => {
-            debug!("reconcile could not list repositories: {err}");
+            debug!("reconcile could not list pull-request facts: {err}");
+            return;
         }
+    };
+    let mut facts_by_owner: HashMap<String, Vec<CodePullRequestFact>> = HashMap::new();
+    for fact in facts
+        .into_iter()
+        .filter(|fact| fact.state == CodePullRequestState::Open)
+    {
+        facts_by_owner
+            .entry(fact.owner.as_str().to_owned())
+            .or_default()
+            .push(fact);
     }
-
-    match list_fact_repo_identities_all_owners(&runtime.db).await {
-        Ok(identities) => {
-            for (owner, host, repo_owner, repo_name) in identities {
-                targets_by_owner
-                    .entry(owner)
-                    .or_default()
-                    .push(CodeGitHubRepositoryTarget {
-                        host,
-                        owner: repo_owner,
-                        name: repo_name,
-                    });
-            }
-        }
-        Err(err) => {
-            debug!("reconcile could not list fact identities: {err}");
-        }
-    }
-
-    for (owner, targets) in targets_by_owner {
+    for (owner, facts) in facts_by_owner {
         let Ok(owner) = OwnerId::new(&owner) else {
             continue;
         };
-        let mut seen = HashSet::new();
-        let mut deduped: Vec<CodeGitHubRepositoryTarget> = targets
-            .into_iter()
-            .filter(|target| {
-                seen.insert(format!(
-                    "{}/{}/{}",
-                    target.host.to_ascii_lowercase(),
-                    target.owner.to_ascii_lowercase(),
-                    target.name.to_ascii_lowercase()
-                ))
-            })
-            .collect();
-        if deduped.len() > MAX_REPOSITORIES {
+        for error in refresh_stale_pull_request_facts(runtime, &owner, &facts).await {
             debug!(
-                dropped = deduped.len() - MAX_REPOSITORIES,
-                "reconcile capped this owner's repository set"
+                owner = %owner,
+                kind = %error.kind,
+                message = %error.message,
+                "reconcile pull-request refresh failed"
             );
-            deduped.truncate(MAX_REPOSITORIES);
-        }
-        if deduped.is_empty() {
-            continue;
-        }
-        let query = CodeDeliveryPullRequestQuery {
-            repositories: deduped,
-            search: None,
-            states: Vec::new(),
-            review_states: Vec::new(),
-            check_states: Vec::new(),
-            authors: Vec::new(),
-            attention_only: false,
-            ready_only: false,
-            tidebreak_linked: None,
-            updated_after: None,
-            cursor: None,
-            limit: Some(1),
-            refresh: false,
-        };
-        // A system path: unregistered fact identities must stay readable, so
-        // the registered-target check is bypassed the way other sweeps do.
-        // Fact persistence and link augmentation happen inside the read.
-        if let Err(err) = query_pull_requests(runtime, &owner, true, query).await {
-            debug!("reconcile read failed: {err:?}");
         }
     }
 }

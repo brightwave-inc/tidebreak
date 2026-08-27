@@ -3548,12 +3548,14 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     use crate::db::code::{
         count_attributed_prs_for_workspace, get_pull_request_fact, get_pull_request_fetch_state,
         insert_pull_request_attribution, list_attributed_facts_for_workspace,
-        list_fact_repo_identities, promote_attribution_to_authored, save_pull_request_fact,
-        set_pull_request_fetch_state, set_pull_request_live_state, PullRequestFetchCondition,
+        list_fact_repo_identities, mark_pull_request_fact_stale, promote_attribution_to_authored,
+        save_pull_request_fact, set_pull_request_fetch_state, set_pull_request_live_state,
+        PullRequestFetchCondition,
     };
 
     let (_dir, store) = temp_store().await;
     let owner = OwnerId::local();
+    let stranger = OwnerId::new("stranger").unwrap();
     let (session_id, _turn_id) = seed_owner(&store, &owner, "facts").await;
     let workspace_id = get_session(&store, &owner, session_id)
         .await
@@ -3678,6 +3680,35 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     assert_eq!(stored_live.merge_state_status.as_deref(), Some("blocked"));
     assert_eq!(stored_live.checks.as_ref().unwrap().len(), 1);
     assert_eq!(stored_live.auto_merge_enabled, Some(true));
+    assert!(
+        !mark_pull_request_fact_stale(&store, &stranger, "github.com", "acme", "tools", 412,)
+            .await
+            .unwrap()
+    );
+    let still_fresh =
+        get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(still_fresh.fact.live.unwrap().observed_at, later);
+    assert_eq!(still_fresh.pull_etag.as_deref(), Some("W/\"pull-2\""));
+    assert!(
+        mark_pull_request_fact_stale(&store, &owner, "github.com", "acme", "tools", 412,)
+            .await
+            .unwrap()
+    );
+    let stale = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stale.fact.live.unwrap().observed_at < later);
+    assert_eq!(stale.pull_etag.as_deref(), Some("W/\"pull-2\""));
+    assert_eq!(stale.checks_etag.as_deref(), Some("W/\"checks-2\""));
+    assert_eq!(stale.reviews_etag.as_deref(), Some("W/\"reviews-2\""));
+    set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
+        .await
+        .unwrap()
+        .unwrap();
     save_pull_request_fact(&store, &refreshed).await.unwrap();
     let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
         .await
@@ -3751,7 +3782,6 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     );
 
     // Another owner sees none of it.
-    let stranger = OwnerId::new("stranger").unwrap();
     assert!(
         get_pull_request_fact(&store, &stranger, "github.com", "acme", "tools", 412)
             .await

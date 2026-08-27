@@ -176,6 +176,43 @@ pub async fn set_pull_request_live_state(
     Ok(Some((id, changed)))
 }
 
+/// Mark one fact's live tier stale without disturbing its conditional
+/// request validators.
+///
+/// Delivery actions call this before their immediate refresh. If that read
+/// cannot complete, the next aggregate or reconcile pass still sees the row
+/// as stale and retries through the gated fetcher. The old live fields stay
+/// available as a fallback projection, while the pull/check/review ETags
+/// remain paired with the representations they validate.
+#[allow(clippy::too_many_arguments)]
+pub async fn mark_pull_request_fact_stale(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    number: u64,
+) -> Result<bool> {
+    let number = i64::try_from(number)
+        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
+    let stale_at = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+        .expect("the Unix epoch is a valid UTC timestamp");
+    let result = entities::code_pull_request::Entity::update_many()
+        .col_expr(
+            entities::code_pull_request::Column::LiveObservedAt,
+            Expr::value(stale_at),
+        )
+        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_pull_request::Column::Host.eq(host))
+        .filter(entities::code_pull_request::Column::RepoOwner.eq(repo_owner))
+        .filter(entities::code_pull_request::Column::RepoName.eq(repo_name))
+        .filter(entities::code_pull_request::Column::Number.eq(number))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// One observed pull request plus the transport hints the conditional
 /// fetcher sends back to the host (decision 66): the ETag each endpoint
 /// last answered with.
@@ -348,11 +385,25 @@ pub async fn list_pull_request_facts(
         .collect()
 }
 
-/// Every distinct repository identity holding at least one fact row.
+/// Every observed pull request across owners, newest first.
 ///
-/// The reconcile sweep reads this to keep cross-repo facts fresh: a
-/// repository discovered through a detected command keeps itself on the
-/// sweep's list without a local checkout.
+/// A system-only read for the reconcile scheduler: each returned fact still
+/// carries its owner, and every subsequent fetch and write must use that
+/// owner. Request paths must use [`list_pull_request_facts`] instead.
+pub async fn list_pull_request_facts_all_owners(
+    store: &DbStore,
+) -> Result<Vec<CodePullRequestFact>> {
+    entities::code_pull_request::Entity::find()
+        .order_by_desc(entities::code_pull_request::Column::UpdatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(fact_from_row)
+        .collect()
+}
+
+/// Every distinct repository identity holding at least one fact row.
 pub async fn list_fact_repo_identities(
     store: &DbStore,
     owner: &OwnerId,
@@ -364,29 +415,6 @@ pub async fn list_fact_repo_identities(
         .column(entities::code_pull_request::Column::RepoName)
         .distinct()
         .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
-        .into_tuple()
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?;
-    Ok(rows)
-}
-
-/// Every distinct `(owner, host, repo_owner, repo_name)` holding at least
-/// one fact row.
-///
-/// A system path, not a request path: the reconcile sweep walks every
-/// tracked repository identity regardless of who observed it, then scopes
-/// each read to the row's owner. Nothing reachable from a route may call it.
-pub async fn list_fact_repo_identities_all_owners(
-    store: &DbStore,
-) -> Result<Vec<(String, String, String, String)>> {
-    let rows: Vec<(String, String, String, String)> = entities::code_pull_request::Entity::find()
-        .select_only()
-        .column(entities::code_pull_request::Column::Owner)
-        .column(entities::code_pull_request::Column::Host)
-        .column(entities::code_pull_request::Column::RepoOwner)
-        .column(entities::code_pull_request::Column::RepoName)
-        .distinct()
         .into_tuple()
         .all(&store.conn)
         .await
