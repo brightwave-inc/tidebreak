@@ -58,7 +58,8 @@ const DIAGNOSTIC_LOG_ENV_VAR: &str = "TIDEBREAK_DIAGNOSTICS_LOG";
 /// `info` for the workspace's own crates, `warn` for dependencies.
 const DEFAULT_DIRECTIVES: &str = "warn,tidebreak_cli=info,tidebreak_code_execution=info,\
     tidebreak_core=info,tidebreak_desktop=info,tidebreak_egress=info,\
-    tidebreak_harness=info,tidebreak_host_broker=info,tidebreak_mcp=info,\
+    tidebreak_harness=info,tidebreak_host_broker=info,tidebreak_managed_node=info,\
+    tidebreak_mcp=info,\
     tidebreak_router=info,tidebreak_sandbox_agent=info,tidebreak_sandbox_protocol=info,\
     tidebreak_server=info,tidebreak_shell_policy=info,tidebreak_whisper=info";
 
