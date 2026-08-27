@@ -5,6 +5,7 @@
 - Owners: Code mode
 - Related: [0009](0009-queued-turns.md),
   [0030](0030-code-mode-separate-surface.md),
+  [0032](0032-code-workspaces-worktrees-checkpoints.md),
   [0050](0050-watch-and-fix-is-a-durable-task.md),
   [0053](0053-code-worktrees-live-in-a-user-visible-root.md)
 
@@ -16,9 +17,16 @@ the rule by keying its live digest map on the workspace alone.
 
 The rule was never about the agent. It was about the checkout. A workspace is
 one git worktree, and two harnesses editing the same files at the same time is
-corruption, not concurrency: they overwrite each other's edits, and their
-per-turn checkpoints race for `.git/index.lock`. Allowing one session was the
-cheapest way to make that impossible.
+corruption, not concurrency: they overwrite each other's edits. That is why
+turns serialize. The lock is also the checkout reservation that makes the
+send-versus-queue split correct, and it keeps host git actions such as
+commit, push, merge, and pull request creation out of a running turn.
+Per-turn checkpoints are not a reason for it. Record 32 writes each snapshot
+through a private temporary index; the worktree's `.git/index` and
+`.git/index.lock` are never opened, and contention on the reusable checkpoint
+index already falls back to a cold private index rather than blocking.
+Allowing one session was the cheapest way to make overlapping edits
+impossible.
 
 It is also the wrong shape for how people work. Running a second agent on the
 same branch — a different harness for a second opinion, a scratch conversation
