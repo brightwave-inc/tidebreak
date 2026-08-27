@@ -7660,11 +7660,8 @@ async fn the_doctor_reports_relay_engines_ready_on_a_hosted_machine() {
 
     let opencode = &report["harnesses"][1];
     assert_eq!(opencode["kind"], "opencode");
-    assert_eq!(opencode["auth_mode"], "hosted_unavailable");
-    assert_eq!(
-        opencode["remediation"],
-        "opencode is not available on hosted machines yet."
-    );
+    assert_eq!(opencode["auth_mode"], "gateway_relay");
+    assert_eq!(opencode["remediation"], "");
 }
 
 /// A session restored at boot comes back supervised. Recovery re-attaches its

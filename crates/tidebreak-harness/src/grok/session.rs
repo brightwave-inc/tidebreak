@@ -30,6 +30,21 @@ use tidebreak_core::{PermissionMode, ReasoningEffort};
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 
+/// Environment key carrying the harness relay key from the server's spawn
+/// wiring. The adapter consumes it here and the reserved-namespace filter
+/// keeps it out of the child's environment: the Grok CLI reads credentials
+/// only from an auth file, so the key travels the last hop inside a
+/// session-scoped 0600 file pointed at by `GROK_AUTH_PATH`.
+const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
+/// The OIDC issuer and client id the relay credential's scope names. Grok
+/// matches an auth entry by `{issuer}::{client_id}` and refuses to start a
+/// headless child without a live-looking one, so the wiring points both at
+/// values this repo controls; a `.invalid` issuer also keeps any stray
+/// refresh attempt from reaching a real endpoint. Pinned against grok
+/// 1.0.4.
+const RELAY_ISSUER: &str = "https://tidebreak.invalid";
+const RELAY_CLIENT_ID: &str = "3b54b149-d08a-494a-b3db-8d255dacea47";
+
 /// Live Grok CLI session: one child per [`HarnessSession::run_turn`].
 pub struct GrokSession {
     spec: SessionSpec,
@@ -41,6 +56,9 @@ pub struct GrokSession {
     prompt_directory: Mutex<Option<PromptDirectory>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
     pid: ChildPid,
+    /// Session-scoped auth file holding the harness relay key, written on
+    /// the first turn of a relay-wired session (decision 71).
+    relay_auth: Mutex<Option<RelayAuthFile>>,
     /// Exit status of a child [`HarnessSession::interrupt`] already reaped.
     reaped: Mutex<Option<ExitStatus>>,
     /// Unrecognized events summed across every turn's parser: each turn is a
@@ -58,24 +76,26 @@ impl GrokSession {
             resume_ref: Mutex::new(resume_ref),
             version,
             prompt_directory: Mutex::new(None),
+            relay_auth: Mutex::new(None),
             child: AsyncMutex::new(None),
             pid: ChildPid::new(),
             reaped: Mutex::new(None),
             unrecognized: AtomicU64::new(0),
         }
     }
-
     fn compose_plan(
         &self,
         prompt_file: &Path,
         turn_model: Option<&str>,
         turn_effort: Option<ReasoningEffort>,
     ) -> Result<LaunchPlan, HarnessError> {
+        let relay_auth = self.relay_auth_file()?;
         compose_print_plan(PrintLaunch {
             binary: &self.spec.binary,
             extra_argv: &self.spec.extra_argv,
             cwd: &self.spec.worktree,
             extra_env: &self.spec.extra_env,
+            relay_auth: relay_auth.as_deref(),
             resume_ref: self.resume_ref.lock().expect("grok resume").as_deref(),
             prompt_file,
             mode: self.permission_mode(),
@@ -97,6 +117,36 @@ impl GrokSession {
         slot.as_ref()
             .expect("grok prompt directory initialized")
             .write(text)
+    }
+
+    /// The path of the session-scoped auth file holding the harness relay
+    /// key, or `None` on a machine whose spawn wiring carried no key.
+    ///
+    /// Grok 1.0.4 refuses to start a headless child without a credential in
+    /// its auth file and presents that credential as the bearer on every
+    /// inference request, so the file is what turns the relay key into the
+    /// child's login. Pinned shapes: the scope names [`RELAY_ISSUER`] and
+    /// [`RELAY_CLIENT_ID`] (the CLI refuses a scope it does not recognize),
+    /// and `auth_mode: "api_key"` plus a `user_id` are the minimum fields a
+    /// credential parses with.
+    fn relay_auth_file(&self) -> Result<Option<std::path::PathBuf>, HarnessError> {
+        let Some((_, key)) = self
+            .spec
+            .extra_env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == RELAY_KEY_ENV)
+        else {
+            return Ok(None);
+        };
+        let mut slot = self.relay_auth.lock().expect("grok relay auth");
+        if let Some(file) = slot.as_ref() {
+            return Ok(Some(file.path.clone()));
+        }
+        let file = RelayAuthFile::new(key)?;
+        let path = file.path.clone();
+        *slot = Some(file);
+        Ok(Some(path))
     }
 }
 
@@ -138,6 +188,61 @@ impl PromptDirectory {
     }
 }
 
+/// Session-private storage for the relay credential file. The `TempDir`
+/// removes the key from disk when the session drops.
+struct RelayAuthFile {
+    #[allow(dead_code)] // held for its drop, which deletes the key file
+    directory: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl RelayAuthFile {
+    fn new(key: &str) -> Result<Self, HarnessError> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("tidebreak-grok-auth-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let directory = builder.tempdir()?;
+        let path = directory.path().join("auth.json");
+        // Grok expires a credential with no `expires_at` 30 days after
+        // `create_time` and refuses one already past its horizon, so the
+        // file states a far one: the key's real lifetime is the relay's
+        // server-side revocation, not this file.
+        let credential = serde_json::json!({
+            format!("{RELAY_ISSUER}::{RELAY_CLIENT_ID}"): {
+                "key": key,
+                "auth_mode": "api_key",
+                "create_time": "2026-01-01T00:00:00Z",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "user_id": "tidebreak",
+            },
+        });
+        let mut file_builder = tempfile::Builder::new();
+        file_builder.prefix("auth-").suffix(".json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file_builder.permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        let mut file = file_builder.tempfile_in(directory.path())?;
+        file.as_file_mut()
+            .write_all(credential.to_string().as_bytes())?;
+        file.as_file_mut().flush()?;
+        file.persist(&path).map_err(|error| {
+            HarnessError::Other(format!("could not place the grok relay auth file: {error}"))
+        })?;
+        Ok(Self { directory, path })
+    }
+
+    #[cfg(test)]
+    fn directory_path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
 /// Deletes the prompt file on every Rust exit path, including cancellation
 /// and panic unwinding.
 struct PromptFile {
@@ -156,6 +261,9 @@ pub(crate) struct PrintLaunch<'a> {
     pub extra_argv: &'a [String],
     pub cwd: &'a Path,
     pub extra_env: &'a [(String, String)],
+    /// Session-scoped auth file holding the harness relay key. `None` on a
+    /// machine whose spawn wiring carried no key.
+    pub relay_auth: Option<&'a Path>,
     pub resume_ref: Option<&'a str>,
     pub prompt_file: &'a Path,
     pub mode: PermissionMode,
@@ -220,7 +328,17 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     }
     argv.extend(launch.extra_argv.iter().cloned());
     let mut env = launch.extra_env.to_vec();
-    env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
+    env.retain(|(key, _)| {
+        !BrowserChannelSpec::is_reserved_env_key(key) && key != RELAY_KEY_ENV && key != "PWD"
+    });
+    // The relay key itself was consumed into `relay_auth` and the retain
+    // above stripped its variable; the child learns only where the file is
+    // and which issuer scope it names.
+    if let Some(auth) = launch.relay_auth {
+        env.push(("GROK_AUTH_PATH".into(), auth.to_string_lossy().into_owned()));
+        env.push(("GROK_OAUTH2_ISSUER".into(), RELAY_ISSUER.into()));
+        env.push(("GROK_OAUTH2_CLIENT_ID".into(), RELAY_CLIENT_ID.into()));
+    }
     let policy = match launch.mode {
         PermissionMode::Allow => BypassPolicy::Permitted,
         PermissionMode::Plan | PermissionMode::Ask | PermissionMode::Auto => {
@@ -546,6 +664,83 @@ where
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn relay_wiring_moves_the_key_into_an_auth_file_and_points_the_env_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let plan = compose_print_plan(PrintLaunch {
+            binary: std::path::Path::new("/usr/bin/grok"),
+            extra_argv: &[],
+            cwd: dir.path(),
+            extra_env: &[
+                ("TIDEBREAK_LLM_KEY".to_owned(), "tbreak_hl_k".to_owned()),
+                (
+                    "GROK_MODELS_BASE_URL".to_owned(),
+                    "http://127.0.0.1:1/code/llm/openai/v1".to_owned(),
+                ),
+            ],
+            relay_auth: Some(&auth_path),
+            resume_ref: None,
+            prompt_file: &dir.path().join("prompt.txt"),
+            mode: PermissionMode::Auto,
+            model: None,
+            effort: None,
+        })
+        .unwrap();
+
+        let env: std::collections::HashMap<_, _> = plan.env.into_iter().collect();
+        assert_eq!(
+            env.get("GROK_AUTH_PATH").map(String::as_str),
+            Some(auth_path.to_str().unwrap()),
+            "the child reads credentials only from the file: {:?}",
+            env
+        );
+        assert_eq!(
+            env.get("GROK_OAUTH2_ISSUER").map(String::as_str),
+            Some(RELAY_ISSUER)
+        );
+        assert_eq!(
+            env.get("GROK_OAUTH2_CLIENT_ID").map(String::as_str),
+            Some(RELAY_CLIENT_ID)
+        );
+        assert_eq!(
+            env.get("GROK_MODELS_BASE_URL").map(String::as_str),
+            Some("http://127.0.0.1:1/code/llm/openai/v1")
+        );
+        assert!(
+            !env.contains_key("TIDEBREAK_LLM_KEY"),
+            "the relay key never reaches the child's environment: {:?}",
+            env
+        );
+    }
+
+    #[test]
+    fn relay_auth_file_carries_the_key_under_the_wired_scope() {
+        let file = RelayAuthFile::new("tbreak_hl_k").unwrap();
+        let raw = std::fs::read_to_string(&file.path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &value[format!("{RELAY_ISSUER}::{RELAY_CLIENT_ID}")];
+        assert_eq!(entry["key"], "tbreak_hl_k");
+        assert_eq!(entry["auth_mode"], "api_key");
+        assert_eq!(entry["user_id"], "tidebreak");
+
+        let path = file.path.clone();
+        let directory = file.directory_path().to_owned();
+        drop(file);
+        assert!(!path.exists(), "the key leaves disk with the session");
+        assert!(!directory.join("auth.json").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn relay_auth_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file = RelayAuthFile::new("tbreak_hl_k").unwrap();
+        let mode = std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "the relay key file is 0600");
+    }
 
     fn spec(bridge: &str) -> BrowserChannelSpec {
         BrowserChannelSpec::new(

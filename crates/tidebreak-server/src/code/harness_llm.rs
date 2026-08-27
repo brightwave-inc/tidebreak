@@ -54,6 +54,9 @@ pub(crate) enum RelayEndpoint {
     AnthropicMessages,
     /// OpenAI Responses, spoken by Codex.
     OpenAiResponses,
+    /// The OpenAI-compatible model listing, prefetched by Grok's custom
+    /// models endpoint.
+    OpenAiModels,
 }
 
 impl RelayEndpoint {
@@ -61,6 +64,7 @@ impl RelayEndpoint {
         match self {
             Self::AnthropicMessages => "/compat/anthropic/v1/messages",
             Self::OpenAiResponses => "/compat/openai/v1/responses",
+            Self::OpenAiModels => "/compat/openai/v1/models",
         }
     }
 
@@ -72,7 +76,7 @@ impl RelayEndpoint {
                 "type": "error",
                 "error": { "type": kind, "message": message },
             }),
-            Self::OpenAiResponses => serde_json::json!({
+            Self::OpenAiResponses | Self::OpenAiModels => serde_json::json!({
                 "error": { "type": kind, "message": message, "param": null, "code": null },
             }),
         };
@@ -144,12 +148,50 @@ impl HarnessLlmRelay {
             .cloned()
     }
 
-    /// Authenticate one relayed request and stream it through to the
-    /// gateway's compat endpoint with a fresh on-behalf-of token.
+    /// Authenticate one relayed request and exchange the caller's live
+    /// machine-bound token for a fresh inference token.
     ///
     /// Refusals are 401 with the vendor's authentication shape so the
     /// engine fails the turn fast instead of retrying; a gateway that does
     /// not answer is 502 so the engine's own retry policy applies.
+    async fn exchange(
+        &self,
+        endpoint: RelayEndpoint,
+        headers: &HeaderMap,
+    ) -> Result<String, Response> {
+        let Some(key) = relay_key(headers) else {
+            return Err(endpoint.error_response(
+                StatusCode::UNAUTHORIZED,
+                "authentication_error",
+                "missing harness relay key",
+            ));
+        };
+        let Some(subject) = self.subject_for_key(key) else {
+            return Err(endpoint.error_response(
+                StatusCode::UNAUTHORIZED,
+                "authentication_error",
+                "unknown or revoked harness relay key",
+            ));
+        };
+        match self.obo.bearer_for(&subject.owner).await {
+            Ok(token) => Ok(token),
+            Err(error @ (AgentError::SignInRequired(_) | AgentError::InvalidTarget(_))) => {
+                Err(endpoint.error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "authentication_error",
+                    &error.to_string(),
+                ))
+            }
+            Err(error) => Err(endpoint.error_response(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                &format!("the Model Gateway did not answer the token exchange: {error}"),
+            )),
+        }
+    }
+
+    /// Stream one relayed inference request through to the gateway's compat
+    /// endpoint with a fresh on-behalf-of token.
     pub(crate) async fn forward(
         &self,
         endpoint: RelayEndpoint,
@@ -157,36 +199,9 @@ impl HarnessLlmRelay {
         query: Option<String>,
         body: axum::body::Body,
     ) -> Response {
-        let Some(key) = relay_key(headers) else {
-            return endpoint.error_response(
-                StatusCode::UNAUTHORIZED,
-                "authentication_error",
-                "missing harness relay key",
-            );
-        };
-        let Some(subject) = self.subject_for_key(key) else {
-            return endpoint.error_response(
-                StatusCode::UNAUTHORIZED,
-                "authentication_error",
-                "unknown or revoked harness relay key",
-            );
-        };
-        let token = match self.obo.bearer_for(&subject.owner).await {
+        let token = match self.exchange(endpoint, headers).await {
             Ok(token) => token,
-            Err(error @ (AgentError::SignInRequired(_) | AgentError::InvalidTarget(_))) => {
-                return endpoint.error_response(
-                    StatusCode::UNAUTHORIZED,
-                    "authentication_error",
-                    &error.to_string(),
-                );
-            }
-            Err(error) => {
-                return endpoint.error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    &format!("the Model Gateway did not answer the token exchange: {error}"),
-                );
-            }
+            Err(response) => return response,
         };
 
         let mut url = format!(
@@ -237,6 +252,105 @@ impl HarnessLlmRelay {
                 )
             })
     }
+
+    /// Relay the gateway's OpenAI-compatible model listing, tagging each
+    /// row with the backend this relay serves it through.
+    ///
+    /// Grok defaults a model prefetched from a custom models endpoint to
+    /// its chat-completions backend, which neither this relay nor the
+    /// gateway speaks; the `api_backend` row member is the extension it
+    /// honors to pick the Responses backend instead. Every other client
+    /// ignores unknown members — the gateway's own listing already carries
+    /// additive fields for the same reason. The listing is a bounded JSON
+    /// document, so this buffers rather than streams.
+    pub(crate) async fn forward_models(
+        &self,
+        endpoint: RelayEndpoint,
+        headers: &HeaderMap,
+    ) -> Response {
+        let token = match self.exchange(endpoint, headers).await {
+            Ok(token) => token,
+            Err(response) => return response,
+        };
+        let url = format!(
+            "{}{}",
+            self.obo.gateway_base_url(),
+            endpoint.upstream_path()
+        );
+        let upstream = match self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                return endpoint.error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &format!("the Model Gateway is unreachable: {error}"),
+                );
+            }
+        };
+        let status = upstream.status();
+        let body = match upstream.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                return endpoint.error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &format!("could not read the gateway model listing: {error}"),
+                );
+            }
+        };
+        if !status.is_success() {
+            return Response::builder()
+                .status(status)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap_or_else(|error| {
+                    endpoint.error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        &format!("could not relay the gateway model listing: {error}"),
+                    )
+                });
+        }
+        let mut listing: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(listing) => listing,
+            Err(error) => {
+                return endpoint.error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &format!("the gateway model listing is not valid JSON: {error}"),
+                );
+            }
+        };
+        let Some(rows) = listing.get_mut("data").and_then(|data| data.as_array_mut()) else {
+            return endpoint.error_response(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "the gateway model listing has no data array",
+            );
+        };
+        for row in rows {
+            if let Some(object) = row.as_object_mut() {
+                object.insert("api_backend".to_owned(), "responses".into());
+            }
+        }
+        Response::builder()
+            .status(status)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(listing.to_string()))
+            .unwrap_or_else(|error| {
+                endpoint.error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &format!("could not relay the gateway model listing: {error}"),
+                )
+            })
+    }
 }
 
 /// The argv and environment that point one engine child at the relay.
@@ -245,7 +359,13 @@ impl HarnessLlmRelay {
 /// Codex takes a custom model provider on the command line; the custom
 /// provider also keeps it off its websocket transport, whose vendor-only
 /// endpoint produced the reconnect noise hosted sessions logged. Opencode
-/// and Grok have no relay wiring yet and launch unchanged.
+/// takes a provider override through its JSON config environment variable —
+/// one entry per protocol the relay serves, so any session model under
+/// those providers rides the caller's grant. Grok takes a custom models
+/// endpoint plus the relay key itself; its CLI reads credentials only from
+/// an auth file, so the grok adapter materializes the key as a
+/// session-scoped `GROK_AUTH_PATH` file and strips the variable from the
+/// child's environment.
 pub(crate) fn spawn_wiring(
     kind: HarnessKind,
     loopback_base: &str,
@@ -278,7 +398,23 @@ pub(crate) fn spawn_wiring(
             ],
             vec![("TIDEBREAK_LLM_KEY".into(), key.to_owned())],
         ),
-        HarnessKind::Opencode | HarnessKind::Grok => (Vec::new(), Vec::new()),
+        HarnessKind::Opencode => (
+            Vec::new(),
+            vec![(
+                "OPENCODE_CONFIG_CONTENT".into(),
+                opencode_relay_config(base, key),
+            )],
+        ),
+        HarnessKind::Grok => (
+            Vec::new(),
+            vec![
+                ("TIDEBREAK_LLM_KEY".into(), key.to_owned()),
+                (
+                    "GROK_MODELS_BASE_URL".into(),
+                    format!("{base}/code/llm/openai/v1"),
+                ),
+            ],
+        ),
     }
 }
 
@@ -289,7 +425,51 @@ pub(crate) fn spawn_wiring(
 /// sign-in and an uncovered one cannot run at all; everywhere else the local
 /// probe decides, and this answer does not matter.
 pub(crate) fn relay_covered(kind: HarnessKind) -> bool {
-    matches!(kind, HarnessKind::ClaudeCode | HarnessKind::Codex)
+    matches!(
+        kind,
+        HarnessKind::ClaudeCode | HarnessKind::Codex | HarnessKind::Opencode | HarnessKind::Grok
+    )
+}
+
+/// Opencode's provider override: one entry per protocol the relay serves.
+///
+/// `OPENCODE_CONFIG_CONTENT` is the JSON config object the CLI merges over
+/// its file config, and `options` is the base-URL and key surface every
+/// catalog provider accepts. The Anthropic loader posts `{baseURL}/messages`
+/// with the key as `x-api-key`; the OpenAI loader posts `{baseURL}/responses`
+/// with the key as bearer. `model-gateway` is not a catalog provider — the
+/// adapter maps vendor-neutral gateway model ids (deepseek, glm, kimi, ...)
+/// to it — so the entry names the OpenAI loader itself: without `npm` the
+/// CLI falls back to its OpenAI-compatible loader and posts
+/// `{baseURL}/chat/completions`, which neither this relay nor the gateway
+/// serves. Non-reasoning OpenAI models would also go to chat completions —
+/// pinned against opencode 1.18.x.
+fn opencode_relay_config(base: &str, key: &str) -> String {
+    serde_json::json!({
+        "provider": {
+            "anthropic": {
+                "options": {
+                    "baseURL": format!("{base}/code/llm/anthropic/v1"),
+                    "apiKey": key,
+                },
+            },
+            "openai": {
+                "options": {
+                    "baseURL": format!("{base}/code/llm/openai/v1"),
+                    "apiKey": key,
+                },
+            },
+            "model-gateway": {
+                "name": "Model Gateway",
+                "npm": "@ai-sdk/openai",
+                "options": {
+                    "baseURL": format!("{base}/code/llm/openai/v1"),
+                    "apiKey": key,
+                },
+            },
+        },
+    })
+    .to_string()
 }
 
 fn generate_key() -> String {
@@ -408,6 +588,18 @@ mod tests {
                     }))
                 }),
             )
+            .route(
+                "/compat/openai/v1/models",
+                axum::routing::get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [
+                            {"id": "glm-5.3", "object": "model", "created": 0, "owned_by": "model-gateway"},
+                            {"id": "grok-4.5", "object": "model", "created": 0, "owned_by": "model-gateway"},
+                        ]
+                    }))
+                }),
+            )
             .route("/compat/anthropic/v1/messages", post(seen))
             .route("/compat/openai/v1/responses", post(seen));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -448,10 +640,50 @@ mod tests {
         assert!(argv.contains(&"model_providers.tidebreak.wire_api=responses".to_owned()));
         assert!(argv.contains(&"model_provider=tidebreak".to_owned()));
 
-        for kind in [HarnessKind::Opencode, HarnessKind::Grok] {
-            let (argv, env) = spawn_wiring(kind, "http://0.0.0.0:8080", "k3");
-            assert!(argv.is_empty() && env.is_empty(), "{kind:?} is unchanged");
-        }
+        let (argv, env) = spawn_wiring(HarnessKind::Opencode, "http://0.0.0.0:8080", "k3");
+        assert!(argv.is_empty());
+        assert_eq!(env.len(), 1, "one config override: {env:?}");
+        let (name, config) = &env[0];
+        assert_eq!(name, "OPENCODE_CONFIG_CONTENT");
+        let config: serde_json::Value = serde_json::from_str(config).unwrap();
+        assert_eq!(
+            config["provider"]["anthropic"]["options"]["baseURL"],
+            "http://0.0.0.0:8080/code/llm/anthropic/v1",
+            "the Anthropic loader posts {{baseURL}}/messages: {config}"
+        );
+        assert_eq!(config["provider"]["anthropic"]["options"]["apiKey"], "k3",);
+        assert_eq!(
+            config["provider"]["openai"]["options"]["baseURL"],
+            "http://0.0.0.0:8080/code/llm/openai/v1",
+            "the OpenAI loader posts {{baseURL}}/responses: {config}"
+        );
+        assert_eq!(config["provider"]["openai"]["options"]["apiKey"], "k3");
+        assert_eq!(
+            config["provider"]["model-gateway"]["options"]["baseURL"],
+            "http://0.0.0.0:8080/code/llm/openai/v1",
+            "provider-neutral gateway models use the model-gateway provider: {config}"
+        );
+        assert_eq!(
+            config["provider"]["model-gateway"]["options"]["apiKey"],
+            "k3"
+        );
+        assert_eq!(
+            config["provider"]["model-gateway"]["npm"], "@ai-sdk/openai",
+            "without a loader the CLI defaults to its OpenAI-compatible one and posts \
+             chat completions, which the relay does not serve: {config}"
+        );
+        let (argv, env) = spawn_wiring(HarnessKind::Grok, "http://0.0.0.0:8080/", "k4");
+        assert!(argv.is_empty());
+        assert_eq!(
+            env,
+            vec![
+                ("TIDEBREAK_LLM_KEY".to_owned(), "k4".to_owned()),
+                (
+                    "GROK_MODELS_BASE_URL".to_owned(),
+                    "http://0.0.0.0:8080/code/llm/openai/v1".to_owned()
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -569,5 +801,50 @@ mod tests {
         let (status, text) = read_text(response).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(text.contains("api_error"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn forward_models_tags_every_row_with_the_responses_backend() {
+        let obo = fake_gateway().await;
+        obo.record_caller(&owner("thet"), Arc::from("mg_at_live"));
+        let relay = HarnessLlmRelay::new(obo);
+        let key = relay.issue(subject_for("thet"));
+
+        let response = relay
+            .forward_models(RelayEndpoint::OpenAiModels, &bearer_headers(&key))
+            .await;
+        let (status, text) = read_text(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let listing: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rows = listing["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(
+                row["api_backend"], "responses",
+                "Grok defaults a prefetched row to chat_completions, which the relay does not serve: {row}"
+            );
+        }
+        assert_eq!(rows[0]["id"], "glm-5.3");
+        assert!(
+            !text.contains(&key),
+            "child credentials never reach the gateway: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_models_refuses_an_unknown_key() {
+        let relay = HarnessLlmRelay::new(fake_gateway().await);
+        let response = relay
+            .forward_models(
+                RelayEndpoint::OpenAiModels,
+                &bearer_headers("tbreak_hl_not-issued"),
+            )
+            .await;
+        let (status, text) = read_text(response).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            text.contains("authentication_error") && text.contains("\"error\""),
+            "the OpenAI error shape: {text}"
+        );
     }
 }
