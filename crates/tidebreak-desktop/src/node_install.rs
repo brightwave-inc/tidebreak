@@ -57,7 +57,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tauri::AppHandle;
-use tidebreak_code_execution::managed_node::{
+use tidebreak_managed_node::{
     current_managed_node_pin, managed_node_executable, managed_node_install_marker,
     managed_node_marker_path, managed_node_root as verified_managed_node_root,
     managed_node_version_dir, managed_npm_executable, MANAGED_NODE_VERSION,

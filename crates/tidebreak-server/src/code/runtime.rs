@@ -912,7 +912,7 @@ impl CodeRuntime {
                     .managed_root(tidebreak_code_execution::HostDep::Node)
                     .await
             }
-            None => tidebreak_code_execution::managed_node::managed_node_root(&self.data_dir),
+            None => tidebreak_managed_node::managed_node_root(&self.data_dir),
         };
         let probe = adapter.probe(&host).await;
         self.probes
@@ -974,7 +974,7 @@ impl CodeRuntime {
                 )
                 .await
             }
-            None => tidebreak_code_execution::managed_node::managed_node_root(&self.data_dir)
+            None => tidebreak_managed_node::managed_node_root(&self.data_dir)
                 .ok_or_else(|| {
                     "the verified managed Node runtime is not installed in this Tidebreak data directory"
                         .to_owned()
@@ -6425,7 +6425,7 @@ mod managed_node_wait_tests {
     #[tokio::test]
     async fn headless_runtime_reuses_a_verified_node_for_an_existing_pinned_harness() {
         use std::os::unix::fs::PermissionsExt as _;
-        use tidebreak_code_execution::managed_node::{
+        use tidebreak_managed_node::{
             current_managed_node_pin, managed_node_install_marker, managed_node_marker_path,
             managed_node_version_dir,
         };

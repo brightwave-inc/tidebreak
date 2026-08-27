@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tidebreak_code_execution::managed_node::{
+use tidebreak_core::HarnessKind;
+use tidebreak_managed_node::{
     managed_node_executable, managed_node_path_dir, managed_npm_executable,
 };
-use tidebreak_core::HarnessKind;
 use tokio::process::Command;
 use tokio::time::timeout;
 
