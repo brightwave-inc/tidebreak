@@ -383,19 +383,34 @@ async fn observe_login(
         .await
         .ok()?
         .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("");
-    if line.starts_with("Logged in") {
-        Some(true)
-    } else if line.starts_with("Not logged in") {
-        Some(false)
-    } else {
-        None
+    login_status_from_output(&output.stdout, &output.stderr)
+}
+
+/// The first status-shaped line from either stream, stdout first.
+///
+/// The pinned 0.147 writes the status line to stderr under the probe's spawn
+/// shape (null stdin, piped stdout), so neither stream alone is authoritative:
+/// a stdout-only read reported "not observed" on signed-in machines. A
+/// non-status first line on one stream does not hide a status line on the
+/// other.
+fn login_status_from_output(stdout: &[u8], stderr: &[u8]) -> Option<bool> {
+    let first_line = |bytes: &[u8]| -> String {
+        let text = String::from_utf8_lossy(bytes);
+        text.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("")
+            .to_owned()
+    };
+    for line in [first_line(stdout), first_line(stderr)] {
+        if line.starts_with("Logged in") {
+            return Some(true);
+        }
+        if line.starts_with("Not logged in") {
+            return Some(false);
+        }
     }
+    None
 }
 
 #[cfg(test)]
@@ -780,6 +795,44 @@ mod tests {
         assert_eq!(normalize_codex_version("codex-cli 0.147.0"), "0.147.0");
         assert_eq!(normalize_codex_version("codex-cli v0.147.0"), "0.147.0");
         assert_eq!(normalize_codex_version("0.147.0"), "0.147.0");
+    }
+
+    #[test]
+    fn login_status_reads_the_stream_the_cli_writes() {
+        // The pinned 0.147 writes `login status` to stderr when stdin is not
+        // a terminal — the probe's spawn shape — so a stdout-only read
+        // reported "not observed" on signed-in machines.
+        assert_eq!(
+            login_status_from_output(b"", b"Logged in using ChatGPT\n"),
+            Some(true)
+        );
+        assert_eq!(
+            login_status_from_output(b"", b"Not logged in\n"),
+            Some(false)
+        );
+        assert_eq!(
+            login_status_from_output(b"Logged in using ChatGPT\n", b""),
+            Some(true)
+        );
+        assert_eq!(
+            login_status_from_output(b"Not logged in\n", b""),
+            Some(false)
+        );
+        // stdout stays authoritative when both streams answer.
+        assert_eq!(
+            login_status_from_output(b"Not logged in\n", b"Logged in\n"),
+            Some(false)
+        );
+        // A non-status first line on one stream does not hide the other's.
+        assert_eq!(
+            login_status_from_output(b"warning: update available\n", b"Logged in using ChatGPT\n"),
+            Some(true)
+        );
+        assert_eq!(login_status_from_output(b"", b""), None);
+        assert_eq!(
+            login_status_from_output(b"something else\n", b"also something\n"),
+            None
+        );
     }
 
     #[test]
