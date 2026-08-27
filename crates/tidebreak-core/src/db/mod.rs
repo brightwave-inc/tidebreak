@@ -2610,6 +2610,45 @@ impl Store for DbStore {
         ops::inbox::list_inbox_items(self, owner).await
     }
 
+    async fn record_work_turn_notification(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        kind: crate::NotificationKind,
+    ) -> Result<Option<crate::Notification>> {
+        ops::notification::record_work_turn_notification(self, chat_id, turn_id, kind).await
+    }
+
+    async fn list_notifications_scoped(
+        &self,
+        owner: &OwnerId,
+        cursor: Option<crate::NotificationListCursor>,
+        limit: u64,
+    ) -> Result<Vec<crate::Notification>> {
+        ops::notification::list_notifications(self, owner, cursor, limit).await
+    }
+
+    async fn unread_notification_count_scoped(&self, owner: &OwnerId) -> Result<u64> {
+        ops::notification::unread_notification_count(self, owner).await
+    }
+
+    async fn mark_notifications_read_scoped(
+        &self,
+        owner: &OwnerId,
+        ids: &[crate::NotificationId],
+        read_at: chrono::DateTime<Utc>,
+    ) -> Result<u64> {
+        ops::notification::mark_notifications_read(self, owner, ids, read_at).await
+    }
+
+    async fn mark_all_notifications_read_scoped(
+        &self,
+        owner: &OwnerId,
+        read_at: chrono::DateTime<Utc>,
+    ) -> Result<u64> {
+        ops::notification::mark_all_notifications_read(self, owner, read_at).await
+    }
+
     async fn chat_attention_scoped(
         &self,
         owner: &OwnerId,

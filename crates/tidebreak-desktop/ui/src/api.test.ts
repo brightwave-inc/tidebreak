@@ -4,6 +4,7 @@ import {
   archiveForceKind,
   HttpError,
   parseAgentActivityHistory,
+  parseAgentNotificationPage,
   parseAgentRunTaskPlan,
   parseFolderAccessRequest,
   parseInboxEntry,
@@ -241,6 +242,69 @@ describe("inbox entries", () => {
       parseInboxEntry({
         ...chatEntry,
         items: [{ ...item, questions: [{ question: "private" }] }],
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("agent notifications", () => {
+  const notification = {
+    id: "notification-1",
+    kind: "agent_completed",
+    title: "Fix the updater finished",
+    context: {
+      surface: "code",
+      session_id: "session-1",
+      workspace_id: "workspace-1",
+    },
+    created_at: "2026-08-26T18:00:00Z",
+  };
+
+  it("accepts the bounded notification page", () => {
+    expect(
+      parseAgentNotificationPage({
+        notifications: [notification],
+        next_cursor: "cursor-1",
+      }),
+    ).toEqual({
+      notifications: [
+        {
+          id: "notification-1",
+          kind: "agent_completed",
+          title: "Fix the updater finished",
+          context: {
+            surface: "code",
+            sessionId: "session-1",
+            workspaceId: "workspace-1",
+          },
+          createdAt: "2026-08-26T18:00:00Z",
+          readAt: null,
+        },
+      ],
+      nextCursor: "cursor-1",
+    });
+  });
+
+  it("rejects unknown kinds, context detail, and extra page fields", () => {
+    expect(
+      parseAgentNotificationPage({
+        notifications: [{ ...notification, kind: "agent_started" }],
+      }),
+    ).toBeNull();
+    expect(
+      parseAgentNotificationPage({
+        notifications: [
+          {
+            ...notification,
+            context: { ...notification.context, worktree_path: "/private" },
+          },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      parseAgentNotificationPage({
+        notifications: [notification],
+        unread: 1,
       }),
     ).toBeNull();
   });

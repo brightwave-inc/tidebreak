@@ -7,6 +7,7 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
 use crate::code::CodeSessionId;
 use crate::error::{AgentError, Result};
+use crate::OwnerId;
 
 use super::super::{entities, store_err};
 
@@ -35,6 +36,28 @@ pub use trigger::*;
 pub use turn::*;
 pub use watch::*;
 pub use workspace::*;
+
+/// Insert a Code notification when an interactive session turn settles.
+pub async fn record_code_turn_notification(
+    store: &super::super::DbStore,
+    owner: &OwnerId,
+    session_id: crate::code::CodeSessionId,
+    workspace_id: crate::code::WorkspaceId,
+    turn_id: crate::code::CodeTurnId,
+    workspace_title: Option<&str>,
+    kind: crate::NotificationKind,
+) -> crate::error::Result<crate::Notification> {
+    super::notification::record_code_turn_notification(
+        store,
+        owner,
+        session_id,
+        workspace_id,
+        turn_id,
+        workspace_title,
+        kind,
+    )
+    .await
+}
 
 /// Typed journal-append failure. A stale spawn epoch is a distinct variant so
 /// a superseded worker cannot be mistaken for a generic store error.

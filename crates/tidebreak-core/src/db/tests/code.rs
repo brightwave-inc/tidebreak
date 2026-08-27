@@ -8,17 +8,17 @@ use crate::code::{
 };
 use crate::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
-    begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change, claim_approval,
-    clear_session_harness_resume_ref, confirm_permission_mode_change, delete_queued_turn,
-    delete_session_queued_turns, discard_permission_mode_change, enqueue_queued_turn,
-    fence_permission_mode_change, get_approval, get_repo, get_repo_by_root_path, get_session,
-    get_turn, get_workspace, insert_approval, insert_approval_for_worker, insert_repo,
-    insert_session, insert_turn, insert_workspace, list_approvals, list_events,
-    list_pending_permission_mode_changes, list_queued_turns, list_repos, list_sessions,
-    list_turn_metrics, list_turns, mark_repo_removed, promote_queued_turn, queue_paused,
-    queued_turn_head, recover_interrupted_session, replace_session_attention,
-    replace_session_execution_settings, save_session, save_turn, set_queue_paused,
-    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
+    append_event_with_notification, begin_permission_mode_change, bump_spawn_epoch,
+    cancel_permission_mode_change, claim_approval, clear_session_harness_resume_ref,
+    confirm_permission_mode_change, delete_queued_turn, delete_session_queued_turns,
+    discard_permission_mode_change, enqueue_queued_turn, fence_permission_mode_change,
+    get_approval, get_repo, get_repo_by_root_path, get_session, get_turn, get_workspace,
+    insert_approval, insert_approval_for_worker, insert_repo, insert_session, insert_turn,
+    insert_workspace, list_approvals, list_events, list_pending_permission_mode_changes,
+    list_queued_turns, list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
+    promote_queued_turn, queue_paused, queued_turn_head, recover_interrupted_session,
+    replace_session_attention, replace_session_execution_settings, save_session, save_turn,
+    set_queue_paused, set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
     set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
     CodeJournalError, CodeSessionExecutionSettings, MAX_REPLAY_EVENTS,
 };
@@ -1300,6 +1300,38 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let event = CodeEvent::TurnCompleted {
+        usage: Default::default(),
+        checkpoint: None,
+    };
+
+    append_event_with_notification(&store, &owner, session_id, 0, turn_id, &event)
+        .await
+        .unwrap();
+
+    let notifications = store
+        .list_notifications_scoped(&owner, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title, "first finished");
+    assert_eq!(
+        notifications[0].context,
+        crate::NotificationContext::Code {
+            session_id,
+            workspace_id: get_session(&store, &owner, session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .workspace_id,
+        }
+    );
 }
 
 /// Archive marks the row Ended without bumping spawn_epoch. A same-epoch

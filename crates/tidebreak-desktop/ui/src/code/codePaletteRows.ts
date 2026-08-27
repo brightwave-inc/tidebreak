@@ -1,7 +1,6 @@
 import {
   Archive,
   BarChart3,
-  Bell,
   FileText,
   GitPullRequest,
   MessageSquare,
@@ -261,13 +260,6 @@ export function codeNavigationPaletteRows(input: {
       keywords: "delivery checks ci",
       icon: Play,
       onSelect: () => input.navigate("/code/delivery/runs"),
-    },
-    {
-      id: "navigate:notifications",
-      section: "navigate",
-      label: "Notifications",
-      icon: Bell,
-      onSelect: () => input.navigate("/code/notifications"),
     },
     {
       id: "navigate:archive",

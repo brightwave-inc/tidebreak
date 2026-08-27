@@ -25,9 +25,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 845
+- Rust crates: 849
 - Desktop UI production packages: 515
-- Distinct license texts: 581
+- Distinct license texts: 583
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -2140,6 +2140,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Ralith/lru-slab
 - License text: `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-c9cf4d18fd9d](#l-c9cf4d18fd9d)), `LICENSE-ZLIB` ([L-cebce11166dc](#l-cebce11166dc))
 
+### mac-notification-sys 0.6.15
+
+- License: `MIT/Apache-2.0`
+- Repository: https://github.com/h4llow3En/mac-notification-sys
+- License text: not distributed with this package
+
 ### mac_address 1.1.8
 
 - License: `MIT OR Apache-2.0`
@@ -2289,6 +2295,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/rust-bakery/nom
 - License text: `LICENSE` ([L-e9f8a16f9ed6](#l-e9f8a16f9ed6))
+
+### notify-rust 4.18.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/hoodie/notify-rust
+- License text: `LICENSE-Apache` ([L-c5accbbd8546](#l-c5accbbd8546)), `LICENSE-MIT` ([L-cf9929833318](#l-cf9929833318))
 
 ### num 0.4.3
 
@@ -3808,6 +3820,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tauri-apps/plugins-workspace
 - License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
+### tauri-plugin-notification 2.3.3
+
+- License: `Apache-2.0 OR MIT`
+- Repository: https://github.com/tauri-apps/plugins-workspace
+- License text: `LICENSE.spdx` ([L-eb8a6c846304](#l-eb8a6c846304)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
+
 ### tauri-plugin-shell 2.3.5
 
 - License: `Apache-2.0 OR MIT`
@@ -3849,6 +3867,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/tauri-apps/winres
 - License text: `LICENSE` ([L-a2c382fbddcc](#l-a2c382fbddcc))
+
+### tauri-winrt-notification 0.7.3
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/tauri-apps/winrt-notification
+- License text: `LICENSE.spdx` ([L-c801c521ff39](#l-c801c521ff39)), `LICENSE_APACHE-2.0` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE_MIT` ([L-89ff9689dcf9](#l-89ff9689dcf9))
 
 ### tempfile 3.27.0
 
@@ -32366,6 +32390,30 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### L-c801c521ff39
+
+```
+SPDXVersion: SPDX-2.1
+DataLicense: CC0-1.0
+PackageName: winrt-notification
+DataFormat: SPDXRef-1
+PackageSupplier: Organization: The Tauri Programme in the Commons Conservancy
+PackageHomePage: https://tauri.app
+PackageLicenseDeclared: Apache-2.0
+PackageLicenseDeclared: MIT
+PackageCopyrightText: 2022-2022, The Tauri Programme in the Commons Conservancy
+PackageSummary: <text>An incomplete wrapper over the WinRT toast api.
+                </text>
+PackageComment: <text>The package includes the following libraries; see
+Relationship information.
+                </text>
+Created: 2019-05-20T09:00:00Z
+PackageDownloadLocation: git://github.com/tauri-apps/winrt-notification
+PackageDownloadLocation: git+https://github.com/tauri-apps/winrt-notification.git
+PackageDownloadLocation: git+ssh://github.com/tauri-apps/winrt-notification.git
+Creator: Person: Daniel Thompson-Yvetot
+```
+
 ### L-c804065b0956
 
 ```
@@ -33913,6 +33961,32 @@ DEALINGS IN THE SOFTWARE.
 
 ```
 Copyright (c) 2015 The quick-error Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### L-cf9929833318
+
+```
+MIT License
+
+Copyright (c) 2017 Hendrik Sollich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

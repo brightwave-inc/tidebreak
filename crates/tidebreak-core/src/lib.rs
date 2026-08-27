@@ -236,8 +236,8 @@ pub use error::{AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, 
 pub use event::{AgentEvent, SequencedEvent};
 pub use id::{
     AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, HostRootId,
-    HostRootIdError, MessageId, OutputCitationId, OutputId, OutputRevisionId, ProjectId,
-    RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
+    HostRootIdError, MessageId, NotificationId, OutputCitationId, OutputId, OutputRevisionId,
+    ProjectId, RootAttachmentChangeId, RootAttachmentChangeIdError, StepId, TurnId, TurnSteerId,
 };
 pub use image::{
     ImageAttachments, ImageData, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
@@ -301,6 +301,8 @@ pub use semantic_checkpoint::{
 };
 pub use steer::{SteerInbox, SteerMessage};
 pub use storage::{
+    code_notification_dedupe_key, code_session_mints_notification,
+    notification_kind_for_turn_status, notification_title, work_notification_dedupe_key,
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AcceptTurnOutcome,
     AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome, AnswerUserQuestionsOutcome,
     AppendClaimedMessageOutcome, ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
@@ -313,7 +315,8 @@ pub use storage::{
     FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, InboxItem, InboxItemKind,
     JournaledClientToolCallOutcome, JournaledToolApprovalOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, MessageInvokedSkills, MoveChatOutcome, OperationClaimOutcome,
+    JournaledTurnSteerOutcome, MessageInvokedSkills, MoveChatOutcome, Notification,
+    NotificationContext, NotificationKind, NotificationListCursor, OperationClaimOutcome,
     OperationLogEntry, OperationLogState, OperationLogWrite, ParkSandboxToolCallOutcome,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PendingChatPrompt,
     PromoteQueuedTurnOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,

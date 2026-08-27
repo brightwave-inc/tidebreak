@@ -2962,6 +2962,53 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Insert a Work notification for a top-level turn that settled.
+    ///
+    /// Callers decide the kind. This write is idempotent on the turn's
+    /// dedupe key, so a reconnect cannot double-insert.
+    async fn record_work_turn_notification(
+        &self,
+        _chat_id: ChatId,
+        _turn_id: TurnId,
+        _kind: crate::NotificationKind,
+    ) -> Result<Option<crate::Notification>> {
+        turn_storage_unavailable()
+    }
+
+    /// Newest-first page of `owner`'s notifications.
+    async fn list_notifications_scoped(
+        &self,
+        _owner: &OwnerId,
+        _cursor: Option<crate::NotificationListCursor>,
+        _limit: u64,
+    ) -> Result<Vec<crate::Notification>> {
+        turn_storage_unavailable()
+    }
+
+    /// How many of `owner`'s notifications are unread.
+    async fn unread_notification_count_scoped(&self, _owner: &OwnerId) -> Result<u64> {
+        turn_storage_unavailable()
+    }
+
+    /// Mark the given ids read for `owner`. Other owners' rows stay unread.
+    async fn mark_notifications_read_scoped(
+        &self,
+        _owner: &OwnerId,
+        _ids: &[crate::NotificationId],
+        _read_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        turn_storage_unavailable()
+    }
+
+    /// Mark every unread notification for `owner` read.
+    async fn mark_all_notifications_read_scoped(
+        &self,
+        _owner: &OwnerId,
+        _read_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        turn_storage_unavailable()
+    }
+
     /// One attention value per conversation that has something to say,
     /// derived from the same rows the inbox projects (decision 48 step 3).
     ///

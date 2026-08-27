@@ -340,7 +340,6 @@ function storyRouter() {
     "/code",
     "/code/delivery/pull-requests",
     "/code/archive",
-    "/code/notifications",
     "/settings",
   ].map((path) =>
     createRoute({

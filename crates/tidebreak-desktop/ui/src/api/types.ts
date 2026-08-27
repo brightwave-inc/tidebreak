@@ -1044,6 +1044,27 @@ export type InboxEntry = {
   waitingSince: string;
 };
 
+/** Why a durable notification exists. */
+export type NotificationKind = "agent_completed" | "agent_failed";
+
+/** Where opening a notification takes the reader. */
+export type NotificationContext = InboxConversation;
+
+/** One agent-finished row from GET /notifications. */
+export type AgentNotification = {
+  id: string;
+  kind: NotificationKind;
+  title: string;
+  context: NotificationContext;
+  createdAt: string;
+  readAt: string | null;
+};
+
+export type AgentNotificationPage = {
+  notifications: AgentNotification[];
+  nextCursor: string | null;
+};
+
 /** A stable key for an entry, whichever surface it lives on. */
 export function inboxConversationKey(conversation: InboxConversation): string {
   return conversation.surface === "chat"

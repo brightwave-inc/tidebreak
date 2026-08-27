@@ -25,6 +25,8 @@
 # Shell bootstrap and native window control
 server_info: hands the renderer the embedded server's address and per-launch token — the handshake that makes every HTTP route reachable, so it cannot itself be one.
 request_user_attention: native window attention hint when a parked question needs the user.
+is_window_focused: reports main-window focus; document.hidden is the tab, not the window.
+present_native_notification: posts an OS banner and asks for notification permission on first unfocused present.
 code_browser_command: creates and controls sandboxed native child webviews whose bounds and lifecycle exist only in the desktop shell.
 open_code_worktree: opens a local Code worktree through this operating system's folder handler; a headless server cannot open desktop UI.
 

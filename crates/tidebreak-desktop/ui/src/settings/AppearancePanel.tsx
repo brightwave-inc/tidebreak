@@ -1,9 +1,14 @@
 import { Monitor, Moon, Sun } from "lucide-react";
-import type { ComponentType } from "react";
+import { useState, type ComponentType } from "react";
 
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import {
+  desktopNotificationsEnabled,
+  setDesktopNotificationsEnabled,
+} from "@/NotificationPreferences";
 import type { ThemeMode } from "../theme";
 import { SettingsField, SettingsPanel, SettingsSection } from "./primitives";
 
@@ -24,6 +29,10 @@ export function AppearancePanel({
   mode: ThemeMode;
   onChange: (mode: ThemeMode) => void;
 }) {
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    desktopNotificationsEnabled,
+  );
+
   return (
     <SettingsPanel
       title="Appearance"
@@ -56,6 +65,21 @@ export function AppearancePanel({
               );
             })}
           </RadioGroup>
+        </SettingsField>
+      </SettingsSection>
+      <SettingsSection title="Notifications">
+        <SettingsField
+          label="Completion notifications"
+          hint="Show a toast or desktop notification when an agent finishes while you are elsewhere."
+        >
+          <Switch
+            checked={notificationsEnabled}
+            onCheckedChange={(enabled) => {
+              setNotificationsEnabled(enabled);
+              setDesktopNotificationsEnabled(enabled);
+            }}
+            aria-label="Completion notifications"
+          />
         </SettingsField>
       </SettingsSection>
     </SettingsPanel>

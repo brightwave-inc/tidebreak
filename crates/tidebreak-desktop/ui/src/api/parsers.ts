@@ -32,6 +32,9 @@ import {
   type InboxEntry,
   type InboxItem,
   type InboxItemKind,
+  type AgentNotification,
+  type AgentNotificationPage,
+  type NotificationKind,
   type NetworkPolicy,
   type PendingChatPrompt,
   type PendingFolderAccessRequest,
@@ -205,6 +208,77 @@ function parseInboxConversation(value: unknown): InboxConversation | null {
     };
   }
   return null;
+}
+
+export function parseAgentNotification(
+  value: unknown,
+): AgentNotification | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<{
+      id: unknown;
+      kind: unknown;
+      title: unknown;
+      context: unknown;
+      created_at: unknown;
+      read_at?: unknown;
+    }>(value, ["id", "kind", "title", "context", "created_at", "read_at"]) ||
+    !nonEmptyBounded(value.id, 128) ||
+    !isNotificationKind(value.kind) ||
+    !nonEmptyBounded(value.title, 512) ||
+    !nonEmptyBounded(value.created_at, 64)
+  ) {
+    return null;
+  }
+  const context = parseInboxConversation(value.context);
+  if (!context) return null;
+  if (value.read_at !== undefined && !nonEmptyBounded(value.read_at, 64)) {
+    return null;
+  }
+  return {
+    id: value.id,
+    kind: value.kind,
+    title: value.title,
+    context,
+    createdAt: value.created_at,
+    readAt: typeof value.read_at === "string" ? value.read_at : null,
+  };
+}
+
+export function parseAgentNotificationPage(
+  value: unknown,
+): AgentNotificationPage | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<{ notifications: unknown; next_cursor?: unknown }>(value, [
+      "notifications",
+      "next_cursor",
+    ]) ||
+    !Array.isArray(value.notifications)
+  ) {
+    return null;
+  }
+  if (
+    value.next_cursor !== undefined &&
+    !nonEmptyBounded(value.next_cursor, 256)
+  ) {
+    return null;
+  }
+  const notifications: AgentNotification[] = [];
+  for (const raw of value.notifications) {
+    const row = parseAgentNotification(raw);
+    if (!row) return null;
+    notifications.push(row);
+  }
+  return {
+    notifications,
+    nextCursor:
+      typeof value.next_cursor === "string" ? value.next_cursor : null,
+  };
+}
+
+function isNotificationKind(value: unknown): value is NotificationKind {
+  return value === "agent_completed" || value === "agent_failed";
 }
 
 export function parseInboxEntry(value: unknown): InboxEntry | null {

@@ -97,6 +97,11 @@ const listCodeHarnessModels = vi.fn(async () => ({
 const listPendingUserQuestions = vi.fn(async () => [] as unknown[]);
 const listPendingFolderAccessRequests = vi.fn(async () => [] as unknown[]);
 const listInbox = vi.fn(async () => [] as unknown[]);
+const listNotifications = vi.fn(async () => ({
+  notifications: [],
+  nextCursor: null,
+}));
+const notificationUnreadCount = vi.fn(async () => 0);
 const listPendingOutputWritebackRequests = vi.fn(async () => [] as unknown[]);
 const requestUserAttention = vi.fn(async () => {});
 const hasNativeHost = vi.hoisted(() => vi.fn(() => false));
@@ -228,6 +233,10 @@ vi.mock("./api", () => ({
     listPendingUserQuestions = listPendingUserQuestions;
     listPendingFolderAccessRequests = listPendingFolderAccessRequests;
     listInbox = listInbox;
+    listNotifications = listNotifications;
+    notificationUnreadCount = notificationUnreadCount;
+    markNotificationsRead = vi.fn(async () => 0);
+    markAllNotificationsRead = vi.fn(async () => 0);
     listPendingOutputWritebackRequests = listPendingOutputWritebackRequests;
     postMessage = postMessage;
     openEvents = vi.fn(() => ({ close: vi.fn() }));
@@ -238,6 +247,8 @@ vi.mock("./host", () => ({
   hasNativeHost,
   hasMacOverlayTitlebar: () => false,
   requestUserAttention,
+  isWindowFocused: async () => true,
+  presentNativeNotification: async () => false,
   onPairingChanged: () => () => undefined,
   setAttachedRemotely: () => undefined,
   attachedRemotely: () => false,

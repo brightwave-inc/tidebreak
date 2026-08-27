@@ -25,7 +25,6 @@ import { CodeArchivePage } from "@/code/CodeArchivePage";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { CodeDeliveryPage } from "@/code/CodeDeliveryPage";
 import { useCodeDeliveryStore } from "@/code/CodeDeliveryStore";
-import { CodeNotificationsPage } from "@/code/CodeNotificationsPage";
 import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "@/code/CodeUiStore";
 import {
   disconnectCodeUpdates,
@@ -34,7 +33,6 @@ import {
 import { useUiStore } from "@/UiStore";
 import {
   deliveryCodeRepo,
-  deliveryNotifications,
   deliveryPullRequestDetails,
   deliveryPullRequests,
   stackedDeliveryPullRequests,
@@ -57,9 +55,7 @@ type DeliveryScenario =
   | "github-unavailable"
   | "runs"
   | "archive"
-  | "archive-empty"
-  | "notifications"
-  | "notifications-empty";
+  | "archive-empty";
 
 /**
  * Open one pull request's detail sheet from the list.
@@ -366,12 +362,6 @@ function storyRouter(initialUrl: string) {
     path: "/code/archive",
     component: CodeArchivePage,
   });
-  const notificationsRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/code/notifications",
-    component: CodeNotificationsPage,
-  });
-
   return createRouter({
     routeTree: rootRoute.addChildren([
       homeRoute,
@@ -381,13 +371,12 @@ function storyRouter(initialUrl: string) {
       pullRequestsRoute,
       runsRoute,
       archiveRoute,
-      notificationsRoute,
     ]),
     history: createMemoryHistory({ initialEntries: [initialUrl] }),
   });
 }
 
-function resetStoryState(scenario: DeliveryScenario): void {
+function resetStoryState(_scenario: DeliveryScenario): void {
   disconnectCodeUpdates();
   useCodeCatalogStore.getState().reset();
   useCodeUpdatesStore.getState().reset();
@@ -411,20 +400,6 @@ function resetStoryState(scenario: DeliveryScenario): void {
       { login: "dependabot[bot]" },
     ],
   });
-
-  if (scenario === "notifications") {
-    useCodeDeliveryStore.setState({
-      notifications: deliveryNotifications,
-      seenFingerprints: Object.fromEntries(
-        deliveryNotifications.map((notification) => [
-          notification.fingerprint,
-          notification.receivedAt,
-        ]),
-      ),
-      lastPollAt: "2026-08-20T15:20:00.000Z",
-      lastSuccessfulPollAt: "2026-08-20T15:20:00.000Z",
-    });
-  }
 }
 
 function DeliveryCenterStory({
@@ -993,36 +968,6 @@ export const ArchiveEmpty: Story = {
   args: {
     scenario: "archive-empty",
     initialUrl: "/code/archive",
-  },
-};
-
-export const NotificationsFeed: Story = {
-  args: {
-    scenario: "notifications",
-    initialUrl: "/code/notifications",
-  },
-};
-
-export const NotificationsEmpty: Story = {
-  args: {
-    scenario: "notifications-empty",
-    initialUrl: "/code/notifications",
-  },
-};
-
-export const NotificationRules: Story = {
-  args: {
-    scenario: "notifications",
-    initialUrl: "/code/notifications",
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByRole("tab", { name: "Rules" }));
-    await expect(
-      await canvas.findByRole("heading", {
-        name: "Delivery notification rules",
-      }),
-    ).toBeVisible();
   },
 };
 

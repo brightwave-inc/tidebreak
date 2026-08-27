@@ -1,10 +1,11 @@
 use futures::stream::BoxStream;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::approval::ToolApproval;
+use crate::code::{CodeSessionId, CodeTurnId, WorkspaceId};
 use crate::error::Result;
 use crate::event::SequencedEvent;
-use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
+use crate::id::{AgentRunId, CallId, ChatId, MessageId, NotificationId, TurnId};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, Message, MessageAttachment,
     MessageDocumentAttachment, RootAttachmentChange, ToolCallRecord, TurnAdmissionLease,
@@ -149,6 +150,125 @@ pub enum InboxItemKind {
     FolderAccess,
     /// A write-back to a connected folder awaiting confirmation.
     OutputWriteback,
+}
+
+/// Why a durable notification exists.
+///
+/// Only top-level agent turns mint rows. Inbox items, Delivery facts, and
+/// child work never do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationKind {
+    AgentCompleted,
+    AgentFailed,
+}
+
+impl NotificationKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentCompleted => "agent_completed",
+            Self::AgentFailed => "agent_failed",
+        }
+    }
+
+    #[must_use]
+    pub fn from_storage_str(value: &str) -> Option<Self> {
+        match value {
+            "agent_completed" => Some(Self::AgentCompleted),
+            "agent_failed" => Some(Self::AgentFailed),
+            _ => None,
+        }
+    }
+
+    /// Verb in the notification title: "Research finished".
+    #[must_use]
+    pub const fn title_verb(self) -> &'static str {
+        match self {
+            Self::AgentCompleted => "finished",
+            Self::AgentFailed => "failed",
+        }
+    }
+}
+
+/// Where opening a notification should take the reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "surface", rename_all = "snake_case")]
+pub enum NotificationContext {
+    Chat {
+        chat_id: ChatId,
+    },
+    Code {
+        session_id: CodeSessionId,
+        workspace_id: WorkspaceId,
+    },
+}
+
+/// One agent-finished row in the durable notification log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Notification {
+    pub id: NotificationId,
+    pub kind: NotificationKind,
+    pub title: String,
+    pub context: NotificationContext,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Resume token for [`Store::list_notifications_scoped`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationListCursor {
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub id: NotificationId,
+}
+
+/// Watch sessions never mint a row. Interactive conversation sessions do.
+#[must_use]
+pub fn code_session_mints_notification(kind: crate::code::CodeSessionKind) -> bool {
+    matches!(kind, crate::code::CodeSessionKind::Interactive)
+}
+
+/// A Work turn mints a row only when it is durably finished or failed.
+/// Cancel, retry-wait, and every live status stay silent.
+#[must_use]
+pub fn notification_kind_for_turn_status(
+    status: crate::model::TurnRunStatus,
+) -> Option<NotificationKind> {
+    match status {
+        crate::model::TurnRunStatus::Completed => Some(NotificationKind::AgentCompleted),
+        crate::model::TurnRunStatus::Failed => Some(NotificationKind::AgentFailed),
+        _ => None,
+    }
+}
+
+/// Build the title `{name} finished` / `{name} failed`.
+#[must_use]
+pub fn notification_title(name: Option<&str>, kind: NotificationKind) -> String {
+    let name = name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Chat");
+    format!("{name} {}", kind.title_verb())
+}
+
+/// Dedupe key for one Work turn settlement. Unique per owner.
+#[must_use]
+pub fn work_notification_dedupe_key(
+    kind: NotificationKind,
+    chat_id: ChatId,
+    turn_id: TurnId,
+) -> String {
+    format!("{}:chat:{chat_id}:turn:{turn_id}", kind.as_str())
+}
+
+/// Dedupe key for one Code turn settlement. Unique per owner.
+#[must_use]
+pub fn code_notification_dedupe_key(
+    kind: NotificationKind,
+    session_id: CodeSessionId,
+    turn_id: CodeTurnId,
+) -> String {
+    format!("{}:code:{session_id}:turn:{turn_id}", kind.as_str())
 }
 
 /// One thing waiting on the reader, wherever in their chats it parked.

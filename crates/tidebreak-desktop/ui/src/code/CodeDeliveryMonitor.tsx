@@ -1,13 +1,10 @@
 import { useEffect, useRef } from "react";
-import { useRouterState } from "@tanstack/react-router";
-
 import type { ApiClient } from "../api/client";
 import type {
   CodeDeliveryPullRequestSummary,
   CodeDeliveryRunSummary,
   CodeGitHubRepositoryTarget,
 } from "../api/types";
-import { requestUserAttention } from "../host";
 import {
   codeClientGeneration,
   isCodeClientGenerationActive,
@@ -38,11 +35,6 @@ type MonitorBatch<T> = {
 
 /** Shell-level delivery polling for GitHub notifications. */
 export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
-  const pathnameRef = useRef(pathname);
-  pathnameRef.current = pathname;
   const wakeRef = useRef<(() => void) | null>(null);
   const deliveryRevision = useCodeUpdatesStore(
     (state) => state.deliveryRevision,
@@ -53,7 +45,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     // returning schedules its own immediate pass.
     if (document.hidden) return;
     wakeRef.current?.();
-  }, [pathname, deliveryRevision]);
+  }, [deliveryRevision]);
 
   useEffect(() => {
     const clientGeneration = codeClientGeneration(client);
@@ -165,14 +157,9 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
         }
 
         if (!isCurrent()) return;
-        const added = useCodeDeliveryStore
+        useCodeDeliveryStore
           .getState()
           .completeDeliveryPoll(pullRequests, runs, startedAt);
-        if (added > 0 && pathnameRef.current !== "/code/notifications") {
-          void requestUserAttention().catch(() => {
-            // The notification feed remains the durable signal.
-          });
-        }
       } catch (error) {
         if (!isCurrent() || isAbortError(error)) return;
         useCodeDeliveryStore

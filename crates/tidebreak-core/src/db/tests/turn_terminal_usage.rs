@@ -2,8 +2,8 @@ use super::{entities, sample_chat, temp_store};
 use crate::event::AgentEvent;
 use crate::model::{Message, Role, TurnRunStatus};
 use crate::provider::{RefusalDetails, RefusalOutcome, StopReason, Usage};
-use crate::storage::{AcceptTurnOutcome, CompleteTurnRunOutcome, Store};
-use crate::{Chat, DbStore, MessageId, TurnId};
+use crate::storage::{AcceptTurnOutcome, CompleteTurnRunOutcome, NotificationKind, Store};
+use crate::{Chat, DbStore, MessageId, OwnerId, TurnId};
 use chrono::Duration;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -110,6 +110,13 @@ async fn completed_terminal_event_persists_authoritative_totals_without_checkpoi
     ));
     let stored = store.get_turn_run(turn_id).await.unwrap().unwrap();
     assert_eq!((stored.model_steps, stored.usage), (3, usage));
+    let notifications = store
+        .list_notifications_scoped(&OwnerId::local(), None, 50)
+        .await
+        .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].kind, NotificationKind::AgentCompleted);
+    assert_eq!(notifications[0].title, "hello finished");
 
     let replay = super::super::ops::turn::complete_turn_run_and_append_event(
         &store,
@@ -131,6 +138,14 @@ async fn completed_terminal_event_persists_authoritative_totals_without_checkpoi
             if turn.model_steps == 3 && turn.usage == usage
     ));
     assert_eq!(replay.terminal_event, completed.terminal_event);
+    assert_eq!(
+        store
+            .list_notifications_scoped(&OwnerId::local(), None, 50)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(super::super::ops::turn::complete_turn_run_and_append_event(
         &store,
         turn_id,

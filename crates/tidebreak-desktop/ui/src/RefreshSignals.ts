@@ -8,7 +8,8 @@ export type RefreshTarget =
   | "outputWritebacks"
   | "userQuestions"
   | "planApprovals"
-  | "taskPlan";
+  | "taskPlan"
+  | "notifications";
 
 /**
  * A revision counter per pollable target.
@@ -26,6 +27,7 @@ export type RefreshSignalStore = {
   userQuestions: number;
   planApprovals: number;
   taskPlan: number;
+  notifications: number;
   signal: (target: RefreshTarget) => void;
 };
 
@@ -36,6 +38,7 @@ export function createRefreshSignalStore() {
     userQuestions: 0,
     planApprovals: 0,
     taskPlan: 0,
+    notifications: 0,
     signal: (target) =>
       set(
         (state) =>

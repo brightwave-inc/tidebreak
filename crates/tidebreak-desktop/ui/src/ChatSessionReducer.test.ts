@@ -607,6 +607,7 @@ describe("terminal events", () => {
       { type: "turn_resolved" },
       { type: "refresh_user_questions" },
       { type: "refresh_plan_approvals" },
+      { type: "refresh_notifications" },
       { type: "hydrate_terminal_transcript" },
     ]);
   });
@@ -664,6 +665,7 @@ describe("terminal events", () => {
       { type: "turn_resolved" },
       { type: "refresh_user_questions" },
       { type: "refresh_plan_approvals" },
+      { type: "refresh_notifications" },
       { type: "hydrate_terminal_transcript" },
     ]);
   });

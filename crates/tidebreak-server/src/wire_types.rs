@@ -350,6 +350,10 @@ mod tests {
         generate::collect_from::<crate::routes::InboxEntrySnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::InboxConversation>(&cfg, &mut out);
         generate::collect_from::<crate::routes::InboxItemSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::NotificationSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::NotificationPage>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::NotificationUnreadCount>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::MarkNotificationsReadResult>(&cfg, &mut out);
         generate::collect_from::<crate::routes::CompactionRun>(&cfg, &mut out);
         // Configuration, catalog, and project surfaces. These carry no shared
         // types with the conversation path, but one generated module keeps the

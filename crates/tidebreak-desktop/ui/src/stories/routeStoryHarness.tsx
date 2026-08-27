@@ -27,6 +27,7 @@ import {
   useFirstTaskGuide,
 } from "@/FirstTaskWalkthrough";
 import { useInbox } from "@/Inbox";
+import { useNotifications } from "@/NotificationStore";
 import { ManagedPolicyContext } from "@/managedPolicy";
 import { useNewChatSettings } from "@/NewChatSettings";
 import { useProjectListStore } from "@/ProjectListStore";
@@ -596,6 +597,10 @@ type RouteClientMethods = Pick<
   | "setPluginsEnabled"
   | "getSkillInstructions"
   | "getPromptBody"
+  | "listNotifications"
+  | "notificationUnreadCount"
+  | "markNotificationsRead"
+  | "markAllNotificationsRead"
 >;
 
 export function pending<T>(): Promise<T> {
@@ -795,6 +800,10 @@ export function storyClient(
       name,
       body: "Summarize the launch risks and assign a clear owner to each one.",
     }),
+    listNotifications: async () => ({ notifications: [], nextCursor: null }),
+    notificationUnreadCount: async () => 0,
+    markNotificationsRead: async () => 0,
+    markAllNotificationsRead: async () => 0,
     ...overrides,
   };
 
@@ -899,6 +908,11 @@ export function resetRouteStoryStores({
     expandedProjectIds,
   });
   useInbox.setState({ entries: inboxEntries, loaded: inboxLoaded });
+  useNotifications.setState({
+    notifications: [],
+    unread: 0,
+    loaded: true,
+  });
   useChatAttention.setState({
     chatIdsWithPendingPrompts: new Set(attentionChatIds),
   });

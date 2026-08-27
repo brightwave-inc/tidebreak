@@ -520,6 +520,44 @@ fn request_user_attention(window: tauri::WebviewWindow) {
     let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
 }
 
+/// Main-window focus. `document.hidden` is the tab, not this window.
+#[tauri::command]
+fn is_window_focused(window: tauri::WebviewWindow) -> bool {
+    window.is_focused().unwrap_or(true)
+}
+
+/// Post one OS banner. Request permission on this first unfocused present.
+#[tauri::command]
+fn present_native_notification(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    let permission = app
+        .notification()
+        .permission_state()
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        permission,
+        tauri_plugin_notification::PermissionState::Granted
+    ) {
+        let granted = app
+            .notification()
+            .request_permission()
+            .map_err(|error| error.to_string())?;
+        if !matches!(granted, tauri_plugin_notification::PermissionState::Granted) {
+            return Err("notification_permission_denied".into());
+        }
+    }
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| error.to_string())
+}
+
 async fn wait_server_info(state: &Arc<AppState>) -> Result<NativeServerInfo, String> {
     let mut rx = state.info_rx.clone();
     loop {
@@ -796,6 +834,7 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
@@ -811,6 +850,8 @@ pub fn run() {
             disconnect_remote_machine,
             put_native_mcp_servers,
             request_user_attention,
+            is_window_focused,
+            present_native_notification,
             code_browser::code_browser_command,
             code_worktree::open_code_worktree,
             attachments::attach_chat_files,

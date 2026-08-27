@@ -21,4 +21,20 @@ describe("codeNavigationPaletteRows", () => {
     analytics?.onSelect();
     expect(navigate).toHaveBeenCalledWith("/code/analytics");
   });
+
+  it("does not keep a Delivery notifications destination", () => {
+    const navigate = vi.fn();
+    const rows = codeNavigationPaletteRows({
+      navigate,
+      onNewWorkspace: vi.fn(),
+      onQuickOpen: vi.fn(),
+    });
+
+    expect(rows.some((row) => row.id === "navigate:notifications")).toBe(false);
+    for (const row of rows) {
+      navigate.mockClear();
+      row.onSelect();
+    }
+    expect(navigate.mock.calls.flat()).not.toContain("/code/notifications");
+  });
 });

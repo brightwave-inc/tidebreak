@@ -28,7 +28,6 @@ import {
   CodeDeliveryPage,
   codeDeliverySearchFrom,
 } from "./code/CodeDeliveryPage";
-import { CodeNotificationsPage } from "./code/CodeNotificationsPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 
 const rootRoute = createRootRoute({ component: AppShell });
@@ -250,12 +249,6 @@ const codeArchiveRoute = createRoute({
   component: CodeArchivePage,
 });
 
-const codeNotificationsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/code/notifications",
-  component: CodeNotificationsPage,
-});
-
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
   return <CodeWorkspacePage workspaceId={workspaceId} />;
@@ -360,7 +353,6 @@ export const routeTree = rootRoute.addChildren([
   codeDeliveryPullRequestsRoute,
   codeDeliveryRunsRoute,
   codeArchiveRoute,
-  codeNotificationsRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,

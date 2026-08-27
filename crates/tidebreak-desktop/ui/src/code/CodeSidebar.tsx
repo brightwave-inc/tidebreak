@@ -3,7 +3,6 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   Archive,
   BarChart3,
-  Bell,
   FolderPlus,
   GitPullRequest,
   Plus,
@@ -14,14 +13,11 @@ import { useApp } from "@/AppContext";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useLayoutState } from "@/panel/usePanelNav";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
+import { NotificationBellButton } from "@/NotificationBellButton";
 import { SidebarButton } from "@/sidebar/primitives";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeModeSwitch } from "./CodeModeSwitch";
-import {
-  unreadCodeDeliveryNotifications,
-  useCodeDeliveryStore,
-} from "./CodeDeliveryStore";
 import { CodeSubscriptionUsage } from "./CodeSubscriptionUsage";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
@@ -93,9 +89,6 @@ export function CodeSidebar() {
   const setAddRepoOpen = useCodeUiStore((state) => state.setAddRepoOpen);
   const prefs = useCodeUiStore((state) => state.railPrefs);
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
-  const unreadNotifications = useCodeDeliveryStore((state) =>
-    unreadCodeDeliveryNotifications(state),
-  );
   const { run, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const terminalOpen =
@@ -119,9 +112,11 @@ export function CodeSidebar() {
         <>
           <CodeUtilityLinks
             pathname={pathname}
-            unreadNotifications={unreadNotifications}
             onNavigate={(to) => void navigate({ to })}
           />
+          <div className="mt-0.5">
+            <NotificationBellButton />
+          </div>
           <div className="mt-1 border-t border-border-subtle pt-1">
             <CodeSubscriptionUsage />
           </div>
@@ -376,17 +371,11 @@ export function CodeSidebar() {
 
 function CodeUtilityLinks({
   pathname,
-  unreadNotifications,
   onNavigate,
 }: {
   pathname: string;
-  unreadNotifications: number;
   onNavigate: (
-    to:
-      | "/code/delivery/pull-requests"
-      | "/code/analytics"
-      | "/code/archive"
-      | "/code/notifications",
+    to: "/code/delivery/pull-requests" | "/code/analytics" | "/code/archive",
   ) => void;
 }) {
   const links = [
@@ -408,12 +397,6 @@ function CodeUtilityLinks({
       active: pathname === "/code/archive",
       icon: Archive,
     },
-    {
-      label: "Notifications",
-      to: "/code/notifications" as const,
-      active: pathname === "/code/notifications",
-      icon: Bell,
-    },
   ];
   return (
     <div className="flex flex-col gap-0.5">
@@ -428,11 +411,6 @@ function CodeUtilityLinks({
         >
           <link.icon />
           <span className="min-w-0 flex-1 truncate">{link.label}</span>
-          {link.to === "/code/notifications" && unreadNotifications > 0 && (
-            <span className="min-w-5 rounded-full bg-primary px-1.5 py-0.5 text-center text-2xs font-medium leading-none text-primary-foreground">
-              {unreadNotifications > 99 ? "99+" : unreadNotifications}
-            </span>
-          )}
         </SidebarButton>
       ))}
     </div>

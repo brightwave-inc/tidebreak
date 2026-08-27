@@ -422,6 +422,41 @@ impl ScopedStore {
         self.store.list_inbox_items_scoped(&self.owner).await
     }
 
+    pub async fn list_notifications(
+        &self,
+        cursor: Option<tidebreak_core::NotificationListCursor>,
+        limit: u64,
+    ) -> Result<Vec<tidebreak_core::Notification>> {
+        self.store
+            .list_notifications_scoped(&self.owner, cursor, limit)
+            .await
+    }
+
+    pub async fn unread_notification_count(&self) -> Result<u64> {
+        self.store
+            .unread_notification_count_scoped(&self.owner)
+            .await
+    }
+
+    pub async fn mark_notifications_read(
+        &self,
+        ids: &[tidebreak_core::NotificationId],
+        read_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        self.store
+            .mark_notifications_read_scoped(&self.owner, ids, read_at)
+            .await
+    }
+
+    pub async fn mark_all_notifications_read(
+        &self,
+        read_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        self.store
+            .mark_all_notifications_read_scoped(&self.owner, read_at)
+            .await
+    }
+
     /// The principal this read is scoped to.
     pub fn owner(&self) -> &OwnerId {
         &self.owner

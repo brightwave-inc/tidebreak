@@ -23,10 +23,10 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
-    accept_trigger_turn_delivery, append_event, bump_spawn_epoch, delete_queued_turn,
-    get_open_turn, get_session, get_session_all_owners, get_workspace, insert_approval_for_worker,
-    insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
-    save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
+    accept_trigger_turn_delivery, append_event, append_event_with_notification, bump_spawn_epoch,
+    delete_queued_turn, get_open_turn, get_session, get_session_all_owners, get_workspace,
+    insert_approval_for_worker, insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused,
+    queued_turn_head, save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
     set_session_subagents, CodeJournalError, CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
@@ -603,16 +603,35 @@ impl HarnessEventSink for LiveSink {
         let completed_turn = matches!(code_event, CodeEvent::TurnCompleted { .. })
             .then_some(turn_id)
             .flatten();
-        let journaled = match persist_and_publish(
-            &self.db,
-            &self.bus,
-            &self.owner,
-            self.session_id,
-            self.spawn_epoch,
-            code_event,
+        let notification_turn = matches!(
+            &code_event,
+            CodeEvent::TurnCompleted { .. } | CodeEvent::TurnFailed { .. }
         )
-        .await
-        {
+        .then_some(turn_id)
+        .flatten();
+        let write = if let Some(turn_id) = notification_turn {
+            persist_turn_and_publish(
+                &self.db,
+                &self.bus,
+                &self.owner,
+                self.session_id,
+                self.spawn_epoch,
+                turn_id,
+                code_event,
+            )
+            .await
+        } else {
+            persist_and_publish(
+                &self.db,
+                &self.bus,
+                &self.owner,
+                self.session_id,
+                self.spawn_epoch,
+                code_event,
+            )
+            .await
+        };
+        let journaled = match write {
             Ok(()) => true,
             Err(CodeJournalError::StaleSpawnEpoch { .. }) => {
                 warn!(
@@ -1722,15 +1741,29 @@ async fn drive_turn_inner(
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
                 sink.note_subagent_boundary(&event).await;
-                let _ = persist_and_publish(
-                    db,
-                    bus,
-                    &session.owner,
-                    session.id,
-                    session.spawn_epoch,
-                    event,
-                )
-                .await;
+                let write = if matches!(event, CodeEvent::TurnInterrupted) {
+                    persist_and_publish(
+                        db,
+                        bus,
+                        &session.owner,
+                        session.id,
+                        session.spawn_epoch,
+                        event,
+                    )
+                    .await
+                } else {
+                    persist_turn_and_publish(
+                        db,
+                        bus,
+                        &session.owner,
+                        session.id,
+                        session.spawn_epoch,
+                        turn.id,
+                        event,
+                    )
+                    .await
+                };
+                let _ = write;
             }
         }
         Err(err) => {
@@ -1744,12 +1777,13 @@ async fn drive_turn_inner(
                     },
                 };
                 sink.note_subagent_boundary(&event).await;
-                let _ = persist_and_publish(
+                let _ = persist_turn_and_publish(
                     db,
                     bus,
                     &session.owner,
                     session.id,
                     session.spawn_epoch,
+                    turn.id,
                     event,
                 )
                 .await;
@@ -2194,6 +2228,39 @@ async fn persist_and_publish(
     spawn_epoch: i64,
     event: CodeEvent,
 ) -> Result<(), CodeJournalError> {
+    persist_and_publish_inner(db, bus, owner, session_id, spawn_epoch, None, event).await
+}
+
+async fn persist_turn_and_publish(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    turn_id: CodeTurnId,
+    event: CodeEvent,
+) -> Result<(), CodeJournalError> {
+    persist_and_publish_inner(
+        db,
+        bus,
+        owner,
+        session_id,
+        spawn_epoch,
+        Some(turn_id),
+        event,
+    )
+    .await
+}
+
+async fn persist_and_publish_inner(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    notification_turn_id: Option<CodeTurnId>,
+    event: CodeEvent,
+) -> Result<(), CodeJournalError> {
     settle_streamed_text(db, bus, owner, session_id, spawn_epoch, &event).await;
     let activity_boundary = matches!(
         &event,
@@ -2206,7 +2273,11 @@ async fn persist_and_publish(
         }
     );
     apply_side_effects(db, owner, session_id, spawn_epoch, &event).await?;
-    let seq = append_event(db, owner, session_id, spawn_epoch, &event).await?;
+    let seq = if let Some(turn_id) = notification_turn_id {
+        append_event_with_notification(db, owner, session_id, spawn_epoch, turn_id, &event).await?
+    } else {
+        append_event(db, owner, session_id, spawn_epoch, &event).await?
+    };
     if is_activity(&event) {
         let _ = super::attention::note_activity(db, bus, owner, session_id).await;
     }
