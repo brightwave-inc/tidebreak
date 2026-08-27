@@ -215,9 +215,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         }
     }
 
-    fn capabilities(&self, _probe: &HarnessProbe) -> HarnessCaps {
+    fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps {
         // Honest values for v2.1.233, from captured fixtures and `--help`.
-        HarnessCaps {
+        let mut caps = HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
             // Permission flags are documented on the 2.1 line. The product
@@ -233,7 +233,16 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Supported,
             slash_commands: CapLevel::Unknown,
+        };
+        // Off the captured 2.1 line — a declared newer engine, say — the
+        // stream contract and permission flags are stable documented
+        // surface, but the flags read off one pin's `--help` and fixtures
+        // drop back to Unknown (decision 31 rule 3).
+        if crate::probe::off_pinned_line(probe.version.as_deref(), (2, 1)) {
+            caps.reasoning_levels = CapLevel::Unknown;
+            caps.image_input = CapLevel::Unknown;
         }
+        caps
     }
 
     fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
@@ -754,6 +763,28 @@ mod tests {
             commands: Vec::new(),
         });
         assert_eq!(caps.structured_approvals, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
+    }
+
+    #[test]
+    fn pin_specific_observations_degrade_off_the_2_1_line() {
+        let caps = ClaudeCodeAdapter::new().capabilities(&HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("3.0.1 (Claude Code)".into()),
+            authenticated: None,
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        });
+        assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
+        assert_eq!(caps.image_input, CapLevel::Unknown);
+        // Documented stream and permission surface stays advertised.
+        assert_eq!(caps.resume, CapLevel::Supported);
+        assert_eq!(caps.streaming_deltas, CapLevel::Supported);
+        assert_eq!(caps.structured_approvals, CapLevel::Supported);
+        assert_eq!(caps.plan_mode, CapLevel::Supported);
+        assert_eq!(caps.auto_mode, CapLevel::Supported);
         assert_eq!(caps.allow_mode, CapLevel::Supported);
     }
 

@@ -74,8 +74,8 @@ impl HarnessAdapter for OpencodeAdapter {
         }
     }
 
-    fn capabilities(&self, _probe: &HarnessProbe) -> HarnessCaps {
-        HarnessCaps {
+    fn capabilities(&self, probe: &HarnessProbe) -> HarnessCaps {
+        let mut caps = HarnessCaps {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
             structured_approvals: CapLevel::Supported,
@@ -96,7 +96,14 @@ impl HarnessAdapter for OpencodeAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
+        };
+        // Off the captured 1.18 line the missing-effort-flag finding no
+        // longer applies: a later minor may have grown the flag, so the
+        // verdict drops back to Unknown (decision 31 rule 3).
+        if crate::probe::off_pinned_line(probe.version.as_deref(), (1, 18)) {
+            caps.reasoning_levels = CapLevel::Unknown;
         }
+        caps
     }
 
     /// The agent and permission ruleset ride `POST /session`, and resuming is
@@ -199,6 +206,7 @@ mod tests {
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         }
         .with_declared_binary(tidebreak_core::HarnessKind::Opencode, &binary, "1.19.2");
         let probe = OpencodeAdapter::new().probe(&host).await;
@@ -386,6 +394,26 @@ mod tests {
         assert_eq!(caps.native_file_change_events, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Unknown);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
+    }
+
+    #[test]
+    fn missing_effort_flag_finding_degrades_off_the_1_18_line() {
+        let caps = OpencodeAdapter::new().capabilities(&HarnessProbe {
+            found: true,
+            binary_path: None,
+            version: Some("1.19.2".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        });
+        assert_eq!(caps.reasoning_levels, CapLevel::Unknown);
+        // The serve API contract the adapter drives stays advertised.
+        assert_eq!(caps.resume, CapLevel::Supported);
+        assert_eq!(caps.structured_approvals, CapLevel::Supported);
+        assert_eq!(caps.plan_mode, CapLevel::Supported);
+        assert_eq!(caps.auto_mode, CapLevel::Supported);
+        assert_eq!(caps.allow_mode, CapLevel::Supported);
     }
 
     #[test]

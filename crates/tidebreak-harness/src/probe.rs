@@ -45,6 +45,10 @@ pub struct HostEnv {
     /// PATH; the declared version is authoritative, so probe never runs
     /// `--version` against it.
     pub declared_binaries: Vec<(tidebreak_core::HarnessKind, DeclaredBinary)>,
+    /// Complete child environment the embedding environment asserts. When
+    /// set, probes never run the login shell: commands resolve against this
+    /// environment's `PATH`, and environment captures return it verbatim.
+    pub declared_env: Option<Vec<(OsString, OsString)>>,
 }
 
 /// A harness binary the embedding environment installed itself.
@@ -83,6 +87,7 @@ impl HostEnv {
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         }
     }
 
@@ -122,6 +127,15 @@ impl HostEnv {
     pub fn declared_version(&self, kind: tidebreak_core::HarnessKind) -> Option<&str> {
         self.declared(kind)
             .map(|declared| declared.version.as_str())
+    }
+
+    /// Assert the complete probe environment. Probes then skip the login
+    /// shell entirely: resolution scans this environment's `PATH`, and the
+    /// captured child environment is this one, verbatim.
+    #[must_use]
+    pub fn with_declared_env(mut self, env: Vec<(OsString, OsString)>) -> Self {
+        self.declared_env = Some(env);
+        self
     }
 }
 
@@ -191,6 +205,20 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
             // doctor refresh install the pin.
             return Err(ProbeError::NotFound(name.to_owned()));
         }
+    }
+    // A declared environment replaces the login shell: resolve against its
+    // PATH directly, and return it as the capture.
+    if let Some(env) = &host.declared_env {
+        #[cfg(windows)]
+        let resolved = resolve_windows_command(env, name);
+        #[cfg(not(windows))]
+        let resolved = resolve_unix_command(env, name);
+        let binary = resolved.ok_or_else(|| ProbeError::NotFound(name.to_owned()))?;
+        return Ok(ProbeCapture {
+            binary,
+            env: env.clone(),
+            stderr: String::new(),
+        });
     }
     #[cfg(windows)]
     {
@@ -300,6 +328,15 @@ fn kind_for_command(name: &str) -> Option<tidebreak_core::HarnessKind> {
     }
 }
 
+#[cfg(not(windows))]
+fn resolve_unix_command(env: &[(OsString, OsString)], name: &str) -> Option<PathBuf> {
+    let path = env_value(env, std::ffi::OsStr::new("PATH"))?;
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_absolute_executable(candidate))
+}
+
 /// Capture for a binary the embedding environment declared.
 ///
 /// The path is validated, never resolved: a declaration bypasses both the
@@ -378,6 +415,9 @@ fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
 }
 
 async fn capture_shell_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
+    if let Some(env) = &host.declared_env {
+        return Ok(env.clone());
+    }
     #[cfg(windows)]
     {
         Ok(windows_process_env(host))
@@ -475,6 +515,30 @@ pub(crate) fn env_sets_any(env: &[(OsString, OsString)], names: &[&str]) -> bool
     names.iter().any(|name| {
         env_value(env, std::ffi::OsStr::new(name)).is_some_and(|value| !value.is_empty())
     })
+}
+
+/// The first `major.minor` a version line states. Scans whitespace tokens for
+/// one whose leading `v`-stripped form starts `<digits>.<digits>`, so banner
+/// words and build hashes around the number do not matter.
+pub(crate) fn version_minor_line(version: Option<&str>) -> Option<(u64, u64)> {
+    version
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .find_map(|candidate| {
+            let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+            let mut parts = candidate.split('.');
+            let major = parts.next()?.parse::<u64>().ok()?;
+            let minor = parts.next()?.parse::<u64>().ok()?;
+            Some((major, minor))
+        })
+}
+
+/// Whether a probed version states a `major.minor` other than the pinned
+/// line. A missing or unparseable version is not off-line: with nothing to
+/// compare, an adapter keeps the pinned capture's flags rather than degrading
+/// the product it ships today.
+pub(crate) fn off_pinned_line(version: Option<&str>, pinned: (u64, u64)) -> bool {
+    version_minor_line(version).is_some_and(|line| line != pinned)
 }
 
 fn apply_captured_env(command: &mut Command, env: &[(std::ffi::OsString, std::ffi::OsString)]) {
@@ -969,6 +1033,7 @@ eval "$cmd"
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         }
     }
 
@@ -1053,6 +1118,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
         match resolve_binary(&host, "claude").await {
             Err(ProbeError::RelativePath { name, path })
@@ -1078,6 +1144,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
         let resolved = resolve_binary(&host, "claude").await.unwrap();
         assert_eq!(resolved, bin);
@@ -1131,6 +1198,7 @@ eval "$cmd"
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
         let capture = probe_shell(&host, "claude").await.unwrap();
         assert_eq!(capture.binary, bin);
@@ -1188,6 +1256,7 @@ eval "$cmd"
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
         let capture = pinned_probe_capture(&host, binary.clone()).await;
         assert_eq!(capture.binary, binary);
@@ -1222,6 +1291,7 @@ eval "$cmd"
             data_dir: None,
             managed_node_root: Some(node_root),
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
 
         let capture = pinned_probe_capture(&host, binary.clone()).await;
@@ -1254,6 +1324,7 @@ eval "$cmd"
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         }
         .with_declared_binary(tidebreak_core::HarnessKind::ClaudeCode, &binary, "9.9.9");
         let capture = probe_shell(&host, "claude").await.unwrap();
@@ -1324,10 +1395,87 @@ eval "$cmd"
             data_dir: Some(data_dir.path().to_path_buf()),
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         }
         .with_declared_binary(tidebreak_core::HarnessKind::ClaudeCode, &declared, "9.9.9");
         let capture = probe_shell(&host, "claude").await.unwrap();
         assert_eq!(capture.binary, declared);
+    }
+
+    #[test]
+    fn version_lines_parse_from_banner_tokens() {
+        assert_eq!(
+            version_minor_line(Some("2.1.233 (Claude Code)")),
+            Some((2, 1))
+        );
+        assert_eq!(
+            version_minor_line(Some("grok 1.0.4 (d846eb93d94d) [stable]")),
+            Some((1, 0))
+        );
+        assert_eq!(version_minor_line(Some("v1.18.18")), Some((1, 18)));
+        assert_eq!(version_minor_line(Some("development build")), None);
+        assert_eq!(version_minor_line(None), None);
+        assert!(off_pinned_line(Some("3.0.1 (Claude Code)"), (2, 1)));
+        assert!(!off_pinned_line(Some("2.1.300 (Claude Code)"), (2, 1)));
+        // Nothing to compare: keep the pinned capture's flags.
+        assert!(!off_pinned_line(None, (2, 1)));
+        assert!(!off_pinned_line(Some("development build"), (2, 1)));
+    }
+
+    #[tokio::test]
+    async fn declared_env_resolves_on_its_own_path_without_a_login_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("claude");
+        write_exec(&binary, "#!/bin/sh\nexit 1\n");
+        let declared_env = vec![
+            (
+                OsString::from("PATH"),
+                dir.path().as_os_str().to_os_string(),
+            ),
+            (OsString::from("SANDBOX_MARKER"), OsString::from("1")),
+        ];
+        // A shell that cannot run: only the declared environment can
+        // produce this capture.
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+            declared_binaries: Vec::new(),
+            declared_env: None,
+        }
+        .with_declared_env(declared_env.clone());
+        let capture = probe_shell(&host, "claude").await.unwrap();
+        assert_eq!(capture.binary, binary);
+        assert_eq!(capture.env, declared_env);
+        assert!(matches!(
+            probe_shell(&host, "codex").await,
+            Err(ProbeError::NotFound(name)) if name == "codex"
+        ));
+    }
+
+    #[tokio::test]
+    async fn declared_binary_captures_the_declared_env_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("declared-grok");
+        write_exec(&binary, "#!/bin/sh\nexit 1\n");
+        let declared_env = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+            declared_binaries: Vec::new(),
+            declared_env: None,
+        }
+        .with_declared_binary(tidebreak_core::HarnessKind::Grok, &binary, "1.0.4")
+        .with_declared_env(declared_env.clone());
+        let capture = probe_shell(&host, "grok").await.unwrap();
+        assert_eq!(capture.binary, binary);
+        assert_eq!(capture.env, declared_env);
+        assert!(capture.stderr.is_empty(), "no shell ran, so no shell error");
     }
 
     #[tokio::test]
@@ -1350,6 +1498,7 @@ eval "$cmd"
             data_dir: Some(data_dir.path().to_path_buf()),
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
 
         assert!(matches!(
@@ -1412,6 +1561,7 @@ mod windows_tests {
             data_dir: None,
             managed_node_root: None,
             declared_binaries: Vec::new(),
+            declared_env: None,
         };
 
         let capture = probe_shell(&host, "claude").await.unwrap();
