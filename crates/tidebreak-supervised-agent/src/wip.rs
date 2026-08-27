@@ -951,12 +951,26 @@ mod tests {
                 "main",
             ],
         );
+        // The merge needs an identity even to conflict: without one git
+        // dies before touching the tree (CI runners auto-detect none).
         let merge = Command::new("git")
-            .args(["merge", "side"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "merge",
+                "side",
+            ])
             .current_dir(&clone)
             .output()
             .unwrap();
         assert!(!merge.status.success(), "the merge must conflict");
+        assert!(
+            clone.join(".git").join("MERGE_HEAD").is_file(),
+            "the merge died without conflicting: {}",
+            String::from_utf8_lossy(&merge.stderr)
+        );
         let head = run(&clone, &["rev-parse", "HEAD"]);
         let mut context = context(root.path(), &clone).await;
 
