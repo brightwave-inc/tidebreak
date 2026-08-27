@@ -115,6 +115,20 @@ type Story = StoryObj<typeof meta>;
 /** One agent alone; the `+` menu is the whole affordance. */
 export const ConversationOnly: Story = {};
 
+/** The live mark on the agent the reader is looking at. */
+export const WorkingConversation: Story = {
+  args: {
+    conversations: [
+      {
+        id: "session-1",
+        label: "Main agent",
+        harness: "claude_code",
+        attention: attentionWorking,
+      },
+    ],
+  },
+};
+
 /**
  * The `+` menu, open. The top group starts something the workspace can hold
  * many of; the group under it opens the one view there is of the worktree.
