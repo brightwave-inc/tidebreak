@@ -40,4 +40,15 @@ describe("nextWorkspaceAfterLeaving", () => {
     expect(nextWorkspaceAfterLeaving(["a"], "a")).toBeNull();
     expect(nextWorkspaceAfterLeaving([], "a")).toBeNull();
   });
+
+  it("skips every id that left in the same pass", () => {
+    const left = new Set(["b", "c"]);
+    expect(nextWorkspaceAfterLeaving(["a", "b", "c", "d"], "b", left)).toBe(
+      "d",
+    );
+    expect(nextWorkspaceAfterLeaving(["a", "b", "c"], "c", left)).toBe("a");
+    expect(
+      nextWorkspaceAfterLeaving(["a", "b", "c"], "b", new Set(["a", "b", "c"])),
+    ).toBeNull();
+  });
 });

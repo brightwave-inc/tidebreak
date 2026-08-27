@@ -522,8 +522,7 @@ export function useWorkspaceCardCommands(): {
     if (!ok) return;
     const liveIds = railWorkspaceIds();
     const viewing = codeWorkspaceIdFromPath(pathname);
-    let archivedViewed = false;
-    let archivedCount = 0;
+    const archivedIds = new Set<string>();
     const failed: string[] = [];
 
     for (const workspace of workspaces) {
@@ -531,19 +530,18 @@ export function useWorkspaceCardCommands(): {
         const archived = await client.archiveCodeWorkspace(workspace.id, force);
         upsertWorkspace(archived);
         forgetWorkspaceSession(workspace.id);
-        archivedCount += 1;
-        if (viewing === workspace.id) archivedViewed = true;
+        archivedIds.add(workspace.id);
       } catch {
         failed.push(workspace.title);
       }
     }
 
     useCodeUiStore.getState().clearWorkspaceSelection();
-    if (archivedCount > 0) {
+    if (archivedIds.size > 0) {
       toast.success(
-        archivedCount === 1
+        archivedIds.size === 1
           ? "Workspace archived"
-          : `${archivedCount} workspaces archived`,
+          : `${archivedIds.size} workspaces archived`,
       );
     }
     if (failed.length > 0) {
@@ -553,8 +551,8 @@ export function useWorkspaceCardCommands(): {
           : `Could not archive ${failed.length} workspaces`,
       );
     }
-    if (!archivedViewed || viewing === undefined) return;
-    const nextId = nextWorkspaceAfterLeaving(liveIds, viewing);
+    if (viewing === undefined || !archivedIds.has(viewing)) return;
+    const nextId = nextWorkspaceAfterLeaving(liveIds, viewing, archivedIds);
     if (nextId) {
       await navigate({
         to: "/code/w/$workspaceId",
