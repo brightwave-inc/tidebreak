@@ -3,10 +3,27 @@ import { describe, expect, it } from "vitest";
 import { setEditorPreference } from "./editorPreference";
 import {
   externalEditorOpenFailureNotice,
+  workspaceBulkCommands,
   workspaceCommands,
   workspaceHeaderCommands,
   worktreeOpenFailureNotice,
 } from "./workspaceActions";
+
+describe("workspaceBulkCommands", () => {
+  it("names the count and keeps force-archive destructive", () => {
+    const commands = workspaceBulkCommands(4);
+    expect(commands).toEqual([
+      { id: "archive", label: "Archive 4 workspaces" },
+      {
+        id: "force-archive",
+        label: "Force archive 4 workspaces",
+        destructive: true,
+        separated: true,
+      },
+    ]);
+    expect(workspaceBulkCommands(2)[0]?.label).toBe("Archive 2 workspaces");
+  });
+});
 
 describe("workspace worktree actions", () => {
   it("offers a native folder action only for an active local workspace", () => {

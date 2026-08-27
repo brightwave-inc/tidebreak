@@ -80,6 +80,22 @@ const client = {
     gh_found: false,
     gh_remediation: "gh is not installed.",
   })),
+  getGatewayStatus: vi.fn(async () => ({
+    signed_in: false,
+    model_count: 0,
+    sign_in: { state: "idle" as const },
+  })),
+  getCodeDeliveryRepositories: vi.fn(async () => ({
+    capability: {
+      found: true,
+      authenticated: true,
+      viewer_login: "mira-chen",
+      remediation: "",
+    },
+    repositories: [],
+    errors: [],
+    fetched_at: "2026-08-15T00:00:00.000Z",
+  })),
   openCodeUpdates: vi.fn((_onNotice: (notice: unknown) => void) => {
     return {
       close() {},
@@ -128,7 +144,11 @@ afterEach(() => {
   useCodeDeliveryStore.getState().reset();
   disconnectCodeUpdates();
   useCodeUpdatesStore.getState().reset();
-  useCodeUiStore.setState({ railPrefs: DEFAULT_RAIL_PREFS });
+  useCodeUiStore.setState({
+    railPrefs: DEFAULT_RAIL_PREFS,
+    selectedWorkspaceIds: [],
+    selectionAnchorId: null,
+  });
   window.localStorage.clear();
 });
 
@@ -414,5 +434,122 @@ describe("CodeSidebar", () => {
         name: "Broken setup · Setup failed · app · tidebreak/broken",
       }),
     ).toBeInTheDocument();
+  });
+
+  it("cmd-clicks select without navigating, and a pair shows the bulk menu", async () => {
+    client.listCodeWorkspaces.mockResolvedValueOnce([
+      {
+        id: "ws-1",
+        repo_id: "repo-1",
+        title: "Fix login",
+        worktree_path: "/tmp/app/.worktrees/fix-login",
+        branch_name: "tidebreak/fix-login",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+      {
+        id: "ws-2",
+        repo_id: "repo-1",
+        title: "Fix logout",
+        worktree_path: "/tmp/app/.worktrees/fix-logout",
+        branch_name: "tidebreak/fix-logout",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-16T00:00:00.000Z",
+      },
+    ]);
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const first = await screen.findByRole("button", { name: /^Fix login/ });
+    const second = await screen.findByRole("button", { name: /^Fix logout/ });
+    fireEvent.click(first, { metaKey: true });
+    fireEvent.click(second, { metaKey: true });
+    expect(router.state.location.pathname).toBe("/code");
+    expect(first).toHaveAttribute("aria-selected", "true");
+    expect(second).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.contextMenu(first);
+    expect(
+      await screen.findByRole("menuitem", { name: "Archive 2 workspaces" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Force archive 2 workspaces" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Rename…" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("cmd-clicks include the open workspace", async () => {
+    client.listCodeWorkspaces.mockResolvedValueOnce([
+      {
+        id: "ws-1",
+        repo_id: "repo-1",
+        title: "Fix login",
+        worktree_path: "/tmp/app/.worktrees/fix-login",
+        branch_name: "tidebreak/fix-login",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+      {
+        id: "ws-2",
+        repo_id: "repo-1",
+        title: "Fix logout",
+        worktree_path: "/tmp/app/.worktrees/fix-logout",
+        branch_name: "tidebreak/fix-logout",
+        base_ref: "main",
+        status: "active" as const,
+        created_at: "2026-08-16T00:00:00.000Z",
+      },
+    ]);
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code/w/ws-1" },
+    );
+    const open = await screen.findByRole("button", { name: /^Fix login/ });
+    const other = await screen.findByRole("button", { name: /^Fix logout/ });
+    fireEvent.click(other, { metaKey: true });
+    expect(open).toHaveAttribute("aria-selected", "true");
+    expect(other).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("clears selection when you click away from the cards", async () => {
+    await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    const card = await screen.findByRole("button", { name: /^Fix login/ });
+    fireEvent.click(card, { metaKey: true });
+    expect(card).toHaveAttribute("aria-selected", "true");
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Workspaces" }));
+    expect(card).not.toHaveAttribute("aria-selected");
+  });
+
+  it("opens and clears selection on an unmodified click", async () => {
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    const card = await screen.findByRole("button", { name: /^Fix login/ });
+    fireEvent.click(card, { metaKey: true });
+    expect(card).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(card);
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-1"),
+    );
+    expect(card).not.toHaveAttribute("aria-selected");
   });
 });

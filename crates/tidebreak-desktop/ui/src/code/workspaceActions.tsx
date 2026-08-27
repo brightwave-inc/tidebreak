@@ -167,6 +167,22 @@ export function workspaceCommands(input: {
   return items;
 }
 
+/** Right-click on a multi-selection. Count is always greater than one. */
+export function workspaceBulkCommands(count: number): WorkspaceCommand[] {
+  return [
+    {
+      id: "archive",
+      label: `Archive ${count} workspaces`,
+    },
+    {
+      id: "force-archive",
+      label: `Force archive ${count} workspaces`,
+      destructive: true,
+      separated: true,
+    },
+  ];
+}
+
 /**
  * Header overflow: worktree access, rename, pin/clear, repo quick actions,
  * then archive. Opening the workspace and its terminal remain card-only.
@@ -391,6 +407,10 @@ export async function archiveWorkspaceWithConfirm(options: {
 
 export function useWorkspaceCardCommands(): {
   run: (command: WorkspaceCommandId, context: WorkspaceCommandContext) => void;
+  runBulk: (
+    command: Extract<WorkspaceCommandId, "archive" | "force-archive">,
+    workspaces: readonly CodeWorkspaceSnapshot[],
+  ) => void;
   dialogs: ReactElement;
 } {
   const { client } = useApp();
@@ -476,6 +496,76 @@ export function useWorkspaceCardCommands(): {
    * reader who already knows and does not want two dialogs about it. One
    * confirmation still stands between the click and the worktree going away.
    */
+  async function runBulkArchive(
+    workspaces: readonly CodeWorkspaceSnapshot[],
+    force: boolean,
+  ) {
+    const count = workspaces.length;
+    if (count === 0) return;
+    const ok = await confirm(
+      force
+        ? {
+            title: `Discard changes and archive ${count} workspaces?`,
+            description:
+              "Uncommitted and unpushed work is lost and a running session is stopped. Branches and their commits are kept.",
+            confirmLabel: "Discard and archive",
+            destructive: true,
+          }
+        : {
+            title: `Archive ${count} workspaces?`,
+            description:
+              "They leave the rail and collect in Archive. Worktrees go away; branches stay.",
+            confirmLabel: "Archive",
+            destructive: true,
+          },
+    );
+    if (!ok) return;
+    const liveIds = railWorkspaceIds();
+    const viewing = codeWorkspaceIdFromPath(pathname);
+    let archivedViewed = false;
+    let archivedCount = 0;
+    const failed: string[] = [];
+
+    for (const workspace of workspaces) {
+      try {
+        const archived = await client.archiveCodeWorkspace(workspace.id, force);
+        upsertWorkspace(archived);
+        forgetWorkspaceSession(workspace.id);
+        archivedCount += 1;
+        if (viewing === workspace.id) archivedViewed = true;
+      } catch {
+        failed.push(workspace.title);
+      }
+    }
+
+    useCodeUiStore.getState().clearWorkspaceSelection();
+    if (archivedCount > 0) {
+      toast.success(
+        archivedCount === 1
+          ? "Workspace archived"
+          : `${archivedCount} workspaces archived`,
+      );
+    }
+    if (failed.length > 0) {
+      toast.error(
+        failed.length === 1
+          ? `Could not archive ${failed[0]}`
+          : `Could not archive ${failed.length} workspaces`,
+      );
+    }
+    if (!archivedViewed || viewing === undefined) return;
+    const nextId = nextWorkspaceAfterLeaving(liveIds, viewing);
+    if (nextId) {
+      await navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: nextId },
+        replace: true,
+      });
+      return;
+    }
+    await navigate({ to: "/code", replace: true });
+  }
+
   async function runForceArchive(workspace: CodeWorkspaceSnapshot) {
     const liveIds = railWorkspaceIds();
     const ok = await confirm({
@@ -773,6 +863,13 @@ export function useWorkspaceCardCommands(): {
     }
   }
 
+  function runBulk(
+    command: Extract<WorkspaceCommandId, "archive" | "force-archive">,
+    workspaces: readonly CodeWorkspaceSnapshot[],
+  ): void {
+    void runBulkArchive(workspaces, command === "force-archive");
+  }
+
   const renameDialog = (
     <Dialog
       open={rename !== null}
@@ -844,6 +941,7 @@ export function useWorkspaceCardCommands(): {
 
   return {
     run,
+    runBulk,
     dialogs: (
       <>
         {dialog}

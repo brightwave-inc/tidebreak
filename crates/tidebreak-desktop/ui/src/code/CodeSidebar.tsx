@@ -33,15 +33,23 @@ import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import { RailSettingsMenu } from "./RailSettingsMenu";
 import {
   useWorkspaceCardCommands,
+  workspaceBulkCommands,
   workspaceCommands,
 } from "./workspaceActions";
 import { tidebreakProductRepo } from "./uneffMe";
-import { WorkspaceCard } from "./WorkspaceCard";
+import { WorkspaceCard, WorkspaceStatusMark } from "./WorkspaceCard";
 import {
   arrangeWorkspaces,
   isPutAway,
+  isWorkspaceStatusRank,
   workspaceStackParent,
 } from "./workspaceCards";
+import {
+  pointerSelectIntent,
+  rangeWorkspaceSelection,
+  seedOpenWorkspaceSelection,
+  toggleWorkspaceSelection,
+} from "./workspaceSelection";
 import { fetchFixErrorsLogs } from "./checkLogs";
 import { prWorkflowPrompt } from "./prActions";
 import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
@@ -92,7 +100,7 @@ export function CodeSidebar() {
   const setAddRepoOpen = useCodeUiStore((state) => state.setAddRepoOpen);
   const prefs = useCodeUiStore((state) => state.railPrefs);
   const runComposerPrompt = useCodeUiStore((state) => state.runComposerPrompt);
-  const { run, dialogs } = useWorkspaceCardCommands();
+  const { run, runBulk, dialogs } = useWorkspaceCardCommands();
   const layout = useLayoutState();
   const terminalOpen =
     findCodeTerminalTab(layout) !== null && pathname.startsWith("/code/w/");
@@ -108,6 +116,73 @@ export function CodeSidebar() {
 
   const groups = arrangeWorkspaces(prefs.sortMode, repos, workspaces, digests);
   const canOpenWorktree = canOpenLocalCodeWorktree();
+  const selectedWorkspaceIds = useCodeUiStore(
+    (state) => state.selectedWorkspaceIds,
+  );
+  const replaceWorkspaceSelection = useCodeUiStore(
+    (state) => state.replaceWorkspaceSelection,
+  );
+  const clearWorkspaceSelection = useCodeUiStore(
+    (state) => state.clearWorkspaceSelection,
+  );
+  const selectableIds = groups.flatMap((group) =>
+    group.workspaces
+      .filter((workspace) => workspace.status !== "creating")
+      .map((workspace) => workspace.id),
+  );
+  const selectedWorkspaces = workspaces.filter(
+    (workspace) =>
+      selectedWorkspaceIds.includes(workspace.id) &&
+      workspace.status !== "creating" &&
+      !isPutAway(workspace),
+  );
+
+  function applyPointerSelect(
+    workspaceId: string,
+    event: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean },
+  ) {
+    const intent = pointerSelectIntent(event);
+    const { selectedWorkspaceIds: current, selectionAnchorId } =
+      useCodeUiStore.getState();
+    const seeded = seedOpenWorkspaceSelection(
+      current,
+      viewedWorkspaceId,
+      selectableIds,
+      workspaceId,
+    );
+    if (intent === "range") {
+      const anchor = selectionAnchorId ?? seeded.anchorId;
+      replaceWorkspaceSelection(
+        rangeWorkspaceSelection(selectableIds, anchor, workspaceId),
+        anchor ?? workspaceId,
+      );
+      return;
+    }
+    if (intent === "toggle") {
+      replaceWorkspaceSelection(
+        toggleWorkspaceSelection(seeded.selected, workspaceId),
+        workspaceId,
+      );
+    }
+  }
+
+  useEffect(() => {
+    function onPointerDown(event: PointerEvent) {
+      if (useCodeUiStore.getState().selectedWorkspaceIds.length === 0) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(
+          "[data-workspace-card], [role='menu'], [role='alertdialog']",
+        )
+      ) {
+        return;
+      }
+      clearWorkspaceSelection();
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [clearWorkspaceSelection]);
 
   return (
     <SidebarFrame
@@ -163,23 +238,52 @@ export function CodeSidebar() {
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-col gap-1">
+      <div
+        className="flex min-h-0 flex-col gap-1"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            if (useCodeUiStore.getState().selectedWorkspaceIds.length === 0) {
+              return;
+            }
+            event.preventDefault();
+            clearWorkspaceSelection();
+            return;
+          }
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            event.key.toLowerCase() === "a"
+          ) {
+            event.preventDefault();
+            replaceWorkspaceSelection(selectableIds, selectableIds[0] ?? null);
+          }
+        }}
+      >
         {groups.map((group) => (
           <div key={group.key} className="flex flex-col gap-1">
-            {group.label && (
-              <div
-                className="truncate px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90"
-                title={group.label}
-              >
-                {group.key === "archived"
-                  ? `${group.label} · ${group.workspaces.length}`
-                  : group.label}
-              </div>
-            )}
+            {group.label &&
+              (isWorkspaceStatusRank(group.key) ? (
+                <div className="flex items-center gap-1.5 px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90">
+                  <WorkspaceStatusMark rank={group.key} />
+                  <span className="min-w-0 truncate" title={group.label}>
+                    {group.label} · {group.workspaces.length}
+                  </span>
+                </div>
+              ) : (
+                <div
+                  className="truncate px-2 pt-3 pb-1 text-xs font-medium text-muted-foreground/90"
+                  title={group.label}
+                >
+                  {group.key === "archived"
+                    ? `${group.label} · ${group.workspaces.length}`
+                    : group.label}
+                </div>
+              ))}
             {group.workspaces.map((workspace) => {
               const digest = digests[workspace.id];
               const pr = digest?.pr_state ?? workspace.pr;
               const creating = workspace.status === "creating";
+              const selected = selectedWorkspaceIds.includes(workspace.id);
+              const bulk = selected && selectedWorkspaces.length > 1;
               return (
                 <WorkspaceCard
                   key={workspace.id}
@@ -191,6 +295,7 @@ export function CodeSidebar() {
                       ?.display_name ?? workspace.repo_id
                   }
                   active={pathname === `/code/w/${workspace.id}`}
+                  selected={selected}
                   terminalOpen={
                     terminalOpen && viewedWorkspaceId === workspace.id
                   }
@@ -202,22 +307,25 @@ export function CodeSidebar() {
                       prefs.showRepoChip && prefs.sortMode !== "by-repo",
                     branch: prefs.showBranch && !creating,
                   }}
+                  contextMenuLabel={bulk ? "Workspace" : undefined}
                   commands={
                     creating
                       ? []
-                      : workspaceCommands({
-                          hasPr: Boolean(pr),
-                          archived: isPutAway(workspace),
-                          hasSession: Boolean(sessions[workspace.id]),
-                          attentionPinned:
-                            (
-                              digest?.attention ??
-                              sessions[workspace.id]?.attention
-                            )?.state.type === "manual",
-                          canOpenWorktree,
-                          canUneff: Boolean(tidebreakProductRepo(repos)),
-                          setupFailed: workspace.status === "setup_failed",
-                        })
+                      : bulk
+                        ? workspaceBulkCommands(selectedWorkspaces.length)
+                        : workspaceCommands({
+                            hasPr: Boolean(pr),
+                            archived: isPutAway(workspace),
+                            hasSession: Boolean(sessions[workspace.id]),
+                            attentionPinned:
+                              (
+                                digest?.attention ??
+                                sessions[workspace.id]?.attention
+                              )?.state.type === "manual",
+                            canOpenWorktree,
+                            canUneff: Boolean(tidebreakProductRepo(repos)),
+                            setupFailed: workspace.status === "setup_failed",
+                          })
                   }
                   childSessions={watchChildren(
                     { childrenByWorkspace },
@@ -232,10 +340,18 @@ export function CodeSidebar() {
                   }
                   onOpen={() => {
                     if (creating) return;
+                    clearWorkspaceSelection();
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
                     });
+                  }}
+                  onSelectPointer={(event) =>
+                    applyPointerSelect(workspace.id, event)
+                  }
+                  onMenuOpen={() => {
+                    if (selectedWorkspaceIds.includes(workspace.id)) return;
+                    replaceWorkspaceSelection([workspace.id], workspace.id);
                   }}
                   onOpenChildSession={(sessionId) =>
                     void navigate({
@@ -345,14 +461,21 @@ export function CodeSidebar() {
                       params: { workspaceId: workspace.id },
                     });
                   }}
-                  onCommand={(command) =>
+                  onCommand={(command) => {
+                    if (
+                      bulk &&
+                      (command === "archive" || command === "force-archive")
+                    ) {
+                      runBulk(command, selectedWorkspaces);
+                      return;
+                    }
                     run(command, {
                       workspace,
                       title: digest?.title ?? workspace.title,
                       pr,
                       session: sessions[workspace.id],
-                    })
-                  }
+                    });
+                  }}
                 />
               );
             })}

@@ -1,14 +1,7 @@
 import { getName } from "@tauri-apps/api/app";
 import { useEffect, useState, type ReactNode } from "react";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
-import {
-  Monitor,
-  Moon,
-  PanelLeftClose,
-  RotateCw,
-  Settings,
-  Sun,
-} from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { PanelLeftClose, RotateCw } from "lucide-react";
 
 import { useApp } from "@/AppContext";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -21,8 +14,8 @@ import {
   SidebarFooter,
   SidebarHeader,
 } from "./primitives";
-import { useTheme } from "@/theme";
 import { useUiStore } from "@/UiStore";
+import { SidebarAccountMenu } from "./SidebarAccountMenu";
 
 /**
  * The parts of the rail that do not depend on where the reader is: the way
@@ -41,11 +34,7 @@ export function SidebarFrame({
 }) {
   const navigate = useNavigate();
   const { updateState, restartForUpdate } = useApp();
-  const { mode: themeMode, cycle: cycleTheme } = useTheme();
   const toggleSidebar = useUiStore((state) => state.toggleSidebar);
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
   const [appName, setAppName] = useState("Tidebreak");
 
   // Keep dev and staging windows distinguishable, but put that identity in
@@ -115,28 +104,7 @@ export function SidebarFrame({
             )}
           </SidebarButton>
         )}
-        <SidebarButton
-          aria-label={`Theme: ${themeMode}. Click to change.`}
-          onClick={cycleTheme}
-        >
-          {themeMode === "light" ? (
-            <Sun />
-          ) : themeMode === "dark" ? (
-            <Moon />
-          ) : (
-            <Monitor />
-          )}
-          <span>Theme</span>
-        </SidebarButton>
-        <SidebarButton
-          aria-current={pathname === "/settings" ? "page" : undefined}
-          data-active={pathname === "/settings" || undefined}
-          className="data-[active]:bg-muted"
-          onClick={() => void navigate({ to: "/settings" })}
-        >
-          <Settings />
-          <span>Settings</span>
-        </SidebarButton>
+        <SidebarAccountMenu />
       </SidebarFooter>
     </SidebarRail>
   );

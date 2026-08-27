@@ -3,6 +3,7 @@ import {
   Archive,
   Bot,
   CheckCircle2,
+  Circle,
   CircleAlert,
   Copy,
   CornerDownRight,
@@ -25,9 +26,11 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { Spinner } from "@/components/ui/spinner";
 import {
   HoverCard,
   HoverCardContent,
@@ -75,15 +78,70 @@ import {
   sessionActivityLineLabel,
   watchRowLabel,
   workspaceCardLabel,
+  workspaceCardStatus,
   workspacePrChipSummary,
+  WORKSPACE_STATUS_RANK_LABELS,
+  WORKSPACE_STATUS_RANK_TONES,
   type CardDensity,
+  type WorkspaceStatusRank,
 } from "./workspaceCards";
+import { pointerSelectIntent } from "./workspaceSelection";
 import {
   PULL_REQUEST_LIFECYCLE_TONE,
   prCompactStatusLabel,
   prCompactStatusTone,
   pullRequestLifecycle,
 } from "./prState";
+
+/** Compact rank glyph shared by the card and by-status group headers. */
+export function WorkspaceStatusMark({
+  rank,
+  creating = false,
+  prState,
+}: {
+  rank: WorkspaceStatusRank;
+  creating?: boolean;
+  prState?: string;
+}) {
+  if (creating) {
+    return (
+      <span role="img" aria-label="Creating workspace">
+        <LoaderCircle
+          className={cn("size-3 animate-spin", STATUS_MARK.pending)}
+          aria-hidden
+        />
+      </span>
+    );
+  }
+  const label = WORKSPACE_STATUS_RANK_LABELS[rank];
+  const className = cn(
+    "size-3",
+    STATUS_MARK[WORKSPACE_STATUS_RANK_TONES[rank]],
+  );
+  return (
+    <span role="img" aria-label={label} data-workspace-status={rank}>
+      {rank === "needs_you" ? (
+        <CircleAlert className={className} aria-hidden />
+      ) : rank === "running" ? (
+        <Spinner className={className} aria-hidden />
+      ) : rank === "pr_open" ? (
+        <GitPullRequest
+          className={className}
+          aria-hidden
+          data-pr-state={prState ?? "open"}
+        />
+      ) : rank === "done_unreviewed" ? (
+        <CheckCircle2 className={className} aria-hidden />
+      ) : rank === "setup_failed" ? (
+        <CircleAlert className={className} aria-hidden />
+      ) : rank === "archived" ? (
+        <Archive className={className} aria-hidden />
+      ) : (
+        <Circle className={className} aria-hidden />
+      )}
+    </span>
+  );
+}
 
 /**
  * One workspace in the rail.
@@ -98,6 +156,7 @@ export function WorkspaceCard({
   session,
   repoName,
   active,
+  selected = false,
   terminalOpen,
   density,
   visibleMeta,
@@ -105,7 +164,10 @@ export function WorkspaceCard({
   childSessions = [],
   stackParent,
   detailDefaultOpen = false,
+  contextMenuLabel,
   onOpen,
+  onSelectPointer,
+  onMenuOpen,
   onCommand,
   onOpenChildSession,
   onOpenSubagent,
@@ -117,6 +179,7 @@ export function WorkspaceCard({
   session: CodeSessionSnapshot | undefined;
   repoName: string;
   active: boolean;
+  selected?: boolean;
   terminalOpen: boolean;
   density: CardDensity;
   visibleMeta: { repoChip: boolean; branch: boolean };
@@ -126,7 +189,15 @@ export function WorkspaceCard({
   stackParent?: { id: string; title: string } | null;
   /** Open the hover detail at mount time. Stories use this for visual review. */
   detailDefaultOpen?: boolean;
+  /** Section label for a bulk context menu. */
+  contextMenuLabel?: string;
   onOpen: () => void;
+  onSelectPointer?: (event: {
+    shiftKey: boolean;
+    metaKey: boolean;
+    ctrlKey: boolean;
+  }) => void;
+  onMenuOpen?: () => void;
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onOpenChildSession?: (sessionId: string) => void;
   onOpenSubagent?: (callId: string) => void;
@@ -137,6 +208,7 @@ export function WorkspaceCard({
   const pr = digest?.pr_state ?? workspace.pr;
   const archived = isPutAway(workspace);
   const creating = workspace.status === "creating";
+  const cardStatus = workspaceCardStatus(workspace, digest);
   const attentionMark = attentionMarkForDigest(digest);
   const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
   const compactDetail = useCompactWorkspaceDetail();
@@ -152,16 +224,22 @@ export function WorkspaceCard({
     <article
       className={cn(
         "group/workspace relative rounded-xl border border-transparent transition-[background-color,border-color,box-shadow,opacity] duration-150",
-        active
-          ? "border-border-subtle bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]"
-          : "hover:bg-background/55",
+        selected
+          ? "border-border bg-muted/60"
+          : active
+            ? "border-border-subtle bg-background shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]"
+            : "hover:bg-background/55",
         archived && "opacity-65",
       )}
+      data-workspace-card=""
       data-active={active || undefined}
+      data-selected={selected || undefined}
     >
       <ContextMenu
         onOpenChange={(open) => {
-          if (open) setDetailOpen(false);
+          if (!open) return;
+          setDetailOpen(false);
+          onMenuOpen?.();
         }}
       >
         <HoverCard
@@ -185,6 +263,7 @@ export function WorkspaceCard({
                   workspaceStatus: workspace.status,
                 })}
                 aria-current={active ? "page" : undefined}
+                aria-selected={selected || undefined}
                 disabled={creating}
                 className={cn(
                   "flex w-full cursor-pointer flex-col gap-0.5 rounded-xl px-2.5 py-2 text-left",
@@ -192,10 +271,25 @@ export function WorkspaceCard({
                   HOVER_TINT,
                   creating && "cursor-wait",
                 )}
-                onClick={onOpen}
+                onClick={(event) => {
+                  if (creating) return;
+                  if (
+                    onSelectPointer &&
+                    pointerSelectIntent(event) !== "open"
+                  ) {
+                    event.preventDefault();
+                    onSelectPointer(event);
+                    return;
+                  }
+                  onOpen();
+                }}
               >
                 <span className="flex min-w-0 items-center gap-2">
-                  <AttentionBadge attention={attentionMark} compact />
+                  <WorkspaceStatusMark
+                    rank={cardStatus.rank}
+                    creating={creating}
+                    prState={pr ? pullRequestLifecycle(pr) : undefined}
+                  />
                   <span className="min-w-0 flex-1 truncate text-md font-medium leading-5">
                     {title}
                   </span>
@@ -203,17 +297,9 @@ export function WorkspaceCard({
                     className="flex shrink-0 items-center gap-1.5"
                     aria-hidden
                   >
-                    {pr && <PrGlyph pr={pr} />}
+                    {pr && cardStatus.rank !== "pr_open" && <PrGlyph pr={pr} />}
                     {terminalOpen && (
                       <SquareTerminal className="size-3 text-muted-foreground" />
-                    )}
-                    {creating && (
-                      <LoaderCircle
-                        className={cn(
-                          "size-3 animate-spin",
-                          STATUS_MARK.pending,
-                        )}
-                      />
                     )}
                   </span>
                 </span>
@@ -268,6 +354,9 @@ export function WorkspaceCard({
         </HoverCard>
 
         <ContextMenuContent>
+          {contextMenuLabel && (
+            <ContextMenuLabel>{contextMenuLabel}</ContextMenuLabel>
+          )}
           {commands.map((command) => (
             <WorkspaceMenuItem
               key={command.id}
