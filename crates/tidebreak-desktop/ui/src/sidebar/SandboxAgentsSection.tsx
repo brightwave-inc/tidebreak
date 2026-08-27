@@ -169,7 +169,7 @@ export function SandboxAgentsSection({
             </Badge>
           )}
           {liveCount === 0 && agents.length > 0 && (
-            <span className="ml-auto text-[10px] text-muted-foreground">
+            <span className="ml-auto text-2xs text-muted-foreground">
               {agents.length}
             </span>
           )}
@@ -245,7 +245,7 @@ function SandboxAgentRow({
         </span>
         <span className="min-w-0 flex-1 truncate text-xs">{agent.task}</span>
         {live && agent.elapsedLabel && (
-          <span className="shrink-0 text-[10px] text-muted-foreground">
+          <span className="shrink-0 text-2xs text-muted-foreground">
             {agent.elapsedLabel}
           </span>
         )}
@@ -278,7 +278,7 @@ function SandboxAgentRow({
 function SandboxAgentStatusBadge({ status }: { status: SandboxStatus }) {
   const variant = sandboxStatusBadgeVariant(status);
   return (
-    <Badge variant={variant} size="sm" className="h-4 px-1.5 py-0 text-[10px]">
+    <Badge variant={variant} size="sm" className="h-4 px-1.5 py-0 text-2xs">
       {SANDBOX_STATUS_LABELS[status]}
     </Badge>
   );
