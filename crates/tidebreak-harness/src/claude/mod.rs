@@ -103,18 +103,24 @@ const AUTH_OVERRIDE_VARS: &[&str] = &[
 /// login at all, so a hit means a session may work even though the probe
 /// saw signed-out — never that credentials are known-good.
 pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> bool {
+    observe_auth_override(env).is_some()
+}
+
+/// The same detection, reported with the surface it came from, for the
+/// doctor's display of how this machine authenticates.
+pub(crate) fn observe_auth_override(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<crate::AuthOverrideSignal> {
     if crate::probe::env_sets_any(env, AUTH_OVERRIDE_VARS) {
-        return true;
+        return Some(crate::AuthOverrideSignal::Environment);
     }
-    let Some(settings) = read_settings(env) else {
-        return false;
-    };
+    let settings = read_settings(env)?;
     if settings
         .get("apiKeyHelper")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|helper| !helper.trim().is_empty())
     {
-        return true;
+        return Some(crate::AuthOverrideSignal::EngineConfig);
     }
     settings
         .get("env")
@@ -124,6 +130,7 @@ pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsStri
                 .iter()
                 .any(|name| vars.contains_key(*name))
         })
+        .then_some(crate::AuthOverrideSignal::EngineConfig)
 }
 
 fn claude_settings_models(
@@ -360,6 +367,46 @@ mod tests {
         assert!(auth_override_present(&env));
         std::fs::write(&settings, r#"{"apiKeyHelper":"/usr/local/bin/key.sh"}"#).unwrap();
         assert!(auth_override_present(&env));
+    }
+
+    #[test]
+    fn auth_observation_names_the_surface_it_read() {
+        use crate::AuthOverrideSignal;
+        let os = std::ffi::OsString::from;
+        assert_eq!(observe_auth_override(&[]), None);
+        assert_eq!(
+            observe_auth_override(&[(os("ANTHROPIC_AUTH_TOKEN"), os("tok"))]),
+            Some(AuthOverrideSignal::Environment)
+        );
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let settings = home.path().join(".claude").join("settings.json");
+        let env = vec![(os("HOME"), home.path().as_os_str().to_owned())];
+        std::fs::write(&settings, r#"{"model":"claude-opus-5"}"#).unwrap();
+        assert_eq!(observe_auth_override(&env), None);
+        std::fs::write(
+            &settings,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://gateway.example"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            observe_auth_override(&env),
+            Some(AuthOverrideSignal::EngineConfig)
+        );
+        std::fs::write(&settings, r#"{"apiKeyHelper":"/usr/local/bin/key.sh"}"#).unwrap();
+        assert_eq!(
+            observe_auth_override(&env),
+            Some(AuthOverrideSignal::EngineConfig)
+        );
+        // The environment is the nearer surface, so it names itself even when
+        // the settings file would also answer.
+        let mut both = env.clone();
+        both.push((os("ANTHROPIC_API_KEY"), os("sk-ant")));
+        assert_eq!(
+            observe_auth_override(&both),
+            Some(AuthOverrideSignal::Environment)
+        );
     }
 
     #[tokio::test]

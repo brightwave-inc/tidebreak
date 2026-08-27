@@ -421,10 +421,18 @@ fn login_status_from_output(stdout: &[u8], stderr: &[u8]) -> Option<bool> {
 /// signed out. A hit means a session may work even though the probe saw
 /// signed-out — never that credentials are known-good.
 pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> bool {
+    observe_auth_override(env).is_some()
+}
+
+/// The same detection, reported with the surface it came from, for the
+/// doctor's display of how this machine authenticates.
+pub(crate) fn observe_auth_override(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<crate::AuthOverrideSignal> {
     if crate::probe::env_sets_any(env, &["OPENAI_API_KEY", "OPENAI_BASE_URL"]) {
-        return true;
+        return Some(crate::AuthOverrideSignal::Environment);
     }
-    config_declares_model_provider(env)
+    config_declares_model_provider(env).then_some(crate::AuthOverrideSignal::EngineConfig)
 }
 
 /// `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, mentions
@@ -938,6 +946,39 @@ mod tests {
         )
         .unwrap();
         assert!(auth_override_present(&env));
+    }
+
+    #[test]
+    fn auth_observation_names_the_surface_it_read() {
+        use crate::AuthOverrideSignal;
+        let os = std::ffi::OsString::from;
+        assert_eq!(observe_auth_override(&[]), None);
+        assert_eq!(
+            observe_auth_override(&[(os("OPENAI_BASE_URL"), os("https://gateway.example/v1"))]),
+            Some(AuthOverrideSignal::Environment)
+        );
+
+        let codex_home = tempfile::tempdir().unwrap();
+        let env = vec![(os("CODEX_HOME"), codex_home.path().as_os_str().to_owned())];
+        std::fs::write(codex_home.path().join("config.toml"), "model = \"gpt-5\"\n").unwrap();
+        assert_eq!(observe_auth_override(&env), None);
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            "[model_providers.gateway]\nbase_url = \"https://gateway.example/v1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            observe_auth_override(&env),
+            Some(AuthOverrideSignal::EngineConfig)
+        );
+        // The environment is the nearer surface, so it names itself even when
+        // the config file would also answer.
+        let mut both = env.clone();
+        both.push((os("OPENAI_API_KEY"), os("sk")));
+        assert_eq!(
+            observe_auth_override(&both),
+            Some(AuthOverrideSignal::Environment)
+        );
     }
 
     #[test]

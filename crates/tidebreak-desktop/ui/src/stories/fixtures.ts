@@ -647,6 +647,56 @@ export const harnessDoctorHosted: HarnessDoctorReport = {
   ],
 };
 
+/**
+ * A machine whose engines are pointed at a Model Gateway: no vendor login
+ * anywhere, and every engine that reads a credential override works. The two
+ * engines whose override surfaces Tidebreak does not read stay on the local
+ * sign-in they actually have.
+ */
+export const harnessDoctorGatewayManaged: HarnessDoctorReport = {
+  harnesses: [
+    doctorEntry({
+      kind: "claude_code",
+      version: "2.1.234 (Claude Code)",
+      path: "~/.local/share/tidebreak/tools/harnesses/claude_code",
+      authenticated: false,
+      auth_mode: "gateway_managed",
+    }),
+    doctorEntry({
+      kind: "codex",
+      version: "codex-cli 0.147.0",
+      tier: "secondary",
+      authenticated: false,
+      auth_mode: "gateway_managed",
+      caps: {
+        ...fullCaps,
+        mid_turn_steering: "supported",
+        image_input: "unknown",
+      },
+    }),
+    doctorEntry({
+      kind: "opencode",
+      version: "1.18.18",
+      tier: "tertiary",
+      authenticated: true,
+      caps: { ...fullCaps, allow_mode: "unknown", reasoning_levels: "unknown" },
+    }),
+    doctorEntry({
+      kind: "grok",
+      version: "grok 1.0.5",
+      tier: "best_effort",
+      authenticated: false,
+      remediation: "Sign in to Grok CLI in your own terminal, then re-check.",
+      caps: {
+        ...fullCaps,
+        mid_turn_steering: "unsupported",
+        plan_mode: "unsupported",
+        structured_approvals: "unsupported",
+      },
+    }),
+  ],
+};
+
 /** One engine mid-download, one that failed, for the doctor's live states. */
 export const harnessInstallsInFlight: Partial<
   Record<HarnessKind, CodeHarnessInstallSnapshot>

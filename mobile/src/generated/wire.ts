@@ -2485,7 +2485,7 @@ export type GrantScope = { "scope": "exact_action" } & ToolActionPreview | { "sc
 /**
  * How a session of one engine authenticates on this machine.
  */
-export type HarnessAuthMode = "local_sign_in" | "gateway_relay" | "hosted_unavailable";
+export type HarnessAuthMode = "local_sign_in" | "gateway_managed" | "gateway_relay" | "hosted_unavailable";
 
 /**
  * Capability vector for one probed engine version.
@@ -2584,11 +2584,12 @@ export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean,
 installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, 
 /**
  * How a session of this engine authenticates here: the engine's own
- * local sign-in, the on-behalf-of relay on a gateway-hosted machine
+ * local sign-in, a credential override that authenticates without one
+ * (issue 2749), the on-behalf-of relay on a gateway-hosted machine
  * (decision 71), or nothing where the relay does not cover the engine
  * yet. Readiness follows this — `authenticated` stays the local probe
- * observation, which on a hosted machine is not what a session
- * authenticates with.
+ * observation, which on a hosted or gateway-managed machine is not what
+ * a session authenticates with.
  */
 auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number, 
 /**

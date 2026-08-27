@@ -6,6 +6,7 @@ import {
   harnessDoctor,
   harnessDoctorCold,
   harnessDoctorDegraded,
+  harnessDoctorGatewayManaged,
   harnessDoctorHosted,
   harnessDoctorMixed,
   harnessInstallsInFlight,
@@ -73,6 +74,16 @@ export const NeedsYou: Story = {
  */
 export const Hosted: Story = {
   args: { report: harnessDoctorHosted },
+};
+
+/**
+ * A gateway-managed machine: the credentials each engine runs on are wired
+ * outside its own login, so its sign-in check reports signed out on a machine
+ * that works. The rows say who holds the credentials rather than sending the
+ * reader after a login nothing here needs.
+ */
+export const GatewayManaged: Story = {
+  args: { report: harnessDoctorGatewayManaged },
 };
 
 /** The re-probe is running. */

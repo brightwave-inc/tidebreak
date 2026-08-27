@@ -199,6 +199,7 @@ const HARNESS_TIERS = new Set<HarnessTier>([
 ]);
 const HARNESS_AUTH_MODES = new Set<HarnessAuthMode>([
   "local_sign_in",
+  "gateway_managed",
   "gateway_relay",
   "hosted_unavailable",
 ]);

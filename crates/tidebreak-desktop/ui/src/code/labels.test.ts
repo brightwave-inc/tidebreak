@@ -135,6 +135,34 @@ describe("harnessUnusableReason", () => {
     ).toBe(false);
   });
 
+  it("reads a gateway-managed engine as ready without a sign-in", () => {
+    // The machine's credentials are wired outside the engine's own login, so
+    // its login check reports signed out on a working machine (issue 2749).
+    expect(
+      isHarnessReady({
+        found: true,
+        authenticated: false,
+        auth_mode: "gateway_managed",
+      }),
+    ).toBe(true);
+    expect(isHarnessReady({ found: true, auth_mode: "gateway_managed" })).toBe(
+      true,
+    );
+    // The binary still has to be there.
+    expect(isHarnessReady({ found: false, auth_mode: "gateway_managed" })).toBe(
+      false,
+    );
+    expect(
+      harnessUnusableReason({
+        found: true,
+        installable: true,
+        authenticated: false,
+        auth_mode: "gateway_managed",
+        caps: caps("supported", "supported", "supported"),
+      }),
+    ).toBeNull();
+  });
+
   it("gates hosted rows on relay coverage, not a terminal sign-in", () => {
     expect(
       harnessUnusableReason({

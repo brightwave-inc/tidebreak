@@ -368,6 +368,13 @@ pub struct HarnessDoctorReport {
 pub enum HarnessAuthMode {
     /// The engine's own local sign-in — the probe result decides readiness.
     LocalSignIn,
+    /// A credential or endpoint override on this machine authenticates the
+    /// engine without any vendor login (issue 2749): an API key or gateway
+    /// base URL in the environment, or engine config pointing inference at a
+    /// gateway. The engine's own login check reports signed out on such a
+    /// machine, and it is still working, so readiness is the binary being
+    /// there and there is nothing to remediate.
+    GatewayManaged,
     /// The on-behalf-of relay (decision 71): a gateway-hosted machine, where
     /// turns run as the caller through the gateway and no local sign-in is
     /// needed.
@@ -401,11 +408,12 @@ pub struct HarnessDoctorEntry {
     #[ts(optional)]
     pub authenticated: Option<bool>,
     /// How a session of this engine authenticates here: the engine's own
-    /// local sign-in, the on-behalf-of relay on a gateway-hosted machine
+    /// local sign-in, a credential override that authenticates without one
+    /// (issue 2749), the on-behalf-of relay on a gateway-hosted machine
     /// (decision 71), or nothing where the relay does not cover the engine
     /// yet. Readiness follows this — `authenticated` stays the local probe
-    /// observation, which on a hosted machine is not what a session
-    /// authenticates with.
+    /// observation, which on a hosted or gateway-managed machine is not what
+    /// a session authenticates with.
     pub auth_mode: HarnessAuthMode,
     pub remediation: String,
     pub stderr: String,

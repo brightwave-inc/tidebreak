@@ -167,12 +167,32 @@ pub struct HarnessDoctorEntry {
     pub caps: HarnessCaps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authenticated: Option<bool>,
+    /// How a session of this engine authenticates on the server's machine.
+    /// A server that predates the field knows only the local sign-in probe.
+    #[serde(default)]
+    pub auth_mode: HarnessAuthMode,
     #[serde(default)]
     pub remediation: String,
     #[serde(default)]
     pub stderr: String,
     #[serde(default)]
     pub unrecognized_event_count: i64,
+}
+
+/// How a session of one engine authenticates on the server's machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessAuthMode {
+    /// The engine's own local sign-in.
+    #[default]
+    LocalSignIn,
+    /// A credential or endpoint override authenticates the engine without a
+    /// vendor login.
+    GatewayManaged,
+    /// The on-behalf-of relay carries turns as the caller.
+    GatewayRelay,
+    /// The relay does not cover this engine on a hosted machine.
+    HostedUnavailable,
 }
 
 /// Bounded changed-file list for `GET /code/workspaces/{id}/files`.
