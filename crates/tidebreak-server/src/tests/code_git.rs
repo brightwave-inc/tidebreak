@@ -13,7 +13,7 @@ use crate::code::CodeRuntime;
 use crate::obo_gateway::test_support::FakeLender;
 use crate::obo_gateway::{GitCredentialLender, GitForgeError};
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
-use tidebreak_core::{QuickAction, RepoId};
+use tidebreak_core::{CapLevel, CodeSessionKind, PermissionMode, QuickAction, RepoId};
 use tidebreak_harness::AdapterRegistry;
 
 async fn code_app() -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
@@ -32,11 +32,42 @@ async fn code_app_with_principal(
     lender: Option<Arc<dyn GitCredentialLender>>,
     member_token: Option<&str>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_options(lender, member_token, None).await
+}
+
+/// An OS policy that asserts one permission-mode ceiling and nothing else.
+struct CappedOsPolicy(PermissionMode);
+
+impl crate::managed_policy::OsPolicySource for CappedOsPolicy {
+    fn gateway_url(&self) -> tidebreak_core::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn permission_mode_ceiling(&self) -> tidebreak_core::Result<Option<PermissionMode>> {
+        Ok(Some(self.0))
+    }
+}
+
+async fn code_app_with_ceiling(
+    ceiling: PermissionMode,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_options(None, None, Some(ceiling)).await
+}
+
+async fn code_app_with_options(
+    lender: Option<Arc<dyn GitCredentialLender>>,
+    member_token: Option<&str>,
+    permission_mode_ceiling: Option<PermissionMode>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code-git.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = AdapterRegistry::new();
-    registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
+    let mut adapter = ScriptedAdapter::new(plain_text_script());
+    if permission_mode_ceiling.is_some() {
+        adapter = adapter.with_auto_mode(CapLevel::Supported);
+    }
+    registry.register(Arc::new(adapter));
     let mut runtime = CodeRuntime::with_registry(db, dir.path().to_path_buf(), registry);
     if let Some(lender) = lender {
         runtime = runtime.with_git_credentials(lender);
@@ -64,6 +95,9 @@ async fn code_app_with_principal(
             ..AgentConfig::default()
         },
     );
+    if let Some(ceiling) = permission_mode_ceiling {
+        state.os_policy = Arc::new(CappedOsPolicy(ceiling));
+    }
     state.code = Some(runtime.clone());
     let token = member_token
         .map(Arc::<str>::from)
@@ -161,6 +195,191 @@ async fn seed_workspace_pull_request(runtime: &CodeRuntime, id: &str, url: &str,
         in_merge_queue: None,
     });
     runtime.save_workspace(&workspace).await.unwrap();
+}
+
+struct WatchFixture {
+    router: Router,
+    bearer: String,
+    runtime: Arc<CodeRuntime>,
+    _data: tempfile::TempDir,
+    _shim: tempfile::TempDir,
+    id: String,
+    workspace_id: tidebreak_core::WorkspaceId,
+    refresh_log: std::path::PathBuf,
+}
+
+async fn watch_fixture(ceiling: PermissionMode) -> WatchFixture {
+    let (router, token, runtime, data) = code_app_with_ceiling(ceiling).await;
+    let bearer = format!("Bearer {token}");
+    let repo = init_paired_repo(data.path());
+    let registered = post_json(
+        &router,
+        &bearer,
+        "/code/repos",
+        serde_json::json!({ "path": repo }),
+    )
+    .await;
+    assert_eq!(registered.status(), StatusCode::CREATED);
+    let repo_body: serde_json::Value = json_body(registered).await;
+    let created = post_json(
+        &router,
+        &bearer,
+        "/code/workspaces",
+        serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "managed watch",
+        }),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let workspace: serde_json::Value = json_body(created).await;
+    let id = json_id(&workspace).to_owned();
+    let workspace_id = id.parse().unwrap();
+    seed_workspace_pull_request(&runtime, &id, "https://github.com/example/demo/pull/12", 12).await;
+
+    let shim = tempfile::TempDir::new().unwrap();
+    let refresh_log = shim.path().join("refresh-log");
+    write_executable(
+        &shim.path().join("gh"),
+        &format!(
+            r#"#!/bin/sh
+echo "$@" >> {refresh_log}
+if [ "$1" = auth ]; then
+  echo '{{"hosts":{{"github.com":[{{"active":true,"state":"success","login":"tester"}}]}}}}'
+  exit 0
+fi
+if [ "$1" = api ]; then
+  case "$*" in
+    *pulls/12/reviews*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *rules/branches/main*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'; echo '[]'; exit 0;;
+    *check-runs*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      echo '{{"check_runs":[{{"name":"lint","status":"completed","conclusion":"success","html_url":"https://example.test/lint"}}]}}'
+      exit 0;;
+    *pulls/12*)
+      printf 'HTTP/2.0 200 OK\r\n\r\n'
+      echo '{{"number":12,"html_url":"https://github.com/example/demo/pull/12","title":"Managed watch","state":"open","draft":false,"mergeable":true,"mergeable_state":"clean","head":{{"ref":"feature","sha":"aaaaaaaa"}},"base":{{"ref":"main"}},"auto_merge":null}}'
+      exit 0;;
+  esac
+fi
+exit 3
+"#,
+            refresh_log = refresh_log.display()
+        ),
+    );
+    runtime.set_gh_search_path(Some(shim.path().display().to_string()));
+
+    WatchFixture {
+        router,
+        bearer,
+        runtime,
+        _data: data,
+        _shim: shim,
+        id,
+        workspace_id,
+        refresh_log,
+    }
+}
+
+#[tokio::test]
+async fn a_managed_ceiling_below_auto_refuses_watch_before_refresh_or_persistence() {
+    for ceiling in [PermissionMode::Plan, PermissionMode::Ask] {
+        let fixture = watch_fixture(ceiling).await;
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/code/workspaces/{}/watch", fixture.id))
+                    .header(header::AUTHORIZATION, &fixture.bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["kind"], "permission_mode_locked", "{body}");
+        assert_eq!(
+            body["message"],
+            format!(
+                "permission mode `auto` exceeds the maximum this managed profile allows (`{}`)",
+                ceiling.as_str()
+            )
+        );
+        assert!(
+            !fixture.refresh_log.exists(),
+            "the refused watch refreshed pull-request state"
+        );
+
+        let owner = tidebreak_core::OwnerId::local();
+        let sessions = tidebreak_core::db::code::list_sessions_for_workspace(
+            &fixture.runtime.db,
+            &owner,
+            fixture.workspace_id,
+        )
+        .await
+        .unwrap();
+        assert!(sessions.is_empty(), "the refused watch created a session");
+        let watch = tidebreak_core::db::code::latest_watch_for_workspace(
+            &fixture.runtime.db,
+            &owner,
+            fixture.workspace_id,
+        )
+        .await
+        .unwrap();
+        assert!(watch.is_none(), "the refused watch created a watch row");
+    }
+}
+
+#[tokio::test]
+async fn a_managed_ceiling_at_or_above_auto_starts_an_auto_watch() {
+    for ceiling in [PermissionMode::Auto, PermissionMode::Allow] {
+        let fixture = watch_fixture(ceiling).await;
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/code/workspaces/{}/watch", fixture.id))
+                    .header(header::AUTHORIZATION, &fixture.bearer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = json_body(response).await;
+        assert_eq!(body["state"], "watching", "{body}");
+        assert!(fixture.refresh_log.exists(), "watch did not refresh the PR");
+
+        let owner = tidebreak_core::OwnerId::local();
+        let sessions = tidebreak_core::db::code::list_sessions_for_workspace(
+            &fixture.runtime.db,
+            &owner,
+            fixture.workspace_id,
+        )
+        .await
+        .unwrap();
+        let session = sessions
+            .iter()
+            .find(|session| session.kind == CodeSessionKind::Watch)
+            .expect("watch session");
+        assert_eq!(session.permission_mode, PermissionMode::Auto);
+        let watch = tidebreak_core::db::code::latest_watch_for_workspace(
+            &fixture.runtime.db,
+            &owner,
+            fixture.workspace_id,
+        )
+        .await
+        .unwrap()
+        .expect("watch row");
+        assert_eq!(watch.session_id, session.id);
+    }
 }
 
 struct MergeFixture {
