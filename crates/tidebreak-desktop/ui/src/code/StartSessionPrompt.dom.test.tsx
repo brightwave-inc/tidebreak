@@ -17,11 +17,7 @@ import { ManagedPolicyContext } from "../managedPolicy";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
-import {
-  ALLOW_ALL_NOTE,
-  PERMISSION_MODE_POLICY_BLOCKED,
-  UNSUPERVISED_AUTO_NOTE,
-} from "./labels";
+import { PERMISSION_MODE_POLICY_BLOCKED } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
@@ -162,8 +158,6 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeInTheDocument();
-    // The default posture is never silent: it says what it will do.
-    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "Harness" }).closest("form"),
     ).toHaveClass("chat-composer");
@@ -211,7 +205,6 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Ask" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(ALLOW_ALL_NOTE)).not.toBeInTheDocument();
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
       "list the files",
@@ -260,7 +253,6 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByText(PERMISSION_MODE_POLICY_BLOCKED),
     ).toBeInTheDocument();
-    expect(screen.queryByText(ALLOW_ALL_NOTE)).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeDisabled();
@@ -359,8 +351,6 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Auto" }),
     ).toBeInTheDocument();
-    // Grok's Auto has no approval channel behind it, and the composer says so.
-    expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
       "list the files",

@@ -1,11 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { PermissionModePicker } from "@/code/CodeComposer";
-import {
-  ALLOW_ALL_NOTE,
-  CREATE_PERMISSION_MODE_FIXED,
-  UNSUPERVISED_AUTO_NOTE,
-} from "@/code/labels";
+import { CREATE_PERMISSION_MODE_FIXED } from "@/code/labels";
 
 /**
  * Permission mode in the composer footer.
@@ -13,7 +9,7 @@ import {
  * Most engines take a new mode on the next turn. opencode fixes its posture
  * when the session is created, so after the first turn the trigger stays
  * visible, disabled, with the locked-mode tooltip. Create surfaces keep the
- * picker live and add a short hint so Plan vs Allow is an informed choice.
+ * picker live and state when the selected engine fixes the mode at creation.
  */
 const meta = {
   title: "Composer/Permission mode",
@@ -60,42 +56,6 @@ export const FixedAtCreate: Story = {
       <PermissionModePicker {...args} />
       <p className="text-muted-foreground px-2 text-xs">
         {CREATE_PERMISSION_MODE_FIXED}
-      </p>
-    </div>
-  ),
-};
-
-/**
- * Create states Allow under the picker (decision 0039). A live session
- * carries the header chip instead of this line.
- */
-export const AllowAllNote: Story = {
-  args: {
-    value: "allow",
-    onChange: () => {},
-  },
-  render: (args) => (
-    <div className="flex min-w-0 max-w-sm flex-col">
-      <PermissionModePicker {...args} />
-      <p className="text-muted-foreground px-2 text-xs">{ALLOW_ALL_NOTE}</p>
-    </div>
-  ),
-};
-
-/**
- * Auto on an engine with no approval channel (decision 0038). Same placement
- * as Allow: under the control, not inside the menu row.
- */
-export const UnsupervisedAutoNote: Story = {
-  args: {
-    value: "auto",
-    onChange: () => {},
-  },
-  render: (args) => (
-    <div className="flex min-w-0 max-w-sm flex-col">
-      <PermissionModePicker {...args} />
-      <p className="text-muted-foreground px-2 text-xs">
-        {UNSUPERVISED_AUTO_NOTE}
       </p>
     </div>
   ),
