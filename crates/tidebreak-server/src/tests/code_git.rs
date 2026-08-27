@@ -2061,7 +2061,9 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     };
     let pull = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
-        axum::Json(pull_request())
+        let mut pull = pull_request();
+        pull["draft"] = serde_json::Value::Bool(true);
+        axum::Json(pull)
     };
     let issue_comments = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
@@ -2454,6 +2456,10 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     assert_eq!(pull_request_detail["summary"]["number"], 17);
     assert_eq!(pull_request_detail["summary"]["in_merge_queue"], true);
     assert_eq!(
+        pull_request_detail["can_mark_ready"], false,
+        "hosted REST details must not advertise the unsupported ready transition"
+    );
+    assert_eq!(
         pull_request_detail["body"],
         "Read the delivery detail over REST."
     );
@@ -2701,17 +2707,40 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
 async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
     let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let merge_requests = Arc::clone(&requests);
-    let merge = move |headers: axum::http::HeaderMap| {
+    let merge = move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
         let requests = Arc::clone(&merge_requests);
         async move {
             assert_borrowed_forge_credential(&headers);
             requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            (
-                axum::http::StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({
-                    "message": "Head branch was modified. Review and try the merge again."
-                })),
-            )
+            match body["sha"].as_str() {
+                Some("old-head") => (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "message": "The reviewed revision no longer matches."
+                    })),
+                ),
+                Some("blocked-head") => (
+                    axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                    axum::Json(serde_json::json!({
+                        "message": "Branch protection rejected this operation."
+                    })),
+                ),
+                Some("soft-blocked-head") => (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "merged": false,
+                        "message": "Repository policy rejected this operation."
+                    })),
+                ),
+                Some("expired-credential") => (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({
+                        "message": "The borrowed credential is no longer valid."
+                    })),
+                ),
+                unexpected => panic!("unexpected merge sha: {unexpected:?}"),
+            }
         }
     };
     let forge =
@@ -2741,7 +2770,7 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
     );
     register_delivery_repository(&client, addr, &token, &root).await;
 
-    let merge_action = |repository: serde_json::Value| {
+    let merge_action = |repository: serde_json::Value, expected_head_sha: &str| {
         serde_json::json!({
             "target": { "repository": repository, "number": 17 },
             "action": {
@@ -2749,27 +2778,87 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
                 "method": "squash",
                 "auto": false,
                 "admin": false,
-                "expected_head_sha": "old-head"
+                "expected_head_sha": expected_head_sha
             }
         })
     };
     let response = client
         .post(format!("http://{addr}/code/delivery/pull-requests/action"))
         .bearer_auth(&token)
-        .json(&merge_action(serde_json::json!({
-            "host": "github.com",
-            "owner": "acme",
-            "name": "demo"
-        })))
+        .json(&merge_action(
+            serde_json::json!({
+                "host": "github.com",
+                "owner": "acme",
+                "name": "demo"
+            }),
+            "old-head",
+        ))
         .send()
         .await
         .unwrap();
     let (status, kind, message) = error_kind(response).await;
     assert_eq!(status, reqwest::StatusCode::CONFLICT);
     assert_eq!(kind, "pr_head_changed");
-    assert!(message.contains("Head branch was modified"), "{message}");
-    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(lender.minted(), vec!["acme/demo"]);
+    assert!(message.contains("reviewed revision"), "{message}");
+
+    let response = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+        .bearer_auth(&token)
+        .json(&merge_action(
+            serde_json::json!({
+                "host": "github.com",
+                "owner": "acme",
+                "name": "demo"
+            }),
+            "blocked-head",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "pr_not_mergeable");
+    assert!(message.contains("Branch protection"), "{message}");
+
+    let response = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+        .bearer_auth(&token)
+        .json(&merge_action(
+            serde_json::json!({
+                "host": "github.com",
+                "owner": "acme",
+                "name": "demo"
+            }),
+            "soft-blocked-head",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "pr_not_mergeable");
+    assert!(message.contains("Repository policy"), "{message}");
+
+    let response = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+        .bearer_auth(&token)
+        .json(&merge_action(
+            serde_json::json!({
+                "host": "github.com",
+                "owner": "acme",
+                "name": "demo"
+            }),
+            "expired-credential",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "git_auth_failed");
+    assert!(message.contains("no longer valid"), "{message}");
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(lender.minted(), vec!["acme/demo"; 4]);
 
     for repository in [
         serde_json::json!({
@@ -2786,7 +2875,7 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
         let response = client
             .post(format!("http://{addr}/code/delivery/pull-requests/action"))
             .bearer_auth(&token)
-            .json(&merge_action(repository))
+            .json(&merge_action(repository, "old-head"))
             .send()
             .await
             .unwrap();
@@ -2794,13 +2883,51 @@ async fn hosted_delivery_actions_propagate_failures_and_pin_the_target() {
     }
     assert_eq!(
         requests.load(std::sync::atomic::Ordering::SeqCst),
-        1,
+        4,
         "unregistered targets never reach the forge"
     );
     assert_eq!(
         lender.minted(),
-        vec!["acme/demo"],
+        vec!["acme/demo"; 4],
         "unregistered targets never mint a credential"
+    );
+    let connect_url = "https://gateway.example/account/apps";
+    *lender.mint_refusal.lock().expect("mint refusal") = Some(GitForgeError::NotConnected {
+        connect_url: Some(connect_url.to_owned()),
+    });
+    let response = client
+        .post(format!("http://{addr}/code/delivery/pull-requests/action"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "target": {
+                "repository": {
+                    "host": "github.com",
+                    "owner": "acme",
+                    "name": "demo"
+                },
+                "number": 17
+            },
+            "action": {
+                "type": "comment",
+                "body": "This must not reach the forge."
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let (status, kind, message) = error_kind(response).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+    assert_eq!(kind, "git_forge_not_offered");
+    assert!(message.contains(connect_url), "{message}");
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "a refused credential mint never reaches the forge"
+    );
+    assert_eq!(
+        lender.minted().len(),
+        5,
+        "the failed operation borrows once"
     );
 }
 
