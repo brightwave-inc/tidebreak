@@ -13,6 +13,7 @@ export type TimelineItem =
 
 export type TranscriptState = {
   lastSeq: number;
+  approvalRevision: number;
   items: TimelineItem[];
   assistantBuffer: string;
   tools: Record<string, { name: string; summary: string }>;
@@ -22,6 +23,7 @@ export type TranscriptState = {
 export function initialTranscript(): TranscriptState {
   return {
     lastSeq: 0,
+    approvalRevision: 0,
     items: [],
     assistantBuffer: "",
     tools: {},
@@ -164,13 +166,13 @@ function applyEvent(
       );
     case "approval_requested":
       return appendStatus(
-        state,
+        { ...state, approvalRevision: state.lastSeq },
         `appr:${event.approval_id}`,
         "Approval waiting",
       );
     case "approval_resolved":
       return appendStatus(
-        state,
+        { ...state, approvalRevision: state.lastSeq },
         `appr-done:${event.approval_id}`,
         `Approval ${event.decision.type}`,
       );

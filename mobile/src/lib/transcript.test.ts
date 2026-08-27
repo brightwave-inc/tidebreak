@@ -75,6 +75,27 @@ describe("reduceTranscript", () => {
     expect(state.activeTurnId).toBeNull();
   });
 
+  it("marks durable approval changes for an authoritative list refresh", () => {
+    let state = reduceTranscript(initialTranscript(), {
+      seq: 7,
+      event: {
+        type: "approval_requested",
+        approval_id: "approval-1",
+      },
+    });
+    expect(state.approvalRevision).toBe(7);
+
+    state = reduceTranscript(state, {
+      seq: 8,
+      event: {
+        type: "approval_resolved",
+        approval_id: "approval-1",
+        decision: { type: "deny", feedback: "Use the focused test." },
+      },
+    });
+    expect(state.approvalRevision).toBe(8);
+  });
+
   it("hydrates user turns once, in ordinal order, and recovers a running id", () => {
     const turns = [
       {
