@@ -2786,6 +2786,34 @@ done
     }
 
     #[test]
+    fn session_relay_key_survives_the_reserved_namespace_strip() {
+        // Decision 71 hands the codex child its per-session relay key by env
+        // (the provider config spawn_wiring emits reads it through
+        // env_key=TIDEBREAK_LLM_KEY); stripping it as a reserved key left
+        // hosted codex sessions with no credential at all.
+        let plan = compose_app_server_plan(
+            std::path::Path::new("/usr/bin/codex"),
+            &[],
+            std::path::Path::new("/workspace"),
+            &[
+                ("TIDEBREAK_LLM_KEY".into(), "tbreak_hl_test".into()),
+                ("TIDEBREAK_BROWSER_CAPFILE".into(), "/evil/cap.json".into()),
+            ],
+            None,
+        )
+        .unwrap();
+        let relay = plan.env.iter().find(|(key, _)| key == "TIDEBREAK_LLM_KEY");
+        assert_eq!(
+            relay.map(|(_, value)| value.as_str()),
+            Some("tbreak_hl_test")
+        );
+        assert!(!plan
+            .env
+            .iter()
+            .any(|(key, _)| key == "TIDEBREAK_BROWSER_CAPFILE"));
+    }
+
+    #[test]
     fn bridge_command_with_spaces_remains_one_command_value() {
         let spec = BrowserChannelSpec::new(
             std::path::PathBuf::from("/tmp/browser-cap.json"),
