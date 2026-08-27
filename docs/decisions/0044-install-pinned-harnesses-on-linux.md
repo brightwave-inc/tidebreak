@@ -124,3 +124,18 @@ checkpointing, and restart recovery on Windows.
 - Documentation states Linux code-mode support while continuing to name
   Windows code mode and the native execution/office/computer boundaries as
   unavailable.
+
+## Amendment (2026-08-27): declared binaries run on their own interpreter
+
+The managed-Node rule above exists so a pinned npm harness never resolves an
+interpreter Tidebreak did not verify. A binary declared under the
+[decision 41 amendment](0041-pinned-harness-binaries.md) sits outside that
+rule: the embedding environment that installed the engine also provides
+whatever interpreter it needs, in a controlled image whose contents are
+already the environment's responsibility. Probe therefore does not prepend
+the managed Node directory for a declared binary, and a declared binary does
+not require a verified managed Node root.
+
+Managed Node still governs every Tidebreak-installed harness. "Headless never
+falls back to a system interpreter" continues to hold for pinned installs;
+a declared binary is not a fallback but an explicit assertion by the caller.

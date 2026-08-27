@@ -52,10 +52,13 @@ impl HarnessAdapter for CodexAdapter {
     async fn probe(&self, host: &HostEnv) -> HarnessProbe {
         match probe_shell(host, "codex").await {
             Ok(capture) => {
-                let version = observe_version(&capture.binary, &capture.env)
-                    .await
-                    .ok()
-                    .map(|version| normalize_codex_version(&version));
+                let version = match host.declared_version(HarnessKind::Codex) {
+                    Some(declared) => Some(normalize_codex_version(declared)),
+                    None => observe_version(&capture.binary, &capture.env)
+                        .await
+                        .ok()
+                        .map(|version| normalize_codex_version(&version)),
+                };
                 let authenticated = observe_login(&capture.binary, &capture.env).await;
                 HarnessProbe {
                     found: true,

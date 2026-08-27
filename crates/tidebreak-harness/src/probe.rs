@@ -40,6 +40,24 @@ pub struct HostEnv {
     /// Host-verified managed Node root. Pinned npm harnesses need its runtime
     /// directory first on `PATH`; their entrypoints resolve `node`/`node.exe`.
     pub managed_node_root: Option<PathBuf>,
+    /// Binaries the embedding environment provides and vouches for. A
+    /// declared entry wins over both the pinned install and the login-shell
+    /// PATH; the declared version is authoritative, so probe never runs
+    /// `--version` against it.
+    pub declared_binaries: Vec<(tidebreak_core::HarnessKind, DeclaredBinary)>,
+}
+
+/// A harness binary the embedding environment installed itself.
+///
+/// The caller asserts provenance: the path must be absolute and executable,
+/// and the version must be the exact version the environment installed.
+/// Declaring a wrong version misinforms capability detection.
+#[derive(Debug, Clone)]
+pub struct DeclaredBinary {
+    /// Absolute path to the engine entrypoint.
+    pub path: PathBuf,
+    /// Exact engine version at that path, as `--version` would print it.
+    pub version: String,
 }
 
 impl Default for HostEnv {
@@ -64,7 +82,46 @@ impl HostEnv {
             clear_env: false,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         }
+    }
+
+    /// Declare a preinstalled engine binary and its exact version. Replaces
+    /// any earlier declaration for the same kind.
+    #[must_use]
+    pub fn with_declared_binary(
+        mut self,
+        kind: tidebreak_core::HarnessKind,
+        path: impl Into<PathBuf>,
+        version: impl Into<String>,
+    ) -> Self {
+        self.declared_binaries
+            .retain(|(existing, _)| *existing != kind);
+        self.declared_binaries.push((
+            kind,
+            DeclaredBinary {
+                path: path.into(),
+                version: version.into(),
+            },
+        ));
+        self
+    }
+
+    /// The declared binary for `kind`, when the embedding environment set one.
+    #[must_use]
+    pub fn declared(&self, kind: tidebreak_core::HarnessKind) -> Option<&DeclaredBinary> {
+        self.declared_binaries
+            .iter()
+            .rev()
+            .find(|(existing, _)| *existing == kind)
+            .map(|(_, declared)| declared)
+    }
+
+    /// The declared version for `kind`, when one was declared.
+    #[must_use]
+    pub fn declared_version(&self, kind: tidebreak_core::HarnessKind) -> Option<&str> {
+        self.declared(kind)
+            .map(|declared| declared.version.as_str())
     }
 }
 
@@ -113,6 +170,9 @@ pub async fn resolve_binary(host: &HostEnv, name: &str) -> Result<PathBuf, Probe
 pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, ProbeError> {
     if name.is_empty() || name.contains(['/', '\\', '\0', '\'', '"', ';', '|', '&']) {
         return Err(ProbeError::NotFound(name.to_owned()));
+    }
+    if let Some(declared) = kind_for_command(name).and_then(|kind| host.declared(kind)) {
+        return declared_probe_capture(host, name, declared).await;
     }
     if let Some(data_dir) = &host.data_dir {
         if let Some(kind) = kind_for_command(name) {
@@ -238,6 +298,41 @@ fn kind_for_command(name: &str) -> Option<tidebreak_core::HarnessKind> {
         "grok" => Some(tidebreak_core::HarnessKind::Grok),
         _ => None,
     }
+}
+
+/// Capture for a binary the embedding environment declared.
+///
+/// The path is validated, never resolved: a declaration bypasses both the
+/// pinned install and the login-shell PATH. The child environment still comes
+/// from the shell capture when the shell works, with the process environment
+/// as the fallback, but the managed Node runtime is never prepended — the
+/// embedding environment provides whatever interpreter its binary needs.
+async fn declared_probe_capture(
+    host: &HostEnv,
+    name: &str,
+    declared: &DeclaredBinary,
+) -> Result<ProbeCapture, ProbeError> {
+    if !declared.path.is_absolute() {
+        return Err(ProbeError::RelativePath {
+            name: name.to_owned(),
+            path: declared.path.to_string_lossy().into_owned(),
+        });
+    }
+    if !is_absolute_executable(&declared.path) {
+        return Err(ProbeError::NotExecutable(declared.path.clone()));
+    }
+    Ok(match capture_shell_env(host).await {
+        Ok(env) => ProbeCapture {
+            binary: declared.path.clone(),
+            env,
+            stderr: String::new(),
+        },
+        Err(err) => ProbeCapture {
+            binary: declared.path.clone(),
+            env: process_env_without_tidebreak(),
+            stderr: err.to_string(),
+        },
+    })
 }
 
 async fn pinned_probe_capture(host: &HostEnv, binary: PathBuf) -> ProbeCapture {
@@ -873,6 +968,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         }
     }
 
@@ -956,6 +1052,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         };
         match resolve_binary(&host, "claude").await {
             Err(ProbeError::RelativePath { name, path })
@@ -980,6 +1077,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         };
         let resolved = resolve_binary(&host, "claude").await.unwrap();
         assert_eq!(resolved, bin);
@@ -1032,6 +1130,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         };
         let capture = probe_shell(&host, "claude").await.unwrap();
         assert_eq!(capture.binary, bin);
@@ -1088,6 +1187,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         };
         let capture = pinned_probe_capture(&host, binary.clone()).await;
         assert_eq!(capture.binary, binary);
@@ -1121,6 +1221,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: Some(node_root),
+            declared_binaries: Vec::new(),
         };
 
         let capture = pinned_probe_capture(&host, binary.clone()).await;
@@ -1142,6 +1243,94 @@ eval "$cmd"
     }
 
     #[tokio::test]
+    async fn declared_binary_resolves_without_a_login_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("engine-claude");
+        write_exec(&binary, "#!/bin/sh\nexit 1\n");
+        let host = HostEnv {
+            shell: dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: None,
+            managed_node_root: None,
+            declared_binaries: Vec::new(),
+        }
+        .with_declared_binary(tidebreak_core::HarnessKind::ClaudeCode, &binary, "9.9.9");
+        let capture = probe_shell(&host, "claude").await.unwrap();
+        assert_eq!(capture.binary, binary);
+        assert!(!capture.stderr.is_empty());
+        assert!(capture
+            .env
+            .iter()
+            .any(|(key, _)| key == "PATH" || key == "HOME"));
+        assert!(capture.env.iter().all(|(key, _)| {
+            !key.to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("TIDEBREAK_")
+        }));
+    }
+
+    #[tokio::test]
+    async fn declared_relative_path_is_rejected() {
+        let host = HostEnv::from_process().with_declared_binary(
+            tidebreak_core::HarnessKind::ClaudeCode,
+            "relative/claude",
+            "9.9.9",
+        );
+        match probe_shell(&host, "claude").await {
+            Err(ProbeError::RelativePath { name, path })
+                if name == "claude" && path == "relative/claude" => {}
+            other => panic!("expected RelativePath, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_non_executable_path_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("claude");
+        std::fs::write(&binary, "not executable").unwrap();
+        let host = HostEnv::from_process().with_declared_binary(
+            tidebreak_core::HarnessKind::ClaudeCode,
+            &binary,
+            "9.9.9",
+        );
+        match probe_shell(&host, "claude").await {
+            Err(ProbeError::NotExecutable(path)) if path == binary => {}
+            other => panic!("expected NotExecutable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_binary_wins_over_the_pinned_install() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let pin = crate::pin_for(tidebreak_core::HarnessKind::ClaudeCode).unwrap();
+        let install_dir = crate::pin::install_dir(data_dir.path(), pin);
+        let pinned = install_dir.join("node_modules/.bin/claude");
+        std::fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+        write_exec(&pinned, "#!/usr/bin/env node\n");
+        std::fs::write(
+            install_dir.join("installed.json"),
+            serde_json::json!({"package": pin.package, "version": pin.version}).to_string(),
+        )
+        .unwrap();
+        let declared = data_dir.path().join("declared-claude");
+        write_exec(&declared, "#!/bin/sh\nexit 1\n");
+        // No managed Node root: the pinned path would refuse, the declared
+        // binary must not need one.
+        let host = HostEnv {
+            shell: data_dir.path().join("missing-shell"),
+            env: Vec::new(),
+            clear_env: true,
+            data_dir: Some(data_dir.path().to_path_buf()),
+            managed_node_root: None,
+            declared_binaries: Vec::new(),
+        }
+        .with_declared_binary(tidebreak_core::HarnessKind::ClaudeCode, &declared, "9.9.9");
+        let capture = probe_shell(&host, "claude").await.unwrap();
+        assert_eq!(capture.binary, declared);
+    }
+
+    #[tokio::test]
     async fn pinned_harness_is_not_found_without_a_verified_node_root() {
         let data_dir = tempfile::tempdir().unwrap();
         let pin = crate::pin_for(tidebreak_core::HarnessKind::ClaudeCode).unwrap();
@@ -1160,6 +1349,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: Some(data_dir.path().to_path_buf()),
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         };
 
         assert!(matches!(
@@ -1221,6 +1411,7 @@ mod windows_tests {
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            declared_binaries: Vec::new(),
         };
 
         let capture = probe_shell(&host, "claude").await.unwrap();
