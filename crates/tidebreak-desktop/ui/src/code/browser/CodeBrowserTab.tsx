@@ -71,6 +71,17 @@ function createProfileResetId(): number {
   return nextProfileResetId;
 }
 
+function profileResetPhaseRank(phase: BrowserProfileResetPhase): number {
+  switch (phase) {
+    case "closing":
+      return 0;
+    case "deleting":
+      return 1;
+    case "reconstructing":
+      return 2;
+  }
+}
+
 type BrowserAgentHostAction = Extract<
   BrowserHostAction,
   {
@@ -136,6 +147,7 @@ function CodeBrowserTabSession({
   const activeProfileResetId = useRef<number | null>(null);
   const locallyInitiatedProfileResetId = useRef<number | null>(null);
   const nativeClosingConfirmedProfileResetId = useRef<number | null>(null);
+  const profileResetPhaseRef = useRef<BrowserProfileResetPhase | null>(null);
   const completedProfileResetIds = useRef(new Set<number>());
   const profileResetRecovery = useRef<{
     resetId: number;
@@ -248,7 +260,14 @@ function CodeBrowserTabSession({
         nativeClosingConfirmedProfileResetId.current = null;
         profileResetRecovery.current = null;
         markNativeClosedForProfileReset();
+      } else if (
+        profileResetPhaseRef.current !== null &&
+        profileResetPhaseRank(phase) <
+          profileResetPhaseRank(profileResetPhaseRef.current)
+      ) {
+        return false;
       }
+      profileResetPhaseRef.current = phase;
       setProfileResetPhase(phase);
       return true;
     },
@@ -258,10 +277,11 @@ function CodeBrowserTabSession({
   const confirmNativeProfileResetClosing = useCallback(
     (resetId: number) => {
       const resetWasAlreadyActive = activeProfileResetId.current === resetId;
+      const phaseBeforeNativeClosing = profileResetPhaseRef.current;
       if (!beginProfileResetCycle(resetId, "closing")) return;
       if (nativeClosingConfirmedProfileResetId.current === resetId) return;
       nativeClosingConfirmedProfileResetId.current = resetId;
-      if (resetWasAlreadyActive) {
+      if (resetWasAlreadyActive && phaseBeforeNativeClosing === "closing") {
         // A locally initiated reset hides the surface before native acquires
         // the reset lease. Fence again once native has marked the records as
         // resetting, so no response or document epoch from that short window
@@ -284,6 +304,7 @@ function CodeBrowserTabSession({
     if (nativeClosingConfirmedProfileResetId.current === resetId) {
       nativeClosingConfirmedProfileResetId.current = null;
     }
+    profileResetPhaseRef.current = null;
     if (profileResetRecovery.current?.resetId === resetId) {
       profileResetRecovery.current = null;
     }

@@ -1446,6 +1446,19 @@ describe("CodeBrowserTab", () => {
         runtime.calls.filter(({ action }) => action.type === "create"),
       ).toHaveLength(2),
     );
+    await act(async () => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "profile_reset_closing",
+        resetId,
+      });
+    });
+    expect(
+      screen.getByText(
+        "Resetting the Tidebreak development profile… reopening stored browser pages.",
+      ),
+    ).toBeVisible();
     expect(
       screen.getByText(
         "Resetting the Tidebreak development profile… reopening stored browser pages.",
