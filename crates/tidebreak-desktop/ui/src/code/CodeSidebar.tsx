@@ -18,7 +18,6 @@ import { SidebarButton } from "@/sidebar/primitives";
 import { AddRepoPalette } from "./AddRepoPalette";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { CodeModeSwitch } from "./CodeModeSwitch";
-import { CodeSubscriptionUsage } from "./CodeSubscriptionUsage";
 import { useCodeUiStore } from "./CodeUiStore";
 import {
   connectCodeUpdates,
@@ -185,23 +184,15 @@ export function CodeSidebar() {
   }, [clearWorkspaceSelection]);
 
   return (
-    <SidebarFrame
-      footer={
-        <>
-          <CodeUtilityLinks
-            pathname={pathname}
-            onNavigate={(to) => void navigate({ to })}
-          />
-          <div className="mt-0.5">
-            <NotificationBellButton />
-          </div>
-          <div className="mt-1 border-t border-border-subtle pt-1">
-            <CodeSubscriptionUsage />
-          </div>
-        </>
-      }
-    >
+    <SidebarFrame>
       <CodeModeSwitch />
+
+      <nav aria-label="Code destinations" className="sidebar-primary-nav">
+        <CodeDestinations
+          pathname={pathname}
+          onNavigate={(to) => void navigate({ to })}
+        />
+      </nav>
 
       <div className="flex shrink-0 items-center gap-0.5 px-1 pt-1 pb-1.5">
         <button
@@ -508,7 +499,7 @@ export function CodeSidebar() {
   );
 }
 
-function CodeUtilityLinks({
+function CodeDestinations({
   pathname,
   onNavigate,
 }: {
@@ -517,20 +508,24 @@ function CodeUtilityLinks({
     to: "/code/delivery/pull-requests" | "/code/analytics" | "/code/archive",
   ) => void;
 }) {
-  const links = [
+  const destinations = [
     {
+      type: "route" as const,
+      label: "Pull requests",
+      to: "/code/delivery/pull-requests" as const,
+      active: pathname.startsWith("/code/delivery/"),
+      icon: GitPullRequest,
+    },
+    { type: "notifications" as const },
+    {
+      type: "route" as const,
       label: "Analytics",
       to: "/code/analytics" as const,
       active: pathname === "/code/analytics",
       icon: BarChart3,
     },
     {
-      label: "Pull requests",
-      to: "/code/delivery/pull-requests" as const,
-      active: pathname.startsWith("/code/delivery/"),
-      icon: GitPullRequest,
-    },
-    {
+      type: "route" as const,
       label: "Archive",
       to: "/code/archive" as const,
       active: pathname === "/code/archive",
@@ -538,21 +533,26 @@ function CodeUtilityLinks({
     },
   ];
   return (
-    <div className="flex flex-col gap-0.5">
-      {links.map((link) => (
-        <SidebarButton
-          key={link.to}
-          type="button"
-          aria-current={link.active ? "page" : undefined}
-          data-active={link.active || undefined}
-          className="data-[active]:bg-muted"
-          onClick={() => onNavigate(link.to)}
-        >
-          <link.icon />
-          <span className="min-w-0 flex-1 truncate">{link.label}</span>
-        </SidebarButton>
-      ))}
-    </div>
+    <>
+      {destinations.map((destination) => {
+        if (destination.type === "notifications") {
+          return <NotificationBellButton key="notifications" />;
+        }
+        return (
+          <SidebarButton
+            key={destination.to}
+            type="button"
+            aria-current={destination.active ? "page" : undefined}
+            data-active={destination.active || undefined}
+            className="data-[active]:bg-muted"
+            onClick={() => onNavigate(destination.to)}
+          >
+            <destination.icon />
+            <span className="min-w-0 flex-1 truncate">{destination.label}</span>
+          </SidebarButton>
+        );
+      })}
+    </>
   );
 }
 

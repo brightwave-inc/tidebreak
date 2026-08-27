@@ -1655,6 +1655,16 @@ body {
 
   /* ---------- Appearance ---------- */
 
+  .sidebar-primary-nav {
+    display: flex;
+    flex-shrink: 0;
+    flex-direction: column;
+    gap: 0.125rem;
+    margin-top: 0.25rem;
+    padding: 0.25rem 0 0.625rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
   .settings-route-frame {
     display: flex;
     flex: 1 1 auto;
