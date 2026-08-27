@@ -7,6 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Deterministic allow/ask/deny analysis for shell commands against standing rules."
+publish = false
 
 [lints]
 workspace = true

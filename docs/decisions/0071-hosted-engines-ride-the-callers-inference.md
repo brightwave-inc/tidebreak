@@ -77,10 +77,8 @@ gateway does not answer (the engine's own retry policy applies).
 
 ## Consequences
 
-- Hosted Claude Code and Codex sessions run turns as the caller, with the
-  caller's entitlements and metering, matching chat.
-- Opencode and Grok sessions on hosted machines still launch without
-  credentials and fail their first turn; they need equivalent wiring.
+- Hosted Claude Code, Codex, OpenCode, and Grok sessions run turns as the
+  caller, with the caller's entitlements and metering, matching chat.
 - A Codex thread started before this decision recorded the default
   provider in its rollout; resuming it may still fail. A new session is
   the path.
