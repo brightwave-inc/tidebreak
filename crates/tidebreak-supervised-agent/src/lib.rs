@@ -12,10 +12,14 @@
 //! contract, and the turn state machine, each testable against an in-process
 //! mock endpoint.
 
+pub mod bootstrap;
+pub mod completion;
 pub mod control;
 pub mod drive;
 pub mod engine;
 pub mod inputs;
+pub mod trust;
+pub mod wip;
 pub mod wire;
 
 /// A required environment variable is absent or unusable.

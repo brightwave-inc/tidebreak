@@ -15,11 +15,15 @@
 //!   must not pretend to be.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::bootstrap::Event;
+use crate::completion;
 use crate::control::{Control, Outbox, PollFailure};
 use crate::engine::{Engine, SteerOutcome, TurnEnd, TurnHandle, TurnRequest, TurnSource};
 use crate::inputs::{Inputs, RunMode, POLL_INTERVAL};
+use crate::wip::{self, CheckpointPoint, WipContext};
 use crate::wire::{SupervisorMessage, SupervisorPoll};
 use crate::{EXIT_CONTROL_FATAL, EXIT_ENGINE_FAILED};
 
@@ -76,6 +80,16 @@ pub struct Driver<E> {
     ran_spawn_task: bool,
     last_turn_succeeded: bool,
     poll_interval: Duration,
+    /// Workspace root: where the completion latch lives.
+    workspace: PathBuf,
+    /// Where the engine runs; the deliverable file is looked for here first.
+    workdir: PathBuf,
+    /// No repositories were declared: results leave as the deliverable file.
+    research: bool,
+    /// Pushes are denied by policy: no checkpoints, deliverable compensates.
+    push_denied: bool,
+    /// Checkpoint state, when the run has clones worth preserving.
+    wip: Option<WipContext>,
 }
 
 impl<E: Engine> Driver<E> {
@@ -101,6 +115,11 @@ impl<E: Engine> Driver<E> {
             ran_spawn_task: resumed,
             last_turn_succeeded: resumed,
             poll_interval: POLL_INTERVAL,
+            workspace: inputs.workspace.clone(),
+            workdir: inputs.workspace.clone(),
+            research: inputs.repositories.is_empty(),
+            push_denied: inputs.forge_push_denied,
+            wip: None,
         }
     }
 
@@ -109,6 +128,31 @@ impl<E: Engine> Driver<E> {
     #[must_use]
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self
+    }
+
+    /// Names the directory the engine runs in — the first clone, when the
+    /// run has one.
+    #[must_use]
+    pub fn with_workdir(mut self, workdir: PathBuf) -> Self {
+        self.workdir = workdir;
+        self
+    }
+
+    /// Attaches checkpoint state for the run's clones.
+    #[must_use]
+    pub fn with_wip(mut self, wip: WipContext) -> Self {
+        self.wip = Some(wip);
+        self
+    }
+
+    /// Queues events to deliver ahead of `supervisor_started` — the
+    /// bootstrap events, in the order the work happened.
+    #[must_use]
+    pub fn preload_events(mut self, events: Vec<Event>) -> Self {
+        for (kind, payload) in events {
+            self.outbox.push(&kind, payload);
+        }
         self
     }
 
@@ -121,6 +165,12 @@ impl<E: Engine> Driver<E> {
                 "agent": "tidebreak-supervised-agent",
             }),
         );
+        if self.push_denied && !self.research {
+            // Announce once why no checkpoints will follow; the deliverable
+            // file is the compensating channel.
+            self.outbox
+                .push("wip_push_unavailable", wip::unavailable_payload());
+        }
         if self.mode == RunMode::Goal && self.turn > 1 {
             // A resumed goal may already be complete or stopped. Read that
             // state before another engine turn can begin.
@@ -240,20 +290,53 @@ impl<E: Engine> Driver<E> {
                 self.last_turn_succeeded = false;
             }
             TurnEnd::Completed { success } => {
-                let may_resume = self.mode == RunMode::Goal
-                    && success
-                    && self.budget_allows(turn + 1)
-                    && !self.acceptance_met;
-                let mut payload = serde_json::json!({
-                    "turn": turn,
-                    "exit_code": if success { 0 } else { 1 },
-                    "may_resume": may_resume,
-                });
-                if self.mode == RunMode::Turn {
-                    payload["gate"] = serde_json::json!("turn_mode");
+                // The completion latch is read once per finished turn, at the
+                // boundary, and only a successful turn can latch: a failing
+                // turn's claim of completion is not trusted.
+                let latch = if success {
+                    completion::read_completion_latch(&self.workspace)
+                } else {
+                    None
+                };
+                if let Some(latch) = latch {
+                    self.outbox.push(
+                        "turn_completed",
+                        serde_json::json!({
+                            "turn": turn,
+                            "exit_code": 0,
+                            "may_resume": false,
+                            "gate": "task_complete",
+                        }),
+                    );
+                    self.checkpoint(&CheckpointPoint::SuccessfulTurn { turn })
+                        .await;
+                    self.outbox
+                        .push("task_complete", completion::task_complete_payload(&latch));
+                    self.last_turn_succeeded = true;
+                    // An endpoint-requested stop that raced in keeps its own
+                    // reason.
+                    self.stop_reason
+                        .get_or_insert_with(|| "task_complete".to_owned());
+                } else {
+                    let may_resume = self.mode == RunMode::Goal
+                        && success
+                        && self.budget_allows(turn + 1)
+                        && !self.acceptance_met;
+                    let mut payload = serde_json::json!({
+                        "turn": turn,
+                        "exit_code": if success { 0 } else { 1 },
+                        "may_resume": may_resume,
+                    });
+                    if self.mode == RunMode::Turn {
+                        payload["gate"] = serde_json::json!("turn_mode");
+                    }
+                    self.outbox.push("turn_completed", payload);
+                    self.last_turn_succeeded = success;
+                    if success {
+                        self.checkpoint(&CheckpointPoint::SuccessfulTurn { turn })
+                            .await;
+                    }
                 }
-                self.outbox.push("turn_completed", payload);
-                self.last_turn_succeeded = success;
             }
             TurnEnd::Fatal { message } => {
                 self.outbox.push(
@@ -346,6 +429,7 @@ impl<E: Engine> Driver<E> {
 
     /// Reports a clean stop and exits zero.
     async fn stopped(mut self, reason: &str) -> Result<(), DriveError> {
+        self.terminal_events(reason).await;
         self.outbox.push(
             "supervisor_stopped",
             serde_json::json!({ "reason": reason }),
@@ -356,6 +440,7 @@ impl<E: Engine> Driver<E> {
 
     /// Reports an engine failure and exits with [`EXIT_ENGINE_FAILED`].
     async fn engine_failed(&mut self, message: &str) -> Result<(), DriveError> {
+        self.terminal_events("engine_failed").await;
         self.outbox.push(
             "supervisor_stopped",
             serde_json::json!({ "reason": "engine_failed" }),
@@ -365,6 +450,106 @@ impl<E: Engine> Driver<E> {
             code: EXIT_ENGINE_FAILED,
             message: format!("the engine failed: {message}"),
         })
+    }
+
+    /// The last chance to preserve work: a terminal checkpoint, and the
+    /// deliverable file when the run's results leave no other way.
+    async fn terminal_events(&mut self, reason: &str) {
+        self.checkpoint(&CheckpointPoint::Terminal {
+            reason: reason.to_owned(),
+        })
+        .await;
+        if self.research || self.push_denied {
+            self.push_task_output();
+        }
+    }
+
+    /// Reads the deliverable file — the working directory first, then the
+    /// workspace — and reports it, or why it could not be carried.
+    fn push_task_output(&mut self) {
+        let mut directories = vec![self.workdir.clone()];
+        if self.workspace != self.workdir {
+            directories.push(self.workspace.clone());
+        }
+        for directory in directories {
+            let path = directory.join(completion::TASK_OUTPUT_NAME);
+            match completion::read_task_output(&directory) {
+                Ok(Some(output)) => {
+                    self.outbox.push(
+                        "task_output",
+                        serde_json::json!({
+                            "path": path.display().to_string(),
+                            "bytes": output.file_bytes,
+                            "truncated": output.truncated,
+                            "body": output.body,
+                        }),
+                    );
+                    return;
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    self.outbox.push(
+                        "task_output_skipped",
+                        serde_json::json!({
+                            "path": path.display().to_string(),
+                            "reason": reason,
+                        }),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Runs one checkpoint and queues whatever it reports.
+    ///
+    /// The git work runs on its own task while the driver keeps polling at
+    /// its normal cadence: a checkpoint may legitimately take minutes
+    /// (`CHECKPOINT_BUDGET`), and going silent that long would read as a
+    /// stall to a supervising environment that treats the poll interval as
+    /// the liveness heartbeat. Poll errors are swallowed here deliberately —
+    /// the terminal checkpoint must complete even when the endpoint is
+    /// already gone — and the failure counter is not reset, so a dead
+    /// endpoint still ends the run at the next regular poll.
+    async fn checkpoint(&mut self, point: &CheckpointPoint) {
+        if self.push_denied {
+            return;
+        }
+        let Some(mut wip) = self.wip.take() else {
+            return;
+        };
+        let point = point.clone();
+        let mut job = tokio::spawn(async move {
+            let events = wip.checkpoint(&point).await;
+            (wip, events)
+        });
+        let joined = loop {
+            tokio::select! {
+                joined = &mut job => break joined,
+                () = tokio::time::sleep(self.poll_interval) => {
+                    let _ = self.poll(true).await;
+                }
+            }
+        };
+        match joined {
+            Ok((wip, events)) => {
+                self.wip = Some(wip);
+                for (kind, payload) in events {
+                    self.outbox.push(&kind, payload);
+                }
+            }
+            // A panicked checkpoint task loses the WIP context; later
+            // checkpoints are skipped rather than crashing the run.
+            Err(error) => {
+                self.outbox.push(
+                    "wip_push_failed",
+                    serde_json::json!({
+                        "reason": "checkpoint_task_failed",
+                        "error": error.to_string(),
+                    }),
+                );
+            }
+        }
     }
 
     /// Best-effort final delivery of whatever the outbox still holds.
@@ -943,5 +1128,284 @@ mod tests {
         engine.finish(TurnEnd::Completed { success: true });
         state.lock().unwrap().stop = Some("cancelled".to_owned());
         run.await.unwrap().unwrap();
+    }
+
+    fn inputs_at(workspace: &std::path::Path, mode: &str) -> Inputs {
+        resolve(RawInputs {
+            task: Some("do the thing".to_owned()),
+            workspace: Some(workspace.display().to_string()),
+            mode: Some(mode.to_owned()),
+            ..RawInputs::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_completion_latch_ends_the_run_as_task_complete() {
+        let (state, url) = start_supervisor().await;
+        let root = tempfile::tempdir().unwrap();
+        let engine = MockEngine::new();
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs_at(root.path(), "goal")).run());
+
+        // The turn is running; the task writes its latch, then the turn ends.
+        wait_for(&state, |_| engine.turns().len() == 1).await;
+        let latch_directory = root.path().join(".model-gateway");
+        std::fs::create_dir_all(&latch_directory).unwrap();
+        std::fs::write(latch_directory.join("task-complete"), "shipped the fix\n").unwrap();
+        engine.finish(TurnEnd::Completed { success: true });
+
+        run.await.unwrap().unwrap();
+        let completed = event_payload(&state, "turn_completed", 0);
+        assert_eq!(completed["gate"], "task_complete");
+        assert_eq!(completed["may_resume"], false);
+        let complete = event_payload(&state, "task_complete", 0);
+        assert_eq!(complete["path"], ".model-gateway/task-complete");
+        assert_eq!(complete["note"], "shipped the fix");
+        assert_eq!(
+            event_payload(&state, "supervisor_stopped", 0)["reason"],
+            "task_complete"
+        );
+        let kinds = event_kinds(&state);
+        let completed_at = kinds.iter().position(|kind| kind == "turn_completed");
+        let complete_at = kinds.iter().position(|kind| kind == "task_complete");
+        assert!(completed_at < complete_at);
+    }
+
+    #[tokio::test]
+    async fn the_deliverable_file_rides_the_final_poll() {
+        let (state, url) = start_supervisor().await;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("TASK_OUTPUT.md"), "# Findings\n").unwrap();
+        let engine = MockEngine::new();
+        engine.finish(TurnEnd::Completed { success: true });
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs_at(root.path(), "turn")).run());
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+        let output = event_payload(&state, "task_output", 0);
+        assert_eq!(output["body"], "# Findings\n");
+        assert_eq!(output["truncated"], false);
+        let kinds = event_kinds(&state);
+        let output_at = kinds.iter().position(|kind| kind == "task_output");
+        let stopped_at = kinds.iter().position(|kind| kind == "supervisor_stopped");
+        assert!(output_at < stopped_at);
+    }
+
+    /// Builds a source repository and a clone whose origin accepts
+    /// checkpoint refs.
+    fn git_fixture(root: &std::path::Path) -> std::path::PathBuf {
+        let git = |directory: &std::path::Path, arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(arguments)
+                .current_dir(directory)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {arguments:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let origin = root.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "--initial-branch=main"]);
+        std::fs::write(origin.join("README.md"), "hello\n").unwrap();
+        git(&origin, &["add", "-A"]);
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-m",
+                "first",
+            ],
+        );
+        let clone = root.join("clone");
+        git(
+            root,
+            &[
+                "clone",
+                &origin.display().to_string(),
+                &clone.display().to_string(),
+            ],
+        );
+        clone
+    }
+
+    #[tokio::test]
+    async fn a_successful_turn_checkpoints_the_clone() {
+        let (state, url) = start_supervisor().await;
+        let root = tempfile::tempdir().unwrap();
+        let clone = git_fixture(root.path());
+        let wip = WipContext::capture(
+            "sb-drive".to_owned(),
+            1,
+            &[crate::bootstrap::ClonedRepository {
+                directory: clone.clone(),
+                position: 0,
+            }],
+            crate::trust::Trust {
+                bundle: root.path().join("bundle.pem"),
+                certificate: root.path().join("ca.crt"),
+                merged_system_roots: false,
+            },
+        )
+        .await;
+        let engine = MockEngine::new();
+        let run = tokio::spawn(
+            driver(engine.clone(), &url, &inputs_at(root.path(), "turn"))
+                .with_wip(wip)
+                .run(),
+        );
+
+        // The turn leaves an uncommitted file behind; the boundary
+        // checkpoint must preserve it.
+        wait_for(&state, |_| engine.turns().len() == 1).await;
+        std::fs::write(clone.join("draft.txt"), "unfinished\n").unwrap();
+        engine.finish(TurnEnd::Completed { success: true });
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "wip_pushed")
+        })
+        .await;
+        let pushed = event_payload(&state, "wip_pushed", 0);
+        assert_eq!(pushed["checkpoint"], "successful_turn");
+        assert_eq!(pushed["ref"], "mg-wip/sb-drive-i1");
+        let kinds = event_kinds(&state);
+        let completed_at = kinds.iter().position(|kind| kind == "turn_completed");
+        let pushed_at = kinds.iter().position(|kind| kind == "wip_pushed");
+        assert!(completed_at < pushed_at);
+
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_heartbeats_report_idle_after_the_turn_ends() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (state, url) = start_supervisor().await;
+        let root = tempfile::tempdir().unwrap();
+        let clone = git_fixture(root.path());
+        let hook = root.path().join("origin/.git/hooks/pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook, permissions).unwrap();
+        let wip = WipContext::capture(
+            "sb-drive".to_owned(),
+            1,
+            &[crate::bootstrap::ClonedRepository {
+                directory: clone.clone(),
+                position: 0,
+            }],
+            crate::trust::Trust {
+                bundle: root.path().join("bundle.pem"),
+                certificate: root.path().join("ca.crt"),
+                merged_system_roots: false,
+            },
+        )
+        .await;
+        let engine = MockEngine::new();
+        let run = tokio::spawn(
+            driver(engine.clone(), &url, &inputs_at(root.path(), "turn"))
+                .with_poll_interval(Duration::from_millis(5))
+                .with_wip(wip)
+                .run(),
+        );
+
+        wait_for(&state, |_| engine.turns().len() == 1).await;
+        std::fs::write(clone.join("draft.txt"), "unfinished\n").unwrap();
+        engine.finish(TurnEnd::Completed { success: true });
+
+        wait_for(&state, |supervisor| {
+            supervisor.polls.iter().any(|poll| {
+                poll.get("events")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|events| {
+                        events.iter().any(|event| event["kind"] == "turn_completed")
+                    })
+            })
+        })
+        .await;
+        let completed_idle = {
+            let supervisor = state.lock().unwrap();
+            supervisor
+                .polls
+                .iter()
+                .find(|poll| {
+                    poll.get("events")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|events| {
+                            events.iter().any(|event| event["kind"] == "turn_completed")
+                        })
+                })
+                .expect("a poll carrying turn_completed")["idle"]
+                .clone()
+        };
+        assert_eq!(completed_idle, true);
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "wip_pushed")
+        })
+        .await;
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn denied_pushes_are_announced_once() {
+        let (state, url) = start_supervisor().await;
+        let root = tempfile::tempdir().unwrap();
+        let mut inputs = inputs_at(root.path(), "turn");
+        inputs.repositories = vec![crate::inputs::Repository {
+            url: "https://example.com/org/app.git".to_owned(),
+            repository_ref: None,
+        }];
+        inputs.forge_push_denied = true;
+        let engine = MockEngine::new();
+        engine.finish(TurnEnd::Completed { success: true });
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs).run());
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+        let kinds = event_kinds(&state);
+        assert_eq!(kinds[0], "supervisor_started");
+        assert_eq!(kinds[1], "wip_push_unavailable");
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "wip_push_unavailable")
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_payload(&state, "wip_push_unavailable", 0)["deliverable"],
+            "TASK_OUTPUT.md"
+        );
     }
 }
