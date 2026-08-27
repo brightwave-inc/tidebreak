@@ -181,6 +181,37 @@ function deferred<T>() {
 }
 
 describe("NewWorkspaceDialog", () => {
+  it("gives the prompt more room and lets controls wrap", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({ listCodeHarnessModels: claudeModels() })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(screen.getByRole("dialog")).toHaveClass(
+      "max-w-4xl",
+      "max-h-[calc(100dvh-1rem)]",
+    );
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveClass(
+      "min-h-48",
+      "sm:min-h-52",
+    );
+    expect(screen.getByTestId("new-workspace-controls")).toHaveClass(
+      "flex-wrap",
+    );
+  });
+
   it("closes and lists the workspace before creation finishes", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
