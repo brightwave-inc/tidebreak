@@ -31,6 +31,10 @@ import {
   useCodeUpdatesStore,
 } from "@/code/CodeUpdatesStore";
 import { CodeWorkspacePage } from "@/code/CodeWorkspacePage";
+import {
+  INSPECTOR_LAYOUT_STORAGE_ID,
+  INSPECTOR_PANEL_IDS,
+} from "@/code/inspectorLayout";
 import type { LayoutState } from "@/panel/panelTypes";
 import {
   panelSearchFrom,
@@ -850,7 +854,11 @@ function storyRouter(client: ApiClient, initialUrl: string) {
   });
 }
 
-function resetStoryState(reviewOpen: boolean, sidebarCollapsed: boolean) {
+function resetStoryState(
+  reviewOpen: boolean,
+  sidebarCollapsed: boolean,
+  storedInspectorLayout?: Record<string, number>,
+) {
   resetCodeSessionRegistry();
   disconnectCodeUpdates();
   useCodeCatalogStore.getState().reset();
@@ -864,6 +872,15 @@ function resetStoryState(reviewOpen: boolean, sidebarCollapsed: boolean) {
     addRepoOpen: false,
   });
   useUiStore.setState({ sidebarCollapsed, sidebarWidth: 280 });
+  const storageKey = `react-resizable-panels:${[
+    INSPECTOR_LAYOUT_STORAGE_ID,
+    ...INSPECTOR_PANEL_IDS,
+  ].join(":")}`;
+  if (storedInspectorLayout) {
+    localStorage.setItem(storageKey, JSON.stringify(storedInspectorLayout));
+  } else {
+    localStorage.removeItem(storageKey);
+  }
 }
 
 function WorkspacePageStory({
@@ -871,14 +888,16 @@ function WorkspacePageStory({
   initialUrl,
   reviewOpen,
   sidebarCollapsed = false,
+  storedInspectorLayout,
 }: {
   scenario: WorkspaceScenario;
   initialUrl: string;
   reviewOpen: boolean;
   sidebarCollapsed?: boolean;
+  storedInspectorLayout?: Record<string, number>;
 }) {
   const [state] = useState(() => {
-    resetStoryState(reviewOpen, sidebarCollapsed);
+    resetStoryState(reviewOpen, sidebarCollapsed, storedInspectorLayout);
     const client = storyClient(scenario);
     return { client, router: storyRouter(client, initialUrl) };
   });
@@ -985,11 +1004,12 @@ const meta = {
     initialUrl: conversationUrl,
     reviewOpen: false,
     sidebarCollapsed: false,
+    storedInspectorLayout: undefined,
   },
   parameters: { layout: "fullscreen" },
   render: (args) => (
     <WorkspacePageStory
-      key={`${args.scenario}:${args.initialUrl}:${args.reviewOpen}:${args.sidebarCollapsed}`}
+      key={`${args.scenario}:${args.initialUrl}:${args.reviewOpen}:${args.sidebarCollapsed}:${JSON.stringify(args.storedInspectorLayout)}`}
       {...args}
     />
   ),
@@ -1034,6 +1054,56 @@ export const ConversationWithReview: Story = {
         "Rework the code workspace around persistent conversation",
       ),
     ).toBeVisible();
+    const workspacePanel = canvas.getByTestId("workspace");
+    const inspectorPanel = canvas.getByTestId("inspector");
+    await expect(workspacePanel).toBeVisible();
+    await expect(inspectorPanel).toBeVisible();
+    expect(workspacePanel.getBoundingClientRect().width).toBeGreaterThan(
+      inspectorPanel.getBoundingClientRect().width,
+    );
+  },
+};
+
+/** A stale full-width inspector resets before it can hide the journal. */
+export const InvalidStoredInspectorLayout: Story = {
+  args: {
+    reviewOpen: true,
+    storedInspectorLayout: { workspace: 0, inspector: 100 },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const workspacePanel = await canvas.findByTestId("workspace");
+    const inspectorPanel = canvas.getByTestId("inspector");
+    await expect(
+      canvas.findByRole("tab", { name: "Main agent" }),
+    ).resolves.toBeVisible();
+    expect(workspacePanel.getBoundingClientRect().width).toBeGreaterThan(
+      inspectorPanel.getBoundingClientRect().width,
+    );
+  },
+};
+
+/** Source control remains a peer center tab and keeps the inspector optional. */
+export const SourceControlTab: Story = {
+  args: {
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "source_control" }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: false,
+  },
+};
+
+/** Pull-request status and comments remain a peer center tab. */
+export const PullRequestTab: Story = {
+  args: {
+    initialUrl: workspaceUrl({
+      tabs: [{ type: "pr" }],
+      activeIndex: 0,
+      fullscreen: false,
+    }),
+    reviewOpen: false,
   },
 };
 

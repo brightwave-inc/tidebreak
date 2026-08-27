@@ -97,8 +97,7 @@ export function CodeInspector({
   workspace,
   contentRevision,
   prResource,
-  requestedTab,
-  onRequestedTabHandled,
+  initialTab,
   onOpenFile,
   onOpenDiff,
   onClose,
@@ -108,8 +107,7 @@ export function CodeInspector({
   workspace: CodeWorkspaceSnapshot | null;
   contentRevision: number;
   prResource?: CodeWorkspacePrResource;
-  requestedTab?: { tab: InspectorTab; revision: number } | null;
-  onRequestedTabHandled?: (revision: number) => void;
+  initialTab?: InspectorTab;
   onOpenFile?: (path: string, line?: number) => void;
   onOpenDiff?: (path: string) => void;
   onClose?: () => void;
@@ -121,7 +119,9 @@ export function CodeInspector({
   const filesSearchPending = useCodeUiStore(
     (state) => state.filesSearchPending,
   );
-  const [tab, setTab] = useState<InspectorTab>(scope ? "source" : "files");
+  const [tab, setTab] = useState<InspectorTab>(
+    initialTab ?? (scope ? "source" : "files"),
+  );
   const [file, setFile] = useState<string | undefined>();
   const turnId = scope?.turnId;
   const changedFiles = useChangedFilesResource({
@@ -136,12 +136,6 @@ export function CodeInspector({
     setTab("source");
     setFile(undefined);
   }, [scope]);
-
-  useEffect(() => {
-    if (!requestedTab) return;
-    setTab(requestedTab.tab);
-    onRequestedTabHandled?.(requestedTab.revision);
-  }, [onRequestedTabHandled, requestedTab]);
 
   // Search lives on the Files tab, so the find chord has to land there first.
   // The panel itself clears the flag once it has the caret; this only moves

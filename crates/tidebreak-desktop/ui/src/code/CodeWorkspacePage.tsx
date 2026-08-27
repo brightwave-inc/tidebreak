@@ -24,7 +24,7 @@ import {
   type ReactNode,
 } from "react";
 import { ArrowDown, Bot, CircleDotDashed } from "lucide-react";
-import { useDefaultLayout } from "react-resizable-panels";
+import { useDefaultLayout, useGroupRef } from "react-resizable-panels";
 import { toast } from "sonner";
 
 import type { ApiClient } from "../api/client";
@@ -126,7 +126,7 @@ const CodeBrowserTab = lazy(async () => {
   return { default: module.CodeBrowserTab };
 });
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { CodeInspector, PrTab, type InspectorTab } from "./CodeInspector";
+import { CodeInspector, PrTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
 import { forkFraming, forkTranscriptFile } from "./fork";
@@ -172,6 +172,15 @@ import {
 } from "./workspaceActions";
 import { tidebreakProductRepo } from "./uneffMe";
 import { sessionActivityLabel, isPutAway } from "./workspaceCards";
+import {
+  DEFAULT_INSPECTOR_LAYOUT,
+  INSPECTOR_LAYOUT_STORAGE_ID,
+  INSPECTOR_PANEL_IDS,
+  MAX_INSPECTOR_SIZE,
+  MIN_INSPECTOR_SIZE,
+  MIN_WORKSPACE_SIZE,
+  usableInspectorLayout,
+} from "./inspectorLayout";
 import {
   createPermissionModes,
   fenceReasonText,
@@ -310,7 +319,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   };
   const taskParam = workspaceSearch.task;
   const subagentParam = workspaceSearch.subagent;
-  const inspectorLayout = useDefaultLayout({ id: "code-inspector" });
+  const inspectorLayout = useDefaultLayout({
+    id: INSPECTOR_LAYOUT_STORAGE_ID,
+    panelIds: INSPECTOR_PANEL_IDS,
+    onlySaveAfterUserInteractions: true,
+  });
+  const inspectorGroupRef = useGroupRef();
   const reviewSidebarOpen = useCodeUiStore((state) => state.reviewSidebarOpen);
   const toggleReviewSidebar = useCodeUiStore(
     (state) => state.toggleReviewSidebar,
@@ -394,16 +408,30 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [newTabMenuRequest, setNewTabMenuRequest] = useState(0);
   const [newTabMenuRegion, setNewTabMenuRegion] =
     useState<CodeEditorRegion>("primary");
-  const [inspectorTabRequest, setInspectorTabRequest] = useState<{
-    tab: InspectorTab;
-    revision: number;
-  } | null>(null);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const tabDragSensors = useSensors(
     // Four pixels of travel before a press becomes a drag, so a click still
     // selects the tab it landed on.
     useSensor(TabPointerSensor, { activationConstraint: { distance: 4 } }),
   );
+
+  const inspectorDefaultLayout = useMemo(
+    () =>
+      usableInspectorLayout(inspectorLayout.defaultLayout) ?? {
+        ...DEFAULT_INSPECTOR_LAYOUT,
+      },
+    [inspectorLayout.defaultLayout],
+  );
+
+  useEffect(() => {
+    if (!reviewSidebarOpen) return;
+    const group = inspectorGroupRef.current;
+    if (!group) return;
+    const current = group.getLayout();
+    if (Object.keys(current).length > 0 && !usableInspectorLayout(current)) {
+      group.setLayout({ ...DEFAULT_INSPECTOR_LAYOUT });
+    }
+  }, [inspectorGroupRef, reviewSidebarOpen, workspaceId]);
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<PermissionMode | null>(null);
   const [fileReveal, setFileReveal] = useState<{
@@ -1033,20 +1061,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     });
   }
 
-  function openInspectorTab(tab: InspectorTab) {
-    setReviewSidebarOpen(true);
-    setInspectorTabRequest((request) => ({
-      tab,
-      revision: (request?.revision ?? 0) + 1,
-    }));
-  }
-
-  const handleInspectorTabRequest = useCallback((revision: number) => {
-    setInspectorTabRequest((request) =>
-      request?.revision === revision ? null : request,
-    );
-  }, []);
-
   function finishTabDrag(event: DragEndEvent) {
     setDraggedTabId(null);
     const next = dropEditorTab(
@@ -1262,8 +1276,19 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             openCodeEditor(layout, { type: "diff" }, "primary"),
           )
         }
-        onNewSourceControl={() => openInspectorTab("source")}
-        onNewPr={pr ? () => openInspectorTab("pr") : undefined}
+        onNewSourceControl={() =>
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "source_control" }, "primary"),
+          )
+        }
+        onNewPr={
+          pr
+            ? () =>
+                setWorkspaceLayout(
+                  openCodeEditor(layout, { type: "pr" }, "primary"),
+                )
+            : undefined
+        }
         onNewTerminal={() => void openTerminal("primary")}
         canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
@@ -1444,8 +1469,19 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             openCodeEditor(layout, { type: "diff" }, "secondary"),
           )
         }
-        onNewSourceControl={() => openInspectorTab("source")}
-        onNewPr={pr ? () => openInspectorTab("pr") : undefined}
+        onNewSourceControl={() =>
+          setWorkspaceLayout(
+            openCodeEditor(layout, { type: "source_control" }, "secondary"),
+          )
+        }
+        onNewPr={
+          pr
+            ? () =>
+                setWorkspaceLayout(
+                  openCodeEditor(layout, { type: "pr" }, "secondary"),
+                )
+            : undefined
+        }
         onNewTerminal={() => void openTerminal("secondary")}
         canNewTerminal={canNewTerminal}
         onMoveEditorToOtherGroup={(index) =>
@@ -1551,7 +1587,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               baseRef={workspace.base_ref}
               fallbackPr={pr}
               resource={prResource}
-              onOpenSourceControl={() => openInspectorTab("source")}
+              onOpenSourceControl={() =>
+                setWorkspaceLayout(
+                  openCodeEditor(
+                    layoutRef.current,
+                    { type: "source_control" },
+                    splitFocused ? "secondary" : "primary",
+                  ),
+                )
+              }
               onOpenWatchTask={
                 prResource.data?.watch
                   ? () => openWorkspaceTask(prResource.data?.watch?.session_id)
@@ -1628,15 +1672,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         </div>
       ) : reviewSidebarOpen ? (
         <ResizablePanelGroup
-          defaultLayout={usableInspectorLayout(inspectorLayout.defaultLayout)}
+          id={INSPECTOR_LAYOUT_STORAGE_ID}
+          groupRef={inspectorGroupRef}
+          defaultLayout={inspectorDefaultLayout}
           onLayoutChanged={inspectorLayout.onLayoutChanged}
           orientation="horizontal"
-          className="h-full min-h-0 flex-1"
+          className="h-auto min-h-0 max-w-full min-w-0 flex-1 overflow-clip"
         >
           <ResizablePanel
             id="workspace"
-            defaultSize="68"
-            minSize="42"
+            defaultSize={String(DEFAULT_INSPECTOR_LAYOUT.workspace)}
+            minSize={String(MIN_WORKSPACE_SIZE)}
             className="h-full min-h-0 min-w-0"
           >
             {workspaceMain}
@@ -1644,9 +1690,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           <ResizableHandle className="bg-border-subtle transition-colors hover:bg-border" />
           <ResizablePanel
             id="inspector"
-            defaultSize="32"
-            minSize="22"
-            className="min-w-0 bg-page-background"
+            defaultSize={String(DEFAULT_INSPECTOR_LAYOUT.inspector)}
+            minSize={String(MIN_INSPECTOR_SIZE)}
+            maxSize={String(MAX_INSPECTOR_SIZE)}
+            className="h-full min-h-0 min-w-0 bg-page-background"
           >
             <ErrorBoundary
               resetKey={workspaceId}
@@ -1664,8 +1711,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 workspace={workspace}
                 contentRevision={contentRevision}
                 prResource={prResource}
-                requestedTab={inspectorTabRequest}
-                onRequestedTabHandled={handleInspectorTabRequest}
                 onOpenFile={openFile}
                 onOpenDiff={openFileDiff}
                 onClose={() => setReviewSidebarOpen(false)}
@@ -2723,32 +2768,6 @@ function WatchTaskBar({
       </Button>
     </div>
   );
-}
-
-/**
- * Ignore a stored inspector split that would collapse the conversation.
- *
- * react-resizable-panels v4 remembers `{ [panelId]: percent }`. A leftover
- * v3 payload, or a drag that parked the workspace pane at zero, would hide
- * the chat the moment the review sidebar opened.
- */
-function usableInspectorLayout(
-  layout: Record<string, number> | undefined,
-): Record<string, number> | undefined {
-  if (!layout) return undefined;
-  const workspace = layout.workspace;
-  const inspector = layout.inspector;
-  if (
-    typeof workspace !== "number" ||
-    typeof inspector !== "number" ||
-    !Number.isFinite(workspace) ||
-    !Number.isFinite(inspector) ||
-    workspace < 40 ||
-    inspector < 18
-  ) {
-    return undefined;
-  }
-  return { workspace, inspector };
 }
 
 /**

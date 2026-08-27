@@ -727,9 +727,10 @@ it("keys the attributed set on full identity, not the number", async () => {
       workspaceId="ws-1"
       workspace={{ ...WORKSPACE, pr: OPEN_PR } as never}
       contentRevision={0}
-      requestedTab={{ tab: "pr", revision: 1 }}
     />,
   );
+
+  await userEvent.click(screen.getByRole("tab", { name: "Pull request" }));
 
   const list = await screen.findByRole("navigation", {
     name: "Pull requests this workspace worked on",
