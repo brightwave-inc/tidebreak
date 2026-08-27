@@ -670,9 +670,9 @@ each pinned to the GitHub Actions app (`app_id` 15368) so no other app can
 satisfy them.
 Every lane a change's scope can reach runs on the pull request itself; a lane
 outside the scope reports a successful skip, which is what lets a required
-check pass without running. Green PR checks are full platform-neutral
-validation, re-backed by the same lanes on
-every Rust-scoped push to `main` and on the weekly scheduled run. Keep the
+check pass without running. Green PR checks cover the scoped Linux lanes plus
+Windows compilation for every Rust-scoped change, re-backed by the same lanes
+on every Rust-scoped push to `main` and on the weekly scheduled run. Keep the
 whole set required so the skip-reporting stays wired up, and add any new
 always-running lane to the list.
 
@@ -681,12 +681,17 @@ non-required: the required `semantic PR title` job already fails unless the
 managed release labels match the title, so requiring the label job too would
 add nothing.
 
-`Windows cargo check` is intentionally separate from the required contexts. It
-runs automatically for Rust-scoped pushes to `main`, weekly schedules, and
-manual dispatches, while pull requests opt in with
-`windows-ci` when they touch a native Windows boundary. Keep it non-required so
-pull requests do not wait for long-running native platform coverage; the
-post-merge and scheduled runs remain the backstop.
+`Windows cargo check` is rust-scoped like clippy because a Windows compile
+break on `main` blocks the desktop release. Keep it off the required list
+until that lane stays green. Native Windows tests inside that job still wait
+for the `windows` scope, the `windows-ci` label, or a main/scheduled/manual
+run: those suites need NTFS and the Windows process APIs, and they retry a
+PowerShell startup race that should not gate unrelated Rust changes.
+
+To run that job on an 8-core Windows larger runner (8 vCPU, 32 GB), set the
+repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you
+omit the variable, the job uses `windows-latest`. Do not point the variable at
+an ARM runner: the lane compiles `x86_64-pc-windows-msvc`.
 
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.
