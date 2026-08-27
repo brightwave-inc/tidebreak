@@ -1,9 +1,9 @@
 # Code mode
 
-Status: supported and enabled by default. The decision records
-[`0030`](decisions/0030-code-mode-separate-surface.md) through
-[`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md) carry the decisions
-and are accepted; this page carries the working design detail in one place.
+Status: supported and enabled by default. Code mode's decision records start at
+[`0030`](decisions/0030-code-mode-separate-surface.md) and continue through the
+current numbering — [`docs/decisions/`](decisions) is the live list — and are
+accepted; this page carries the working design detail in one place.
 Where this page and a decision record disagree, the record wins. The first
 version ships the full surface described here — repos, workspaces, sessions,
 approvals, checkpoints and review, auxiliary terminals, the git/PR flow, the
@@ -20,10 +20,10 @@ Code mode is Tidebreak's second product surface and is available without an
 experimental opt-in: pick a local git repository,
 spin up isolated **workspaces** (one worktree + branch each), and run
 **sessions** — durable conversations with external coding-agent harnesses
-(Claude Code first; Codex CLI, opencode, and Grok CLI behind it) — supervised
-through a structured UI: conversation, tool activity, approvals, per-turn
-diffs, and a pull-request flow. The two-mode split is a delivery strategy:
-the destination is one surface where context selects behavior — a
+(Claude Code as the reference tier, plus Codex CLI, opencode, and Grok CLI) —
+supervised through a structured UI: conversation, tool activity, approvals,
+per-turn diffs, and a pull-request flow. The two-mode split is a delivery
+strategy: the destination is one surface where context selects behavior — a
 conversation bound to a workspace behaves code-like, one without is ordinary
 chat — and the adapter contract below is the runtime interface every engine,
 eventually including Tidebreak's own internal loop, sits behind
@@ -56,34 +56,56 @@ crates/tidebreak-core/src/code/
 
 crates/tidebreak-core/src/db/entities.rs      six new entities (below)
 crates/tidebreak-core/src/db/ops/code/        repo.rs, workspace.rs, session.rs,
-                                              turn.rs, journal.rs, approval.rs
+                                              turn.rs, journal.rs, approval.rs,
+                                              watch.rs, queued.rs, trigger.rs,
+                                              pull_request.rs, session_image.rs,
+                                              recovery.rs
 
 crates/tidebreak-harness/                     protocol translation only
   src/lib.rs       HarnessAdapter + HarnessSession traits, SessionSpec, LaunchPlan,
                    adapter registry
   src/probe.rs     interactive-login shell resolution + env capture (0034),
                    version detection, auth observation
+  src/pin.rs       the pinned npm package version per engine; the user's PATH is
+                   not the engine (0041)
+  src/launch.rs    launch-plan composition and the permission-bypass denylist
+  src/child.rs     engine-child bookkeeping: the pid while a turn is in flight,
+                   and how the child ended
+  src/browser_channel.rs  the capability-file contract adapters hand an engine child
   src/budget.rs    bounded stream-parse budgets
-  src/claude/      mod.rs, parse.rs, session.rs, approvals.rs
-  src/codex/  src/opencode/  src/grok/        later phases
+  src/text.rs      byte caps that never split a character
+  src/claude/      mod.rs, parse.rs, session.rs, approvals.rs, browser.rs
+  src/codex/  src/opencode/  src/grok/        mod.rs, parse.rs, session.rs each
   src/bin/capture.rs                          dev-only, feature = "capture"
   fixtures/<harness>/<version>/               *.ndjson + manifest.toml + *.expected.json
 
-crates/tidebreak-server/src/code/
+crates/tidebreak-server/src/code/   (the spine, not the whole directory)
   mod.rs             wiring
+  runtime.rs         the process-wide runtime: adapters, workers, worktrees, recovery
   session_worker.rs  per-session task: lease + spawn-epoch, adapter session, event pump
   worktree.rs        git shell-out: repo validation, worktree add/remove/prune/self-heal
+  worktree_root.rs   the configured root new worktrees land under (0053)
+  clone.rs           bounded `git clone` jobs for adding a remote repository
   checkpoint.rs      hidden refs, synthetic commits via temp index, bounded diffs
   setup_script.rs    setup/archive hooks, failure-preserves-checkout
   recovery.rs        boot scan, fencing, orphan probe, reap
   attention.rs       server-side attention computation, digest publication
   approval_bridge.rs the loopback approval-prompt endpoint glue and decision routing
   gh.rs              gh CLI shell-out: commit/push/PR/checks, graceful absence
+  pr_facts.rs        post-turn pull-request fact detection and attribution (0062)
+  delivery.rs        install-wide GitHub pull-request and run reads, guarded actions
+  trigger.rs         the sweep that turns pull-request facts into claimed fires (0060)
+  watch.rs           the watch-and-fix sweep (0050)
+  fork.rs            a parent transcript written outside the worktree for a sibling agent
+  harness_install.rs warm installs of the pinned engine binaries, off the create path
+  harness_llm.rs     session-scoped inference relay for engine children (0071)
+  browser_runtime.rs the server↔desktop browser adapter boundary (0054)
   terminal.rs        PTY shells, ring buffers, cursor reads (0036)
   bus.rs             per-session broadcast + install-wide updates channel
 crates/tidebreak-server/src/routes/code/      repos, workspaces, sessions,
                                               session_events, updates, approvals,
-                                              diffs, git, terminals, harnesses
+                                              git, terminals, harnesses, triggers,
+                                              delivery, analytics, usage, browser, llm
 crates/tidebreak-server/src/scripted_harness.rs   feature-gated fake adapter
                                               (the scripted_provider.rs pattern)
 
@@ -92,9 +114,10 @@ crates/tidebreak-desktop/ui/src/code/         the UI family (below)
 
 New dependencies, all exact-pinned and lockfile-matching: one Rust
 pseudo-terminal crate (terminals only — the harness crate must not depend on
-it, enforced by a dependency check), and the terminal-emulator UI package
-pair. Nothing else: no git library, no editor component, no diff library
-(git produces diffs; the UI styles them), no virtualization until measured.
+it, enforced by a dependency check), the terminal-emulator UI package pair,
+and the Monaco editor pair (`@monaco-editor/react`, `monaco-editor`) driving a
+read-only file viewer. Nothing else: no git library, no diff library (git
+produces diffs; the UI styles them), no virtualization until measured.
 
 ## Data model
 
@@ -102,7 +125,7 @@ A schema change here is an appended migration, per
 [`0061`](decisions/0061-schema-changes-are-migrations.md). The tables below
 describe the current schema, not the frozen baseline.
 
-- **`code_repo`** — `id`, `root_path` (unique, canonical toplevel),
+- **`code_repo`** — `id`, `owner`, `root_path` (unique, canonical toplevel),
   `display_name`, `default_base_ref`, `branch_prefix`, `setup_script`,
   `archive_script`, `quick_actions` (JSON array of
   `{name, command, auto_run_on_create}`), `created_at`, `removed_at`,
@@ -118,7 +141,7 @@ describe the current schema, not the frozen baseline.
   it reachable. Deleting the row would strand that history on SQLite, which
   does not enforce the workspace foreign key, and fail outright on PostgreSQL,
   which does. Reclaiming the checkout on disk is a separate, explicit act.
-- **`code_workspace`** — `id`, `repo_id`, `title`, `worktree_path`,
+- **`code_workspace`** — `id`, `owner`, `repo_id`, `title`, `worktree_path`,
   `branch_name`, `base_ref`, `status`
   (`Creating | SetupFailed | Active | Archiving | Archived | Released`), `pr` (JSON digest:
   number, url, state, checks summary; nullable), `created_at`,
@@ -136,14 +159,21 @@ describe the current schema, not the frozen baseline.
   directory from that scan, configure its exact repository-relative path with
   `git config --add tidebreak.archiveDisposablePath <directory>`. Archive
   fails closed when the scan or its configured paths exceed the safety budget.
-- **`code_session`** — `id`, `workspace_id`, `kind`
+- **`code_session`** — `id`, `owner`, `workspace_id`, `kind`
   (`Interactive | Watch`, per
   [`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)), `harness_kind`,
   `harness_version` (observed at launch), `harness_resume_ref` (the
-  harness's own session/thread id for resume), `permission_mode`,
+  harness's own session/thread id for resume), `permission_mode`, `model`,
+  `reasoning_effort`, `fast_mode`,
   `lifecycle` (`Created | Idle | Running | Fenced | Ended`), `fence_reason`
-  (JSON, nullable), `child_pid`, `spawn_epoch`, `attention_state` (JSON),
-  `attention_source`, `unrecognized_event_count`, `created_at`.
+  (JSON, nullable), `child_pid`, `child_process_identity`, `spawn_epoch`,
+  `attention_state` (JSON), `attention_source`, `unrecognized_event_count`,
+  `subagents` (bounded, per
+  [`0052`](decisions/0052-harness-subagents-as-child-rows.md)), `created_at`.
+
+  `reasoning_effort` is null when the engine's own default is in force, which
+  no level on the ladder is equivalent to. `fast_mode` buys output speed at a
+  higher price per token, so it is a spend decision rather than a quality one.
 - **`code_turn`** — `id`, `session_id`, `ordinal`, `status`
   (`Running | Completed | Failed | Interrupted`), `user_input` (inline or
   blob reference when large), `checkpoint_ref`, `diffstat` (JSON), `usage`
@@ -171,7 +201,11 @@ recorded `Running` are probed by recorded pid. Dead → the open turn closes
 as `Interrupted` (journaled), session `Idle`, attention
 `NeedsYou { source: Lifecycle }`. Alive → `Fenced { OrphanAlive }` until an
 explicit reap. Never signal a pid not recorded at spawn; `EPERM` counts as
-alive.
+alive. A pid is reused once its original process exits, so the probe also
+matches the recorded `child_process_identity` — the operating system's
+creation identity for that child — before it treats the pid as the session's
+own. A pid that is alive under a different identity is a stranger's process,
+and signalling it is what the match exists to prevent.
 
 A resume ref is only worth persisting once it would actually resume:
 `HarnessSession::resume_ref` reports a token after the engine has committed
@@ -241,16 +275,19 @@ Process models the trait absorbs:
   stop is a `control_request` the engine answers rather than a signal.
   Approvals via the permission-prompt tool over a loopback MCP endpoint with a
   session-scoped token.
-- **Codex CLI** — a long-lived JSON-RPC server child (preferred; its
-  approval methods are the richer channel) or the JSONL exec mode with
-  resume, whichever the fixture spike proves stable on the installed
-  version.
+- **Codex CLI** — a long-lived `codex app-server --stdio` child driven over
+  JSON-RPC, which is the richer of the two channels the CLI offers: its
+  approval methods carry structured requests the JSONL exec mode does not.
+  The prompt never appears in the argv.
 - **opencode** — a long-lived server child driven over HTTP with its event
   stream; permissions over its permission API.
-- **Grok CLI** — best-effort tier; one print-mode child per turn; honors
-  Auto only, as its default headless posture (unsupervised — see
-  [`0038`](decisions/0038-auto-is-a-declared-capability.md)); capabilities
-  honestly `Unsupported` or `Unknown` where its surface does not carry them.
+- **Grok CLI** — best-effort tier; one print-mode child per turn; honors Auto
+  and Allow and refuses Plan and Ask, since its captured surface carries no
+  approval channel to confine a turn with (see
+  [`0038`](decisions/0038-auto-is-a-declared-capability.md) and
+  [`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md));
+  capabilities honestly `Unsupported` or `Unknown` where its surface does not
+  carry them.
 
 Session-long children spawn lazily on the first turn, and an idle session's
 child is parked — stopped, then respawned and resumed by the next turn
@@ -308,22 +345,36 @@ whose completion payload carries no arguments leaves it unset.
 
 ## Server API surface
 
+The block below is the spine, not the whole router. `crates/tidebreak-server/src/lib.rs`
+carries the complete list, and the generated wire types are what clients bind
+to; transcribing every route here only buys a page that drifts.
+
 ```
 POST/GET        /code/repos                GET/PATCH/DELETE /code/repos/{id}
+GET             /code/repos/sources        POST /code/repos/clone    GET /code/repos/clone/{job}
 GET             /code/harnesses            doctor    POST /code/harnesses/refresh
+POST            /code/harnesses/{kind}/install       warm the pinned install (0041)
+GET             /code/harnesses/{kind}/models
 GET/PUT         /code/worktree-root        {root}    where new worktrees land (admin)
 
 POST/GET        /code/workspaces           {repo_id, base_ref?, title?}
 GET/PATCH       /code/workspaces/{id}
-POST            /code/workspaces/{id}/archive        {force?}
-POST            /code/workspaces/{id}/release        {force?}
-POST            /code/workspaces/{id}/sessions       {harness, permission_mode}
-POST            /code/sessions/{id}/turns            {message}  (queued while running —
+POST            /code/workspaces/{id}/archive | /release            {force?}
+POST            /code/workspaces/{id}/restore        back from a reclaim tier (0059)
+POST            /code/workspaces/{id}/sessions       {harness, permission_mode,
+                                                     model?, reasoning_effort?, fast_mode?}
+POST/GET        /code/sessions/{id}/turns            {message}  (queued while running —
                                                      the chat product's queue-default rule;
                                                      steering is the explicit alternative,
                                                      available only where the adapter's
                                                      mid_turn_steering capability carries it)
-POST            /code/sessions/{id}/interrupt | /permission-mode | /attention | /reap
+GET             /code/sessions/{id}/queued           the durable queue (0069)
+PATCH/DELETE    /code/sessions/{id}/queued/{queued_id}
+PUT             /code/sessions/{id}/queue-paused
+POST            /code/sessions/{id}/queued/send-now
+POST            /code/sessions/{id}/steer            one mid-turn message
+POST            /code/sessions/{id}/interrupt | /reap | /fork
+POST            /code/sessions/{id}/mode | /effort | /fast-mode | /attention
 WS              /code/sessions/{id}/events?after=    snapshot → replay → live
                                                      (replay is capped and flags truncation;
                                                      assistant deltas ride the same socket
@@ -336,12 +387,21 @@ POST            /code/mcp/approval-prompt            loopback approval endpoint 
 
 GET             /code/workspaces/{id}/files          changed files vs base, per-turn filter
 GET             /code/workspaces/{id}/diff?turn=&file=   bounded unified diff
+GET             /code/workspaces/{id}/tree | /search | /blob   the read-only file viewer
 POST            /code/workspaces/{id}/git/commit | /git/push | /git/pr
 GET             /code/workspaces/{id}/pr             PR + checks digest (gh; graceful absence)
+POST            /code/workspaces/{id}/pr/refresh | /pr/merge | /pr/ready
+GET             /code/workspaces/{id}/pr/comments
 POST/DELETE     /code/workspaces/{id}/watch          durable watch-and-fix task (0050)
 POST            /code/workspaces/{id}/actions/{name} quick action; output journaled
+GET/POST        /code/repos/{id}/triggers            durable rules on PR facts (0060)
 
-POST/GET/DELETE /code/workspaces/{id}/terminals
+GET             /code/analytics            GET /code/usage
+POST            /code/delivery/pull-requests/query | /detail | /action
+POST            /code/delivery/runs/query  | /detail | /action
+
+POST/GET/DELETE /code/workspaces/{id}/terminals      DELETE closes every terminal at once
+DELETE          /code/workspaces/{id}/terminals/{tid}    close one
 GET             /code/workspaces/{id}/terminals/{tid}/read?cursor=
 POST            /code/workspaces/{id}/terminals/{tid}/write | /resize
 ```
@@ -378,8 +438,11 @@ Routes (code-defined, hash history, in `ui/src/router.tsx`): `/code` (repo
 list, doctor-driven empty state), `/code/w/$workspaceId` (the main
 surface; files, diffs, browsers, and terminals open as center tabs
 through the existing panel system; git, pull-request state, and comments
-live in a review sidebar). A repo has no page of its own: registering one
-opens the new-workspace dialog, and picking one on `/code` does the same.
+live in a review sidebar), `/code/archive` (workspaces at a reclaim tier),
+`/code/analytics`, and the two install-wide delivery pages,
+`/code/delivery/pull-requests` and `/code/delivery/runs`. A repo has no page
+of its own: registering one opens the new-workspace dialog, and picking one on
+`/code` does the same.
 
 `ui/src/code/`:
 
@@ -405,7 +468,8 @@ opens the new-workspace dialog, and picking one on `/code` does the same.
   in the review sidebar), `CodeInspector` (git sync, PR state, comments),
   `DiffPanel`/`FilesPanel` (server-produced unified diffs styled with the
   semantic status tokens; per-file grouping; per-turn anchoring),
-  `TerminalDrawer`/`TerminalPane` (ephemeral renderer over the cursor-read
+  `FileViewer` (Monaco in read-only mode over the tree/search/blob routes),
+  `TerminalPane` (ephemeral renderer over the cursor-read
   API; replays recent bytes on mount; chunked writes on a frame budget).
 - Settings: one new section, "Coding harnesses" — the doctor.
 - Wire: generated types plus hand-written validators in
@@ -431,7 +495,6 @@ opens the new-workspace dialog, and picking one on `/code` does the same.
 
 Recorded in [`docs/deferred.md`](deferred.md): running a harness in a PTY;
 checkpoint restore (the refs land in v1; the restore surface does not);
-multiple sessions per workspace;
 an in-app code editor; chat–code convergence (the single-surface end
 state: one conversation concept with an optional workspace binding,
 engines behind the adapter contract, no user-facing mode choice); remote

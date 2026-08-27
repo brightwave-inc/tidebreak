@@ -205,7 +205,8 @@ sign-in restartable, and validate the external-app protocol against its SDK.
 
 ## Code mode: what the first version deliberately leaves out
 
-Code mode ([`docs/code-mode.md`](code-mode.md), decision records 30–36) ships
+Code mode ([`docs/code-mode.md`](code-mode.md), decision records from 30
+onward) ships
 structured-first: harnesses are driven through their machine-readable
 protocols, and the product's answer to "the protocol doesn't carry it" is a
 visible capability gap, not a workaround. Several adjacent ideas are parked on
@@ -248,20 +249,24 @@ purpose:
   began under one mode must not have it changed underneath it, so the change
   is refused with `turn_running`. Reconsider only with a reason to let a
   running turn's approvals change shape mid-flight.
-- **An in-app code editor.** V1 reviews server-produced diffs and hands
-  editing to the user's editor via the worktree path. An embedded editor is
-  a heavyweight dependency with its own product surface; it needs demand
-  evidence first.
+- **An in-app code editor.** Code mode reviews server-produced diffs and reads
+  files through a read-only Monaco viewer; it hands editing to the user's
+  editor via the worktree path. Making that viewer writable is a product
+  surface of its own — save, conflict, and undo against a tree an agent is
+  also editing — and it needs demand evidence first.
 - **Chat–code convergence.** The plan of record is
   [decision 48](decisions/0048-one-interaction-model.md): five independently
   useful steps, with code-mode structures as the merge survivor and chat
   contributing the content model. The work is no longer parked as a future
   record; what remains deferred is the implementation, and whether the
   internal engine later becomes an external harness process.
-- **A per-repo worktree-location override.** Worktrees live under the
-  Tidebreak data directory; toolchains that misbehave outside the repo's
-  ancestry are the known cost, and the override waits for real instances of
-  that pain.
+- **A per-repo worktree-location override.** Worktrees live under one root per
+  install — `~/Tidebreak/workspaces` on the desktop, the Tidebreak data
+  directory for a headless deployment — and an operator can move that root
+  ([record 53](decisions/0053-code-worktrees-live-in-a-user-visible-root.md)).
+  What no repo can do is name its own location; toolchains that misbehave
+  outside the repo's ancestry are the known cost, and the override waits for
+  real instances of that pain.
 - **Remote session execution.** The adapter contract deliberately never
   assumes a session's engine is a local child process. A later execution
   location can run the same harness in a managed sandbox — the session
