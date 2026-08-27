@@ -13,6 +13,7 @@ import { hasLocalHostAuthority, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { hostMachineLabel } from "@/remoteMachine";
 import { SettingsError, SettingsPanel } from "./primitives";
+import { ExternalEditorSection } from "./ExternalEditorSection";
 import { WorktreeRootSection } from "./WorktreeRootSection";
 
 /**
@@ -25,7 +26,9 @@ import { WorktreeRootSection } from "./WorktreeRootSection";
  * progress in both places.
  *
  * The workspace folder sits below the engines: a reader who came here came for
- * an engine, and the folder only matters once one runs.
+ * an engine, and the folder only matters once one runs. The external editor
+ * follows it for the same reason — it is where the files a workspace produces
+ * go next.
  */
 
 export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
@@ -169,6 +172,7 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
           onReset={() => void saveRoot(null)}
         />
       )}
+      <ExternalEditorSection canDetect={hasLocalHostAuthority()} />
     </SettingsPanel>
   );
 }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { setEditorPreference } from "./editorPreference";
 import {
+  externalEditorOpenFailureNotice,
   workspaceCommands,
   workspaceHeaderCommands,
   worktreeOpenFailureNotice,
@@ -103,6 +105,95 @@ describe("workspace worktree actions", () => {
     expect(header[headerCopy + 1]).toEqual({
       id: "uneff-me",
       label: "Uneff me",
+    });
+  });
+
+  it("names the chosen editor in both menus, and offers it only locally", () => {
+    setEditorPreference({ editor: "zed", customProgram: "" });
+    const card = workspaceCommands({
+      hasPr: false,
+      archived: false,
+      canOpenWorktree: true,
+      canOpenInEditor: true,
+    });
+    const worktree = card.findIndex(
+      (command) => command.id === "open-worktree",
+    );
+    expect(card[worktree + 1]).toEqual({
+      id: "open-in-editor",
+      label: "Open in Zed",
+    });
+
+    // A custom command has no name worth advertising.
+    setEditorPreference({
+      editor: "custom",
+      customProgram: "/opt/homebrew/bin/nvim",
+    });
+    expect(
+      workspaceCommands({
+        hasPr: false,
+        archived: false,
+        canOpenInEditor: true,
+      }).find((command) => command.id === "open-in-editor"),
+    ).toEqual({ id: "open-in-editor", label: "Open in editor" });
+
+    // A window attached to another machine, and an archived workspace, have
+    // no local file for an editor here to open.
+    for (const commands of [
+      workspaceCommands({
+        hasPr: false,
+        archived: false,
+        canOpenInEditor: false,
+      }),
+      workspaceCommands({
+        hasPr: false,
+        archived: true,
+        canOpenInEditor: true,
+      }),
+    ]) {
+      expect(commands.some((command) => command.id === "open-in-editor")).toBe(
+        false,
+      );
+    }
+  });
+
+  it("puts the editor next to the worktree action in the header overflow", () => {
+    setEditorPreference({ editor: "vscode", customProgram: "" });
+    const common = {
+      archived: false,
+      hasSession: false,
+      attentionPinned: false,
+      quickActions: [],
+    };
+    expect(
+      workspaceHeaderCommands({
+        ...common,
+        canOpenWorktree: true,
+        canOpenInEditor: true,
+      }).slice(0, 2),
+    ).toEqual([
+      { id: "open-worktree", label: "Open worktree folder" },
+      { id: "open-in-editor", label: "Open in Visual Studio Code" },
+    ]);
+    expect(
+      workspaceHeaderCommands({
+        ...common,
+        archived: true,
+        canOpenInEditor: true,
+      }).some((command) => command.id === "open-in-editor"),
+    ).toBe(false);
+  });
+
+  it("says what to do when the editor does not start", () => {
+    expect(
+      externalEditorOpenFailureNotice({
+        reason: "code_editor_editor_unavailable",
+        detail: "/private/native/detail",
+      }),
+    ).toEqual({
+      title: "Could not open that file in your editor",
+      description:
+        "Tidebreak could not find that editor on this computer. Pick another one in Settings, Coding harnesses.",
     });
   });
 

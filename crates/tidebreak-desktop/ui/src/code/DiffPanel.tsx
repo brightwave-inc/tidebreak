@@ -7,6 +7,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { OpenInEditorButton } from "./OpenInEditorButton";
 import { DiffstatBadge } from "./TurnReviewCard";
 import { useLiveResource } from "./useLiveContent";
 
@@ -42,6 +43,7 @@ export function DiffPanel({
   file,
   contentRevision = 0,
   onOpenFile,
+  onOpenInEditor,
 }: {
   client: Pick<ApiClient, "getCodeWorkspaceDiff">;
   workspaceId: string;
@@ -51,6 +53,8 @@ export function DiffPanel({
   file?: string;
   contentRevision?: number;
   onOpenFile?: (path: string) => void;
+  /** Hand the scoped file to the reader's own editor. */
+  onOpenInEditor?: (path: string) => void;
 }) {
   const load = useCallback(
     () => client.getCodeWorkspaceDiff(workspaceId, { turn: turnId, file }),
@@ -109,6 +113,9 @@ export function DiffPanel({
               <FileCode2 className="size-3" aria-hidden />
               Open file
             </button>
+          )}
+          {file && onOpenInEditor && (
+            <OpenInEditorButton onClick={() => onOpenInEditor(file)} />
           )}
         </div>
       </header>

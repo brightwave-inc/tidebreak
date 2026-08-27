@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { toast } from "sonner";
 
+import { setEditorPreference } from "@/code/editorPreference";
 import {
   workspaceCommands,
   worktreeOpenFailureNotice,
@@ -708,6 +709,76 @@ export const RemoteWorktreeFallback: Story = {
       canOpenWorktree: false,
     }),
     detailDefaultOpen: true,
+  },
+};
+
+/**
+ * The card's own menu, held open: the editor action sits under the worktree
+ * folder and names the editor the reader picked, so the row says what it will
+ * do before it is chosen.
+ */
+export const OpenInEditorMenu: Story = {
+  beforeEach: () => {
+    setEditorPreference({ editor: "zed", customProgram: "" });
+    return () => setEditorPreference({ editor: "vscode", customProgram: "" });
+  },
+  render: (args) => (
+    <WorkspaceCard
+      {...args}
+      commands={workspaceCommands({
+        hasPr: false,
+        archived: false,
+        hasSession: true,
+        canOpenWorktree: true,
+        canOpenInEditor: true,
+      })}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: await body.findByText(codeWorkspace.title),
+    });
+    await waitFor(() =>
+      expect(
+        body.getByRole("menuitem", { name: "Open worktree folder" }),
+      ).toBeVisible(),
+    );
+    await expect(
+      body.getByRole("menuitem", { name: "Open in Zed" }),
+    ).toBeVisible();
+  },
+};
+
+/** A window attached to another machine gets no editor row to be let down by. */
+export const RemoteHasNoEditorAction: Story = {
+  render: (args) => (
+    <WorkspaceCard
+      {...args}
+      commands={workspaceCommands({
+        hasPr: false,
+        archived: false,
+        hasSession: true,
+        canOpenWorktree: false,
+        canOpenInEditor: false,
+      })}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: await body.findByText(codeWorkspace.title),
+    });
+    await waitFor(() =>
+      expect(
+        body.getByRole("menuitem", { name: "Copy worktree path" }),
+      ).toBeVisible(),
+    );
+    await expect(
+      body.queryByRole("menuitem", { name: /^Open in / }),
+    ).toBeNull();
   },
 };
 

@@ -166,8 +166,10 @@ import { useCodeContentRevision } from "./useLiveContent";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
 import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
 import { WorkspaceHeader } from "./WorkspaceHeader";
+import { canOpenInExternalEditor } from "./codeWorktreeHost";
 import {
   WorkspaceOverflowMenu,
+  openWorkspaceFileInEditor,
   useWorkspaceCardCommands,
   workspaceHeaderCommands,
 } from "./workspaceActions";
@@ -1160,6 +1162,16 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 fileReveal?.path === panel.path ? fileReveal.line : undefined
               }
               revealRevision={fileReveal?.revision}
+              onOpenInEditor={
+                canOpenInExternalEditor()
+                  ? (path, line) =>
+                      openWorkspaceFileInEditor({
+                        workspaceId,
+                        relativePath: path,
+                        line,
+                      })
+                  : undefined
+              }
             />
           </Suspense>
         ) : panel.type === "diff" ? (
@@ -1170,6 +1182,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             file={panel.path}
             contentRevision={contentRevision}
             onOpenFile={(path) => openFile(path, undefined, region)}
+            onOpenInEditor={
+              canOpenInExternalEditor()
+                ? (path) =>
+                    openWorkspaceFileInEditor({
+                      workspaceId,
+                      relativePath: path,
+                    })
+                : undefined
+            }
           />
         ) : panel.type === "browser" ? (
           <Suspense fallback={<Skeleton className="h-full w-full" />}>

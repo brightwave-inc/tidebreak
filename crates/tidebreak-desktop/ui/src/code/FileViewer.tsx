@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useTheme } from "@/theme";
 import { configureMonaco, monacoLanguage, monacoTheme } from "./monacoEnv";
 import { MiddleTruncate } from "./MiddleTruncate";
+import { OpenInEditorButton } from "./OpenInEditorButton";
 import { useLiveResource } from "./useLiveContent";
 
 /**
@@ -20,6 +21,7 @@ export function FileViewer({
   contentRevision = 0,
   revealLine,
   revealRevision = 0,
+  onOpenInEditor,
 }: {
   client: Pick<ApiClient, "getCodeWorkspaceBlob">;
   workspaceId: string;
@@ -27,6 +29,8 @@ export function FileViewer({
   contentRevision?: number;
   revealLine?: number;
   revealRevision?: number;
+  /** Hand this file, at the line on screen, to the reader's own editor. */
+  onOpenInEditor?: (path: string, line?: number) => void;
 }) {
   const { resolved: resolvedTheme } = useTheme();
   const load = useCallback(
@@ -60,11 +64,18 @@ export function FileViewer({
             className="text-muted-foreground font-mono text-xs"
           />
         </div>
-        <span className="grid size-3.5 shrink-0 place-items-center">
-          {refreshing && (
-            <Spinner className="size-3.5" aria-label="Refreshing" />
+        <div className="flex items-center gap-2">
+          <span className="grid size-3.5 shrink-0 place-items-center">
+            {refreshing && (
+              <Spinner className="size-3.5" aria-label="Refreshing" />
+            )}
+          </span>
+          {onOpenInEditor && (
+            <OpenInEditorButton
+              onClick={() => onOpenInEditor(path, revealLine)}
+            />
           )}
-        </span>
+        </div>
       </header>
       {error && <p className="text-critical px-3 py-2 text-sm">{error}</p>}
       {!data && !error && (

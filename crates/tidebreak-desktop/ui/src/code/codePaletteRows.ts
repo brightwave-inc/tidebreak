@@ -3,6 +3,7 @@ import {
   BarChart3,
   FileText,
   GitPullRequest,
+  ExternalLink,
   MessageSquare,
   Play,
   Plus,
@@ -169,6 +170,8 @@ export function workspaceActionPaletteRows(input: {
   attentionPinned: boolean;
   quickActions: readonly { name: string }[];
   canUneff?: boolean;
+  /** This window can start an editor on the machine holding the worktree. */
+  canOpenInEditor?: boolean;
   onCommand: (command: WorkspaceCommand) => void;
 }): PaletteRow[] {
   const archived = input.workspace.status === "archived";
@@ -178,6 +181,7 @@ export function workspaceActionPaletteRows(input: {
     hasSession: input.hasSession,
     attentionPinned: input.attentionPinned,
     canUneff: input.canUneff,
+    canOpenInEditor: input.canOpenInEditor,
   });
   const quick: WorkspaceCommand[] = archived
     ? []
@@ -204,6 +208,7 @@ export function workspaceActionPaletteRows(input: {
 
 const ACTION_ICONS: Partial<Record<WorkspaceCommandId, PaletteRow["icon"]>> = {
   "new-session": Plus,
+  "open-in-editor": ExternalLink,
   "toggle-terminal": Terminal,
   "open-pr": GitPullRequest,
   "uneff-me": Wrench,
