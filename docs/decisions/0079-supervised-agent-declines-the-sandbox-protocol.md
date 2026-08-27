@@ -7,6 +7,7 @@
   [`0015-tidebreak-product-and-technical-identity.md`](0015-tidebreak-product-and-technical-identity.md),
   [`0041-pinned-harness-binaries.md`](0041-pinned-harness-binaries.md),
   [`0044-install-pinned-harnesses-on-linux.md`](0044-install-pinned-harnesses-on-linux.md),
+  [`0048-one-interaction-model.md`](0048-one-interaction-model.md),
   [`docs/deferred.md`](../deferred.md)
 
 ## Context
@@ -16,8 +17,10 @@ hosts. `tidebreak-sandbox-protocol` is the typed contract: an
 exact-version attach handshake, a sequenced and resumable event cursor,
 deny-by-default capability grants, a reverse-RPC channel whose first
 capability is host-proxied model inference, and a conformance suite over
-an in-process reference backend. It deliberately defines no byte
-transport. `tidebreak-sandbox-agent` is the workload that speaks it: the
+an in-process reference backend. Its `wire` module ships the concrete
+byte transport — newline-delimited JSON framing (`serve_connection`,
+`read_frame`) over a connection the host dials.
+`tidebreak-sandbox-agent` is the workload that speaks it: the
 host dials into the sandbox and attaches
 (`tidebreak-sandbox-protocol::serve_connection`, the supervisor's TCP
 listener in `crates/tidebreak-sandbox-agent/src/supervisor.rs`), and the
@@ -67,14 +70,18 @@ wrong way:
   machinery would gate nothing.
 - **The conformance suite certifies the wrong behaviors.** It exercises
   attach, replay, and idempotent operation identity — none of which the
-  supervised agent performs — and the crate deliberately pins typed
-  frames rather than byte transport, so there is no wire framing to
-  inherit either. Grafting HTTP polling underneath it buys nothing the
-  control endpoint's own API does not already define.
+  supervised agent performs. The wire framing the crate ships frames
+  exactly that attach conversation: a stream the host dials into the
+  sandbox. Reuse fails on direction, cursor ownership, and reverse RPC,
+  not on a missing transport, and grafting HTTP polling underneath the
+  suite buys nothing the control endpoint's own API does not already
+  define.
 
-**The name is `tidebreak-supervised-agent`.** `tidebreak-agent` is
-unavailable: that name is already in service as an OAuth client
-identifier. `tidebreak-sandbox-agent` cannot stretch to cover this
+**The name is `tidebreak-supervised-agent`.** `tidebreak-agent` says
+nothing about which way the connection points, and that direction is the
+entire distinction this record draws — a bare "agent" crate next to
+`tidebreak-sandbox-agent` would make every reader look up which one is
+which. `tidebreak-sandbox-agent` cannot stretch to cover this
 shape, because its defining property is the opposite connection
 direction — the host reaches into the sandbox and inference flows
 inward, where the supervised agent reaches out and inference is the
@@ -84,11 +91,16 @@ stream, and the agent reports to it.
 
 **The crates coexist.** Neither subsumes nor deprecates the other.
 `tidebreak-sandbox-protocol` and `tidebreak-sandbox-agent` remain the
-Tidebreak-hosted tier, where Tidebreak provisions the sandbox, attaches
-inward, and runs its own loop. `tidebreak-supervised-agent` is the
-guest tier, where someone else's environment provisions the sandbox and
-the agent polls outward. Both sit on the same `tidebreak-harness`
-adapters, so engine fixes land once and serve every execution shape.
+in-flight attach contract: Tidebreak dials into a sandbox it supervises
+and runs its own model loop there, a path
+[`docs/deferred.md`](../deferred.md) keeps attached-only and opt-in
+while the supported run stays in-process. `tidebreak-supervised-agent`
+is the outbound shape, where an external environment provisions the
+sandbox and the agent polls out. Only the supervised agent sits on
+`tidebreak-harness`; the sandbox agent runs Tidebreak's own model loop
+over reverse RPC, and whether that loop graduates into a harness-driven
+process stays parked
+([`0048-one-interaction-model.md`](0048-one-interaction-model.md)).
 
 ## Alternatives Considered
 
