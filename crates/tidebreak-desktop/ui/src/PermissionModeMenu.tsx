@@ -60,17 +60,34 @@ function autonomyRank(mode: PermissionMode): number {
 }
 
 /**
- * The mode a create or start should post under a managed ceiling: the
- * requested posture when it is at or below the ceiling, otherwise the
- * ceiling itself. Chat create already seeds this way server-side; code
- * posts an explicit mode, so the client has to clamp before the request.
+ * The mode a create or start should post under a managed ceiling. Keep the
+ * requested posture when the engine supports it and policy permits it.
+ * Otherwise, choose the most autonomous supported posture at or below the
+ * ceiling. Return `null` when the engine has no policy-compatible posture.
+ * Chat create already clamps server-side; code posts an explicit mode, so the
+ * client resolves the supported posture before the request.
  */
 export function clampPermissionMode(
   mode: PermissionMode,
   ceiling: PermissionMode | null | undefined,
-): PermissionMode {
-  if (ceiling == null) return mode;
-  return autonomyRank(mode) > autonomyRank(ceiling) ? ceiling : mode;
+  availableModes: readonly PermissionMode[] = PERMISSION_MODE_SCALE.map(
+    (option) => option.value,
+  ),
+): PermissionMode | null {
+  const ceilingRank =
+    ceiling == null ? Number.POSITIVE_INFINITY : autonomyRank(ceiling);
+  if (availableModes.includes(mode) && autonomyRank(mode) <= ceilingRank) {
+    return mode;
+  }
+
+  let fallback: PermissionMode | null = null;
+  for (const candidate of availableModes) {
+    if (autonomyRank(candidate) > ceilingRank) continue;
+    if (fallback === null || autonomyRank(candidate) > autonomyRank(fallback)) {
+      fallback = candidate;
+    }
+  }
+  return fallback;
 }
 
 export function permissionModeOption(mode: PermissionMode | null) {

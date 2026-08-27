@@ -93,6 +93,10 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
 export const PERMISSION_MODE_UNAVAILABLE_REASON =
   "this harness cannot honor that mode";
 
+/** Shown when managed policy leaves an engine with no mode it can honor. */
+export const PERMISSION_MODE_POLICY_BLOCKED =
+  "This engine has no permission mode allowed by your organization's policy.";
+
 /**
  * Shown where the mode is fixed for the life of the surface — a create form
  * that has already posted, a read-only view of someone else's session, or a

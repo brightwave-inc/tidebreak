@@ -26,7 +26,7 @@ import {
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
-import { ALLOW_ALL_NOTE } from "./labels";
+import { ALLOW_ALL_NOTE, PERMISSION_MODE_POLICY_BLOCKED } from "./labels";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
 import type { CodeTurnSubmission, ParsedHarnessModel } from "./parsers";
@@ -708,6 +708,67 @@ describe("NewWorkspaceDialog", () => {
         model: "sonnet",
       }),
     );
+  });
+
+  it("blocks create when policy leaves the engine no supported mode", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    const grok = harness("grok");
+    grok.caps = {
+      ...grok.caps,
+      plan_mode: "unsupported",
+      structured_approvals: "unsupported",
+    };
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: { harnesses: [grok], notices: [] } as never,
+    });
+    useCodeUiStore.setState({
+      lastCreate: {
+        harness: "grok",
+        modelsByHarness: {},
+        permissionMode: "allow",
+      },
+    });
+    const createCodeWorkspace = vi.fn();
+    const capped: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+      allow_local_mcp_servers: false,
+      permission_mode_ceiling: "ask",
+    };
+    await renderWithRouter(
+      <ManagedPolicyContext.Provider value={capped}>
+        <AppContextProvider
+          value={app({
+            createCodeWorkspace,
+            listCodeHarnessModels: vi.fn(async () => ({
+              kind: "grok" as const,
+              models: [],
+              reasoning_efforts: [],
+              fast_mode: false,
+            })),
+          })}
+        >
+          <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+        </AppContextProvider>
+      </ManagedPolicyContext.Provider>,
+      { initialUrl: "/code" },
+    );
+
+    expect(
+      await screen.findByText(PERMISSION_MODE_POLICY_BLOCKED),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Permissions: Allow all" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
+
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    expect(createCodeWorkspace).not.toHaveBeenCalled();
   });
 
   it("creates on Enter in the message; Shift+Enter stays a newline", async () => {

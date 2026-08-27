@@ -29,6 +29,7 @@ import {
   harnessCanStartNow,
   harnessUnusableReason,
   preferredCodeModels,
+  PERMISSION_MODE_POLICY_BLOCKED,
   type CodeModelOption,
 } from "./labels";
 
@@ -115,14 +116,19 @@ export function StartSessionPrompt({
     selectable[0];
   const availableModes = selected ? createPermissionModes(selected.caps) : [];
   const ceiling = useManagedPolicy().permission_mode_ceiling;
-  const mode: PermissionMode = clampPermissionMode(
+  const requestedMode: PermissionMode =
     selectedMode && availableModes.includes(selectedMode)
       ? selectedMode
       : selected
         ? defaultCreatePermissionMode(selected.caps)
-        : "plan",
+        : "plan";
+  const permittedMode = clampPermissionMode(
+    requestedMode,
     ceiling,
+    availableModes,
   );
+  const mode = permittedMode ?? requestedMode;
+  const policyBlocksStart = Boolean(selected && permittedMode === null);
 
   const selectedKind = selected?.kind;
   const model = selectedKind ? modelsByHarness[selectedKind] : undefined;
@@ -231,10 +237,13 @@ export function StartSessionPrompt({
       </div>
       <div className="mt-auto">
         <CodeComposer
-          disabled={starting || !selected || !installed}
+          disabled={starting || !selected || !installed || policyBlocksStart}
           running={starting}
           permissionMode={mode}
           availableModes={availableModes}
+          unavailableReason={
+            policyBlocksStart ? PERMISSION_MODE_POLICY_BLOCKED : undefined
+          }
           harness={selected?.kind}
           model={model}
           modelOptions={modelOptions}

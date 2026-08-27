@@ -17,7 +17,11 @@ import { ManagedPolicyContext } from "../managedPolicy";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
-import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
+import {
+  ALLOW_ALL_NOTE,
+  PERMISSION_MODE_POLICY_BLOCKED,
+  UNSUPERVISED_AUTO_NOTE,
+} from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
@@ -222,6 +226,47 @@ describe("StartSessionPrompt", () => {
       null,
       false,
     );
+  });
+
+  it("blocks start when policy leaves the engine no supported mode", async () => {
+    const onStart = vi.fn();
+    const capped: ManagedPolicy = {
+      managed: false,
+      source: "unmanaged",
+      misconfigured: false,
+      allow_local_mcp_servers: false,
+      permission_mode_ceiling: "ask",
+    };
+    await renderWithRouter(
+      wrap(
+        <ManagedPolicyContext.Provider value={capped}>
+          <StartSessionPrompt
+            workspaceId="workspace-1"
+            harnesses={[
+              entry("grok", {
+                plan_mode: "unsupported",
+                structured_approvals: "unsupported",
+              }),
+            ]}
+            starting={false}
+            selectedMode={null}
+            onSelectMode={vi.fn()}
+            onStart={onStart}
+          />
+        </ManagedPolicyContext.Provider>,
+      ),
+    );
+
+    expect(
+      screen.getByText(PERMISSION_MODE_POLICY_BLOCKED),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(ALLOW_ALL_NOTE)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Permissions: Allow all" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(onStart).not.toHaveBeenCalled();
   });
 
   it("says opencode's mode is fixed once the session starts", async () => {

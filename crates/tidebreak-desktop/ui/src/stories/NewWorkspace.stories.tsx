@@ -13,12 +13,15 @@ import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type {
   CodeRepoSnapshot,
   HarnessKind,
+  ManagedPolicy,
+  PermissionMode,
   ReasoningEffort,
 } from "@/api/types";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "@/code/CodeUiStore";
 import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
 import { NewWorkspaceDialog } from "@/code/NewWorkspaceDialog";
+import { ManagedPolicyContext } from "@/managedPolicy";
 import {
   harnessDoctor,
   harnessDoctorCold,
@@ -232,9 +235,13 @@ function withRouter(children: ReactNode) {
 function NewWorkspace({
   doctor = harnessDoctor,
   installs,
+  initialHarness,
+  permissionModeCeiling,
 }: {
   doctor?: typeof harnessDoctor;
   installs?: typeof harnessInstallsInFlight;
+  initialHarness?: HarnessKind;
+  permissionModeCeiling?: PermissionMode;
 }) {
   // Seed the catalog before the dialog mounts: its defaults read the store.
   const [seeded, setSeeded] = useState(false);
@@ -246,14 +253,28 @@ function NewWorkspace({
       workspaces: [],
     });
     useCodeUpdatesStore.setState({ harnessInstalls: installs ?? {} });
-    useCodeUiStore.setState({ newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT });
+    useCodeUiStore.setState({
+      lastCreate: initialHarness
+        ? { harness: initialHarness, modelsByHarness: {} }
+        : null,
+      newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
+    });
     setSeeded(true);
-  }, [doctor, installs]);
+  }, [doctor, initialHarness, installs]);
   if (!seeded) return null;
+  const policy: ManagedPolicy = {
+    managed: Boolean(permissionModeCeiling),
+    source: permissionModeCeiling ? "os" : "unmanaged",
+    misconfigured: false,
+    allow_local_mcp_servers: false,
+    permission_mode_ceiling: permissionModeCeiling,
+  };
   return (
-    <AppContextProvider value={appContext()}>
-      <NewWorkspaceDialog open onOpenChange={fn()} repos={repos} />
-    </AppContextProvider>
+    <ManagedPolicyContext.Provider value={policy}>
+      <AppContextProvider value={appContext()}>
+        <NewWorkspaceDialog open onOpenChange={fn()} repos={repos} />
+      </AppContextProvider>
+    </ManagedPolicyContext.Provider>
   );
 }
 
@@ -386,5 +407,28 @@ export const EngineDownloading: Story = {
         done: false,
       },
     },
+  },
+};
+
+/** The selected engine has no mode at or below the managed ceiling. */
+export const BlockedByManagedCeiling: Story = {
+  args: {
+    doctor: {
+      ...harnessDoctor,
+      harnesses: harnessDoctor.harnesses
+        .filter((entry) => entry.kind === "grok")
+        .map((entry) => ({ ...entry, authenticated: true, remediation: "" })),
+    },
+    initialHarness: "grok",
+    permissionModeCeiling: "ask",
+  },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await expect(
+      page.findByText(
+        "This engine has no permission mode allowed by your organization's policy.",
+      ),
+    ).resolves.toBeVisible();
+    await expect(page.getByRole("button", { name: /Create/ })).toBeDisabled();
   },
 };
