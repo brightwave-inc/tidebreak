@@ -2,17 +2,18 @@ import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 import { Screen, Body, ErrorText } from "../src/components/Screen";
-import { parseWorkspaceList, workspaceDisplayName } from "../src/lib/attach";
+import { listActiveCodeWorkspaces } from "../src/lib/api";
 import { fetchIdentity } from "../src/lib/gateway";
-import { fetchRefusingRedirects } from "../src/lib/http";
 import { RESOURCE_CONTROL } from "../src/lib/resource";
 import { tokenStore } from "../src/session/runtime";
 import { useSessionStore } from "../src/session/store";
+import { useMachineClient } from "../src/session/useMachineClient";
 
 export default function HomeScreen() {
   const router = useRouter();
   const session = useSessionStore((state) => state.session);
   const setSession = useSessionStore((state) => state.setSession);
+  const client = useMachineClient();
 
   const identityQuery = useQuery({
     queryKey: ["identity", session?.gatewayUrl],
@@ -27,19 +28,9 @@ export default function HomeScreen() {
   });
 
   const workspacesQuery = useQuery({
-    queryKey: ["workspaces", session?.machine?.baseUrl],
-    enabled: !!session?.machine,
-    queryFn: async () => {
-      const token = await tokenStore.getAccessToken(session!.machine!.resource);
-      const response = await fetchRefusingRedirects(
-        `${session!.machine!.baseUrl}/code/workspaces`,
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
-      if (!response.ok) {
-        throw new Error(`Workspace list failed (HTTP ${response.status})`);
-      }
-      return parseWorkspaceList(await response.json());
-    },
+    queryKey: ["code-workspaces", session?.machine?.baseUrl],
+    enabled: !!client,
+    queryFn: () => listActiveCodeWorkspaces(client!),
   });
 
   if (!session?.machine) {
@@ -95,11 +86,40 @@ export default function HomeScreen() {
               : `${workspaces.length} workspace${workspaces.length === 1 ? "" : "s"}`}
           </Text>
         )}
-        {workspaces.map((workspace) => (
-          <Text key={workspace.id} className="text-sm text-muted-foreground">
-            {workspaceDisplayName(workspace)}
+        {!workspacesQuery.isLoading && !workspacesQuery.isError && workspaces.length === 0 ? (
+          <Text className="text-sm text-muted-foreground">
+            No active workspaces are available on this machine.
           </Text>
+        ) : null}
+        {workspaces.map((workspace) => (
+          <Pressable
+            key={workspace.id}
+            accessibilityRole="button"
+            accessibilityLabel={`Start a session in ${workspace.title || workspace.branch_name}`}
+            className="gap-1 border-t border-border py-3 first:border-t-0"
+            onPress={() =>
+              router.push({
+                pathname: "/workspace/[id]/start",
+                params: { id: workspace.id },
+              })
+            }
+          >
+            <Text className="text-sm font-medium text-foreground">
+              {workspace.title || "Untitled workspace"}
+            </Text>
+            <Text
+              className="font-mono text-xs text-muted-foreground"
+              numberOfLines={1}
+            >
+              {workspace.branch_name}
+            </Text>
+          </Pressable>
         ))}
+        {workspaces.length > 0 ? (
+          <Text className="text-xs text-muted-foreground">
+            Tap a workspace to start a session.
+          </Text>
+        ) : null}
       </View>
       <Pressable
         className="rounded-lg border border-border bg-background px-4 py-3"

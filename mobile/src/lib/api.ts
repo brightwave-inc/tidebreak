@@ -1,8 +1,18 @@
 import type {
+  CapLevel,
   CodeApprovalKind,
   CodeApprovalSnapshot,
+  CodeSessionLifecycle,
   CodeTurnSnapshot,
+  CodeWorkspaceStatus,
+  HarnessAuthMode,
+  HarnessCaps,
+  HarnessKind,
+  HarnessModel,
+  HarnessModelSource,
+  PermissionMode,
   QueuedCodeTurn,
+  ReasoningEffort,
 } from "../generated/wire";
 import type { MachineClient } from "./machine";
 
@@ -11,6 +21,65 @@ export type CodeTurnSubmission =
   | { kind: "queued"; queued: QueuedCodeTurn };
 
 type MachineJsonClient = Pick<MachineClient, "getJson" | "requestJson">;
+
+export type ActiveCodeWorkspace = {
+  id: string;
+  repo_id: string;
+  title: string;
+  branch_name: string;
+  base_ref: string;
+  status: CodeWorkspaceStatus;
+  created_at: string;
+};
+
+export type CodeHarnessOption = {
+  kind: HarnessKind;
+  found: boolean;
+  installable: boolean;
+  version?: string;
+  authenticated?: boolean;
+  auth_mode: HarnessAuthMode;
+  remediation: string;
+  caps: HarnessCaps;
+};
+
+export type CodeHarnessModels = {
+  kind: HarnessKind;
+  models: HarnessModel[];
+  reasoning_efforts: ReasoningEffort[];
+  source: HarnessModelSource;
+};
+
+export type CodePermissionPolicy = {
+  permission_mode_ceiling?: PermissionMode;
+};
+
+export type CreateCodeSessionInput = {
+  harness: HarnessKind;
+  permission_mode: PermissionMode;
+  model?: string;
+  reasoning_effort?: ReasoningEffort;
+  fast_mode?: boolean;
+};
+
+export type CreatedCodeSession = {
+  id: string;
+  workspace_id: string;
+  harness_kind: HarnessKind;
+  permission_mode: PermissionMode;
+  model?: string;
+  reasoning_effort?: ReasoningEffort;
+  fast_mode: boolean;
+  lifecycle: CodeSessionLifecycle;
+  created_at: string;
+};
+
+export type CodeSessionLaunchResult = {
+  session: CreatedCodeSession;
+  submitted: CodeTurnSubmission | null;
+  undeliveredDraft: string | null;
+  sendError: string | null;
+};
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object"
@@ -26,8 +95,232 @@ function optionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
 }
 
+function optionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
+}
+
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function codeWorkspaceStatus(value: unknown): value is CodeWorkspaceStatus {
+  return [
+    "creating",
+    "setup_failed",
+    "active",
+    "archiving",
+    "archived",
+    "released",
+  ].includes(String(value));
+}
+
+function harnessKind(value: unknown): value is HarnessKind {
+  return ["claude_code", "codex", "opencode", "grok"].includes(
+    String(value),
+  );
+}
+
+function harnessAuthMode(value: unknown): value is HarnessAuthMode {
+  return [
+    "local_sign_in",
+    "gateway_managed",
+    "gateway_relay",
+    "hosted_unavailable",
+  ].includes(String(value));
+}
+
+function capLevel(value: unknown): value is CapLevel {
+  return ["supported", "unsupported", "unknown"].includes(String(value));
+}
+
+function permissionMode(value: unknown): value is PermissionMode {
+  return ["plan", "ask", "auto", "allow"].includes(String(value));
+}
+
+function reasoningEffort(value: unknown): value is ReasoningEffort {
+  return ["none", "low", "medium", "high", "xhigh", "max", "ultra"].includes(
+    String(value),
+  );
+}
+
+function codeSessionLifecycle(value: unknown): value is CodeSessionLifecycle {
+  return ["created", "idle", "running", "fenced", "ended"].includes(
+    String(value),
+  );
+}
+
+function parseHarnessCaps(value: unknown): HarnessCaps | null {
+  const caps = record(value);
+  if (
+    !caps ||
+    !capLevel(caps.resume) ||
+    !capLevel(caps.streaming_deltas) ||
+    !capLevel(caps.structured_approvals) ||
+    !capLevel(caps.mid_turn_steering) ||
+    !capLevel(caps.plan_mode) ||
+    !capLevel(caps.auto_mode) ||
+    !capLevel(caps.allow_mode) ||
+    !capLevel(caps.reasoning_levels) ||
+    !capLevel(caps.native_file_change_events) ||
+    !capLevel(caps.native_interrupt) ||
+    !capLevel(caps.image_input) ||
+    !capLevel(caps.slash_commands)
+  ) {
+    return null;
+  }
+  return {
+    resume: caps.resume,
+    streaming_deltas: caps.streaming_deltas,
+    structured_approvals: caps.structured_approvals,
+    mid_turn_steering: caps.mid_turn_steering,
+    plan_mode: caps.plan_mode,
+    auto_mode: caps.auto_mode,
+    allow_mode: caps.allow_mode,
+    reasoning_levels: caps.reasoning_levels,
+    native_file_change_events: caps.native_file_change_events,
+    native_interrupt: caps.native_interrupt,
+    image_input: caps.image_input,
+    slash_commands: caps.slash_commands,
+  };
+}
+
+export function parseCodeWorkspace(
+  value: unknown,
+): ActiveCodeWorkspace | null {
+  const workspace = record(value);
+  if (
+    !workspace ||
+    !nonEmpty(workspace.id) ||
+    !nonEmpty(workspace.repo_id) ||
+    typeof workspace.title !== "string" ||
+    !nonEmpty(workspace.branch_name) ||
+    !nonEmpty(workspace.base_ref) ||
+    !codeWorkspaceStatus(workspace.status) ||
+    !nonEmpty(workspace.created_at)
+  ) {
+    return null;
+  }
+  return {
+    id: workspace.id,
+    repo_id: workspace.repo_id,
+    title: workspace.title,
+    branch_name: workspace.branch_name,
+    base_ref: workspace.base_ref,
+    status: workspace.status,
+    created_at: workspace.created_at,
+  };
+}
+
+export function parseCodeHarness(value: unknown): CodeHarnessOption | null {
+  const harness = record(value);
+  const caps = parseHarnessCaps(harness?.caps);
+  if (
+    !harness ||
+    !harnessKind(harness.kind) ||
+    typeof harness.found !== "boolean" ||
+    typeof harness.installable !== "boolean" ||
+    !optionalString(harness.version) ||
+    !optionalBoolean(harness.authenticated) ||
+    !harnessAuthMode(harness.auth_mode) ||
+    typeof harness.remediation !== "string" ||
+    !caps
+  ) {
+    return null;
+  }
+  return {
+    kind: harness.kind,
+    found: harness.found,
+    installable: harness.installable,
+    ...(harness.version !== undefined ? { version: harness.version } : {}),
+    ...(harness.authenticated !== undefined
+      ? { authenticated: harness.authenticated }
+      : {}),
+    auth_mode: harness.auth_mode,
+    remediation: harness.remediation,
+    caps,
+  };
+}
+
+function parseHarnessModel(value: unknown): HarnessModel | null {
+  const model = record(value);
+  if (
+    !model ||
+    !nonEmpty(model.id) ||
+    !nonEmpty(model.label) ||
+    typeof model.default !== "boolean" ||
+    !Array.isArray(model.reasoning_efforts) ||
+    !model.reasoning_efforts.every(reasoningEffort) ||
+    typeof model.fast_mode !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: model.id,
+    label: model.label,
+    default: model.default,
+    reasoning_efforts: model.reasoning_efforts,
+    fast_mode: model.fast_mode,
+  };
+}
+
+export function parseCodeHarnessModels(
+  value: unknown,
+): CodeHarnessModels | null {
+  const listing = record(value);
+  if (
+    !listing ||
+    !harnessKind(listing.kind) ||
+    !Array.isArray(listing.models) ||
+    !Array.isArray(listing.reasoning_efforts) ||
+    !listing.reasoning_efforts.every(reasoningEffort) ||
+    !["harness", "model_gateway"].includes(String(listing.source))
+  ) {
+    return null;
+  }
+  const models = listing.models.map(parseHarnessModel);
+  if (models.some((model) => model === null)) return null;
+  return {
+    kind: listing.kind,
+    models: models as HarnessModel[],
+    reasoning_efforts: listing.reasoning_efforts,
+    source: listing.source as HarnessModelSource,
+  };
+}
+
+export function parseCreatedCodeSession(
+  value: unknown,
+): CreatedCodeSession | null {
+  const session = record(value);
+  if (
+    !session ||
+    !nonEmpty(session.id) ||
+    !nonEmpty(session.workspace_id) ||
+    !harnessKind(session.harness_kind) ||
+    !permissionMode(session.permission_mode) ||
+    !optionalString(session.model) ||
+    !(
+      session.reasoning_effort === undefined ||
+      reasoningEffort(session.reasoning_effort)
+    ) ||
+    typeof session.fast_mode !== "boolean" ||
+    !codeSessionLifecycle(session.lifecycle) ||
+    !nonEmpty(session.created_at)
+  ) {
+    return null;
+  }
+  return {
+    id: session.id,
+    workspace_id: session.workspace_id,
+    harness_kind: session.harness_kind,
+    permission_mode: session.permission_mode,
+    ...(session.model !== undefined ? { model: session.model } : {}),
+    ...(session.reasoning_effort !== undefined
+      ? { reasoning_effort: session.reasoning_effort }
+      : {}),
+    fast_mode: session.fast_mode,
+    lifecycle: session.lifecycle,
+    created_at: session.created_at,
+  };
 }
 
 function parseApprovalKind(value: unknown): CodeApprovalKind | null {
@@ -142,6 +435,131 @@ function parseList<T>(
 function required<T>(value: T | null, label: string): T {
   if (!value) throw new Error(`${label} response contains invalid data.`);
   return value;
+}
+
+export async function listActiveCodeWorkspaces(
+  client: MachineJsonClient,
+): Promise<ActiveCodeWorkspace[]> {
+  return parseList(
+    await client.getJson("/code/workspaces"),
+    parseCodeWorkspace,
+    "Code workspaces",
+  ).filter((workspace) => workspace.status === "active");
+}
+
+export async function listCodeHarnesses(
+  client: MachineJsonClient,
+): Promise<CodeHarnessOption[]> {
+  const report = record(await client.getJson("/code/harnesses"));
+  if (!report || !Array.isArray(report.harnesses)) {
+    throw new Error("Code harnesses response contains invalid data.");
+  }
+  return parseList(report.harnesses, parseCodeHarness, "Code harnesses");
+}
+
+export async function listCodeHarnessModels(
+  client: MachineJsonClient,
+  kind: HarnessKind,
+): Promise<CodeHarnessModels> {
+  const listing = required(
+    parseCodeHarnessModels(
+      await client.getJson(
+        `/code/harnesses/${encodeURIComponent(kind)}/models`,
+      ),
+    ),
+    "Code harness models",
+  );
+  if (listing.kind !== kind) {
+    throw new Error("Code harness models response named a different harness.");
+  }
+  return listing;
+}
+
+export async function getCodePermissionPolicy(
+  client: MachineJsonClient,
+): Promise<CodePermissionPolicy> {
+  const policy = record(await client.getJson("/policy"));
+  if (!policy) {
+    throw new Error("Machine policy response contains invalid data.");
+  }
+  if (
+    policy.permission_mode_ceiling !== undefined &&
+    !permissionMode(policy.permission_mode_ceiling)
+  ) {
+    throw new Error("Machine policy response contains invalid data.");
+  }
+  return policy.permission_mode_ceiling === undefined
+    ? {}
+    : { permission_mode_ceiling: policy.permission_mode_ceiling };
+}
+
+export async function createCodeSession(
+  client: MachineJsonClient,
+  workspaceId: string,
+  input: CreateCodeSessionInput,
+): Promise<CreatedCodeSession> {
+  const body = {
+    harness: input.harness,
+    permission_mode: input.permission_mode,
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.reasoning_effort
+      ? { reasoning_effort: input.reasoning_effort }
+      : {}),
+    ...(input.fast_mode ? { fast_mode: true } : {}),
+  };
+  const session = required(
+    parseCreatedCodeSession(
+      await client.requestJson(
+        `/code/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+        { method: "POST", body, expectedStatus: 201 },
+      ),
+    ),
+    "Code session",
+  );
+  if (
+    session.workspace_id !== workspaceId ||
+    session.harness_kind !== input.harness ||
+    session.permission_mode !== input.permission_mode
+  ) {
+    throw new Error("Code session response did not match the launch request.");
+  }
+  return session;
+}
+
+export async function launchCodeSession(
+  client: MachineJsonClient,
+  workspaceId: string,
+  input: CreateCodeSessionInput,
+  firstMessage: string,
+): Promise<CodeSessionLaunchResult> {
+  const session = await createCodeSession(client, workspaceId, input);
+  const submittedMessage = firstMessage.trim();
+  if (!submittedMessage) {
+    return {
+      session,
+      submitted: null,
+      undeliveredDraft: null,
+      sendError: null,
+    };
+  }
+  try {
+    return {
+      session,
+      submitted: await submitCodeTurn(client, session.id, submittedMessage),
+      undeliveredDraft: null,
+      sendError: null,
+    };
+  } catch (error) {
+    return {
+      session,
+      submitted: null,
+      undeliveredDraft: firstMessage,
+      sendError:
+        error instanceof Error
+          ? error.message
+          : "The first message could not be sent.",
+    };
+  }
 }
 
 export async function listCodeApprovals(

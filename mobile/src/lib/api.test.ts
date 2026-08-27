@@ -1,12 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MachineClient } from "./machine";
 import {
+  createCodeSession,
   decideCodeApproval,
+  getCodePermissionPolicy,
   interruptCodeSession,
+  launchCodeSession,
+  listActiveCodeWorkspaces,
   listCodeApprovals,
+  listCodeHarnessModels,
+  listCodeHarnesses,
   listCodeQueuedTurns,
   listCodeTurns,
   parseCodeApproval,
+  parseCodeHarness,
+  parseCodeHarnessModels,
+  parseCodeWorkspace,
+  parseCreatedCodeSession,
   parseCodeTurnSubmission,
   steerCodeSession,
   submitCodeTurn,
@@ -42,6 +52,62 @@ const approval = {
   requested_at: "2026-08-27T00:00:02Z",
 };
 
+const caps = {
+  resume: "supported",
+  streaming_deltas: "supported",
+  structured_approvals: "supported",
+  mid_turn_steering: "supported",
+  plan_mode: "supported",
+  auto_mode: "supported",
+  allow_mode: "supported",
+  reasoning_levels: "supported",
+  native_file_change_events: "supported",
+  native_interrupt: "supported",
+  image_input: "unsupported",
+  slash_commands: "supported",
+};
+
+const harness = {
+  kind: "codex",
+  found: true,
+  installable: true,
+  version: "1.0.0",
+  tier: "reference",
+  caps,
+  commands: [],
+  authenticated: true,
+  auth_mode: "local_sign_in",
+  remediation: "",
+  stderr: "",
+  unrecognized_event_count: 0,
+  relaunch_composes_permission_mode: true,
+};
+
+const workspace = {
+  id: "workspace-1",
+  repo_id: "repo-1",
+  title: "Mobile launch",
+  worktree_path: "/workspace/mobile-launch",
+  branch_name: "thet/mobile-launch",
+  base_ref: "main",
+  status: "active",
+  created_at: "2026-08-27T00:00:00Z",
+};
+
+const createdSession = {
+  id: "session-2",
+  workspace_id: "workspace-1",
+  kind: "interactive",
+  harness_kind: "codex",
+  permission_mode: "auto",
+  model: "gpt-5.6-sol",
+  fast_mode: false,
+  lifecycle: "created",
+  attention: { state: { type: "idle" }, source: "lifecycle" },
+  unrecognized_event_count: 0,
+  created_at: "2026-08-27T00:00:03Z",
+};
+
 function fakeClient(response: unknown): {
   client: Pick<MachineClient, "getJson" | "requestJson">;
   getJson: ReturnType<typeof vi.fn>;
@@ -53,6 +119,172 @@ function fakeClient(response: unknown): {
 }
 
 describe("mobile supervision API contracts", () => {
+  it("validates active workspaces instead of silently accepting partial rows", async () => {
+    expect(parseCodeWorkspace(workspace)).toMatchObject({
+      id: "workspace-1",
+      status: "active",
+    });
+    expect(parseCodeWorkspace({ id: "workspace-1" })).toBeNull();
+
+    const listed = fakeClient([
+      workspace,
+      { ...workspace, id: "workspace-2", status: "archived" },
+    ]);
+    await expect(listActiveCodeWorkspaces(listed.client)).resolves.toEqual([
+      expect.objectContaining({ id: "workspace-1" }),
+    ]);
+    expect(listed.getJson).toHaveBeenCalledWith("/code/workspaces");
+
+    const invalid = fakeClient([workspace, { ...workspace, branch_name: 42 }]);
+    await expect(listActiveCodeWorkspaces(invalid.client)).rejects.toThrow(
+      /invalid data/,
+    );
+  });
+
+  it("validates harness capabilities and each listed model", async () => {
+    expect(parseCodeHarness(harness)).toMatchObject({
+      kind: "codex",
+      caps: { structured_approvals: "supported" },
+    });
+    expect(
+      parseCodeHarness({
+        ...harness,
+        caps: { ...caps, allow_mode: "maybe" },
+      }),
+    ).toBeNull();
+
+    const doctor = fakeClient({ harnesses: [harness] });
+    await expect(listCodeHarnesses(doctor.client)).resolves.toHaveLength(1);
+    expect(doctor.getJson).toHaveBeenCalledWith("/code/harnesses");
+
+    const listing = {
+      kind: "codex",
+      models: [
+        {
+          id: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol",
+          default: true,
+          reasoning_efforts: ["high", "ultra"],
+          fast_mode: true,
+        },
+      ],
+      reasoning_efforts: ["high", "ultra"],
+      source: "model_gateway",
+    };
+    expect(parseCodeHarnessModels(listing)).toEqual(listing);
+    expect(
+      parseCodeHarnessModels({
+        ...listing,
+        models: [{ ...listing.models[0], fast_mode: "yes" }],
+      }),
+    ).toBeNull();
+
+    const models = fakeClient(listing);
+    await expect(
+      listCodeHarnessModels(models.client, "codex"),
+    ).resolves.toEqual(listing);
+    expect(models.getJson).toHaveBeenCalledWith(
+      "/code/harnesses/codex/models",
+    );
+  });
+
+  it("reads the managed permission ceiling and rejects unknown modes", async () => {
+    const capped = fakeClient({
+      managed: true,
+      source: "os",
+      permission_mode_ceiling: "ask",
+    });
+    await expect(getCodePermissionPolicy(capped.client)).resolves.toEqual({
+      permission_mode_ceiling: "ask",
+    });
+
+    const invalid = fakeClient({ permission_mode_ceiling: "danger" });
+    await expect(getCodePermissionPolicy(invalid.client)).rejects.toThrow(
+      /invalid data/,
+    );
+  });
+
+  it("creates a session through the workspace route and checks the response identity", async () => {
+    expect(parseCreatedCodeSession(createdSession)).toMatchObject({
+      id: "session-2",
+      workspace_id: "workspace-1",
+    });
+    expect(
+      parseCreatedCodeSession({ ...createdSession, fast_mode: "false" }),
+    ).toBeNull();
+
+    const created = fakeClient({
+      ...createdSession,
+      workspace_id: "workspace/1",
+    });
+    await expect(
+      createCodeSession(created.client, "workspace/1", {
+        harness: "codex",
+        permission_mode: "auto",
+        model: "gpt-5.6-sol",
+      }),
+    ).resolves.toMatchObject({ id: "session-2" });
+    expect(created.requestJson).toHaveBeenCalledWith(
+      "/code/workspaces/workspace%2F1/sessions",
+      {
+        method: "POST",
+        body: {
+          harness: "codex",
+          permission_mode: "auto",
+          model: "gpt-5.6-sol",
+        },
+        expectedStatus: 201,
+      },
+    );
+
+    const mismatched = fakeClient({
+      ...createdSession,
+      workspace_id: "workspace-elsewhere",
+    });
+    await expect(
+      createCodeSession(mismatched.client, "workspace-1", {
+        harness: "codex",
+        permission_mode: "auto",
+      }),
+    ).rejects.toThrow(/did not match/);
+  });
+
+  it("keeps the first-message draft when the session starts but send fails", async () => {
+    const getJson = vi.fn();
+    const requestJson = vi
+      .fn()
+      .mockResolvedValueOnce(createdSession)
+      .mockRejectedValueOnce(new Error("Connection ended"));
+    const client = { getJson, requestJson };
+
+    await expect(
+      launchCodeSession(
+        client,
+        "workspace-1",
+        {
+          harness: "codex",
+          permission_mode: "auto",
+          model: "gpt-5.6-sol",
+        },
+        "  Fix the launch flow.  ",
+      ),
+    ).resolves.toEqual({
+      session: expect.objectContaining({ id: "session-2" }),
+      submitted: null,
+      undeliveredDraft: "  Fix the launch flow.  ",
+      sendError: "Connection ended",
+    });
+    expect(requestJson).toHaveBeenNthCalledWith(
+      2,
+      "/code/sessions/session-2/turns",
+      {
+        method: "POST",
+        body: { message: "Fix the launch flow." },
+        expectedStatus: 202,
+      },
+    );
+  });
+
   it("distinguishes an accepted turn from a queued follow-up", async () => {
     expect(parseCodeTurnSubmission(turn)).toEqual({ kind: "ran", turn });
     expect(parseCodeTurnSubmission(queued)).toEqual({ kind: "queued", queued });

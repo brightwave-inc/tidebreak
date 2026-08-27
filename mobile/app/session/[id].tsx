@@ -35,6 +35,7 @@ import {
   type AmbiguousCodeSubmission,
 } from "../../src/lib/submission";
 import type { TimelineItem } from "../../src/lib/transcript";
+import { useSessionDraftRecoveryStore } from "../../src/session/draftRecovery";
 import { useSessionStore } from "../../src/session/store";
 import { useMachineClient } from "../../src/session/useMachineClient";
 import { useSessionEvents } from "../../src/session/useSessionEvents";
@@ -52,6 +53,12 @@ export default function SessionDetailScreen() {
   const session = useSessionStore((state) => state.session);
   const client = useMachineClient();
   const queryClient = useQueryClient();
+  const recoveredDraft = useSessionDraftRecoveryStore((state) =>
+    params.id ? state.bySession[params.id] : undefined,
+  );
+  const consumeRecoveredDraft = useSessionDraftRecoveryStore(
+    (state) => state.consume,
+  );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const transcript = useSessionEvents(client, params.id, refreshVersion);
   const approvalsQuery = useQuery({
@@ -67,6 +74,7 @@ export default function SessionDetailScreen() {
   const steeringRef = useRef(false);
   const interruptingRef = useRef(false);
   const refreshingRef = useRef(false);
+  const recoveredSessionRef = useRef<string | null>(null);
   const [pinned, setPinned] = useState(true);
   const [showJump, setShowJump] = useState(false);
   const [message, setMessage] = useState("");
@@ -87,6 +95,20 @@ export default function SessionDetailScreen() {
     refreshing,
     deliveryUnknown,
   });
+
+  useEffect(() => {
+    if (
+      !params.id ||
+      !recoveredDraft ||
+      recoveredSessionRef.current === params.id
+    ) {
+      return;
+    }
+    recoveredSessionRef.current = params.id;
+    setMessage(recoveredDraft.draft);
+    setSendError(recoveredDraft.error);
+    consumeRecoveredDraft(params.id);
+  }, [consumeRecoveredDraft, params.id, recoveredDraft]);
 
   useEffect(() => {
     if (pinned) {
