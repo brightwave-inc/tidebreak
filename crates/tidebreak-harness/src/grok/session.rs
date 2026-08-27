@@ -30,12 +30,6 @@ use tidebreak_core::{PermissionMode, ReasoningEffort};
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
 
-/// Environment key carrying the harness relay key from the server's spawn
-/// wiring. The adapter consumes it here and the reserved-namespace filter
-/// keeps it out of the child's environment: the Grok CLI reads credentials
-/// only from an auth file, so the key travels the last hop inside a
-/// session-scoped 0600 file pointed at by `GROK_AUTH_PATH`.
-const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
 /// The OIDC issuer and client id the relay credential's scope names. Grok
 /// matches an auth entry by `{issuer}::{client_id}` and refuses to start a
 /// headless child without a live-looking one, so the wiring points both at
@@ -96,6 +90,7 @@ impl GrokSession {
             cwd: &self.spec.worktree,
             extra_env: &self.spec.extra_env,
             relay_auth: relay_auth.as_deref(),
+            relay_key_env: self.spec.relay_key_env.as_deref(),
             resume_ref: self.resume_ref.lock().expect("grok resume").as_deref(),
             prompt_file,
             mode: self.permission_mode(),
@@ -122,6 +117,13 @@ impl GrokSession {
     /// The path of the session-scoped auth file holding the harness relay
     /// key, or `None` on a machine whose spawn wiring carried no key.
     ///
+    /// The wiring hands the key over under the environment name
+    /// [`crate::SessionSpec::relay_key_env`]; the adapter consumes it here
+    /// and [`compose_print_plan`] keeps that variable out of the child's
+    /// environment. The Grok CLI reads credentials only from an auth file,
+    /// so the key travels the last hop inside a session-scoped 0600 file
+    /// pointed at by `GROK_AUTH_PATH`.
+    ///
     /// Grok 1.0.4 refuses to start a headless child without a credential in
     /// its auth file and presents that credential as the bearer on every
     /// inference request, so the file is what turns the relay key into the
@@ -130,12 +132,15 @@ impl GrokSession {
     /// and `auth_mode: "api_key"` plus a `user_id` are the minimum fields a
     /// credential parses with.
     fn relay_auth_file(&self) -> Result<Option<std::path::PathBuf>, HarnessError> {
+        let Some(relay_key_env) = self.spec.relay_key_env.as_deref() else {
+            return Ok(None);
+        };
         let Some((_, key)) = self
             .spec
             .extra_env
             .iter()
             .rev()
-            .find(|(name, _)| name == RELAY_KEY_ENV)
+            .find(|(name, _)| name == relay_key_env)
         else {
             return Ok(None);
         };
@@ -264,6 +269,11 @@ pub(crate) struct PrintLaunch<'a> {
     /// Session-scoped auth file holding the harness relay key. `None` on a
     /// machine whose spawn wiring carried no key.
     pub relay_auth: Option<&'a Path>,
+    /// Environment variable name the spawn wiring used to carry the relay
+    /// key ([`crate::SessionSpec::relay_key_env`]). The adapter consumed
+    /// the key into `relay_auth`, so the variable is stripped from the
+    /// child's environment here.
+    pub relay_key_env: Option<&'a str>,
     pub resume_ref: Option<&'a str>,
     pub prompt_file: &'a Path,
     pub mode: PermissionMode,
@@ -329,7 +339,9 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     argv.extend(launch.extra_argv.iter().cloned());
     let mut env = launch.extra_env.to_vec();
     env.retain(|(key, _)| {
-        !BrowserChannelSpec::is_reserved_env_key(key) && key != RELAY_KEY_ENV && key != "PWD"
+        !BrowserChannelSpec::is_reserved_env_key(key)
+            && launch.relay_key_env != Some(key.as_str())
+            && key != "PWD"
     });
     // The relay key itself was consumed into `relay_auth` and the retain
     // above stripped its variable; the child learns only where the file is
@@ -681,6 +693,7 @@ mod tests {
                 ),
             ],
             relay_auth: Some(&auth_path),
+            relay_key_env: Some("TIDEBREAK_LLM_KEY"),
             resume_ref: None,
             prompt_file: &dir.path().join("prompt.txt"),
             mode: PermissionMode::Auto,

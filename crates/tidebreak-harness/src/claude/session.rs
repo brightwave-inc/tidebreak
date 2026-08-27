@@ -588,7 +588,10 @@ impl ClaudeSession {
         }
         argv.extend(self.spec.extra_argv.iter().cloned());
         let mut env = self.spec.extra_env.clone();
-        env.retain(|(key, _)| !BrowserChannelSpec::is_reserved_env_key(key) && key != "PWD");
+        env.retain(|(key, _)| {
+            !BrowserChannelSpec::is_reserved_env_key_except(key, self.spec.relay_key_env.as_deref())
+                && key != "PWD"
+        });
         let plan = LaunchPlan {
             argv,
             cwd: self.spec.worktree.clone(),
@@ -1447,6 +1450,7 @@ mod tests {
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
+            relay_key_env: None,
             env: Vec::new(),
             approval: None,
             binary,
@@ -1616,6 +1620,7 @@ done
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
+            relay_key_env: None,
             env: Vec::new(),
             approval: None,
             binary: PathBuf::from("/usr/bin/claude"),
@@ -1818,6 +1823,7 @@ done
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
+            relay_key_env: None,
             env: Vec::new(),
             approval: Some(approval),
             binary: dir.path().join("claude"),
@@ -1872,6 +1878,7 @@ done
             resume_ref: None,
             extra_argv: Vec::new(),
             extra_env: Vec::new(),
+            relay_key_env: None,
             env: Vec::new(),
             approval: None,
             binary: dir.path().join("claude"),

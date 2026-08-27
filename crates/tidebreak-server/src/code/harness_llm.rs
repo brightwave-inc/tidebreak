@@ -366,69 +366,34 @@ impl HarnessLlmRelay {
     }
 }
 
+/// Environment variable name the relay wiring uses to carry the session
+/// key to engines whose clients read a credential from the environment.
+/// Callers put the same name in `SessionSpec::relay_key_env` so the harness
+/// adapters' reserved-namespace handling lets exactly this one variable
+/// through.
+pub(crate) const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
+
 /// The argv and environment that point one engine child at the relay.
 ///
-/// Claude Code takes a base URL and bearer through its standard variables.
-/// Codex takes a custom model provider on the command line; the custom
-/// provider also keeps it off its websocket transport, whose vendor-only
-/// endpoint produced the reconnect noise hosted sessions logged. Opencode
-/// takes a provider override through its JSON config environment variable —
-/// one entry per protocol the relay serves, so any session model under
-/// those providers rides the caller's grant. Grok takes a custom models
-/// endpoint plus the relay key itself; its CLI reads credentials only from
-/// an auth file, so the grok adapter materializes the key as a
-/// session-scoped `GROK_AUTH_PATH` file and strips the variable from the
-/// child's environment.
+/// A thin wrapper over [`tidebreak_harness::wiring::spawn_wiring`], which
+/// owns the engine knowledge; this side owns the host knowledge — the
+/// relay's endpoint paths under the loopback base and the key variable
+/// name.
 pub(crate) fn spawn_wiring(
     kind: HarnessKind,
     loopback_base: &str,
     key: &str,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let base = loopback_base.trim_end_matches('/');
-    match kind {
-        HarnessKind::ClaudeCode => (
-            Vec::new(),
-            vec![
-                (
-                    "ANTHROPIC_BASE_URL".into(),
-                    format!("{base}/code/llm/anthropic"),
-                ),
-                ("ANTHROPIC_AUTH_TOKEN".into(), key.to_owned()),
-            ],
-        ),
-        HarnessKind::Codex => (
-            vec![
-                "-c".into(),
-                "model_provider=tidebreak".into(),
-                "-c".into(),
-                "model_providers.tidebreak.name=Tidebreak".into(),
-                "-c".into(),
-                format!("model_providers.tidebreak.base_url={base}/code/llm/openai/v1"),
-                "-c".into(),
-                "model_providers.tidebreak.env_key=TIDEBREAK_LLM_KEY".into(),
-                "-c".into(),
-                "model_providers.tidebreak.wire_api=responses".into(),
-            ],
-            vec![("TIDEBREAK_LLM_KEY".into(), key.to_owned())],
-        ),
-        HarnessKind::Opencode => (
-            Vec::new(),
-            vec![(
-                "OPENCODE_CONFIG_CONTENT".into(),
-                opencode_relay_config(base, key),
-            )],
-        ),
-        HarnessKind::Grok => (
-            Vec::new(),
-            vec![
-                ("TIDEBREAK_LLM_KEY".into(), key.to_owned()),
-                (
-                    "GROK_MODELS_BASE_URL".into(),
-                    format!("{base}/code/llm/openai/v1"),
-                ),
-            ],
-        ),
-    }
+    tidebreak_harness::wiring::spawn_wiring(
+        kind,
+        &tidebreak_harness::wiring::InferenceWiring {
+            anthropic_base: &format!("{base}/code/llm/anthropic"),
+            openai_base: &format!("{base}/code/llm/openai"),
+            key_env: RELAY_KEY_ENV,
+            key,
+        },
+    )
 }
 
 /// Whether the on-behalf-of relay can carry this engine's inference.
@@ -442,47 +407,6 @@ pub(crate) fn relay_covered(kind: HarnessKind) -> bool {
         kind,
         HarnessKind::ClaudeCode | HarnessKind::Codex | HarnessKind::Opencode | HarnessKind::Grok
     )
-}
-
-/// Opencode's provider override: one entry per protocol the relay serves.
-///
-/// `OPENCODE_CONFIG_CONTENT` is the JSON config object the CLI merges over
-/// its file config, and `options` is the base-URL and key surface every
-/// catalog provider accepts. The Anthropic loader posts `{baseURL}/messages`
-/// with the key as `x-api-key`; the OpenAI loader posts `{baseURL}/responses`
-/// with the key as bearer. `model-gateway` is not a catalog provider — the
-/// adapter maps vendor-neutral gateway model ids (deepseek, glm, kimi, ...)
-/// to it — so the entry names the OpenAI loader itself: without `npm` the
-/// CLI falls back to its OpenAI-compatible loader and posts
-/// `{baseURL}/chat/completions`, which neither this relay nor the gateway
-/// serves. Non-reasoning OpenAI models would also go to chat completions —
-/// pinned against opencode 1.18.x.
-fn opencode_relay_config(base: &str, key: &str) -> String {
-    serde_json::json!({
-        "provider": {
-            "anthropic": {
-                "options": {
-                    "baseURL": format!("{base}/code/llm/anthropic/v1"),
-                    "apiKey": key,
-                },
-            },
-            "openai": {
-                "options": {
-                    "baseURL": format!("{base}/code/llm/openai/v1"),
-                    "apiKey": key,
-                },
-            },
-            "model-gateway": {
-                "name": "Model Gateway",
-                "npm": "@ai-sdk/openai",
-                "options": {
-                    "baseURL": format!("{base}/code/llm/openai/v1"),
-                    "apiKey": key,
-                },
-            },
-        },
-    })
-    .to_string()
 }
 
 fn generate_key() -> String {
