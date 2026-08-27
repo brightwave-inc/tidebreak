@@ -78,4 +78,18 @@ describe("NotificationBellButton", () => {
 
     expect(await screen.findByText("Unknown time")).toBeInTheDocument();
   });
+
+  it("caps the popover width to the viewport", async () => {
+    useNotifications.setState({
+      notifications: [notification],
+      unread: 1,
+      loaded: true,
+    });
+
+    await renderBell({} as ApiClient);
+
+    expect(
+      await screen.findByRole("dialog", { name: "Notifications" }),
+    ).toHaveClass("w-80", "max-w-[calc(100vw-1rem)]");
+  });
 });

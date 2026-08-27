@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { formatDistanceToNow } from "date-fns";
 import { Bell, CircleAlert, CircleCheck } from "lucide-react";
@@ -30,6 +31,7 @@ export function NotificationBellButton({
   const notifications = useNotifications((state) => state.notifications);
   const unread = useNotifications((state) => state.unread);
   const loaded = useNotifications((state) => state.loaded);
+  const compact = useCompactNotificationPopover();
 
   const reload = async () => {
     const [page, count] = await Promise.all([
@@ -77,8 +79,10 @@ export function NotificationBellButton({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        side="right"
-        className="w-80 p-0"
+        side={compact ? "bottom" : "right"}
+        collisionBoundary={compact ? [] : undefined}
+        collisionPadding={8}
+        className="w-80 max-w-[calc(100vw-1rem)] p-0"
         aria-label="Notifications"
       >
         <div className="flex items-center justify-between gap-2 border-b border-border-subtle px-3 py-2">
@@ -161,4 +165,30 @@ export function notificationRelativeTime(value: string): string {
   } catch {
     return "Unknown time";
   }
+}
+
+function useCompactNotificationPopover(): boolean {
+  const query = "(max-width: 639px)";
+  const [compact, setCompact] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(query).matches,
+  );
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const update = () => setCompact(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return compact;
 }
