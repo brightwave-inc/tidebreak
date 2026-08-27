@@ -105,6 +105,46 @@ export const SESSION_PERMISSION_MODE_LOCKED =
 export const CREATE_PERMISSION_MODE_FIXED =
   "Mode is fixed once the session starts";
 
+/** What each posture does, in one line, for the surfaces that state it. */
+export const PERMISSION_MODE_POSTURES: Record<PermissionMode, string> = {
+  plan: "Plans the work and writes nothing",
+  ask: "Asks before every tool that changes something",
+  // No claim about escalation: whether Auto has anywhere to ask is the
+  // engine's capability, not the mode's (see [`autoIsUnsupervised`]).
+  auto: "Decides for itself as it works",
+  allow: "Runs every tool without asking",
+};
+
+/** Stated wherever unsupervised Auto is offered (decision 0038). */
+export const UNSUPERVISED_AUTO_NOTE =
+  "This engine has no approval channel: in Auto, every action runs without asking.";
+
+/** Stated wherever Allow is offered (decision 0039). */
+export const ALLOW_ALL_NOTE =
+  "This engine's permission system is off: every action runs without asking.";
+
+/**
+ * The statement a surface shows next to the permission control when the
+ * posture on offer runs with nobody to ask (decisions 0038, 0039).
+ *
+ * `null` for a posture that escalates, so the statement appears only where it
+ * changes what the reader should expect: Allow all anywhere, and Auto on an
+ * engine whose Auto is unsupervised.
+ */
+export function unsupervisedModeStatement(
+  mode: PermissionMode,
+  autoUnsupervised: boolean,
+): string | null {
+  if (mode === "allow") return ALLOW_ALL_NOTE;
+  if (mode === "auto" && autoUnsupervised) return UNSUPERVISED_AUTO_NOTE;
+  return null;
+}
+
+/** The header chip's tooltip: the posture, named and spelled out. */
+export function sessionPermissionModeTooltip(mode: PermissionMode): string {
+  return `Permissions: ${PERMISSION_MODE_LABELS[mode]}\n${PERMISSION_MODE_POSTURES[mode]}`;
+}
+
 /** The capability flags the mode policy reads. */
 export type ModeCaps = Pick<
   HarnessCaps,

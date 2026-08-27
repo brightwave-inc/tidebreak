@@ -23,6 +23,7 @@ import {
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
+import { ALLOW_ALL_NOTE } from "./labels";
 import { NewWorkspaceDialog } from "./NewWorkspaceDialog";
 import type { ReasoningEffort } from "../api/types";
 import type { CodeTurnSubmission, ParsedHarnessModel } from "./parsers";
@@ -549,11 +550,11 @@ describe("NewWorkspaceDialog", () => {
         screen.getByRole("button", { name: "Model: GPT 5.6 Sol" }),
       ).toBeEnabled(),
     );
-    // Allow is the default where the engine honors it.
+    // Allow is the default where the engine honors it, and it says so.
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeEnabled();
-    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
 
     fireEvent.keyDown(screen.getByRole("dialog"), {
       key: "Enter",

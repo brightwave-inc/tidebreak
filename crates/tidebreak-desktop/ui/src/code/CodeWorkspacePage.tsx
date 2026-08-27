@@ -164,6 +164,7 @@ import { TerminalPane } from "./TerminalPane";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useCodeContentRevision } from "./useLiveContent";
 import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
+import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import {
   WorkspaceOverflowMenu,
@@ -1624,6 +1625,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                     : undefined
                 }
               />
+              <span className="text-border" aria-hidden>
+                ·
+              </span>
+              <SessionPermissionIndicator mode={session.permission_mode} />
             </>
           ) : undefined
         }

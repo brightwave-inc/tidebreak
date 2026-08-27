@@ -79,10 +79,13 @@ export function permissionModeOption(mode: PermissionMode | null) {
  *
  * A managed profile may assert a permission-mode ceiling. Modes above it
  * render locked — decided elsewhere rather than silently missing — and the
- * server enforces the same ceiling at the chat routes and the turn gate, so
- * this is legibility, not the lockdown itself. A stored mode already above
- * the ceiling displays as the ceiling, matching what the turn actually runs
- * under.
+ * server enforces the same ceiling at the chat routes, the turn gate, and the
+ * code session routes, so this is legibility, not the lockdown itself. A
+ * stored mode already above the ceiling displays as the ceiling, matching
+ * what the turn actually runs under.
+ *
+ * The rows carry no posture descriptions. What an unsupervised mode will do
+ * is stated once, under the control, by the surface that offers it.
  */
 export function PermissionModeMenu({
   scopeKey,

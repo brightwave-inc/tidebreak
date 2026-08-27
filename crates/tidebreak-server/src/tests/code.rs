@@ -115,6 +115,19 @@ async fn code_app(
     code_app_with(ScriptedAdapter::new(events)).await
 }
 
+/// An OS policy that asserts one permission-mode ceiling and nothing else.
+struct CappedOsPolicy(PermissionMode);
+
+impl crate::managed_policy::OsPolicySource for CappedOsPolicy {
+    fn gateway_url(&self) -> tidebreak_core::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn permission_mode_ceiling(&self) -> tidebreak_core::Result<Option<PermissionMode>> {
+        Ok(Some(self.0))
+    }
+}
+
 async fn code_app_with(
     adapter: ScriptedAdapter,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
@@ -132,20 +145,29 @@ async fn code_app_with_optional_browser(
     adapter: ScriptedAdapter,
     browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
-    code_app_with_options(adapter, browser_runtime, None).await
+    code_app_with_options(adapter, browser_runtime, None, None).await
 }
 
 async fn code_app_with_put_gate(
     adapter: ScriptedAdapter,
     gate: Arc<PutGate>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
-    code_app_with_options(adapter, None, Some(gate)).await
+    code_app_with_options(adapter, None, Some(gate), None).await
+}
+
+/// A code app whose OS policy asserts a permission-mode ceiling.
+async fn code_app_with_ceiling(
+    adapter: ScriptedAdapter,
+    ceiling: PermissionMode,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_options(adapter, None, None, Some(ceiling)).await
 }
 
 async fn code_app_with_options(
     adapter: ScriptedAdapter,
     browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
     put_gate: Option<Arc<PutGate>>,
+    permission_mode_ceiling: Option<PermissionMode>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
@@ -180,6 +202,9 @@ async fn code_app_with_options(
             inner: runtime.blobs.clone(),
             gate,
         });
+    }
+    if let Some(ceiling) = permission_mode_ceiling {
+        state.os_policy = Arc::new(CappedOsPolicy(ceiling));
     }
     state.code = Some(runtime.clone());
     let token = state.token.clone();
@@ -679,6 +704,82 @@ async fn allow_stands_on_its_own_capability_flag() {
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = created.json().await.unwrap();
     assert_eq!(session["permission_mode"], "allow");
+}
+
+/// A managed profile's `permission_mode_ceiling` binds code sessions the way
+/// it binds chats: an over-ceiling posture is refused where it is chosen —
+/// session create and the mode route — while a stricter one stays the
+/// reader's choice. The UI lock is legibility; this is the enforcement.
+#[tokio::test]
+async fn a_managed_ceiling_refuses_over_ceiling_code_session_modes() {
+    let adapter = ScriptedAdapter::new(plain_text_script())
+        .with_approvals(CapLevel::Supported)
+        .with_auto_mode(CapLevel::Supported)
+        .with_allow_mode(CapLevel::Supported);
+    let (router, token, _runtime, dir) = code_app_with_ceiling(adapter, PermissionMode::Ask).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let sessions_url = format!(
+        "http://{addr}/code/workspaces/{}/sessions",
+        json_id(&workspace)
+    );
+
+    // Create: the engine honors Allow, the policy does not.
+    let refused = client
+        .post(&sessions_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "allow",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_locked", "{body}");
+
+    let created = client
+        .post(&sessions_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(session["permission_mode"], "ask", "{session}");
+    let session = json_id(&session).to_owned();
+
+    // The mode route carries the same ceiling.
+    let refused = client
+        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_locked", "{body}");
+
+    // A ceiling names a maximum, so dialing down stays open.
+    let allowed = client
+        .post(format!("http://{addr}/code/sessions/{session}/mode"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "plan" }))
+        .send()
+        .await
+        .unwrap();
+    let status = allowed.status();
+    let body: serde_json::Value = allowed.json().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["permission_mode"], "plan", "{body}");
 }
 
 #[tokio::test]

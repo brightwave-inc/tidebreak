@@ -16,6 +16,7 @@ import type { HarnessDoctorEntry } from "../api/types";
 import { renderWithRouter } from "@/test/router";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
 import { useCodeUiStore } from "./CodeUiStore";
+import { ALLOW_ALL_NOTE, UNSUPERVISED_AUTO_NOTE } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
 import type { ParsedHarnessModel } from "./parsers";
@@ -156,7 +157,8 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Allow all" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    // The default posture is never silent: it says what it will do.
+    expect(screen.getByText(ALLOW_ALL_NOTE)).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "Harness" }).closest("form"),
     ).toHaveClass("chat-composer");
@@ -239,7 +241,7 @@ describe("StartSessionPrompt", () => {
     );
   });
 
-  it("switches an Auto-only engine to Auto without extra permission copy", async () => {
+  it("switches an Auto-only engine to Auto and states that it never asks", async () => {
     const user = userEvent.setup();
     const onStart = vi.fn();
     await renderWithRouter(
@@ -267,7 +269,8 @@ describe("StartSessionPrompt", () => {
     expect(
       screen.getByRole("button", { name: "Permissions: Auto" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/runs without asking/)).toBeNull();
+    // Grok's Auto has no approval channel behind it, and the composer says so.
+    expect(screen.getByText(UNSUPERVISED_AUTO_NOTE)).toBeInTheDocument();
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
       "list the files",
