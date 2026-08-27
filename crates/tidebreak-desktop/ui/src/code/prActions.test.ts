@@ -353,6 +353,25 @@ describe("prDirectMergeAction", () => {
         }),
       ),
     ).toBeNull();
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          auto_merge_enabled: true,
+          checks: [{ name: "ci", bucket: "pending" }],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      prDirectMergeAction(
+        pr({
+          head_sha: "abc",
+          auto_merge_enabled: true,
+          checks: [{ name: "ci", bucket: "pending" }],
+        }),
+        { hasMergeQueue: true },
+      ),
+    ).toBeNull();
     expect(prDirectMergeAction(pr({ state: "merged", head_sha: "abc" }))).toBe(
       null,
     );

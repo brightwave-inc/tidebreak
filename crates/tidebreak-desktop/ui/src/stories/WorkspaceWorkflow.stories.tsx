@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn, userEvent, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { HttpError, type CodeWorkspacePrSnapshot } from "@/api";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
@@ -83,6 +83,7 @@ function WorkflowState({
       baseRef="main"
       resource={resourceFor(snapshot, busy, mutationError, setMutationError)}
       onOpenSourceControl={fn()}
+      onOpenPr={fn()}
       onOpenWatchTask={watchTaskLink ? fn() : undefined}
     />
   );
@@ -116,7 +117,18 @@ export const ReadyForPullRequest: Story = {
   args: { snapshot: readyForPrGit },
 };
 
-export const PullRequestOpen: Story = {};
+export const PullRequestOpen: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("button", { name: "Open pull request #41" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByRole("button", { name: "Open pull request #41 on GitHub" }),
+    ).toBeVisible();
+    await expect(canvas.getByText("Open")).toBeVisible();
+  },
+};
 
 /** The server rechecked the confirmed merge and found a replacement head. */
 export const MergePreconditionChanged: Story = {

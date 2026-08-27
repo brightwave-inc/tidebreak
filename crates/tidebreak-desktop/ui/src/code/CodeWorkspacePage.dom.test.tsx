@@ -1460,14 +1460,16 @@ describe("CodeWorkspacePage", () => {
       within(control).getByRole("button", { name: "Mark ready" }),
     ).toBeInTheDocument();
 
-    await user.click(
+    expect(
       within(control).getByRole("button", {
-        name: "Workspace status: #41 · Draft",
+        name: "Open pull request #41",
       }),
-    );
-    const popover = await screen.findByTestId("workspace-workflow-popover");
-    expect(popover).toHaveTextContent("tidebreak/fix-login");
-    expect(popover).toHaveTextContent("1 passing · 1 pending");
+    ).toBeInTheDocument();
+    expect(
+      within(control).getByRole("button", {
+        name: "Open pull request #41 on GitHub",
+      }),
+    ).toBeInTheDocument();
 
     await user.click(
       within(control).getByRole("button", { name: "More workspace actions" }),
@@ -1572,7 +1574,7 @@ describe("CodeWorkspacePage", () => {
     const user = userEvent.setup();
     await mountWorkspace(client);
     const control = await screen.findByTestId("workspace-workflow-control");
-    await waitFor(() => expect(control).toHaveTextContent("Ready"));
+    await waitFor(() => expect(control).toHaveTextContent("Open"));
 
     act(() =>
       useCodeUiStore.getState().requestWorkflowShortcut("ws-1", "merge"),

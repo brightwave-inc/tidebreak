@@ -1,9 +1,11 @@
 import { HttpError } from "../api/client";
 import type {
+  CodeDeliveryPullRequestSummary,
   CodeDeliveryPullRequestTarget,
   CodeWorkspacePrSnapshot,
   PullRequestDigest,
 } from "../api/types";
+import { codeDeliveryRepositoryKey } from "./CodeDeliveryStore";
 import {
   prDirectMergeAction,
   prMergeControls,
@@ -77,11 +79,11 @@ const REFRESHABLE_MERGE_CONFLICTS = new Set([
   "workspace_upstream_missing",
 ]);
 
-/** Exact pull request identity shown by the workspace UI. */
-export function workspaceMergeIdentity(
-  pr: PullRequestDigest,
-): WorkspaceMergeIdentity | null {
-  if (!pr.url || !pr.head_sha) return null;
+/** Host target encoded in a workspace digest URL. */
+export function workspacePullRequestTarget(
+  pr: Pick<PullRequestDigest, "url" | "number">,
+): CodeDeliveryPullRequestTarget | null {
+  if (!pr.url) return null;
   let url: URL;
   try {
     url = new URL(pr.url);
@@ -98,15 +100,70 @@ export function workspaceMergeIdentity(
     return null;
   }
   return {
-    target: {
-      repository: {
-        host: url.hostname,
-        owner: parts[0],
-        name: parts[1],
-      },
-      number: pr.number,
+    repository: {
+      host: url.hostname,
+      owner: parts[0]!,
+      name: parts[1]!,
     },
-    expected_head_sha: pr.head_sha,
+    number: pr.number,
+  };
+}
+
+/** Exact pull request identity shown by the workspace UI. */
+export function workspaceMergeIdentity(
+  pr: PullRequestDigest,
+): WorkspaceMergeIdentity | null {
+  if (!pr.head_sha) return null;
+  const target = workspacePullRequestTarget(pr);
+  if (!target) return null;
+  return { target, expected_head_sha: pr.head_sha };
+}
+
+/**
+ * Enough of a delivery row to open the shared detail pane from a workspace
+ * digest. The pane replaces this with the host summary as soon as it loads.
+ */
+export function deliverySummaryFromWorkspacePr(
+  pr: PullRequestDigest,
+  target: CodeDeliveryPullRequestTarget,
+): CodeDeliveryPullRequestSummary {
+  const repository = target.repository;
+  const nameWithOwner = `${repository.owner}/${repository.name}`;
+  return {
+    id: `${codeDeliveryRepositoryKey(repository)}#${pr.number}`,
+    repository: {
+      host: repository.host,
+      owner: repository.owner,
+      name: repository.name,
+      name_with_owner: nameWithOwner,
+      url: `https://${repository.host}/${nameWithOwner}`,
+    },
+    number: pr.number,
+    url:
+      pr.url ?? `https://${repository.host}/${nameWithOwner}/pull/${pr.number}`,
+    title: pr.title ?? `#${pr.number}`,
+    state: pr.state,
+    draft: pr.draft ?? false,
+    head_branch: pr.head_branch ?? "",
+    base_branch: pr.base_branch ?? "",
+    head_sha: pr.head_sha,
+    review_decision: pr.review_decision,
+    mergeable: pr.mergeable,
+    merge_state_status: pr.merge_state_status,
+    auto_merge_enabled: pr.auto_merge_enabled ?? false,
+    in_merge_queue: pr.in_merge_queue,
+    checks: (pr.checks ?? []).map((check) => ({
+      name: check.name,
+      bucket: check.bucket,
+      detail: check.detail,
+      url: check.url,
+    })),
+    attention_reasons: [],
+    ready_to_merge: false,
+    workspace_links: [],
+    labels: [],
+    created_at: "",
+    updated_at: "",
   };
 }
 

@@ -391,6 +391,12 @@ describe("prCompactStatusLabel", () => {
       "In merge queue",
     );
     expect(prCompactStatusTone(pr({ in_merge_queue: true }))).toBe("pending");
+    expect(prCompactStatusLabel(pr({ auto_merge_enabled: true }))).toBe(
+      "Auto-merge on",
+    );
+    expect(prCompactStatusTone(pr({ auto_merge_enabled: true }))).toBe(
+      "pending",
+    );
     expect(prCompactStatusLabel(pr({ state: "merged" }))).toBe("Merged");
   });
 });

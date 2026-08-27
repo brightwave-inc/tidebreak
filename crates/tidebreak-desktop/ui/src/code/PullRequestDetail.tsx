@@ -174,6 +174,58 @@ export function PullRequestDetailSheet({
   hasMergeQueue = false,
   onClose,
   onChanged,
+  onSummary,
+  onOpenWorkspace,
+}: {
+  client: Pick<
+    ApiClient,
+    | "getCodeDeliveryPullRequestDetail"
+    | "runCodeDeliveryPullRequestAction"
+    | "createCodeWorkspace"
+    | "writeCodeCheckLogs"
+  >;
+  summary: CodeDeliveryPullRequestSummary;
+  hasMergeQueue?: boolean;
+  initialDetail?: CodeDeliveryPullRequestDetail;
+  onClose: () => void;
+  onChanged: () => void;
+  onSummary?: (summary: CodeDeliveryPullRequestSummary) => void;
+  onOpenWorkspace: (workspaceId: string) => void;
+}) {
+  return (
+    <DetailSheet
+      label={`Pull request #${summary.number}: ${summary.title}`}
+      onClose={onClose}
+    >
+      <PullRequestDetailPane
+        client={client}
+        summary={summary}
+        initialDetail={initialDetail}
+        hasMergeQueue={hasMergeQueue}
+        onClose={onClose}
+        onChanged={onChanged}
+        onSummary={onSummary}
+        onOpenWorkspace={onOpenWorkspace}
+      />
+    </DetailSheet>
+  );
+}
+
+/**
+ * The pull request itself: header, merge box, conversation, files, and checks.
+ *
+ * Delivery hosts this in a column beside the list. A workspace hosts the same
+ * pane as a center tab. The sheet wrapper above is only for surfaces that still
+ * float a dialog.
+ */
+export function PullRequestDetailPane({
+  client,
+  summary,
+  initialDetail,
+  hasMergeQueue = false,
+  onClose,
+  onChanged,
+  onSummary,
   onOpenWorkspace,
 }: {
   client: Pick<
@@ -187,8 +239,10 @@ export function PullRequestDetailSheet({
   /** True when this repository already uses a merge queue. */
   hasMergeQueue?: boolean;
   initialDetail?: CodeDeliveryPullRequestDetail;
-  onClose: () => void;
+  onClose?: () => void;
   onChanged: () => void;
+  /** The list row should follow this summary so its action matches the pane. */
+  onSummary?: (summary: CodeDeliveryPullRequestSummary) => void;
   onOpenWorkspace: (workspaceId: string) => void;
 }) {
   const [detail, setDetail] = useState<CodeDeliveryPullRequestDetail | null>(
@@ -210,6 +264,8 @@ export function PullRequestDetailSheet({
   const generation = useRef(0);
   const activeTarget = useRef(summary.id);
   const mounted = useRef(true);
+  const onSummaryRef = useRef(onSummary);
+  onSummaryRef.current = onSummary;
   activeTarget.current = summary.id;
 
   useEffect(() => {
@@ -222,6 +278,11 @@ export function PullRequestDetailSheet({
   const targetIsActive = (targetId: string) =>
     mounted.current && activeTarget.current === targetId;
 
+  const adoptDetail = (next: CodeDeliveryPullRequestDetail) => {
+    setDetail(next);
+    onSummaryRef.current?.(next.summary);
+  };
+
   const load = async () => {
     const targetId = summary.id;
     const token = ++generation.current;
@@ -233,7 +294,7 @@ export function PullRequestDetailSheet({
         number: summary.number,
       });
       if (token === generation.current && targetIsActive(targetId)) {
-        setDetail(next);
+        adoptDetail(next);
       }
     } catch (caught) {
       if (token === generation.current && targetIsActive(targetId)) {
@@ -254,7 +315,7 @@ export function PullRequestDetailSheet({
     setDraftComment("");
     setConfirmingAdminMerge(false);
     if (initialDetail?.summary.id === summary.id) {
-      setDetail(initialDetail);
+      adoptDetail(initialDetail);
       setLoading(false);
     } else {
       setDetail(null);
@@ -424,9 +485,9 @@ export function PullRequestDetailSheet({
   };
 
   return (
-    <DetailSheet
-      label={`Pull request #${summary.number}: ${summary.title}`}
-      onClose={onClose}
+    <div
+      className="flex h-full min-h-0 flex-col overflow-hidden bg-background"
+      data-testid="pull-request-detail-pane"
     >
       <PrDetailHeader
         summary={current}
@@ -537,7 +598,7 @@ export function PullRequestDetailSheet({
           </>
         ) : null}
       </div>
-    </DetailSheet>
+    </div>
   );
 }
 
@@ -621,7 +682,7 @@ function PrDetailHeader({
   detail: CodeDeliveryPullRequestDetail | null;
   loading: boolean;
   onRefresh: () => void;
-  onClose: () => void;
+  onClose?: () => void;
 }) {
   const settledAt = pullRequestSettledAt(summary);
   const assignees = detail?.assignees ?? [];
@@ -669,15 +730,17 @@ function PrDetailHeader({
             )}
             <span className="sr-only">Refresh</span>
           </Button>
-          <Button
-            type="button"
-            size="icon-xs"
-            variant="ghost"
-            onClick={onClose}
-          >
-            <X />
-            <span className="sr-only">Close pull request details</span>
-          </Button>
+          {onClose ? (
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              onClick={onClose}
+            >
+              <X />
+              <span className="sr-only">Close pull request details</span>
+            </Button>
+          ) : null}
         </div>
       </div>
 
