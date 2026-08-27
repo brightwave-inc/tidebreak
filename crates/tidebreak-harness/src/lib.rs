@@ -48,6 +48,26 @@ pub use probe::{
     ListedHarnessModel, ProbeCapture, ProbeError,
 };
 
+/// Whether some auth mode besides the vendor login a probe observes could
+/// carry this engine's inference: an API key or endpoint override in the
+/// captured environment, or engine config pointing inference at a gateway.
+///
+/// `true` grants the benefit of the doubt — a session may work even though
+/// the probe saw signed-out — so callers use it to avoid refusing that
+/// session, never as proof of working credentials. Engines whose override
+/// surfaces are unverified answer `true` for the same reason.
+#[must_use]
+pub fn auth_override_present(
+    kind: HarnessKind,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> bool {
+    match kind {
+        HarnessKind::ClaudeCode => claude::auth_override_present(env),
+        HarnessKind::Codex => codex::auth_override_present(env),
+        HarnessKind::Opencode | HarnessKind::Grok => true,
+    }
+}
+
 /// Normalized, unpersisted event. Maps 1:1 onto [`tidebreak_core::CodeEvent`]
 /// minus persistence ids (turn id, approval id).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

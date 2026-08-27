@@ -71,22 +71,65 @@ pub(crate) fn model_serves_fast_mode(id: &str) -> bool {
         .any(|model| id == *model || id.ends_with(&format!("-{model}")))
 }
 
-fn claude_settings_models(
-    env: &[(std::ffi::OsString, std::ffi::OsString)],
-) -> Vec<crate::ListedHarnessModel> {
+/// The same `~/.claude/settings.json` the engine reads, located through the
+/// captured probe environment. `None` when HOME is unset or the file is
+/// absent or unparseable.
+fn read_settings(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> Option<serde_json::Value> {
     let home = env
         .iter()
         .rev()
         .find(|(key, _)| key.eq_ignore_ascii_case("HOME"))
-        .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()));
-    let Some(home) = home.filter(|home| !home.as_os_str().is_empty()) else {
-        return Vec::new();
+        .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()))
+        .filter(|home| !home.as_os_str().is_empty())?;
+    let raw = std::fs::read_to_string(home.join(".claude").join("settings.json")).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Environment variables that authenticate or reroute Claude Code without
+/// the vendor login [`observe_auth`] observes.
+const AUTH_OVERRIDE_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+];
+
+/// Whether this environment could authenticate Claude Code without the
+/// vendor login [`observe_auth`] observes: an API key, auth token, or
+/// endpoint override in the environment or in the `env` block of the same
+/// `settings.json` the model listing reads, a Bedrock/Vertex switch, or an
+/// `apiKeyHelper`. Gateway-managed machines authenticate this way with no
+/// login at all, so a hit means a session may work even though the probe
+/// saw signed-out — never that credentials are known-good.
+pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> bool {
+    if crate::probe::env_sets_any(env, AUTH_OVERRIDE_VARS) {
+        return true;
+    }
+    let Some(settings) = read_settings(env) else {
+        return false;
     };
-    let path = home.join(".claude").join("settings.json");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    if settings
+        .get("apiKeyHelper")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|helper| !helper.trim().is_empty())
+    {
+        return true;
+    }
+    settings
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|vars| {
+            AUTH_OVERRIDE_VARS
+                .iter()
+                .any(|name| vars.contains_key(*name))
+        })
+}
+
+fn claude_settings_models(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<crate::ListedHarnessModel> {
+    let Some(value) = read_settings(env) else {
         return Vec::new();
     };
     let current = value
@@ -285,6 +328,38 @@ mod tests {
         );
         assert_eq!(auth_status_from_json(br#"{"authMethod":"oauth"}"#), None);
         assert_eq!(auth_status_from_json(b"not json"), None);
+    }
+
+    #[test]
+    fn auth_override_reads_env_and_settings() {
+        let os = std::ffi::OsString::from;
+        assert!(!auth_override_present(&[]));
+        assert!(auth_override_present(&[(
+            os("ANTHROPIC_API_KEY"),
+            os("sk-ant")
+        )]));
+        assert!(auth_override_present(&[(
+            os("ANTHROPIC_BASE_URL"),
+            os("https://gateway.example")
+        )]));
+        // An empty value is an unset variable, not a credential.
+        assert!(!auth_override_present(&[(os("ANTHROPIC_API_KEY"), os(""))]));
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let settings = home.path().join(".claude").join("settings.json");
+        let env = vec![(os("HOME"), home.path().as_os_str().to_owned())];
+        assert!(!auth_override_present(&env));
+        std::fs::write(&settings, r#"{"model":"claude-opus-5"}"#).unwrap();
+        assert!(!auth_override_present(&env));
+        std::fs::write(
+            &settings,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://gateway.example"}}"#,
+        )
+        .unwrap();
+        assert!(auth_override_present(&env));
+        std::fs::write(&settings, r#"{"apiKeyHelper":"/usr/local/bin/key.sh"}"#).unwrap();
+        assert!(auth_override_present(&env));
     }
 
     #[tokio::test]

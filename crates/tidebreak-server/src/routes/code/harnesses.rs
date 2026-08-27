@@ -8,6 +8,7 @@ use super::types::{
     CodeHarnessInstallSnapshot, HarnessAuthMode, HarnessDoctorEntry, HarnessDoctorReport,
     HarnessModel, HarnessModelList, InstallHarnessQuery,
 };
+use crate::code::harness_label;
 use crate::code::harness_llm::relay_covered;
 use tidebreak_core::HarnessKind;
 
@@ -167,13 +168,4 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
     }))
     .await;
     Ok(HarnessDoctorReport { harnesses })
-}
-
-fn harness_label(kind: HarnessKind) -> &'static str {
-    match kind {
-        HarnessKind::ClaudeCode => "Claude Code",
-        HarnessKind::Codex => "Codex CLI",
-        HarnessKind::Opencode => "opencode",
-        HarnessKind::Grok => "Grok CLI",
-    }
 }

@@ -3049,6 +3049,7 @@ impl CodeRuntime {
                 format!("{harness} has no path"),
             ));
         }
+        self.refuse_signed_out_harness(harness, &probe)?;
         let execution_settings = CodeSessionExecutionSettings {
             model: normalize_model(model),
             reasoning_effort,
@@ -4355,6 +4356,48 @@ impl CodeRuntime {
         Ok(())
     }
 
+    /// Refuse to mint a session that will 401 on its first turn (issue 2653).
+    ///
+    /// Fires only on a definitive signed-out observation with no other auth
+    /// mode in sight: the relay carries covered engines as the caller
+    /// (decision 71), and an API key or gateway endpoint override in the
+    /// environment or engine config authenticates without any vendor login
+    /// (issue 2749). An unobserved sign-in state (`None`) stays allowed — a
+    /// false refusal on a working machine is worse than the first-turn
+    /// failure this replaces, which the worker at least maps to the same
+    /// legible message.
+    fn refuse_signed_out_harness(
+        &self,
+        harness: HarnessKind,
+        probe: &HarnessProbe,
+    ) -> Result<(), ServerError> {
+        Self::signed_out_harness_refusal(self.harness_llm.is_some(), harness, probe)
+    }
+
+    fn signed_out_harness_refusal(
+        relay_active: bool,
+        harness: HarnessKind,
+        probe: &HarnessProbe,
+    ) -> Result<(), ServerError> {
+        if probe.authenticated != Some(false) {
+            return Ok(());
+        }
+        if relay_active && super::harness_llm::relay_covered(harness) {
+            return Ok(());
+        }
+        if tidebreak_harness::auth_override_present(harness, &probe.env) {
+            return Ok(());
+        }
+        let label = super::harness_label(harness);
+        Err(ServerError::unprocessable_kind(
+            "harness_not_authenticated",
+            format!(
+                "{label} is not signed in on this machine. \
+                 Sign in to {label} in your own terminal, then start the session again."
+            ),
+        ))
+    }
+
     pub(crate) async fn mark_session_viewed(
         &self,
         owner: &OwnerId,
@@ -5033,6 +5076,8 @@ impl CodeRuntime {
             session.owner.clone(),
             session.id,
             attached.spawn_epoch,
+            session.harness_kind,
+            self.harness_llm.is_some() && super::harness_llm::relay_covered(session.harness_kind),
             None,
             attached.subagents.clone(),
             self.gh_search_path_owned(),
@@ -6019,6 +6064,94 @@ mod probe_freshness_tests {
         let installed = Path::new("/data/tools/harnesses/codex/0.147.0/node_modules/.bin/codex");
         assert!(!probe_describes(None, installed));
         assert!(!probe_describes(Some(&probe_at(None)), installed));
+    }
+}
+
+#[cfg(test)]
+mod signed_out_refusal_tests {
+    use super::*;
+
+    fn probe(
+        authenticated: Option<bool>,
+        env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    ) -> HarnessProbe {
+        HarnessProbe {
+            found: true,
+            binary_path: Some(PathBuf::from("/scripted/engine")),
+            version: Some("1.0.0".into()),
+            authenticated,
+            stderr: String::new(),
+            env,
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_definitive_signed_out_observation_refuses_with_the_typed_kind() {
+        let err = CodeRuntime::signed_out_harness_refusal(
+            false,
+            HarnessKind::Codex,
+            &probe(Some(false), Vec::new()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), "harness_not_authenticated");
+        assert!(
+            err.message()
+                .contains("Codex CLI is not signed in on this machine."),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn an_unverified_or_signed_in_observation_allows_create() {
+        for authenticated in [None, Some(true)] {
+            assert!(CodeRuntime::signed_out_harness_refusal(
+                false,
+                HarnessKind::ClaudeCode,
+                &probe(authenticated, Vec::new()),
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn the_relay_carries_covered_engines_past_a_signed_out_probe() {
+        // The #2742 guarantee: a hosted machine with the relay creates freely.
+        assert!(CodeRuntime::signed_out_harness_refusal(
+            true,
+            HarnessKind::Codex,
+            &probe(Some(false), Vec::new()),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_credential_override_in_the_environment_allows_create() {
+        // A gateway-managed machine authenticates with no vendor login
+        // (issue 2749); its overrides must beat the signed-out observation.
+        let env = vec![(
+            std::ffi::OsString::from("OPENAI_BASE_URL"),
+            std::ffi::OsString::from("https://gateway.example/v1"),
+        )];
+        assert!(CodeRuntime::signed_out_harness_refusal(
+            false,
+            HarnessKind::Codex,
+            &probe(Some(false), env),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn engines_without_a_verified_override_surface_never_refuse() {
+        // opencode honors provider keys and config shapes the probe cannot
+        // cheaply rule out, so a signed-out observation alone must not block.
+        assert!(CodeRuntime::signed_out_harness_refusal(
+            false,
+            HarnessKind::Opencode,
+            &probe(Some(false), Vec::new()),
+        )
+        .is_ok());
     }
 }
 

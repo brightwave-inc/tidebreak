@@ -413,6 +413,41 @@ fn login_status_from_output(stdout: &[u8], stderr: &[u8]) -> Option<bool> {
     None
 }
 
+/// Whether this environment could authenticate Codex without the ChatGPT or
+/// API-key login [`observe_login`] observes: an OpenAI key or endpoint
+/// override in the environment, or a `config.toml` that declares a custom
+/// model provider — the shape a gateway-managed machine uses to point
+/// inference at its own endpoint, which `codex login status` reports as
+/// signed out. A hit means a session may work even though the probe saw
+/// signed-out — never that credentials are known-good.
+pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> bool {
+    if crate::probe::env_sets_any(env, &["OPENAI_API_KEY", "OPENAI_BASE_URL"]) {
+        return true;
+    }
+    config_declares_model_provider(env)
+}
+
+/// `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, mentions
+/// `model_provider`. A comment mentioning it also matches; that over-reads
+/// toward "may authenticate some other way", which is the safe direction.
+fn config_declares_model_provider(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> bool {
+    let config_dir = crate::probe::env_value(env, std::ffi::OsStr::new("CODEX_HOME"))
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            env.iter()
+                .rev()
+                .find(|(key, _)| key.eq_ignore_ascii_case("HOME"))
+                .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()).join(".codex"))
+                .filter(|dir| !dir.as_os_str().is_empty())
+        });
+    let Some(config_dir) = config_dir else {
+        return false;
+    };
+    std::fs::read_to_string(config_dir.join("config.toml"))
+        .is_ok_and(|raw| raw.contains("model_provider"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +868,44 @@ mod tests {
             login_status_from_output(b"something else\n", b"also something\n"),
             None
         );
+    }
+
+    #[test]
+    fn auth_override_reads_env_and_config() {
+        let os = std::ffi::OsString::from;
+        assert!(!auth_override_present(&[]));
+        assert!(auth_override_present(&[(os("OPENAI_API_KEY"), os("sk"))]));
+        assert!(auth_override_present(&[(
+            os("OPENAI_BASE_URL"),
+            os("https://gateway.example/v1")
+        )]));
+        // An empty value is an unset variable, not a credential.
+        assert!(!auth_override_present(&[(os("OPENAI_API_KEY"), os(""))]));
+
+        // CODEX_HOME wins over HOME/.codex, and only a config that mentions
+        // a model provider counts.
+        let codex_home = tempfile::tempdir().unwrap();
+        let env = vec![(os("CODEX_HOME"), codex_home.path().as_os_str().to_owned())];
+        assert!(!auth_override_present(&env));
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            "model_provider = \"gateway\"\n",
+        )
+        .unwrap();
+        assert!(auth_override_present(&env));
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".codex")).unwrap();
+        let config = home.path().join(".codex").join("config.toml");
+        let env = vec![(os("HOME"), home.path().as_os_str().to_owned())];
+        std::fs::write(&config, "model = \"gpt-5\"\n").unwrap();
+        assert!(!auth_override_present(&env));
+        std::fs::write(
+            &config,
+            "[model_providers.gateway]\nbase_url = \"https://gateway.example/v1\"\n",
+        )
+        .unwrap();
+        assert!(auth_override_present(&env));
     }
 
     #[test]
