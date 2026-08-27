@@ -15,7 +15,8 @@ export function repoPathBasename(path: string): string {
  * The Tidebreak source checkout among connected repos.
  *
  * Match the folder or display name, not a worktree path: those live under
- * `workspaces/tidebreak/…` and are not the product repository.
+ * `workspaces/tidebreak/…` and are not the product repository. Record 78:
+ * Uneff me stays this heuristic; it does not probe remotes or settings.
  */
 export function isTidebreakProductRepo(repo: {
   display_name: string;
