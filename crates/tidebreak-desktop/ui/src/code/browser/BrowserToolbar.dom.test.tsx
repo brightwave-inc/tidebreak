@@ -95,9 +95,7 @@ describe("BrowserToolbar managed profile reset", () => {
     expect(
       screen.queryByRole("button", { name: "Browser options" }),
     ).toBeNull();
-    await user.click(
-      screen.getByRole("button", { name: "Open externally" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Open externally" }));
     expect(onOpenExternal).toHaveBeenCalledOnce();
   });
 
