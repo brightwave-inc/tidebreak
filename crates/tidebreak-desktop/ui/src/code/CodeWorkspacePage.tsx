@@ -174,6 +174,7 @@ import { tidebreakProductRepo } from "./uneffMe";
 import { sessionActivityLabel, isPutAway } from "./workspaceCards";
 import {
   DEFAULT_INSPECTOR_LAYOUT,
+  fitsInspectorSplit,
   INSPECTOR_LAYOUT_STORAGE_ID,
   INSPECTOR_PANEL_IDS,
   MAX_INSPECTOR_SIZE,
@@ -423,15 +424,15 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     [inspectorLayout.defaultLayout],
   );
 
-  useEffect(() => {
-    if (!reviewSidebarOpen) return;
-    const group = inspectorGroupRef.current;
-    if (!group) return;
-    const current = group.getLayout();
-    if (Object.keys(current).length > 0 && !usableInspectorLayout(current)) {
-      group.setLayout({ ...DEFAULT_INSPECTOR_LAYOUT });
-    }
-  }, [inspectorGroupRef, reviewSidebarOpen, workspaceId]);
+  const { paneRef: inspectorPaneRef, width: inspectorPaneWidth } =
+    useMeasuredWidth();
+  const inspectorFits = fitsInspectorSplit(inspectorPaneWidth);
+  /**
+   * The split only appears when the reader asked for it and the pane can
+   * carry it. The stored preference survives a narrow window, so widening
+   * one brings the inspector straight back.
+   */
+  const inspectorOpen = reviewSidebarOpen && inspectorFits;
   const [starting, setStarting] = useState(false);
   const [createMode, setCreateMode] = useState<PermissionMode | null>(null);
   const [fileReveal, setFileReveal] = useState<{
@@ -1628,7 +1629,12 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           ) : undefined
         }
         terminalOpen={hasTerminal}
-        reviewOpen={reviewSidebarOpen}
+        reviewOpen={inspectorOpen}
+        reviewUnavailableReason={
+          inspectorFits
+            ? undefined
+            : "Too narrow for the review sidebar — open Source control or Pull request as a tab"
+        }
         terminalShortcut={shortcutHints.terminal}
         reviewShortcut={shortcutHints.review}
         onToggleTerminal={toggleTerminal}
@@ -1670,57 +1676,63 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             Retry
           </Button>
         </div>
-      ) : reviewSidebarOpen ? (
-        <ResizablePanelGroup
-          id={INSPECTOR_LAYOUT_STORAGE_ID}
-          groupRef={inspectorGroupRef}
-          defaultLayout={inspectorDefaultLayout}
-          onLayoutChanged={inspectorLayout.onLayoutChanged}
-          orientation="horizontal"
-          className="h-auto min-h-0 max-w-full min-w-0 flex-1 overflow-clip"
-        >
-          <ResizablePanel
-            id="workspace"
-            defaultSize={String(DEFAULT_INSPECTOR_LAYOUT.workspace)}
-            minSize={String(MIN_WORKSPACE_SIZE)}
-            className="h-full min-h-0 min-w-0"
-          >
-            {workspaceMain}
-          </ResizablePanel>
-          <ResizableHandle className="bg-border-subtle transition-colors hover:bg-border" />
-          <ResizablePanel
-            id="inspector"
-            defaultSize={String(DEFAULT_INSPECTOR_LAYOUT.inspector)}
-            minSize={String(MIN_INSPECTOR_SIZE)}
-            maxSize={String(MAX_INSPECTOR_SIZE)}
-            className="h-full min-h-0 min-w-0 bg-page-background"
-          >
-            <ErrorBoundary
-              resetKey={workspaceId}
-              fallback={
-                <p className="text-muted-foreground p-4 text-sm">
-                  The review sidebar could not load. Git and pull-request
-                  details stay here when they are available.
-                </p>
-              }
-            >
-              <CodeInspector
-                key={workspaceId}
-                client={client}
-                workspaceId={workspaceId}
-                workspace={workspace}
-                contentRevision={contentRevision}
-                prResource={prResource}
-                onOpenFile={openFile}
-                onOpenDiff={openFileDiff}
-                onClose={() => setReviewSidebarOpen(false)}
-              />
-            </ErrorBoundary>
-          </ResizablePanel>
-        </ResizablePanelGroup>
       ) : (
-        <div className="flex h-full min-h-0 flex-1 overflow-hidden">
-          {workspaceMain}
+        <div
+          ref={inspectorPaneRef}
+          data-testid="workspace-pane"
+          className="flex h-full min-h-0 flex-1 overflow-hidden"
+        >
+          {inspectorOpen ? (
+            <ResizablePanelGroup
+              id={INSPECTOR_LAYOUT_STORAGE_ID}
+              groupRef={inspectorGroupRef}
+              defaultLayout={inspectorDefaultLayout}
+              onLayoutChanged={inspectorLayout.onLayoutChanged}
+              orientation="horizontal"
+              className="h-auto min-h-0 max-w-full min-w-0 flex-1 overflow-clip"
+            >
+              <ResizablePanel
+                id="workspace"
+                defaultSize={String(DEFAULT_INSPECTOR_LAYOUT.workspace)}
+                minSize={String(MIN_WORKSPACE_SIZE)}
+                className="h-full min-h-0 min-w-0"
+              >
+                {workspaceMain}
+              </ResizablePanel>
+              <ResizableHandle className="bg-border-subtle transition-colors hover:bg-border" />
+              <ResizablePanel
+                id="inspector"
+                defaultSize={String(DEFAULT_INSPECTOR_LAYOUT.inspector)}
+                minSize={String(MIN_INSPECTOR_SIZE)}
+                maxSize={String(MAX_INSPECTOR_SIZE)}
+                className="h-full min-h-0 min-w-0 bg-page-background"
+              >
+                <ErrorBoundary
+                  resetKey={workspaceId}
+                  fallback={
+                    <p className="text-muted-foreground p-4 text-sm">
+                      The review sidebar could not load. Git and pull-request
+                      details stay here when they are available.
+                    </p>
+                  }
+                >
+                  <CodeInspector
+                    key={workspaceId}
+                    client={client}
+                    workspaceId={workspaceId}
+                    workspace={workspace}
+                    contentRevision={contentRevision}
+                    prResource={prResource}
+                    onOpenFile={openFile}
+                    onOpenDiff={openFileDiff}
+                    onClose={() => setReviewSidebarOpen(false)}
+                  />
+                </ErrorBoundary>
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          ) : (
+            workspaceMain
+          )}
         </div>
       )}
     </MarkdownLinkProvider>
@@ -1819,6 +1831,40 @@ function storedBrowserTitles(layout: LayoutState): Record<string, string> {
  * plus menu stops offering another rather than letting the create fail.
  */
 const MAX_WORKSPACE_TERMINALS = 8;
+
+/**
+ * Track one element's width, in CSS pixels.
+ *
+ * The width stays `null` until an observer reports, so a caller can tell
+ * "not measured yet" from "measured and narrow" and avoid deciding on a zero
+ * it read before layout ran. The callback ref re-attaches whenever the
+ * element behind it changes, which is what keeps the reading live across the
+ * split going up and coming down.
+ */
+function useMeasuredWidth(): {
+  paneRef: (element: HTMLElement | null) => void;
+  width: number | null;
+} {
+  const [width, setWidth] = useState<number | null>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
+
+  useEffect(() => () => observerRef.current?.disconnect(), []);
+
+  const paneRef = useCallback((element: HTMLElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    setWidth(element.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    observerRef.current = observer;
+  }, []);
+
+  return { paneRef, width };
+}
 
 /**
  * Give every open shell a tab label, keeping the ones already assigned.

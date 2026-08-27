@@ -37,6 +37,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { resetWorkflowPromptStore } from "./workflowPrompts";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
+import { MIN_INSPECTOR_PANE_WIDTH_PX } from "./inspectorLayout";
 import {
   forkFraming,
   forkTranscriptFile,
@@ -655,6 +656,35 @@ beforeEach(() => {
   vi.useRealTimers();
 });
 
+/**
+ * Make every observed element report this width.
+ *
+ * jsdom measures nothing, so the shared stub answers with a desktop-sized
+ * box. A test that cares about a narrow pane swaps in its own for the
+ * duration; `vi.stubGlobal` is undone with the other stubs after each test.
+ */
+function stubPaneWidth(width: number) {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback(
+          [
+            {
+              target,
+              contentRect: { width, height: 768 },
+            } as unknown as ResizeObserverEntry,
+          ],
+          this as unknown as ResizeObserver,
+        );
+      }
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+}
+
 afterEach(() => {
   cleanup();
   resetCodeSessionRegistry();
@@ -674,6 +704,7 @@ afterEach(() => {
   browserMocks.close.mockClear();
   window.localStorage.clear();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -1333,6 +1364,27 @@ describe("CodeWorkspacePage", () => {
     expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("stands the review sidebar down when the pane is too narrow to split", async () => {
+    // The bounds are percentages, so a narrow pane shrinks the workspace and
+    // the inspector together and no drag wins the journal its floor back.
+    stubPaneWidth(MIN_INSPECTOR_PANE_WIDTH_PX - 40);
+    const client = makeClient();
+    await mountWorkspace(client);
+
+    expect(
+      await screen.findByRole("heading", { name: /Fix login/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("code-inspector")).not.toBeInTheDocument();
+    // The reader's preference survives; only this window cannot honour it.
+    expect(useCodeUiStore.getState().reviewSidebarOpen).toBe(true);
+    expect(
+      screen.getByRole("button", { name: "Review sidebar" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("textbox", { name: "Message" }),
     ).toBeInTheDocument();
   });
 

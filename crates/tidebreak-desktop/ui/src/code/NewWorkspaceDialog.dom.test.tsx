@@ -210,6 +210,11 @@ describe("NewWorkspaceDialog", () => {
     expect(screen.getByTestId("new-workspace-controls")).toHaveClass(
       "flex-wrap",
     );
+    // A short window scrolls the form rather than clipping the Create row.
+    expect(screen.getByRole("dialog").querySelector("form")).toHaveClass(
+      "min-h-0",
+      "overflow-y-auto",
+    );
   });
 
   it("closes and lists the workspace before creation finishes", async () => {

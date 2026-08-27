@@ -673,7 +673,14 @@ export function NewWorkspaceDialog({
         }}
       >
         <DialogTitle className="sr-only">New workspace</DialogTitle>
-        <form className="flex min-h-0 min-w-0 flex-col" onSubmit={submit}>
+        {/* The dialog clips what it cannot fit, and the prompt holds a hard
+            floor, so a short window would drop the wrapped footer — the row
+            carrying Create — off the bottom. Scrolling the form instead keeps
+            every control reachable. */}
+        <form
+          className="flex min-h-0 min-w-0 flex-col overflow-y-auto"
+          onSubmit={submit}
+        >
           <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 px-3 pt-3">
             <DropdownMenu {...pickerProps("repo")}>
               <WithTooltip label={`Repo · ${command ? "⌘N" : "Ctrl+N"}`}>
