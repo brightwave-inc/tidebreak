@@ -386,7 +386,7 @@ function CodeUtilityLinks({
       icon: BarChart3,
     },
     {
-      label: "Delivery",
+      label: "Pull requests",
       to: "/code/delivery/pull-requests" as const,
       active: pathname.startsWith("/code/delivery/"),
       icon: GitPullRequest,
