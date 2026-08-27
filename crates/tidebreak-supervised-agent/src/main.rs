@@ -63,8 +63,15 @@ async fn run() -> i32 {
 
     let host = HostEnv::from_process();
     let probe = adapter.probe(&host).await;
-    let ladder = adapter.reasoning_efforts(&probe);
-    let effective = effort::reconcile(inputs.reasoning_effort.as_deref(), &ladder);
+    // Resolving the ladder can shell out to the engine's model catalog, so
+    // only do it when there is a request to reconcile.
+    let effective = match inputs.reasoning_effort.as_deref() {
+        Some(requested) => {
+            let ladder = effort::ladder(adapter.as_ref(), &probe, inputs.model.as_deref()).await;
+            effort::reconcile(Some(requested), &ladder)
+        }
+        None => None,
+    };
 
     let trust_options = TrustOptions::from_env();
     // Bootstrap blocks on the trust sidecar and on git; keep the runtime's
