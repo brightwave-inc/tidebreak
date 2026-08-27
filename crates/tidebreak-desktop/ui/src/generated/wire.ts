@@ -2627,11 +2627,6 @@ reasoning_efforts: Array<ReasoningEffort>,
 fast_mode: boolean, };
 
 /**
- * Whose catalog produced a harness model list.
- */
-export type HarnessModelSource = "harness" | "model_gateway";
-
-/**
  * `GET /code/harnesses/{kind}/models`.
  */
 export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>, 
@@ -2645,6 +2640,11 @@ export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>,
  * control at all.
  */
 reasoning_efforts: Array<ReasoningEffort>, source: HarnessModelSource, };
+
+/**
+ * Whose catalog produced a harness model list.
+ */
+export type HarnessModelSource = "harness" | "model_gateway";
 
 /**
  * Severity of a visible-degradation notice.
