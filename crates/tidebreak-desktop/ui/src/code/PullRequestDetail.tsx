@@ -4,6 +4,8 @@ import {
   Bot,
   Check,
   CircleAlert,
+  CircleCheck,
+  CircleDashed,
   CircleDot,
   ExternalLink,
   GitBranch,
@@ -13,7 +15,6 @@ import {
   GitPullRequestClosed,
   GitPullRequestDraft,
   LoaderCircle,
-  MessageSquare,
   MoreHorizontal,
   Play,
   RefreshCw,
@@ -95,10 +96,22 @@ import {
   pullRequestSettledAt,
   type PullRequestLifecycle,
 } from "./prState";
-import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
+import { STATUS_MARK, STATUS_TEXT, type StatusTone } from "./statusTone";
 
 type MergeMethod = "squash" | "merge" | "rebase";
 type DetailTab = "conversation" | "files" | "checks";
+
+/**
+ * The sheet's tabs, in the vocabulary the Delivery page already uses for a
+ * band of peer views: an underline under the active one, no fill.
+ *
+ * `TabsTrigger`'s default pill belongs on a transparent surface — the
+ * inspector and the tool card — where it has room to float. In a band closed
+ * by a hairline it fills the whole height and reads as a fat button, so this
+ * surface takes the same treatment as `DeliveryTab` one level up.
+ */
+const SHEET_TAB =
+  "relative h-10 rounded-none px-3 hover:bg-transparent hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:after:absolute data-[state=active]:after:right-2 data-[state=active]:after:bottom-0 data-[state=active]:after:left-2 data-[state=active]:after:h-0.5 data-[state=active]:after:rounded-full data-[state=active]:after:bg-primary";
 
 /**
  * The frame both delivery detail surfaces share: a large sheet floated over
@@ -127,6 +140,11 @@ export function DetailSheet({
         <DialogOverlay className="bg-black/40" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
+          // Keep the ring off the first icon button when the sheet opens: the
+          // reader came here to read, and a focus ring parked on "Open on
+          // GitHub" reads as a pressed control. Focus lands on the sheet, so
+          // Tab still walks the header controls first.
+          onOpenAutoFocus={(event) => event.preventDefault()}
           className="fixed top-1/2 left-1/2 z-50 flex h-[min(52rem,calc(100vh-3rem))] w-[min(66rem,calc(100vw-2.5rem))] translate-x-[-50%] translate-y-[-50%] flex-col overflow-hidden rounded-xl border border-border-subtle bg-background shadow-lg outline-none duration-200 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
         >
           <DialogTitle className="sr-only">{label}</DialogTitle>
@@ -415,49 +433,30 @@ export function PullRequestDetailSheet({
         summary={current}
         lifecycle={lifecycle}
         detail={detail}
+        loading={loading}
+        onRefresh={() => void load()}
         onClose={onClose}
       />
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border-subtle px-5 py-2.5">
-        <Button
-          type="button"
-          size="xs"
-          variant="outline"
-          onClick={() => void openInBrowser(current.url)}
-        >
-          <ExternalLink />
-          Open on GitHub
-        </Button>
-        {current.workspace_links.map((workspace) => (
-          <Button
-            key={workspace.workspace_id}
-            type="button"
-            size="xs"
-            variant="outline"
-            title={`Open the linked workspace on ${workspace.branch_name}`}
-            onClick={() => onOpenWorkspace(workspace.workspace_id)}
-          >
-            <GitBranch />
-            Open {workspace.title}
-          </Button>
-        ))}
-        <PrAgentMenu
+      {detail && (
+        <PrMergeBox
           client={client}
+          detail={detail}
           summary={current}
+          hasMergeQueue={hasMergeQueue}
+          busy={busy}
+          mergeMethod={mergeMethod}
+          onMergeMethodChange={setMergeMethod}
+          workflowRunIds={workflowRunIds}
+          onRun={(name, action) => void runAction(name, action)}
+          confirmingAdminMerge={confirmingAdminMerge}
+          onAdminMergeRequest={() => setConfirmingAdminMerge(true)}
+          onAdminMergeCancel={() => setConfirmingAdminMerge(false)}
+          onAdminMergeConfirm={() => void adminMerge()}
+          onMergeStack={(members) => void mergeStack(members)}
           onOpenWorkspace={onOpenWorkspace}
         />
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost"
-          className="ml-auto"
-          disabled={loading}
-          onClick={() => void load()}
-        >
-          {loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
-          Refresh
-        </Button>
-      </div>
+      )}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {loading && !detail ? (
@@ -473,9 +472,8 @@ export function PullRequestDetailSheet({
               value={tab}
               onValueChange={(value) => setTab(value as DetailTab)}
             >
-              <TabsList className="sticky top-0 z-10 w-full justify-start rounded-none border-b border-border-subtle bg-background/95 px-5 backdrop-blur">
-                <TabsTrigger value="conversation">
-                  <MessageSquare />
+              <TabsList className="sticky top-0 z-10 h-10 w-full justify-start gap-1 rounded-none border-b border-border-subtle bg-background/95 px-5 backdrop-blur">
+                <TabsTrigger value="conversation" className={SHEET_TAB}>
                   Conversation
                   {detail.comments.length > 0 && (
                     <span className="text-muted-foreground tabular-nums">
@@ -483,13 +481,13 @@ export function PullRequestDetailSheet({
                     </span>
                   )}
                 </TabsTrigger>
-                <TabsTrigger value="files">
+                <TabsTrigger value="files" className={SHEET_TAB}>
                   Files
                   <span className="text-muted-foreground tabular-nums">
                     {detail.changed_files}
                   </span>
                 </TabsTrigger>
-                <TabsTrigger value="checks">
+                <TabsTrigger value="checks" className={SHEET_TAB}>
                   Checks
                   {counts.total > 0 && (
                     <span
@@ -510,23 +508,8 @@ export function PullRequestDetailSheet({
 
               <TabsContent
                 value="conversation"
-                className="mt-0 flex flex-col gap-5 p-5"
+                className="mt-0 flex flex-col gap-6 p-5"
               >
-                <PrActions
-                  detail={detail}
-                  summary={current}
-                  hasMergeQueue={hasMergeQueue}
-                  busy={busy}
-                  mergeMethod={mergeMethod}
-                  onMergeMethodChange={setMergeMethod}
-                  workflowRunIds={workflowRunIds}
-                  onRun={(name, action) => void runAction(name, action)}
-                  confirmingAdminMerge={confirmingAdminMerge}
-                  onAdminMergeRequest={() => setConfirmingAdminMerge(true)}
-                  onAdminMergeCancel={() => setConfirmingAdminMerge(false)}
-                  onAdminMergeConfirm={() => void adminMerge()}
-                  onMergeStack={(members) => void mergeStack(members)}
-                />
                 <PrDescription body={detail.body} />
                 <PrConversation
                   detail={detail}
@@ -617,39 +600,89 @@ function DetailErrors({
   );
 }
 
+/**
+ * Identity, in one band.
+ *
+ * Everything that says *which* pull request this is sits here — where it
+ * lives, what it is called, who opened it, which branches it spans, how big
+ * it is — on a single wrapping metadata line rather than a stack of rows
+ * with their own margins. What to *do* about it belongs to the merge box
+ * below, so the window controls are the only buttons in this band.
+ */
 function PrDetailHeader({
   summary,
   lifecycle,
   detail,
+  loading,
+  onRefresh,
   onClose,
 }: {
   summary: CodeDeliveryPullRequestSummary;
   lifecycle: PullRequestLifecycle;
   detail: CodeDeliveryPullRequestDetail | null;
+  loading: boolean;
+  onRefresh: () => void;
   onClose: () => void;
 }) {
   const settledAt = pullRequestSettledAt(summary);
+  const assignees = detail?.assignees ?? [];
+  const reviewers = detail?.requested_reviewers ?? [];
   return (
-    <div className="shrink-0 border-b border-border-subtle px-5 py-3">
+    <header
+      aria-label="Pull request summary"
+      className="flex shrink-0 flex-col gap-3 border-b border-border-subtle px-5 py-4"
+    >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <p className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
             <span className="truncate">
               {summary.repository.name_with_owner}
             </span>
             <span className="tabular-nums">#{summary.number}</span>
-          </div>
-          <h2 className="mt-1 text-base font-semibold leading-snug">
+          </p>
+          <h2 className="mt-1.5 text-lg font-semibold leading-snug">
             {summary.title}
           </h2>
         </div>
-        <Button type="button" size="icon-xs" variant="ghost" onClick={onClose}>
-          <X />
-          <span className="sr-only">Close pull request details</span>
-        </Button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            title="Open this pull request on GitHub"
+            onClick={() => void openInBrowser(summary.url)}
+          >
+            <ExternalLink />
+            <span className="sr-only">Open on GitHub</span>
+          </Button>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            title="Reload this pull request from GitHub"
+            disabled={loading}
+            onClick={onRefresh}
+          >
+            {loading ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <RefreshCw />
+            )}
+            <span className="sr-only">Refresh</span>
+          </Button>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            onClick={onClose}
+          >
+            <X />
+            <span className="sr-only">Close pull request details</span>
+          </Button>
+        </div>
       </div>
 
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-muted-foreground">
         <Badge
           variant={
             STATUS_TONE_BADGE_VARIANT[PULL_REQUEST_LIFECYCLE_TONE[lifecycle]]
@@ -665,11 +698,42 @@ function PrDetailHeader({
             Auto-merge
           </Badge>
         )}
-        {detail && (
-          <span className="font-mono text-xs tabular-nums">
-            <span className={STATUS_TEXT.ready}>+{detail.additions}</span>{" "}
-            <span className={STATUS_TEXT.critical}>−{detail.deletions}</span>
+        <span className="flex items-center gap-1.5">
+          <GithubAvatar
+            login={summary.author}
+            url={summary.author_avatar_url}
+            className="size-4"
+          />
+          <span className="font-medium text-foreground">
+            {summary.author ?? "Unknown"}
           </span>
+          <span>opened {relativeTime(summary.created_at)}</span>
+        </span>
+        {settledAt && (
+          <>
+            <MetaDot />
+            <span>
+              {lifecycle === "merged" ? "merged" : "closed"}{" "}
+              {relativeTime(settledAt)}
+              {detail?.merged_by ? ` by ${detail.merged_by}` : ""}
+            </span>
+          </>
+        )}
+        <MetaDot />
+        <span className="flex min-w-0 items-center gap-1.5 font-mono">
+          <GitBranch className="size-3 shrink-0" />
+          <MiddleTruncate className="min-w-0" text={summary.base_branch} />
+          <span aria-hidden>←</span>
+          <MiddleTruncate className="min-w-0" text={summary.head_branch} />
+        </span>
+        {detail && (
+          <>
+            <MetaDot />
+            <DiffStat
+              additions={detail.additions}
+              deletions={detail.deletions}
+            />
+          </>
         )}
       </div>
 
@@ -681,67 +745,116 @@ function PrDetailHeader({
         />
       )}
 
-      <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
-        <GithubAvatar
-          login={summary.author}
-          url={summary.author_avatar_url}
-          className="size-4"
-        />
-        <span className="font-medium text-foreground">
-          {summary.author ?? "Unknown"}
-        </span>
-        <span>opened {relativeTime(summary.created_at)}</span>
-        {settledAt && (
-          <>
-            <span aria-hidden>·</span>
-            <span>
-              {lifecycle === "merged" ? "merged" : "closed"}{" "}
-              {relativeTime(settledAt)}
-              {detail?.merged_by ? ` by ${detail.merged_by}` : ""}
-            </span>
-          </>
-        )}
-      </p>
-
-      <p className="mt-1.5 flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground">
-        <GitBranch className="size-3 shrink-0" />
-        <MiddleTruncate className="min-w-0" text={summary.base_branch} />
-        <span aria-hidden>←</span>
-        <MiddleTruncate className="min-w-0" text={summary.head_branch} />
-      </p>
-
       {(summary.labels.length > 0 ||
-        (detail?.assignees.length ?? 0) > 0 ||
-        (detail?.requested_reviewers.length ?? 0) > 0) && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {summary.labels.map((label) => (
-            <Badge key={label} variant="secondary" size="sm">
-              {label}
-            </Badge>
-          ))}
-          {detail?.assignees.map((login) => (
-            <span
-              key={`assignee:${login}`}
-              className="flex items-center gap-1 text-xs text-muted-foreground"
-            >
-              <GithubAvatar login={login} className="size-4" />
-              {login}
-            </span>
-          ))}
-          {detail?.requested_reviewers.map((login) => (
-            <span
-              key={`reviewer:${login}`}
-              className="flex items-center gap-1 text-xs text-muted-foreground"
-              title={`Review requested from ${login}`}
-            >
-              <GithubAvatar login={login} className="size-4" />
-              {login}
-              <span className="text-2xs">(review requested)</span>
-            </span>
-          ))}
+        assignees.length > 0 ||
+        reviewers.length > 0) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+          {summary.labels.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {summary.labels.map((label) => (
+                <Badge key={label} variant="outline" size="sm">
+                  {label}
+                </Badge>
+              ))}
+            </div>
+          )}
+          <PeopleGroup label="Assignees" logins={assignees} />
+          <PeopleGroup label="Reviewers" logins={reviewers} />
         </div>
       )}
+    </header>
+  );
+}
+
+/**
+ * The people attached to a pull request, under the word for what they are.
+ *
+ * Assignees and reviewers are the same shape — an avatar and a login — so
+ * without the label a row of faces says nothing about who is expected to do
+ * what.
+ */
+function PeopleGroup({
+  label,
+  logins,
+}: {
+  label: string;
+  logins: readonly string[];
+}) {
+  if (logins.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+      {logins.map((login) => (
+        <span
+          key={login}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground"
+        >
+          <GithubAvatar login={login} className="size-4" />
+          {login}
+        </span>
+      ))}
     </div>
+  );
+}
+
+/** The one separator this sheet uses between metadata facts. */
+function MetaDot() {
+  return (
+    <span aria-hidden className="text-muted-foreground/50">
+      ·
+    </span>
+  );
+}
+
+/**
+ * How big the change is, painted the same way everywhere it appears — the
+ * header, the Files summary, and every file row.
+ */
+export function DiffStat({
+  additions,
+  deletions,
+  className,
+}: {
+  additions: number;
+  deletions: number;
+  className?: string;
+}) {
+  return (
+    <span className={cn("font-mono text-xs tabular-nums", className)}>
+      <span className={STATUS_TEXT.ready}>+{additions}</span>{" "}
+      <span className={STATUS_TEXT.critical}>−{deletions}</span>
+    </span>
+  );
+}
+
+/**
+ * A titled block of content inside the sheet.
+ *
+ * The heading is an eyebrow, not a second title: it names the block without
+ * competing with the pull request's own name, and every block on the surface
+ * gets the same rhythm above and below it.
+ */
+function DetailSection({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-2.5">
+      <div className="flex min-h-7 items-center justify-between gap-2">
+        <h3 className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+          {title}
+        </h3>
+        {action}
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -868,7 +981,21 @@ function freshAgentWorkspaceTitle(
   return base.length > 60 ? `${base.slice(0, 59).trimEnd()}…` : base;
 }
 
-function PrActions({
+/**
+ * What stands between this pull request and the base branch, and every move
+ * that changes it.
+ *
+ * The band always leads with the gate — the same answer `prState.ts` gives
+ * the delivery list, so a row and its sheet never disagree — then the exact
+ * reasons underneath, then the controls. Leading with the state is what keeps
+ * a pull request with nothing to do from rendering as a lone overflow button:
+ * "Checks running" is the answer, and the buttons are the footnote.
+ *
+ * It sits above the tabs rather than inside Conversation because it is the
+ * reason the sheet is open. Reading the diff should not cost you the merge.
+ */
+function PrMergeBox({
+  client,
   detail,
   summary,
   hasMergeQueue,
@@ -882,7 +1009,9 @@ function PrActions({
   onAdminMergeCancel,
   onAdminMergeConfirm,
   onMergeStack,
+  onOpenWorkspace,
 }: {
+  client: Pick<ApiClient, "createCodeWorkspace" | "writeCodeCheckLogs">;
   detail: CodeDeliveryPullRequestDetail;
   summary: CodeDeliveryPullRequestSummary;
   hasMergeQueue: boolean;
@@ -896,10 +1025,19 @@ function PrActions({
   onAdminMergeCancel: () => void;
   onAdminMergeConfirm: () => void;
   onMergeStack: (members: readonly CodeDeliveryStackMember[]) => void;
+  onOpenWorkspace: (workspaceId: string) => void;
 }) {
   const [confirmingStackMerge, setConfirmingStackMerge] = useState(false);
   const [confirmingCreateStack, setConfirmingCreateStack] = useState(false);
-  const blockers = mergeBlockedReasons(summary);
+  const status = prStatus(summary);
+  const settled =
+    status.lifecycle === "merged" || status.lifecycle === "closed";
+  // The headline already names the gate. A single blocker only ever restates
+  // it in a longer sentence, so the list earns its space from two up, where
+  // it says what else must clear before the headline moves.
+  const allBlockers =
+    status.lifecycle === "open" ? mergeBlockedReasons(summary) : [];
+  const blockers = allBlockers.length > 1 ? allBlockers : [];
   const mergeAction =
     detail.can_merge && summary.head_sha
       ? prDirectMergeAction(deliveryPullRequestDigest(summary), {
@@ -951,135 +1089,110 @@ function PrActions({
     detail.can_close ||
     detail.can_reopen ||
     canRerun;
-  if (!anyAction) return null;
+  // A settled pull request with nothing to do and nowhere to go says its
+  // outcome in the header already; a second band repeating it is noise.
+  if (settled && !anyAction && summary.workspace_links.length === 0) {
+    return null;
+  }
+  // The header badge already carries the bare lifecycle word, so a headline
+  // that would only repeat it says what that state means instead.
+  const headline =
+    status.lifecycle === "merged"
+      ? `Merged into ${summary.base_branch}`
+      : status.lifecycle === "closed"
+        ? "Closed without merging"
+        : status.lifecycle === "draft"
+          ? "Not ready for review"
+          : status.headline.label;
   return (
-    <section className="rounded-lg border border-border-subtle bg-muted/20 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        {detail.can_mark_ready && (
-          <Button
-            type="button"
-            size="sm"
-            disabled={Boolean(busy)}
-            onClick={() => onRun("ready", { type: "mark_ready" })}
-          >
-            {busy === "ready" && <LoaderCircle className="animate-spin" />}
-            Mark ready
-          </Button>
-        )}
-        {showSingleMerge && summary.head_sha && (
-          <>
-            <Select
-              value={mergeMethod}
-              onValueChange={(value) =>
-                onMergeMethodChange(value as MergeMethod)
-              }
-            >
-              <SelectTrigger size="sm" className="w-28">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="squash">Squash</SelectItem>
-                <SelectItem value="merge">Merge</SelectItem>
-                <SelectItem value="rebase">Rebase</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button
-              type="button"
-              size="sm"
-              variant={mergeAction.kind === "merge" ? "default" : "outline"}
-              disabled={Boolean(busy)}
-              onClick={() =>
-                onRun(mergeAction.kind, {
-                  type: "merge",
-                  method: mergeMethod,
-                  auto: mergeAction.auto,
-                  admin: false,
-                  expected_head_sha: summary.head_sha!,
-                })
-              }
-            >
-              {busy === mergeAction.kind && (
-                <LoaderCircle className="animate-spin" />
+    <section
+      aria-label="Merge status and actions"
+      className="flex shrink-0 flex-col gap-2.5 border-b border-border-subtle px-5 py-3"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2.5">
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          <GateMark tone={status.headline.tone} />
+          <div className="flex min-w-0 flex-col gap-1">
+            <p
+              className={cn(
+                "text-sm font-medium",
+                STATUS_TEXT[status.headline.tone],
               )}
-              {mergeAction.kind === "merge" ? <GitMerge /> : null}
-              {mergeAction.label}
-            </Button>
-          </>
-        )}
-
-        {canMergeStack && (
-          <>
-            <Select
-              value={mergeMethod}
-              onValueChange={(value) =>
-                onMergeMethodChange(value as MergeMethod)
-              }
             >
-              <SelectTrigger size="sm" className="w-28">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="squash">Squash</SelectItem>
-                <SelectItem value="merge">Merge</SelectItem>
-                <SelectItem value="rebase">Rebase</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button
-              type="button"
-              size="sm"
-              variant="default"
-              disabled={Boolean(busy)}
-              onClick={() => setConfirmingStackMerge(true)}
-            >
-              {busy === "merge-stack" && (
-                <LoaderCircle className="animate-spin" />
-              )}
-              <GitMerge />
-              Merge stack ({mergeableStackLayers.length} layers)
-            </Button>
-            {confirmingStackMerge && (
-              <div className="mt-2.5 flex w-full flex-col gap-2 rounded-md border border-border-subtle bg-background p-2.5">
-                <p className="text-muted-foreground text-xs">
-                  Lands #{summary.number} and the{" "}
-                  {mergeableStackLayers.length - 1} unmerged layer
-                  {mergeableStackLayers.length - 1 === 1 ? "" : "s"} below it (
-                  {mergeableStackLayers
-                    .map((member) => `#${member.number}`)
-                    .join(", ")}
-                  ), bottom to top, each with{" "}
-                  {hasMergeQueue
-                    ? "the merge queue — the first layer joins the queue and the rest follow once it lands"
-                    : `a direct ${mergeMethod} merge`}
-                  . The chain stops at the first layer that cannot merge; draft
-                  layers stay open.
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    size="xs"
-                    disabled={Boolean(busy)}
-                    onClick={() => {
-                      setConfirmingStackMerge(false);
-                      onMergeStack(mergeableStackLayers);
-                    }}
-                  >
-                    Merge stack
-                  </Button>
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => setConfirmingStackMerge(false)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
+              {headline}
+            </p>
+            {blockers.length > 0 && (
+              <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+                {blockers.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
             )}
-          </>
-        )}
-        {unregisteredStack !== null && (
-          <>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {detail.can_mark_ready && (
+            <Button
+              type="button"
+              size="sm"
+              disabled={Boolean(busy)}
+              onClick={() => onRun("ready", { type: "mark_ready" })}
+            >
+              {busy === "ready" && <LoaderCircle className="animate-spin" />}
+              Mark ready
+            </Button>
+          )}
+          {showSingleMerge && summary.head_sha && (
+            <>
+              <MergeMethodSelect
+                value={mergeMethod}
+                onChange={onMergeMethodChange}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant={mergeAction.kind === "merge" ? "default" : "outline"}
+                disabled={Boolean(busy)}
+                onClick={() =>
+                  onRun(mergeAction.kind, {
+                    type: "merge",
+                    method: mergeMethod,
+                    auto: mergeAction.auto,
+                    admin: false,
+                    expected_head_sha: summary.head_sha!,
+                  })
+                }
+              >
+                {busy === mergeAction.kind && (
+                  <LoaderCircle className="animate-spin" />
+                )}
+                {mergeAction.kind === "merge" ? <GitMerge /> : null}
+                {mergeAction.label}
+              </Button>
+            </>
+          )}
+          {canMergeStack && (
+            <>
+              <MergeMethodSelect
+                value={mergeMethod}
+                onChange={onMergeMethodChange}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="default"
+                disabled={Boolean(busy)}
+                onClick={() => setConfirmingStackMerge(true)}
+              >
+                {busy === "merge-stack" && (
+                  <LoaderCircle className="animate-spin" />
+                )}
+                <GitMerge />
+                Merge stack ({mergeableStackLayers.length} layers)
+              </Button>
+            </>
+          )}
+          {unregisteredStack !== null && (
             <Button
               type="button"
               size="sm"
@@ -1090,184 +1203,319 @@ function PrActions({
               <Layers />
               Create stack ({unregisteredStack.length} layers)
             </Button>
-            {confirmingCreateStack && (
-              <div className="mt-2.5 flex w-full flex-col gap-2 rounded-md border border-border-subtle bg-background p-2.5">
-                <p className="text-muted-foreground text-xs">
-                  Registers{" "}
-                  {unregisteredStack.map((number) => `#${number}`).join(", ")}{" "}
-                  as a GitHub stack, bottom to top. GitHub then owns the
-                  ordering: merging a layer lands everything below it on{" "}
-                  {summary.repository.default_branch ?? "the default branch"},
-                  and the layers above rebase and retarget on their own.
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    size="xs"
-                    disabled={Boolean(busy)}
-                    onClick={() => {
-                      setConfirmingCreateStack(false);
-                      onRun("create-stack", {
-                        type: "create_stack",
-                        numbers: [...unregisteredStack],
-                      });
-                    }}
-                  >
-                    Create stack
-                  </Button>
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    onClick={() => setConfirmingCreateStack(false)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-        {canRerun && (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={Boolean(busy)}
-            onClick={() =>
-              onRun("rerun", {
-                type: "rerun_failed",
-                workflow_run_ids: workflowRunIds,
-              })
-            }
-          >
-            {busy === "rerun" ? (
-              <LoaderCircle className="animate-spin" />
-            ) : (
-              <RefreshCw />
-            )}
-            Rerun failed
-          </Button>
-        )}
-        {detail.can_reopen && (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={Boolean(busy)}
-            onClick={() => onRun("reopen", { type: "reopen" })}
-          >
-            {busy === "reopen" && <LoaderCircle className="animate-spin" />}
-            Reopen
-          </Button>
-        )}
-        {(detail.can_close || canAdminMerge) && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                size="icon-xs"
-                variant="ghost"
-                disabled={Boolean(busy)}
-                aria-label="More pull request actions"
-              >
-                {busy === "close" || busy === "admin-merge" ? (
-                  <LoaderCircle className="animate-spin" />
-                ) : (
-                  <MoreHorizontal />
-                )}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {canAdminMerge && (
-                <DropdownMenuItem onSelect={onAdminMergeRequest}>
-                  <ShieldAlert />
-                  Admin merge (bypass protections)…
-                </DropdownMenuItem>
-              )}
-              {detail.can_close && (
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => onRun("close", { type: "close" })}
-                >
-                  <GitPullRequestClosed />
-                  Close without merging
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-      {confirmingAdminMerge && canAdminMerge && (
-        <div className="mt-2.5 flex flex-col gap-2 rounded-md border border-critical-border bg-critical-background/40 p-2.5">
-          <p className="flex items-start gap-1.5 text-xs text-critical-foreground-muted">
-            <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
-            Admin merge lands this pull request now and skips any reviews and
-            checks the branch still requires. GitHub records the bypass under
-            your account.
-          </p>
-          <div className="flex items-center gap-2">
+          )}
+          {canRerun && (
             <Button
               type="button"
-              size="xs"
-              variant="destructive"
+              size="sm"
+              variant="outline"
               disabled={Boolean(busy)}
-              onClick={onAdminMergeConfirm}
+              onClick={() =>
+                onRun("rerun", {
+                  type: "rerun_failed",
+                  workflow_run_ids: workflowRunIds,
+                })
+              }
             >
-              {busy === "admin-merge" && (
+              {busy === "rerun" ? (
                 <LoaderCircle className="animate-spin" />
+              ) : (
+                <RefreshCw />
               )}
-              Admin merge
+              Rerun failed
             </Button>
+          )}
+          {detail.can_reopen && (
             <Button
               type="button"
-              size="xs"
-              variant="ghost"
+              size="sm"
+              variant="outline"
               disabled={Boolean(busy)}
-              onClick={onAdminMergeCancel}
+              onClick={() => onRun("reopen", { type: "reopen" })}
             >
-              Cancel
+              {busy === "reopen" && <LoaderCircle className="animate-spin" />}
+              Reopen
             </Button>
-          </div>
+          )}
+          {(detail.can_close || canAdminMerge) && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  disabled={Boolean(busy)}
+                  aria-label="More pull request actions"
+                >
+                  {busy === "close" || busy === "admin-merge" ? (
+                    <LoaderCircle className="animate-spin" />
+                  ) : (
+                    <MoreHorizontal />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {canAdminMerge && (
+                  <DropdownMenuItem onSelect={onAdminMergeRequest}>
+                    <ShieldAlert />
+                    Admin merge (bypass protections)…
+                  </DropdownMenuItem>
+                )}
+                {detail.can_close && (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => onRun("close", { type: "close" })}
+                  >
+                    <GitPullRequestClosed />
+                    Close without merging
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
+      </div>
+
+      {confirmingStackMerge && canMergeStack && (
+        <ConfirmStrip
+          onConfirm={() => {
+            setConfirmingStackMerge(false);
+            onMergeStack(mergeableStackLayers);
+          }}
+          confirmLabel="Merge stack"
+          busy={Boolean(busy)}
+          onCancel={() => setConfirmingStackMerge(false)}
+        >
+          Lands #{summary.number} and the {mergeableStackLayers.length - 1}{" "}
+          unmerged layer
+          {mergeableStackLayers.length - 1 === 1 ? "" : "s"} below it (
+          {mergeableStackLayers.map((member) => `#${member.number}`).join(", ")}
+          ), bottom to top, each with{" "}
+          {hasMergeQueue
+            ? "the merge queue — the first layer joins the queue and the rest follow once it lands"
+            : `a direct ${mergeMethod} merge`}
+          . The chain stops at the first layer that cannot merge; draft layers
+          stay open.
+        </ConfirmStrip>
       )}
-      {blockers.length > 0 && detail.can_merge && mergeAction === null && (
-        <ul className="mt-2.5 flex flex-col gap-1 border-t border-border-subtle pt-2.5 text-xs text-warning-foreground">
-          {blockers.map((reason) => (
-            <li key={reason} className="flex items-start gap-1.5">
-              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-              {reason}
-            </li>
-          ))}
-        </ul>
+
+      {confirmingCreateStack && unregisteredStack !== null && (
+        <ConfirmStrip
+          onConfirm={() => {
+            setConfirmingCreateStack(false);
+            onRun("create-stack", {
+              type: "create_stack",
+              numbers: [...unregisteredStack],
+            });
+          }}
+          confirmLabel="Create stack"
+          busy={Boolean(busy)}
+          onCancel={() => setConfirmingCreateStack(false)}
+        >
+          Registers {unregisteredStack.map((number) => `#${number}`).join(", ")}{" "}
+          as a GitHub stack, bottom to top. GitHub then owns the ordering:
+          merging a layer lands everything below it on{" "}
+          {summary.repository.default_branch ?? "the default branch"}, and the
+          layers above rebase and retarget on their own.
+        </ConfirmStrip>
       )}
+
+      {confirmingAdminMerge && canAdminMerge && (
+        <ConfirmStrip
+          tone="critical"
+          icon={<ShieldAlert className="mt-0.5 size-3.5 shrink-0" />}
+          onConfirm={onAdminMergeConfirm}
+          confirmLabel="Admin merge"
+          confirmVariant="destructive"
+          busy={Boolean(busy)}
+          onCancel={onAdminMergeCancel}
+        >
+          Admin merge lands this pull request now and skips any reviews and
+          checks the branch still requires. GitHub records the bypass under your
+          account.
+        </ConfirmStrip>
+      )}
+
+      <PrWorkspaceRow
+        client={client}
+        summary={summary}
+        onOpenWorkspace={onOpenWorkspace}
+      />
+    </section>
+  );
+}
+
+/** The merge method, offered the same way wherever a merge button appears. */
+function MergeMethodSelect({
+  value,
+  onChange,
+}: {
+  value: MergeMethod;
+  onChange: (method: MergeMethod) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(next) => onChange(next as MergeMethod)}
+    >
+      <SelectTrigger size="sm" className="w-28" aria-label="Merge method">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="squash">Squash</SelectItem>
+        <SelectItem value="merge">Merge</SelectItem>
+        <SelectItem value="rebase">Rebase</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
+/**
+ * An inline "are you sure" inside the merge box.
+ *
+ * Inline rather than a dialog: the sheet is already a modal, and a second
+ * Radix modal stacked on it shares the dismiss layer and the body
+ * pointer-events lock — the class of bug #2537 hit with a dialog over a
+ * dialog.
+ */
+function ConfirmStrip({
+  tone = "neutral",
+  icon,
+  children,
+  confirmLabel,
+  confirmVariant = "default",
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  tone?: "neutral" | "critical";
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+  confirmLabel: string;
+  confirmVariant?: "default" | "destructive";
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-md border p-2.5",
+        tone === "critical"
+          ? "border-critical-border bg-critical-background/40"
+          : "border-border-subtle bg-muted/30",
+      )}
+    >
+      <p
+        className={cn(
+          "flex items-start gap-1.5 text-xs",
+          tone === "critical"
+            ? "text-critical-foreground-muted"
+            : "text-muted-foreground",
+        )}
+      >
+        {icon}
+        <span>{children}</span>
+      </p>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          size="xs"
+          variant={confirmVariant}
+          disabled={busy}
+          onClick={onConfirm}
+        >
+          {busy && <LoaderCircle className="animate-spin" />}
+          {confirmLabel}
+        </Button>
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          disabled={busy}
+          onClick={onCancel}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The mark that carries the gate on its own, ahead of the headline. */
+function GateMark({ tone }: { tone: StatusTone }) {
+  const shared = cn("mt-0.5 size-4 shrink-0", STATUS_MARK[tone]);
+  if (tone === "ready") return <CircleCheck className={shared} />;
+  if (tone === "critical") return <CircleAlert className={shared} />;
+  if (tone === "warning") return <CircleAlert className={shared} />;
+  if (tone === "merged") return <GitMerge className={shared} />;
+  if (tone === "pending") return <CircleDashed className={shared} />;
+  return <CircleDot className={shared} />;
+}
+
+/**
+ * Where the work happens: the workspaces carrying this pull request, and the
+ * agent that can take its remaining chores. Both belong beside the merge
+ * controls — they are the moves that change the state above them.
+ */
+function PrWorkspaceRow({
+  client,
+  summary,
+  onOpenWorkspace,
+}: {
+  client: Pick<ApiClient, "createCodeWorkspace" | "writeCodeCheckLogs">;
+  summary: CodeDeliveryPullRequestSummary;
+  onOpenWorkspace: (workspaceId: string) => void;
+}) {
+  const agentMenu = (
+    <PrAgentMenu
+      client={client}
+      summary={summary}
+      onOpenWorkspace={onOpenWorkspace}
+    />
+  );
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-2 border-t border-border-subtle pt-2.5">
+      {summary.workspace_links.map((workspace) => (
+        <Button
+          key={workspace.workspace_id}
+          type="button"
+          size="xs"
+          variant="outline"
+          title={`Open the linked workspace on ${workspace.branch_name}`}
+          onClick={() => onOpenWorkspace(workspace.workspace_id)}
+        >
+          <GitBranch />
+          Open {workspace.title}
+        </Button>
+      ))}
+      {agentMenu}
       {summary.workspace_links.length === 0 && (
-        <p className="mt-2.5 border-t border-border-subtle pt-2.5 text-xs text-muted-foreground">
+        <p className="w-full text-xs text-muted-foreground">
           Not linked to a Tidebreak workspace. These GitHub actions still work;
           code changes need a workspace.
         </p>
       )}
-    </section>
+    </div>
   );
 }
 
 function PrDescription({ body }: { body: string }) {
   const trimmed = body.trim();
   return (
-    <section>
-      <h3 className="text-sm font-medium">Description</h3>
+    <DetailSection title="Description">
       {trimmed ? (
-        <div className="review-comment-markdown mt-2 text-md leading-5">
+        <div className="review-comment-markdown text-md leading-5">
           <MessageMarkdown>
             {expandGithubEmojiShortcodes(trimmed)}
           </MessageMarkdown>
         </div>
       ) : (
-        <p className="mt-2 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           No description provided.
         </p>
       )}
-    </section>
+    </DetailSection>
   );
 }
 
@@ -1293,10 +1541,10 @@ function PrConversation({
     [detail.comments, order],
   );
   return (
-    <section>
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Conversation</h3>
-        {detail.comments.length > 1 && (
+    <DetailSection
+      title="Conversation"
+      action={
+        detail.comments.length > 1 ? (
           <Select
             value={order}
             onValueChange={(value) =>
@@ -1315,12 +1563,13 @@ function PrConversation({
               <SelectItem value="oldest">Oldest first</SelectItem>
             </SelectContent>
           </Select>
-        )}
-      </div>
+        ) : undefined
+      }
+    >
       {detail.comments.length === 0 ? (
-        <p className="mt-2 text-xs text-muted-foreground">No comments yet.</p>
+        <p className="text-xs text-muted-foreground">No comments yet.</p>
       ) : (
-        <div className="mt-2 flex flex-col gap-2.5">
+        <div className="flex flex-col gap-2.5">
           {ordered.map((comment, index) => (
             <PrCommentCard
               key={
@@ -1346,7 +1595,7 @@ function PrConversation({
         </div>
       )}
       {detail.can_comment && (
-        <div className="mt-3 flex flex-col gap-2">
+        <div className="mt-1 flex flex-col gap-2">
           <Textarea
             value={draft}
             rows={3}
@@ -1367,7 +1616,7 @@ function PrConversation({
           </div>
         </div>
       )}
-    </section>
+    </DetailSection>
   );
 }
 
@@ -1382,21 +1631,22 @@ function PrFiles({ detail }: { detail: CodeDeliveryPullRequestDetail }) {
     );
   }
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs text-muted-foreground">
-        {detail.changed_files} {detail.changed_files === 1 ? "file" : "files"}{" "}
-        changed
-        <span className="ml-2 font-mono tabular-nums">
-          <span className={STATUS_TEXT.ready}>+{detail.additions}</span>{" "}
-          <span className={STATUS_TEXT.critical}>−{detail.deletions}</span>
-        </span>
-        {detail.commits > 0 && (
-          <span className="ml-2">
-            across {detail.commits}{" "}
-            {detail.commits === 1 ? "commit" : "commits"}
+    <DetailSection
+      title="Changed files"
+      action={
+        <span className="flex items-center gap-2.5 text-xs text-muted-foreground">
+          <span>
+            {detail.changed_files}{" "}
+            {detail.changed_files === 1 ? "file" : "files"} changed
+            {detail.commits > 0 &&
+              ` across ${detail.commits} ${
+                detail.commits === 1 ? "commit" : "commits"
+              }`}
           </span>
-        )}
-      </p>
+          <DiffStat additions={detail.additions} deletions={detail.deletions} />
+        </span>
+      }
+    >
       {detail.files.map((file) => (
         <PrFileCard key={file.path} file={file} />
       ))}
@@ -1406,7 +1656,7 @@ function PrFiles({ detail }: { detail: CodeDeliveryPullRequestDetail }) {
           request on GitHub for the rest.
         </p>
       )}
-    </div>
+    </DetailSection>
   );
 }
 
@@ -1422,7 +1672,7 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
       >
         <span
           className={cn(
-            "shrink-0 text-2xs font-medium uppercase",
+            "w-16 shrink-0 text-2xs font-medium uppercase",
             STATUS_TEXT[fileStatusTone(file.status)],
           )}
         >
@@ -1437,8 +1687,7 @@ function PrFileCard({ file }: { file: CodeDeliveryPullRequestFile }) {
           }
         />
         <span className="shrink-0 font-mono text-xs tabular-nums">
-          <span className={STATUS_TEXT.ready}>+{file.additions}</span>{" "}
-          <span className={STATUS_TEXT.critical}>−{file.deletions}</span>
+          <DiffStat additions={file.additions} deletions={file.deletions} />
         </span>
       </button>
       {open && (
@@ -1517,13 +1766,18 @@ function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
     (left, right) => bucketRank(left.bucket) - bucketRank(right.bucket),
   );
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs text-muted-foreground">
-        {counts.passing} of {counts.total} passed
-        {counts.failing > 0 && `, ${counts.failing} failed`}
-        {counts.pending > 0 && `, ${counts.pending} pending`}
-        {counts.skipped > 0 && `, ${counts.skipped} skipped`}
-      </p>
+    <DetailSection
+      title="Checks"
+      action={
+        <span className="text-xs text-muted-foreground">
+          {`${counts.passing} of ${counts.total} passed${
+            counts.failing > 0 ? `, ${counts.failing} failed` : ""
+          }${counts.pending > 0 ? `, ${counts.pending} pending` : ""}${
+            counts.skipped > 0 ? `, ${counts.skipped} skipped` : ""
+          }`}
+        </span>
+      }
+    >
       <div className="flex flex-col rounded-lg border border-border-subtle">
         {ordered.map((check, index) => (
           <button
@@ -1546,7 +1800,7 @@ function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
           </button>
         ))}
       </div>
-    </div>
+    </DetailSection>
   );
 }
 
