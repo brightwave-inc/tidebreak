@@ -2825,6 +2825,8 @@ allow_local_mcp_servers: boolean, };
  */
 export type ManagedPolicySource = "os" | "provisioned" | "unmanaged";
 
+export type MarkNotificationsReadResult = { marked: number, };
+
 /**
  * The curated-registry entry a configured server matched, projected to the
  * renderer beside the server's health.
@@ -3129,6 +3131,24 @@ export type ModelVisibility = "show" | "hide";
  * sandbox. Open access still excludes local, private, and link-local targets.
  */
 export type NetworkPolicy = { "mode": "off" } | { "mode": "package_managers" } | { "mode": "allowed_hosts", allowed_hosts: Array<string>, package_managers: boolean, } | { "mode": "open" };
+
+/**
+ * Where opening the row takes the reader.
+ */
+export type NotificationContextSnapshot = { "surface": "chat", chat_id: ChatId, } | { "surface": "code", session_id: CodeSessionId, workspace_id: WorkspaceId, };
+
+/**
+ * Identifies one durable agent-finished notification.
+ */
+export type NotificationId = string;
+
+export type NotificationKindSnapshot = "agent_completed" | "agent_failed";
+
+export type NotificationPage = { notifications: Array<NotificationSnapshot>, next_cursor?: string, };
+
+export type NotificationSnapshot = { id: NotificationId, kind: NotificationKindSnapshot, title: string, context: NotificationContextSnapshot, created_at: string, read_at?: string, };
+
+export type NotificationUnreadCount = { unread: number, };
 
 /**
  * Identifies one conversation-owned output across all of its revisions.

@@ -6,9 +6,12 @@ use sea_orm::{
     QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, SequencedCodeEvent};
+use crate::code::{
+    CodeEvent, CodeSessionId, CodeSessionKind, CodeTurnId, CodeTurnStatus, SequencedCodeEvent,
+    WorkspaceId,
+};
 use crate::error::{AgentError, Result};
-use crate::OwnerId;
+use crate::{NotificationKind, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::{acquire_code_session_write_lock, CodeJournalError};
@@ -25,6 +28,29 @@ pub async fn append_event(
     session_id: CodeSessionId,
     spawn_epoch: i64,
     event: &CodeEvent,
+) -> std::result::Result<i64, CodeJournalError> {
+    append_event_inner(store, owner, session_id, spawn_epoch, event, None).await
+}
+
+/// Append a terminal event and mint its user notification in one transaction.
+pub async fn append_event_with_notification(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    turn_id: CodeTurnId,
+    event: &CodeEvent,
+) -> std::result::Result<i64, CodeJournalError> {
+    append_event_inner(store, owner, session_id, spawn_epoch, event, Some(turn_id)).await
+}
+
+async fn append_event_inner(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    event: &CodeEvent,
+    notification_turn_id: Option<CodeTurnId>,
 ) -> std::result::Result<i64, CodeJournalError> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
@@ -46,6 +72,56 @@ pub async fn append_event(
         });
     }
     let seq = append_event_on_locked(&transaction, owner, session_id, event).await?;
+    if let Some(turn_id) = notification_turn_id {
+        let kind = match event {
+            CodeEvent::TurnCompleted { .. } => NotificationKind::AgentCompleted,
+            CodeEvent::TurnFailed { .. } => NotificationKind::AgentFailed,
+            _ => {
+                return Err(AgentError::Store(
+                    "only completed or failed Code turns mint notifications".into(),
+                )
+                .into())
+            }
+        };
+        let turn_exists = entities::code_turn::Entity::find_by_id(turn_id.0)
+            .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+            .one(&transaction)
+            .await
+            .map_err(store_err)?
+            .is_some();
+        if !turn_exists {
+            return Err(AgentError::Store(format!(
+                "code turn {turn_id} does not belong to session {session_id}"
+            ))
+            .into());
+        }
+        let session_kind = CodeSessionKind::from_str(&session.kind).ok_or_else(|| {
+            AgentError::Store(format!(
+                "code_session {} has unknown kind {}",
+                session.id, session.kind
+            ))
+        })?;
+        if crate::code_session_mints_notification(session_kind) {
+            let workspace_id = WorkspaceId(session.workspace_id);
+            let workspace_title = entities::code_workspace::Entity::find_by_id(workspace_id.0)
+                .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+                .one(&transaction)
+                .await
+                .map_err(store_err)?
+                .map(|workspace| workspace.title);
+            super::super::notification::record_code_turn_notification_on(
+                &transaction,
+                owner,
+                session_id,
+                workspace_id,
+                turn_id,
+                workspace_title.as_deref(),
+                kind,
+            )
+            .await?;
+        }
+    }
     transaction.commit().await.map_err(store_err)?;
     Ok(seq)
 }

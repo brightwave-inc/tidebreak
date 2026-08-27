@@ -23,6 +23,7 @@ import {
   nextReconnectDelay,
 } from "../ChatSessionController";
 import { requestUserAttention } from "../host";
+import { useRefreshSignals } from "../RefreshSignals";
 import { friendlyErrorMessage } from "../lib/utils";
 import { useCodeUiStore } from "./CodeUiStore";
 
@@ -443,6 +444,7 @@ export const useCodeUpdatesStore = create<CodeUpdatesStore>()((set, get) => ({
       // change would compare against the interactive digest and misfire.
       if (action.type === "digest" && action.digest.kind !== "watch") {
         maybeNotify(previous, action.digest);
+        maybeBumpAgentNotifications(previous, action.digest);
       }
       if (action.type === "clone_progress") {
         const cloneReadErrors = { ...next.cloneReadErrors };
@@ -769,6 +771,21 @@ function notifyBackgroundClone(
     description: "Create a workspace when you are ready.",
     action,
   });
+}
+
+function maybeBumpAgentNotifications(
+  previous: CodeUpdatesState,
+  digest: CodeSessionDigest,
+): void {
+  if (digest.kind === "watch") return;
+  const prior =
+    previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
+      ?.attention;
+  const wasWorking = prior?.state.type === "working";
+  const settled = digest.attention.state.type === "idle";
+  if (wasWorking && settled) {
+    useRefreshSignals.getState().signal("notifications");
+  }
 }
 
 function maybeNotify(

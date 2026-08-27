@@ -2073,6 +2073,31 @@ pub mod code_trigger_fire {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod notification {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "notification")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub kind: String,
+        #[sea_orm(column_type = "Text")]
+        pub title: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub context: Json,
+        pub dedupe_key: String,
+        pub created_at: DateTimeUtc,
+        pub read_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_trigger_delivery_receipt {
     use sea_orm::entity::prelude::*;
 

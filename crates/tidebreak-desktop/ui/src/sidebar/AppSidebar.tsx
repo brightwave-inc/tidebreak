@@ -8,6 +8,7 @@ import { useChatListStore } from "@/ChatListStore";
 import { CodeModeSwitch } from "@/code/CodeModeSwitch";
 import { ChatsSection } from "./ChatsSection";
 import { InboxButton } from "./InboxButton";
+import { NotificationBellButton } from "@/NotificationBellButton";
 import { ProjectsSection } from "./ProjectsSection";
 import { SidebarButton } from "./primitives";
 import { SidebarFrame } from "./SidebarFrame";
@@ -41,6 +42,7 @@ export function AppSidebar({ chat }: { chat?: Chat }) {
 
       <div className="flex shrink-0 flex-col gap-0.5">
         <InboxButton />
+        <NotificationBellButton />
 
         {/* Apps and plugins are install-wide — they outlive every conversation
             — so each is a full page of its own rather than a tab beside one. */}

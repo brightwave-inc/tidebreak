@@ -597,6 +597,10 @@ fn member_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("GET", "/projects"),
         ("GET", "/documents"),
         ("GET", "/inbox"),
+        ("GET", "/notifications"),
+        ("GET", "/notifications/unread-count"),
+        ("POST", "/notifications/read"),
+        ("POST", "/notifications/read-all"),
         ("GET", "/grants"),
         ("GET", "/consent/statements"),
     ]

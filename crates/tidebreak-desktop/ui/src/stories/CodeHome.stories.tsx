@@ -159,7 +159,6 @@ function storyRouter() {
       stub("/code/w/$workspaceId", "Workspace"),
       stub("/code/delivery/pull-requests", "Delivery"),
       stub("/code/archive", "Archive"),
-      stub("/code/notifications", "Notifications"),
     ]),
     history: createMemoryHistory({ initialEntries: ["/code"] }),
   });

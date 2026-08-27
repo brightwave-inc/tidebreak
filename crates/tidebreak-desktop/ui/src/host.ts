@@ -107,6 +107,27 @@ export async function requestUserAttention(): Promise<void> {
   await invoke("request_user_attention");
 }
 
+/** Main-window focus. `document.hidden` is the tab, not this window. */
+export async function isWindowFocused(): Promise<boolean> {
+  if (!isTauri())
+    return typeof document === "undefined" ? true : !document.hidden;
+  return invoke<boolean>("is_window_focused");
+}
+
+/** One OS banner. Asks for permission on the first unfocused present. */
+export async function presentNativeNotification(
+  title: string,
+  body: string,
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    await invoke("present_native_notification", { title, body });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The folders this conversation has attached, by their safe identities. What
  * each folder *allows* is not part of this answer: access is rendered from

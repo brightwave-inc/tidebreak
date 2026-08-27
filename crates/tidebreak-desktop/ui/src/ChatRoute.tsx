@@ -329,6 +329,9 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       case "refresh_task_plan":
         signalRefresh("taskPlan");
         return;
+      case "refresh_notifications":
+        signalRefresh("notifications");
+        return;
       case "warm_presentation_converter":
         warmPresentationConverter();
         return;

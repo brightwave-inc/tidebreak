@@ -677,6 +677,19 @@ pub fn app(state: AppState) -> Router {
             get(routes::list_pending_chat_prompts),
         )
         .route("/inbox", get(routes::list_inbox))
+        .route("/notifications", get(routes::list_notifications))
+        .route(
+            "/notifications/unread-count",
+            get(routes::unread_notification_count),
+        )
+        .route(
+            "/notifications/read",
+            axum::routing::post(routes::mark_notifications_read),
+        )
+        .route(
+            "/notifications/read-all",
+            axum::routing::post(routes::mark_all_notifications_read),
+        )
         .route(
             "/chats/{id}",
             get(routes::get_chat)

@@ -85,6 +85,7 @@ export type ChatSessionEffect =
    * hint that the chat's durable plan moved on, and the panel re-reads it.
    */
   | { type: "refresh_task_plan" }
+  | { type: "refresh_notifications" }
   /** A turn began; the host resets cancel state (and steer state when asked). */
   | { type: "turn_began"; turnId: string; startsDifferentTurn: boolean }
   /** A turn reached a terminal event; the host clears cancel/steer state. */
@@ -441,6 +442,7 @@ export function reduceChatSessionEvent(
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
         { type: "refresh_plan_approvals" },
+        { type: "refresh_notifications" },
         { type: "hydrate_terminal_transcript" },
       );
       return {
@@ -462,6 +464,7 @@ export function reduceChatSessionEvent(
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
         { type: "refresh_plan_approvals" },
+        { type: "refresh_notifications" },
         { type: "hydrate_terminal_transcript" },
       );
       return {
@@ -522,6 +525,7 @@ export function reduceChatSessionEvent(
         { type: "turn_resolved" },
         { type: "refresh_user_questions" },
         { type: "refresh_plan_approvals" },
+        { type: "refresh_notifications" },
       );
       return {
         state: {

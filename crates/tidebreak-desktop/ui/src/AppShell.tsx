@@ -76,6 +76,7 @@ import { SidebarExpandStrip } from "./sidebar/SidebarExpandStrip";
 import { Titlebar } from "./Titlebar";
 import { WindowDragStrip } from "./WindowDragStrip";
 import { useActiveChatId } from "./useActiveChatId";
+import { useAgentNotifications } from "./useAgentNotifications";
 import { useChatPromptWatcher } from "./useChatPromptWatcher";
 import {
   hasOpenModalDialog,
@@ -168,6 +169,7 @@ function GatedShellHooks({
   // Watched here rather than in the conversation, so that the agent parking a
   // turn on a question is noticed whatever screen the reader is on.
   useChatPromptWatcher(client, chatId);
+  useAgentNotifications(client);
   useShellShortcuts(shortcuts, shortcutMode);
   return <CodeDeliveryMonitor client={client} />;
 }

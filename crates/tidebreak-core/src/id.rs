@@ -363,6 +363,10 @@ id_type!(
     TurnId
 );
 id_type!(
+    /// Identifies one durable agent-finished notification.
+    NotificationId
+);
+id_type!(
     /// Identifies one idempotent steering instruction for a live turn.
     TurnSteerId
 );

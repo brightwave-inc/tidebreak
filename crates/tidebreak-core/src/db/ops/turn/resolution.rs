@@ -1059,6 +1059,17 @@ where
         event,
     )
     .await?;
+    let notification_kind = match event {
+        AgentEvent::TurnCompleted { .. } | AgentEvent::TurnRefused { .. } => {
+            Some(crate::NotificationKind::AgentCompleted)
+        }
+        AgentEvent::TurnFailed { .. } => Some(crate::NotificationKind::AgentFailed),
+        _ => None,
+    };
+    if let Some(kind) = notification_kind {
+        super::super::notification::record_work_turn_notification_on(conn, chat_id, id, kind)
+            .await?;
+    }
     Ok(Some(SequencedEvent {
         seq,
         event: event.clone(),
@@ -1092,6 +1103,22 @@ where
         return Err(AgentError::Store(format!(
             "turn {id} has a different terminal event"
         )));
+    }
+    let notification_kind = match &event {
+        AgentEvent::TurnCompleted { .. } | AgentEvent::TurnRefused { .. } => {
+            Some(crate::NotificationKind::AgentCompleted)
+        }
+        AgentEvent::TurnFailed { .. } => Some(crate::NotificationKind::AgentFailed),
+        _ => None,
+    };
+    if let Some(kind) = notification_kind {
+        super::super::notification::record_work_turn_notification_on(
+            conn,
+            ChatId(stored.chat_id),
+            id,
+            kind,
+        )
+        .await?;
     }
     Ok(Some(SequencedEvent {
         seq: stored.seq,

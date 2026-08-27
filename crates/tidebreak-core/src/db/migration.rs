@@ -57,6 +57,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeSessionProcessIdentity),
             Box::new(CodeWorkspaceArchiving),
             Box::new(CodePermissionModeIntent),
+            Box::new(AgentNotification),
         ]
     }
 }
@@ -387,6 +388,94 @@ impl MigrationTrait for CodePermissionModeIntent {
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // A pending intent is a crash-recovery fence. Removing it can make an
         // acknowledged native mode differ from the durable session posture.
+        Ok(())
+    }
+}
+
+/// Durable log of top-level agent turns that settled without cancel.
+struct AgentNotification;
+
+impl MigrationName for AgentNotification {
+    fn name(&self) -> &str {
+        "m20260826_000020_agent_notification"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AgentNotification {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::Notification::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::Notification::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::Notification::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(ColumnDef::new(idens::Notification::Kind).text().not_null())
+                    .col(ColumnDef::new(idens::Notification::Title).text().not_null())
+                    .col(
+                        ColumnDef::new(idens::Notification::Context)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::Notification::DedupeKey)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::Notification::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::Notification::ReadAt).timestamp_with_time_zone())
+                    .check(
+                        Expr::col(idens::Notification::Kind)
+                            .is_in(["agent_completed", "agent_failed"]),
+                    )
+                    .check(Func::char_length(Expr::col(idens::Notification::Title)).gt(0))
+                    .check(Func::char_length(Expr::col(idens::Notification::DedupeKey)).gt(0))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ux_notification_owner_dedupe")
+                    .table(idens::Notification::Table)
+                    .col(idens::Notification::Owner)
+                    .col(idens::Notification::DedupeKey)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_notification_owner_created")
+                    .table(idens::Notification::Table)
+                    .col(idens::Notification::Owner)
+                    .col(idens::Notification::CreatedAt)
+                    .col(idens::Notification::Id)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the table would lose unread agent-finished rows.
         Ok(())
     }
 }
@@ -2378,6 +2467,7 @@ mod tests {
                 "m20260826_000017_code_session_process_identity",
                 "m20260826_000018_code_workspace_archiving",
                 "m20260826_000019_code_permission_mode_intent",
+                "m20260826_000020_agent_notification",
             ]
         );
         assert!(db

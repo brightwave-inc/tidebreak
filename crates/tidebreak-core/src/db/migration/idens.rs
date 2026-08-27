@@ -1053,6 +1053,19 @@ pub(crate) enum CodeTriggerDeliveryReceipt {
     AcceptedAt,
 }
 
+#[derive(DeriveIden)]
+pub(crate) enum Notification {
+    Table,
+    Id,
+    Owner,
+    Kind,
+    Title,
+    Context,
+    DedupeKey,
+    CreatedAt,
+    ReadAt,
+}
+
 /// Reserves one validated image for one code session, mirroring
 /// [`ChatImagePublication`]. Publication is authority, not upload.
 #[derive(DeriveIden)]

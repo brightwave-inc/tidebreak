@@ -77,6 +77,7 @@ import {
   type AgentRunProgress,
   type LocalVoiceInfo,
   type InboxEntry,
+  type AgentNotificationPage,
   inboxConversationKey,
   type AgentRunTaskPlan,
   type PendingChatPrompt,
@@ -138,6 +139,7 @@ import {
   parseAgentRunProgress,
   parseFolderAccessRequest,
   parseInboxEntry,
+  parseAgentNotificationPage,
   parseOutputWritebackRequest,
   parsePendingChatPrompt,
   parsePendingPlanApproval,
@@ -196,6 +198,18 @@ import {
   parseCodeDeliveryRunDetail,
   parseCodeDeliveryRunsPage,
 } from "../code/parsers";
+
+function parseMarked(body: unknown): number {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    !("marked" in body) ||
+    typeof (body as { marked: unknown }).marked !== "number"
+  ) {
+    throw new Error("notification mark response is invalid");
+  }
+  return (body as { marked: number }).marked;
+}
 
 const WS_HANDSHAKE = "tidebreak-v1";
 const WS_TOKEN_PREFIX = "tidebreak-token.";
@@ -1097,6 +1111,50 @@ export class ApiClient {
    * whole set to badge the inbox and mark the rail, and asking each chat in
    * turn would make that cost grow with the profile.
    */
+  async listNotifications(cursor?: string): Promise<AgentNotificationPage> {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    const body = await this.json<unknown>(`/notifications${query}`, {
+      headers: this.headers(),
+    });
+    const page = parseAgentNotificationPage(body);
+    if (!page) {
+      throw new Error("notification list response is invalid");
+    }
+    return page;
+  }
+
+  async notificationUnreadCount(): Promise<number> {
+    const body = await this.json<unknown>("/notifications/unread-count", {
+      headers: this.headers(),
+    });
+    if (
+      !body ||
+      typeof body !== "object" ||
+      !("unread" in body) ||
+      typeof (body as { unread: unknown }).unread !== "number"
+    ) {
+      throw new Error("notification unread-count response is invalid");
+    }
+    return (body as { unread: number }).unread;
+  }
+
+  async markNotificationsRead(ids: string[]): Promise<number> {
+    const body = await this.json<unknown>("/notifications/read", {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ ids }),
+    });
+    return parseMarked(body);
+  }
+
+  async markAllNotificationsRead(): Promise<number> {
+    const body = await this.json<unknown>("/notifications/read-all", {
+      method: "POST",
+      headers: this.headers(),
+    });
+    return parseMarked(body);
+  }
+
   async listInbox(): Promise<InboxEntry[]> {
     const body = await this.json<unknown>("/inbox", {
       headers: this.headers(),
