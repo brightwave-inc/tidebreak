@@ -8,16 +8,48 @@
 //! unconditional one: the request path reads the stored row, and this
 //! sweep is what keeps the row current while anyone watches.
 
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use tidebreak_core::db::code::list_active_watches_all_owners;
+use tidebreak_core::{OwnerId, WorkspaceId};
 
 use super::runtime::CodeRuntime;
 
 /// Coprime with the 47s watch, 53s trigger, and 61s reconcile sweeps, so
 /// the four background readers never land on the same tick.
 pub(crate) const HOT_REFRESH_INTERVAL: Duration = Duration::from_secs(17);
+
+/// How long one mark keeps a workspace on the hot tier.
+const HOT_WINDOW: Duration = Duration::from_secs(120);
+
+/// The workspaces on the hot tier, with the owner each belongs to.
+///
+/// Held by handle rather than owned outright, so a writer that has no
+/// runtime can still mark a workspace: the post-turn fact detector is the
+/// one that knows the agent just pushed, and a row nobody marks stays on
+/// its pre-push head until a route mutation or the reconcile sweep moves it.
+#[derive(Clone, Default)]
+pub(crate) struct HotPullRequests(Arc<Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>>);
+
+impl HotPullRequests {
+    /// Keep this workspace on the hot tier for [`HOT_WINDOW`].
+    pub(crate) fn mark(&self, owner: &OwnerId, id: WorkspaceId) {
+        let mut hot = self.0.lock().expect("hot prs");
+        hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
+        hot.insert(id, (owner.clone(), Instant::now()));
+    }
+
+    /// The workspaces still inside their window.
+    pub(crate) fn live(&self) -> Vec<(OwnerId, WorkspaceId)> {
+        let mut hot = self.0.lock().expect("hot prs");
+        hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
+        hot.iter()
+            .map(|(id, (owner, _))| (owner.clone(), *id))
+            .collect()
+    }
+}
 
 /// Abort the hot refresher when the runtime is dropped. The loop holds a
 /// [`Weak`] handle for the same reason every sweep does: an `Arc` would

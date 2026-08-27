@@ -73,11 +73,17 @@ struct PushAct {
 /// Never returns an error and never touches the turn: every failure is a
 /// debug log. Runs after the turn's terminal event is journaled, so the
 /// tail walk finds the whole turn above its `TurnStarted` marker.
+///
+/// A confirmed act marks the workspace hot (issue 2799). The agent's own
+/// push moves the head the watch assesses, and nothing else dirties the row
+/// for it: without the mark the next assessment reads a pre-push head, calls
+/// its own fix turn a repeat, and parks the watch.
 pub(crate) async fn sweep_turn_for_pull_request_acts(
     db: &DbStore,
     session: &CodeSession,
     turn_id: CodeTurnId,
     gh_search_path: Option<&str>,
+    hot: Option<&super::pr_refresh::HotPullRequests>,
 ) {
     let events =
         match list_recent_events(db, &session.owner, session.id, DETECTOR_EVENT_WINDOW).await {
@@ -148,6 +154,7 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
     recorded.sort_by_key(|(_, command)| command.seq);
 
     let mut confirms = 0usize;
+    let mut confirmed_any = false;
     let mut seen_creates: HashSet<String> = HashSet::new();
     let mut seen_pushes: HashSet<String> = HashSet::new();
     let mut pushes: Vec<(RecordedCommand, PushAct)> = Vec::new();
@@ -179,7 +186,7 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
                     continue;
                 }
                 confirms += 1;
-                confirm_create(
+                confirmed_any |= confirm_create(
                     db,
                     session,
                     &command,
@@ -217,11 +224,23 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
             break;
         }
         confirms += 1;
-        confirm_push(db, session, &command, &push, gh_search_path).await;
+        confirmed_any |= confirm_push(db, session, &command, &push, gh_search_path).await;
+    }
+
+    // The turn moved this workspace's pull request. Nothing else marks it:
+    // route mutations dirty the row for the user's own actions, and the
+    // agent's push is neither. Left unmarked, the watch's next assessment
+    // reads the head from before the fix turn pushed (issue 2799).
+    if confirmed_any {
+        if let Some(hot) = hot {
+            hot.mark(&session.owner, session.workspace_id);
+        }
     }
 }
 
 /// Confirm one `gh pr create` against the host and mint an authored fact.
+///
+/// Reports whether a fact landed, so the caller can mark the workspace hot.
 async fn confirm_create(
     db: &DbStore,
     session: &CodeSession,
@@ -229,13 +248,13 @@ async fn confirm_create(
     create: &CreateAct,
     preview: Option<&str>,
     gh_search_path: Option<&str>,
-) {
+) -> bool {
     let sniffed = preview.and_then(sniff_pull_request_url);
     let target = match resolve_create_target(create, sniffed.as_ref(), &command.cwd).await {
         Some(target) => target,
         None => {
             debug!("pr fact detector could not resolve a repository for a create");
-            return;
+            return false;
         }
     };
     let value = if let Some((_, number)) = &sniffed {
@@ -261,7 +280,7 @@ async fn confirm_create(
         };
         let Some(head) = head else {
             debug!("pr fact detector could not resolve the created head branch");
-            return;
+            return false;
         };
         match list_pull_requests_for_head_raw(
             &target.host,
@@ -279,7 +298,7 @@ async fn confirm_create(
             }
         }
     };
-    let Some(value) = value else { return };
+    let Some(value) = value else { return false };
     record_confirmed_fact(
         db,
         &session.owner,
@@ -291,18 +310,21 @@ async fn confirm_create(
         CodePullRequestRelation::Authored,
         CodePullRequestDiscovery::Command,
     )
-    .await;
+    .await
+    .is_some()
 }
 
 /// Confirm one `git push` against the host and mint a contributed fact when
 /// the pushed branch is a pull request's head.
+///
+/// Reports whether a fact landed, so the caller can mark the workspace hot.
 async fn confirm_push(
     db: &DbStore,
     session: &CodeSession,
     command: &RecordedCommand,
     push: &PushAct,
     gh_search_path: Option<&str>,
-) {
+) -> bool {
     let cwd = push
         .cwd_override
         .clone()
@@ -312,7 +334,7 @@ async fn confirm_push(
         Some(target) => target,
         None => {
             debug!("pr fact detector could not resolve a repository for a push");
-            return;
+            return false;
         }
     };
     let branch = match &push.branch {
@@ -321,7 +343,7 @@ async fn confirm_push(
     };
     let Some(branch) = branch else {
         debug!("pr fact detector could not resolve the pushed branch");
-        return;
+        return false;
     };
     let values = match list_pull_requests_for_head_raw(
         &target.host,
@@ -335,7 +357,7 @@ async fn confirm_push(
         Ok(values) => values,
         Err(err) => {
             debug!("pr fact detector could not list pull requests for a push: {err}");
-            return;
+            return false;
         }
     };
     let matching: Vec<Value> = values
@@ -357,7 +379,7 @@ async fn confirm_push(
         Some(value) => Some(value.clone()),
         None => newest_by_created(matching),
     };
-    let Some(value) = value else { return };
+    let Some(value) = value else { return false };
     record_confirmed_fact(
         db,
         &session.owner,
@@ -369,7 +391,8 @@ async fn confirm_push(
         CodePullRequestRelation::Contributed,
         CodePullRequestDiscovery::Command,
     )
-    .await;
+    .await
+    .is_some()
 }
 
 /// Write one confirmed observation: upsert the fact, claim the attribution,

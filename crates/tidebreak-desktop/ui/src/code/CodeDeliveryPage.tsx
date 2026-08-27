@@ -86,6 +86,7 @@ import {
   type CodeDeliverySurface,
 } from "./CodeDeliveryStore";
 import { CodeSidebar } from "./CodeSidebar";
+import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { RepositoryTriggerRules } from "./RepositoryTriggerRules";
 import { GithubAvatar } from "./GithubAvatar";
 import {
@@ -828,6 +829,13 @@ function PullRequestsSurface({
   const [targetDetailState, setTargetDetailState] =
     useState<TargetDetailState<CodeDeliveryPullRequestDetail> | null>(null);
   const [revision, setRevision] = useState(0);
+  // The server nudges `delivery` whenever the pull-request store moves
+  // (decision 66). This list is a projection of that nudge, not a clock of
+  // its own: a fix turn, a watch, or another window's action reaches the
+  // page through the broadcast rather than waiting for a Refresh.
+  const deliveryRevision = useCodeUpdatesStore(
+    (state) => state.deliveryRevision,
+  );
   // Set by Refresh and by a completed action; consumed by the next query that
   // actually runs. Only those two reach past the server's short list cache —
   // a filter change reruns against it, which is the whole point of caching a
@@ -1048,7 +1056,14 @@ function PullRequestsSurface({
       generation.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, selectedRepositories, filters, revision, targetKey]);
+  }, [
+    client,
+    selectedRepositories,
+    filters,
+    revision,
+    deliveryRevision,
+    targetKey,
+  ]);
 
   if (loadingRepositories) return <DeliveryListSkeleton />;
   if (!repositoryLoaded && repositoryError) {

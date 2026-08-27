@@ -807,10 +807,11 @@ async fn watch_submission_was_accepted(
         .any(|turn| turn.started_at >= reserved_at))
 }
 
-/// The workspace's stored pull-request digest, when the fact row behind it
-/// confirms the live tier is fresh (decision 66). `None` sends the caller to
-/// a host read: no stored digest, no joinable URL, no fact row, or a tier
-/// older than the reconcile cadence promises.
+/// The workspace's pull request as its fact row holds it, when that row's
+/// live tier is fresh (decision 66). The workspace column supplies the
+/// identity to join on. `None` sends the caller to a host read: no stored
+/// digest, no joinable URL, no fact row, or a tier older than the reconcile
+/// cadence promises.
 async fn fresh_stored_digest(
     runtime: &CodeRuntime,
     owner: &OwnerId,
@@ -833,19 +834,34 @@ async fn fresh_stored_digest(
     fresh_workspace_digest(stored, &fact, Utc::now())
 }
 
-/// Return the workspace's write-through digest when the fact row confirms
-/// that its live tier is fresh.
+/// Return the digest the fact row's live tier certifies, when that tier is
+/// fresh.
 ///
-/// The hot refresher can observe a merge before the slower reconcile pass
-/// updates the fact snapshot. Rebuilding from that snapshot would reopen the
-/// pull request for the watch until the next reconcile tick.
+/// The certificate and the fields it certifies must come from the same row
+/// (issue 2799). `observed_at` says when the fact row's live tier was
+/// written; the workspace column is a second row whose write can be dropped
+/// on its own, so reading checks, mergeability, and the head off the column
+/// dates one row's staleness by another row's clock.
+///
+/// A terminal state the column already holds still wins. The snapshot tier
+/// moves on its own writes, and reopening a merged pull request for the
+/// watch would cost a fix turn against a head nobody can push.
 fn fresh_workspace_digest(
     stored: &PullRequestDigest,
     fact: &tidebreak_core::CodePullRequestFact,
     now: chrono::DateTime<Utc>,
 ) -> Option<PullRequestDigest> {
     let live = fact.live.as_ref()?;
-    super::reconcile::live_tier_is_fresh(live, now).then(|| stored.clone())
+    if !super::reconcile::live_tier_is_fresh(live, now) {
+        return None;
+    }
+    let mut digest = super::pr_facts::digest_from_fact(fact);
+    let stored_state = stored.state.trim().to_ascii_lowercase();
+    if stored.merged == Some(true) || stored_state == "merged" || stored_state == "closed" {
+        digest.state = stored.state.clone();
+        digest.merged = stored.merged;
+    }
+    Some(digest)
 }
 
 /// Clear only the `NeedsYou` marker that this watch's previous blocked state
@@ -1026,6 +1042,55 @@ mod tests {
         };
 
         assert_eq!(fresh_workspace_digest(&stored, &fact, now), Some(stored));
+    }
+
+    #[test]
+    fn fresh_workspace_digest_reads_the_row_that_dates_it() {
+        // The workspace column and the fact row are two rows with two
+        // writes. When the column's write is dropped, `observed_at` still
+        // says the pull request was read a second ago — of the fact row.
+        // Assessing the column against that certificate judges a head the
+        // agent has already pushed past (issue 2799).
+        let now = Utc::now();
+        let mut stored = base_pr();
+        stored.head_sha = Some("stale".to_owned());
+        stored.checks = None;
+        stored.merge_state_status = Some("clean".to_owned());
+        let mut observed = base_pr();
+        observed.head_sha = Some("pushed".to_owned());
+        observed.checks = Some(vec![check(PullRequestCheckBucket::Fail)]);
+        observed.merge_state_status = Some("blocked".to_owned());
+        let fact = CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: OwnerId::local(),
+            host: "github.com".to_owned(),
+            repo_owner: "example".to_owned(),
+            repo_name: "demo".to_owned(),
+            number: observed.number,
+            url: observed.url.clone().unwrap(),
+            title: observed.title.clone().unwrap(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".to_owned(),
+            base_branch: "main".to_owned(),
+            head_sha: observed.head_sha.clone(),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: Some(CodePullRequestLiveState::from_digest(&observed, now)),
+        };
+
+        let digest = fresh_workspace_digest(&stored, &fact, now).expect("the tier is fresh");
+        assert_eq!(digest.head_sha.as_deref(), Some("pushed"));
+        assert_eq!(digest.merge_state_status.as_deref(), Some("blocked"));
+        assert_eq!(
+            assess(&digest),
+            WatchAssessment::Actionable(WatchReason::FailingChecks)
+        );
     }
 
     #[test]

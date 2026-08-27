@@ -1769,6 +1769,306 @@ async fn a_hosted_digest_reads_the_row_and_refreshes_conditionally() {
     );
 }
 
+/// A conditional read that loses its validator writes nothing (issue 2799).
+///
+/// Two refreshes overlap: this one sends the ETag the row held when it
+/// started, and a fresher 200 lands on the row while the request is in
+/// flight. The 304 comes back and rebuilds a digest from the snapshot it
+/// read before that write — a pull request that no longer exists. Decision
+/// 66's validator already refuses the fetch-state write; the live tier, the
+/// workspace column, and the caller's broadcast must refuse it too, or the
+/// state every surface renders is the one the row rejected.
+#[tokio::test]
+async fn a_conditional_read_that_lost_its_validator_writes_nothing() {
+    use tidebreak_core::db::code::{
+        get_pull_request_fact, save_pull_request_fact, set_active_workspace_pull_request,
+        set_pull_request_fetch_state, set_pull_request_live_state, PullRequestFetchCondition,
+    };
+    use tidebreak_core::{
+        CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
+        DbStore, PullRequestDigest,
+    };
+
+    /// Where the overlapping fetch writes, once the runtime exists.
+    type Competing = Arc<std::sync::Mutex<Option<(Arc<DbStore>, tidebreak_core::WorkspaceId)>>>;
+
+    let competing: Competing = Arc::default();
+    let pull_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let pull_competing = Arc::clone(&competing);
+    let pull_seen = Arc::clone(&pull_calls);
+    let pull = move |headers: axum::http::HeaderMap| {
+        let competing = Arc::clone(&pull_competing);
+        let calls = Arc::clone(&pull_seen);
+        async move {
+            let conditional = headers
+                .get(axum::http::header::IF_NONE_MATCH)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned);
+            let unchanged = conditional.as_deref() == Some("W/\"pull-1\"");
+            let armed = competing
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let (true, Some((db, workspace_id))) = (unchanged, armed) {
+                // The fresher fetch wins the row while this request is still
+                // open: new snapshot, new live tier, new column, new ETag.
+                let owner = tidebreak_core::OwnerId::local();
+                let now = chrono::Utc::now();
+                let winner = PullRequestDigest {
+                    number: 12,
+                    url: Some("https://github.com/acme/demo/pull/12".to_owned()),
+                    state: "open".to_owned(),
+                    title: Some("Newer hosted change".to_owned()),
+                    checks_summary: Some("2 passing, 0 pending, 0 failing".to_owned()),
+                    checks: None,
+                    draft: Some(false),
+                    merged: Some(false),
+                    review_decision: None,
+                    mergeable: Some("mergeable".to_owned()),
+                    merge_state_status: Some("clean".to_owned()),
+                    head_branch: Some("feature".to_owned()),
+                    base_branch: Some("main".to_owned()),
+                    head_sha: Some("cafecafecafecafecafe".to_owned()),
+                    auto_merge_enabled: Some(false),
+                    in_merge_queue: Some(false),
+                };
+                let fact = CodePullRequestFact {
+                    id: CodePullRequestId::new(),
+                    owner: owner.clone(),
+                    host: "github.com".into(),
+                    repo_owner: "acme".into(),
+                    repo_name: "demo".into(),
+                    number: 12,
+                    url: "https://github.com/acme/demo/pull/12".into(),
+                    title: "Newer hosted change".into(),
+                    state: CodePullRequestState::Open,
+                    draft: false,
+                    author: None,
+                    head_branch: "feature".into(),
+                    base_branch: "main".into(),
+                    head_sha: Some("cafecafecafecafecafe".into()),
+                    created_at: now,
+                    updated_at: now,
+                    merged_at: None,
+                    closed_at: None,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    live: None,
+                };
+                set_pull_request_fetch_state(
+                    &db,
+                    &owner,
+                    "github.com",
+                    "acme",
+                    "demo",
+                    12,
+                    Some(&fact),
+                    PullRequestFetchCondition::Unconditional,
+                    Some("W/\"pull-2\""),
+                    Some("W/\"checks-1\""),
+                    Some("W/\"reviews-1\""),
+                )
+                .await
+                .unwrap();
+                set_pull_request_live_state(
+                    &db,
+                    &owner,
+                    "github.com",
+                    "acme",
+                    "demo",
+                    12,
+                    &CodePullRequestLiveState::from_digest(&winner, now),
+                )
+                .await
+                .unwrap();
+                set_active_workspace_pull_request(&db, &owner, workspace_id, &winner)
+                    .await
+                    .unwrap();
+            }
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            axum::http::Response::builder()
+                .status(if unchanged { 304 } else { 200 })
+                .header("etag", "W/\"pull-1\"")
+                .body(axum::body::Body::from(if unchanged {
+                    String::new()
+                } else {
+                    serde_json::json!({
+                        "number": 12,
+                        "html_url": "https://github.com/acme/demo/pull/12",
+                        "title": "Hosted change",
+                        "state": "open",
+                        "draft": false,
+                        "mergeable": true,
+                        "mergeable_state": "clean",
+                        "head": { "ref": "feature", "sha": "feedfeedfeedfeedfeed" },
+                        "base": { "ref": "main" },
+                        "auto_merge": null,
+                    })
+                    .to_string()
+                }))
+                .unwrap()
+        }
+    };
+    let answer = |headers: axum::http::HeaderMap, etag: &'static str, body: String| {
+        let conditional = headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok());
+        let unchanged = conditional == Some(etag);
+        axum::http::Response::builder()
+            .status(if unchanged { 304 } else { 200 })
+            .header("etag", etag)
+            .body(axum::body::Body::from(if unchanged {
+                String::new()
+            } else {
+                body
+            }))
+            .unwrap()
+    };
+    let checks = move |headers: axum::http::HeaderMap| async move {
+        answer(
+            headers,
+            "W/\"checks-1\"",
+            serde_json::json!({
+                "check_runs": [
+                    { "name": "lint", "status": "completed", "conclusion": "success",
+                      "html_url": "https://github.com/acme/demo/runs/1" },
+                ]
+            })
+            .to_string(),
+        )
+    };
+    let reviews = move |headers: axum::http::HeaderMap| async move {
+        answer(headers, "W/\"reviews-1\"", "[]".to_owned())
+    };
+    let timeline = || async { axum::Json(serde_json::json!([])) };
+    let forge = axum::Router::new()
+        .route("/repos/acme/demo/pulls/12", axum::routing::get(pull))
+        .route(
+            "/repos/acme/demo/commits/{sha}/check-runs",
+            axum::routing::get(checks),
+        )
+        .route(
+            "/repos/acme/demo/pulls/12/reviews",
+            axum::routing::get(reviews),
+        )
+        .route(
+            "/repos/acme/demo/issues/12/timeline",
+            axum::routing::get(timeline),
+        )
+        .fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    let api = serve(forge).await;
+
+    let lender = Arc::new(FakeLender::offering_person("mira-chen"));
+    let (router, token, runtime, dir) =
+        code_app_with(Some(lender.clone() as Arc<dyn GitCredentialLender>)).await;
+    runtime.set_gh_search_path(Some("/path/with/no/gh".into()));
+    runtime.set_forge_api_base(Some(format!("http://{api}")));
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_paired_repo(dir.path());
+    let (_repo, workspace) =
+        register_and_workspace(&client, addr, &token, &repo, "interleaved digest").await;
+    let id = json_id(&workspace).to_owned();
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    run(
+        &path,
+        &[
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/demo.git",
+        ],
+    );
+
+    let owner = tidebreak_core::OwnerId::local();
+    let workspace_id: tidebreak_core::WorkspaceId = id.parse().unwrap();
+    let now = chrono::Utc::now();
+    save_pull_request_fact(
+        &runtime.db,
+        &CodePullRequestFact {
+            id: CodePullRequestId::new(),
+            owner: owner.clone(),
+            host: "github.com".into(),
+            repo_owner: "acme".into(),
+            repo_name: "demo".into(),
+            number: 12,
+            url: "https://github.com/acme/demo/pull/12".into(),
+            title: "Stale hosted change".into(),
+            state: CodePullRequestState::Open,
+            draft: false,
+            author: None,
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+            head_sha: Some("deadbeefdeadbeefdead".into()),
+            created_at: now,
+            updated_at: now,
+            merged_at: None,
+            closed_at: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            live: None,
+        },
+    )
+    .await
+    .unwrap();
+    seed_workspace_pull_request(&runtime, &id, "https://github.com/acme/demo/pull/12", 12).await;
+
+    // The first refresh is unconditional: it stores `W/"pull-1"` and the
+    // snapshot the late 304 will later rebuild from.
+    runtime.refresh_workspace_pr_row(&owner, workspace_id).await;
+    let first = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "demo", 12)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.head_sha.as_deref(), Some("feedfeedfeedfeedfeed"));
+    assert_eq!(
+        first.live.as_ref().unwrap().checks_summary.as_deref(),
+        Some("1 passing, 0 pending, 0 failing")
+    );
+
+    // Arm the overlap and refresh again. This read sends `W/"pull-1"`, the
+    // fresher fetch lands `W/"pull-2"` mid-request, and the 304 comes back
+    // describing the pull request as it was before that.
+    *competing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((Arc::clone(&runtime.db), workspace_id));
+    runtime.refresh_workspace_pr_row(&owner, workspace_id).await;
+    assert_eq!(pull_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    let after = get_pull_request_fact(&runtime.db, &owner, "github.com", "acme", "demo", 12)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.head_sha.as_deref(),
+        Some("cafecafecafecafecafe"),
+        "the fresher snapshot stands"
+    );
+    assert_eq!(
+        after.live.as_ref().unwrap().checks_summary.as_deref(),
+        Some("2 passing, 0 pending, 0 failing"),
+        "the rejected digest never reached the live tier"
+    );
+    let column = runtime
+        .get_workspace(&owner, workspace_id)
+        .await
+        .unwrap()
+        .pr
+        .unwrap();
+    assert_eq!(
+        column.head_sha.as_deref(),
+        Some("cafecafecafecafecafe"),
+        "the rejected digest never reached the workspace column"
+    );
+    assert_eq!(
+        column.checks_summary.as_deref(),
+        Some("2 passing, 0 pending, 0 failing")
+    );
+}
+
 /// One host read updates every workspace holding the pull request
 /// (decision 66): a digest change lands on the fact row's live tier, and the
 /// other holder takes the same snapshot — column and digest cache — with no

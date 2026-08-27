@@ -256,6 +256,10 @@ pub(crate) struct LiveSink {
     /// Derives the turn's recap once it completes. `None` in headless
     /// deployments and tests that install none, which simply have no recaps.
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
+    /// The runtime's hot pull-request tier (decision 66). A turn whose fact
+    /// detector confirms a push or a create marks this workspace, so the
+    /// next hot pass reads the head the turn just moved (issue 2799).
+    hot_prs: super::pr_refresh::HotPullRequests,
 }
 
 impl LiveSink {
@@ -1794,6 +1798,7 @@ async fn drive_turn_inner(
                 session,
                 turn.id,
                 sink.gh_search_path.as_deref(),
+                Some(&sink.hot_prs),
             )
             .await;
             if let Some(detail) = attachment_cleanup_error.as_ref() {
@@ -1846,6 +1851,7 @@ async fn drive_turn_inner(
         session,
         turn.id,
         sink.gh_search_path.as_deref(),
+        Some(&sink.hot_prs),
     )
     .await;
     if let Some(detail) = attachment_cleanup_error {
@@ -2214,6 +2220,7 @@ pub(crate) fn sink_for(
     subagents: Vec<CodeSubagentSummary>,
     gh_search_path: Option<String>,
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
+    hot_prs: super::pr_refresh::HotPullRequests,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
         db,
@@ -2229,6 +2236,7 @@ pub(crate) fn sink_for(
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
         recap,
+        hot_prs,
     })
 }
 
@@ -2877,6 +2885,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::code::pr_refresh::HotPullRequests::default(),
         );
         (directory, store, sink, session_id)
     }
@@ -3153,6 +3162,7 @@ mod tests {
             attached.subagents,
             None,
             None,
+            crate::code::pr_refresh::HotPullRequests::default(),
         );
         sink.emit(HarnessEvent::SessionStarted {
             harness_kind: HarnessKind::Codex,
@@ -3613,6 +3623,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            crate::code::pr_refresh::HotPullRequests::default(),
         );
         // The relay's refusals already name the gateway; "sign in in your
         // own terminal" would be wrong on a hosted machine.
