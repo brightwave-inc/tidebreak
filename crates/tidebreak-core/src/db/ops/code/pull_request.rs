@@ -54,12 +54,11 @@ pub async fn save_pull_request_fact(
         closed_at: Set(fact.closed_at),
         first_seen_at: Set(fact.first_seen_at),
         last_seen_at: Set(fact.last_seen_at),
-        // This snapshot did not arrive with a pull endpoint validator. Clear
-        // any existing validator in the same upsert so a concurrent refresh
-        // cannot leave its ETag naming this writer's unrelated snapshot.
-        pull_etag: Set(None),
         // The live tier (decision 66) is written by its own setter and never
-        // by a snapshot upsert, so a confirmation cannot blank it.
+        // by a snapshot upsert, so a confirmation cannot blank it. Endpoint
+        // validators are likewise owned by `set_pull_request_fetch_state`:
+        // an unrelated snapshot confirmation must not make the next hot read
+        // pay for a full response.
         ..Default::default()
     })
     .on_conflict(
@@ -84,7 +83,6 @@ pub async fn save_pull_request_fact(
             entities::code_pull_request::Column::MergedAt,
             entities::code_pull_request::Column::ClosedAt,
             entities::code_pull_request::Column::LastSeenAt,
-            entities::code_pull_request::Column::PullEtag,
         ])
         .to_owned(),
     )
@@ -176,6 +174,41 @@ pub async fn set_pull_request_live_state(
     Ok(Some((id, changed)))
 }
 
+/// Mark one fact's live tier stale without disturbing endpoint validators.
+///
+/// Delivery actions use this before an immediate identity refresh. If that
+/// refresh cannot complete, the next aggregate or reconcile pass sees the
+/// old observation time and retries through the conditional fetcher. The
+/// last live values remain available as a fallback projection.
+#[allow(clippy::too_many_arguments)]
+pub async fn mark_pull_request_fact_stale(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    number: u64,
+) -> Result<bool> {
+    let number = i64::try_from(number)
+        .map_err(|_| AgentError::Store(format!("pull request number {number} overflows")))?;
+    let stale_at = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+        .expect("the Unix epoch is a valid UTC timestamp");
+    let result = entities::code_pull_request::Entity::update_many()
+        .col_expr(
+            entities::code_pull_request::Column::LiveObservedAt,
+            Expr::value(stale_at),
+        )
+        .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_pull_request::Column::Host.eq(host))
+        .filter(entities::code_pull_request::Column::RepoOwner.eq(repo_owner))
+        .filter(entities::code_pull_request::Column::RepoName.eq(repo_name))
+        .filter(entities::code_pull_request::Column::Number.eq(number))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// One observed pull request plus the transport hints the conditional
 /// fetcher sends back to the host (decision 66): the ETag each endpoint
 /// last answered with.
@@ -188,12 +221,16 @@ pub struct PullRequestFetchState {
 }
 
 /// The condition that protects one pull-request fetch-state write.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum PullRequestFetchCondition<'a> {
     /// A fresh 200 response replaces the snapshot and validator together.
     Unconditional,
-    /// A 304 response writes only if the row still holds the validator sent.
-    PullEtag(Option<&'a str>),
+    /// A 304 response writes only if the row still holds both the validator
+    /// and snapshot observation that the request started from.
+    PullEtag {
+        etag: Option<&'a str>,
+        last_seen_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 /// Load one observed pull request with its stored fetch ETags.
@@ -300,8 +337,9 @@ pub async fn set_pull_request_fetch_state(
                 Expr::value(fact.last_seen_at),
             );
     }
-    if let PullRequestFetchCondition::PullEtag(expected) = condition {
-        update = match expected {
+    if let PullRequestFetchCondition::PullEtag { etag, last_seen_at } = condition {
+        update = update.filter(entities::code_pull_request::Column::LastSeenAt.eq(last_seen_at));
+        update = match etag {
             Some(etag) => update.filter(entities::code_pull_request::Column::PullEtag.eq(etag)),
             None => update.filter(entities::code_pull_request::Column::PullEtag.is_null()),
         };
@@ -348,11 +386,28 @@ pub async fn list_pull_request_facts(
         .collect()
 }
 
+/// Every observed pull request across owners, newest first.
+///
+/// This is a system-only read for the reconcile scheduler. Each fact carries
+/// its owner, and every subsequent fetch and write must keep using that owner.
+/// Request paths must use [`list_pull_request_facts`] instead.
+pub async fn list_pull_request_facts_all_owners(
+    store: &DbStore,
+) -> Result<Vec<CodePullRequestFact>> {
+    entities::code_pull_request::Entity::find()
+        .order_by_desc(entities::code_pull_request::Column::UpdatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(fact_from_row)
+        .collect()
+}
+
 /// Every distinct repository identity holding at least one fact row.
 ///
-/// The reconcile sweep reads this to keep cross-repo facts fresh: a
-/// repository discovered through a detected command keeps itself on the
-/// sweep's list without a local checkout.
+/// This is the owner-scoped inventory for callers that need repository-level
+/// fact coverage without exposing another owner's identities.
 pub async fn list_fact_repo_identities(
     store: &DbStore,
     owner: &OwnerId,
@@ -364,29 +419,6 @@ pub async fn list_fact_repo_identities(
         .column(entities::code_pull_request::Column::RepoName)
         .distinct()
         .filter(entities::code_pull_request::Column::Owner.eq(owner.as_str()))
-        .into_tuple()
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?;
-    Ok(rows)
-}
-
-/// Every distinct `(owner, host, repo_owner, repo_name)` holding at least
-/// one fact row.
-///
-/// A system path, not a request path: the reconcile sweep walks every
-/// tracked repository identity regardless of who observed it, then scopes
-/// each read to the row's owner. Nothing reachable from a route may call it.
-pub async fn list_fact_repo_identities_all_owners(
-    store: &DbStore,
-) -> Result<Vec<(String, String, String, String)>> {
-    let rows: Vec<(String, String, String, String)> = entities::code_pull_request::Entity::find()
-        .select_only()
-        .column(entities::code_pull_request::Column::Owner)
-        .column(entities::code_pull_request::Column::Host)
-        .column(entities::code_pull_request::Column::RepoOwner)
-        .column(entities::code_pull_request::Column::RepoName)
-        .distinct()
         .into_tuple()
         .all(&store.conn)
         .await

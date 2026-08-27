@@ -2273,7 +2273,7 @@ impl CodeRuntime {
         workspace: &CodeWorkspace,
         transport: super::pr_fetch::FetchTransport<'_>,
     ) -> Option<PullRequestDigest> {
-        use super::pr_fetch::{self, EndpointRead};
+        use super::pr_fetch;
 
         let gate = &self.host_gate;
         let stored_identity = workspace
@@ -2304,13 +2304,55 @@ impl CodeRuntime {
                 (target.host, target.owner, target.name, found.number)
             }
         };
-        let stored = tidebreak_core::db::code::get_pull_request_fetch_state(
-            &self.db,
+        self.refresh_pull_request_identity_from_source(
             owner,
+            Some(workspace.id),
             &host,
             &repo_owner,
             &repo_name,
             number,
+            transport,
+        )
+        .await
+    }
+
+    /// Refresh one known pull-request fact through the shared conditional
+    /// fetcher, host gate, and branch-rules cache.
+    ///
+    /// Delivery and reconcile already carry full identity, so they bypass
+    /// the workspace/head lookup while preserving the exact validator,
+    /// live-tier write-through, and broadcast behavior of the hot tier.
+    pub(crate) async fn refresh_pull_request_identity(
+        &self,
+        owner: &OwnerId,
+        host: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        number: u64,
+        transport: super::pr_fetch::FetchTransport<'_>,
+    ) -> Option<PullRequestDigest> {
+        self.refresh_pull_request_identity_from_source(
+            owner, None, host, repo_owner, repo_name, number, transport,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn refresh_pull_request_identity_from_source(
+        &self,
+        owner: &OwnerId,
+        source: Option<WorkspaceId>,
+        host: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        number: u64,
+        transport: super::pr_fetch::FetchTransport<'_>,
+    ) -> Option<PullRequestDigest> {
+        use super::pr_fetch::{self, EndpointRead};
+
+        let gate = &self.host_gate;
+        let stored = tidebreak_core::db::code::get_pull_request_fetch_state(
+            &self.db, owner, host, repo_owner, repo_name, number,
         )
         .await
         .ok()
@@ -2325,12 +2367,13 @@ impl CodeRuntime {
             None => (None, None, None, None),
         };
         let sent_pull_etag = pull_etag.clone();
+        let sent_last_seen_at = stored_fact.as_ref().map(|fact| fact.last_seen_at);
         let (pull, fresh_pull) = match pr_fetch::read_pull_request(
             gate,
             transport,
-            &host,
-            &repo_owner,
-            &repo_name,
+            host,
+            repo_owner,
+            repo_name,
             number,
             pull_etag.as_deref(),
         )
@@ -2366,9 +2409,9 @@ impl CodeRuntime {
                 match pr_fetch::read_check_runs(
                     gate,
                     transport,
-                    &host,
-                    &repo_owner,
-                    &repo_name,
+                    host,
+                    repo_owner,
+                    repo_name,
                     sha,
                     conditional,
                 )
@@ -2397,9 +2440,9 @@ impl CodeRuntime {
         let rules = if open {
             self.branch_rules_for(
                 transport,
-                &host,
-                &repo_owner,
-                &repo_name,
+                host,
+                repo_owner,
+                repo_name,
                 pull.base_branch.as_deref(),
             )
             .await
@@ -2410,9 +2453,9 @@ impl CodeRuntime {
             match pr_fetch::read_reviews(
                 gate,
                 transport,
-                &host,
-                &repo_owner,
-                &repo_name,
+                host,
+                repo_owner,
+                repo_name,
                 number,
                 reviews_etag.as_deref(),
             )
@@ -2443,12 +2486,7 @@ impl CodeRuntime {
                 Some(rules) if !rules.has_merge_queue => Some(false),
                 _ => {
                     pr_fetch::read_merge_queue_membership(
-                        gate,
-                        transport,
-                        &host,
-                        &repo_owner,
-                        &repo_name,
-                        number,
+                        gate, transport, host, repo_owner, repo_name, number,
                     )
                     .await
                 }
@@ -2467,7 +2505,10 @@ impl CodeRuntime {
         let condition = if fresh_pull {
             tidebreak_core::db::code::PullRequestFetchCondition::Unconditional
         } else {
-            tidebreak_core::db::code::PullRequestFetchCondition::PullEtag(sent_pull_etag.as_deref())
+            tidebreak_core::db::code::PullRequestFetchCondition::PullEtag {
+                etag: sent_pull_etag.as_deref(),
+                last_seen_at: sent_last_seen_at?,
+            }
         };
 
         let digest = pr_fetch::digest_from_parts(&pull, &checks, review_decision, in_merge_queue);
@@ -2481,9 +2522,9 @@ impl CodeRuntime {
         let accepted = match tidebreak_core::db::code::set_pull_request_fetch_state(
             &self.db,
             owner,
-            &host,
-            &repo_owner,
-            &repo_name,
+            host,
+            repo_owner,
+            repo_name,
             number,
             fresh_fact.as_ref(),
             condition,
@@ -2507,7 +2548,7 @@ impl CodeRuntime {
             );
             return None;
         }
-        self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
+        self.record_pull_request_live_state(owner, source, &digest)
             .await;
         Some(digest)
     }

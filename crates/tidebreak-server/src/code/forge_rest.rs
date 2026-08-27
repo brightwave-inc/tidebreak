@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use futures::{stream, StreamExt as _};
+use futures::StreamExt as _;
 use serde_json::Value;
 
 use crate::obo_gateway::GitCredential;
@@ -38,9 +38,6 @@ mutation($id: ID!, $oid: GitObjectID!, $method: PullRequestMergeMethod!) {\
     pullRequestId: $id, expectedHeadOid: $oid, mergeMethod: $method\
   }) { pullRequest { number } }\
 }";
-
-/// Bound the check-run fan-out within one repository list read.
-const CHECK_RUN_CONCURRENCY: usize = 4;
 
 /// Timeline pages GitHub returns at once, and the ceiling on how many this
 /// path will fetch. Membership is the last queue event, so a truncated read
@@ -266,56 +263,6 @@ pub(crate) async fn delivery_pull_request(
         .expect("fact values are objects")
         .insert("statusCheckRollup".to_owned(), Value::Array(checks));
     Ok(fact)
-}
-
-/// List one repository's pull requests in the `gh pr list --json`
-/// vocabulary that Delivery already parses.
-///
-/// GitHub REST has no `merged` list state. A merged query reads closed pull
-/// requests and lets Delivery's existing `mergedAt` filter select the rows.
-/// When checks are requested, each pull request carries an explicit
-/// `statusCheckRollup`, including an empty array for a head with no runs.
-pub(crate) async fn delivery_pull_requests(
-    api_base: &str,
-    target: &CodeGitHubRepositoryTarget,
-    credential: &GitCredential,
-    state: &str,
-    checks_loaded: bool,
-) -> Result<Vec<Value>, String> {
-    let state = if state == "merged" { "closed" } else { state };
-    let (status, value) = request(
-        reqwest::Method::GET,
-        format!(
-            "{api_base}/repos/{}/{}/pulls?state={state}&per_page=100",
-            target.owner, target.name
-        ),
-        credential,
-        None,
-    )
-    .await?;
-    if !status.is_success() {
-        return Err(forge_message(status, &value));
-    }
-    let pulls = value.as_array().cloned().unwrap_or_default();
-    stream::iter(pulls)
-        .map(|pull| async move {
-            let mut fact = fact_value(&pull);
-            if checks_loaded {
-                let checks = match pull.pointer("/head/sha").and_then(Value::as_str) {
-                    Some(sha) => check_run_values(api_base, target, credential, sha).await?,
-                    None => Vec::new(),
-                };
-                fact.as_object_mut()
-                    .expect("fact values are objects")
-                    .insert("statusCheckRollup".to_owned(), Value::Array(checks));
-            }
-            Ok(fact)
-        })
-        .buffered(CHECK_RUN_CONCURRENCY)
-        .collect::<Vec<Result<Value, String>>>()
-        .await
-        .into_iter()
-        .collect()
 }
 
 /// Read one repository's GitHub Actions runs.

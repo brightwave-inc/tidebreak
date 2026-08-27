@@ -3548,8 +3548,9 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     use crate::db::code::{
         count_attributed_prs_for_workspace, get_pull_request_fact, get_pull_request_fetch_state,
         insert_pull_request_attribution, list_attributed_facts_for_workspace,
-        list_fact_repo_identities, promote_attribution_to_authored, save_pull_request_fact,
-        set_pull_request_fetch_state, set_pull_request_live_state, PullRequestFetchCondition,
+        list_fact_repo_identities, mark_pull_request_fact_stale, promote_attribution_to_authored,
+        save_pull_request_fact, set_pull_request_fetch_state, set_pull_request_live_state,
+        PullRequestFetchCondition,
     };
 
     let (_dir, store) = temp_store().await;
@@ -3678,15 +3679,52 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     assert_eq!(stored_live.merge_state_status.as_deref(), Some("blocked"));
     assert_eq!(stored_live.checks.as_ref().unwrap().len(), 1);
     assert_eq!(stored_live.auto_merge_enabled, Some(true));
+    let stranger = OwnerId::new("stranger").unwrap();
+    assert!(
+        !mark_pull_request_fact_stale(&store, &stranger, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+    );
+    let still_fresh =
+        get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(still_fresh.fact.live.unwrap().observed_at, later);
+    assert_eq!(still_fresh.pull_etag.as_deref(), Some("W/\"pull-2\""));
+    assert!(
+        mark_pull_request_fact_stale(&store, &owner, "github.com", "acme", "tools", 412)
+            .await
+            .unwrap()
+    );
+    let stale = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stale.fact.live.unwrap().observed_at < later);
+    assert_eq!(stale.pull_etag.as_deref(), Some("W/\"pull-2\""));
+    assert_eq!(stale.checks_etag.as_deref(), Some("W/\"checks-2\""));
+    assert_eq!(stale.reviews_etag.as_deref(), Some("W/\"reviews-2\""));
+    set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 412, &live)
+        .await
+        .unwrap()
+        .unwrap();
     save_pull_request_fact(&store, &refreshed).await.unwrap();
-    let stored = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
+    let stored = get_pull_request_fetch_state(&store, &owner, "github.com", "acme", "tools", 412)
         .await
         .unwrap()
         .unwrap();
     assert!(
-        stored.live.is_some(),
+        stored.fact.live.is_some(),
         "a snapshot upsert must not blank the live tier"
     );
+    assert_eq!(
+        stored.pull_etag.as_deref(),
+        Some("W/\"pull-2\""),
+        "a snapshot upsert must preserve the hot-fetch validator"
+    );
+    assert_eq!(stored.checks_etag.as_deref(), Some("W/\"checks-2\""));
+    assert_eq!(stored.reviews_etag.as_deref(), Some("W/\"reviews-2\""));
     // The tier decorates observations; it never mints a row.
     assert!(
         set_pull_request_live_state(&store, &owner, "github.com", "acme", "tools", 999, &live)
@@ -3751,7 +3789,6 @@ async fn pull_request_facts_upsert_claim_and_promote() {
     );
 
     // Another owner sees none of it.
-    let stranger = OwnerId::new("stranger").unwrap();
     assert!(
         get_pull_request_fact(&store, &stranger, "github.com", "acme", "tools", 412)
             .await
@@ -3765,7 +3802,7 @@ async fn pull_request_facts_upsert_claim_and_promote() {
 }
 
 #[tokio::test]
-async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
+async fn snapshot_upsert_preserves_a_concurrent_fetch_validator() {
     use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
     use crate::db::code::{
         get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
@@ -3829,11 +3866,11 @@ async fn snapshot_upsert_invalidates_a_concurrent_fetch_validator() {
         .unwrap();
     assert_eq!(stored.fact.title, "Stale");
     assert_eq!(stored.fact.head_sha.as_deref(), Some("old"));
-    assert_eq!(stored.pull_etag, None);
+    assert_eq!(stored.pull_etag.as_deref(), Some("W/\"fresh\""));
 }
 
 #[tokio::test]
-async fn late_304_cannot_restore_an_invalidated_pull_validator() {
+async fn late_304_cannot_overwrite_a_newer_snapshot_with_a_preserved_validator() {
     use crate::code::{CodePullRequestFact, CodePullRequestId, CodePullRequestState};
     use crate::db::code::{
         get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
@@ -3890,6 +3927,7 @@ async fn late_304_cannot_restore_an_invalidated_pull_validator() {
     let snapshot_c = CodePullRequestFact {
         title: "Snapshot C".into(),
         head_sha: Some("ccc".into()),
+        last_seen_at: observed + chrono::Duration::seconds(1),
         ..snapshot_a.clone()
     };
     save_pull_request_fact(&store, &snapshot_c).await.unwrap();
@@ -3902,7 +3940,10 @@ async fn late_304_cannot_restore_an_invalidated_pull_validator() {
         "tools",
         100,
         None,
-        PullRequestFetchCondition::PullEtag(refresh.pull_etag.as_deref()),
+        PullRequestFetchCondition::PullEtag {
+            etag: refresh.pull_etag.as_deref(),
+            last_seen_at: refresh.fact.last_seen_at,
+        },
         refresh.pull_etag.as_deref(),
         Some("W/\"late-checks\""),
         Some("W/\"late-reviews\""),
@@ -3916,7 +3957,7 @@ async fn late_304_cannot_restore_an_invalidated_pull_validator() {
         .unwrap();
     assert_eq!(stored.fact.title, "Snapshot C");
     assert_eq!(stored.fact.head_sha.as_deref(), Some("ccc"));
-    assert_eq!(stored.pull_etag, None);
+    assert_eq!(stored.pull_etag.as_deref(), Some("W/\"snapshot-a\""));
     assert_eq!(stored.checks_etag.as_deref(), Some("W/\"checks-a\""));
     assert_eq!(stored.reviews_etag.as_deref(), Some("W/\"reviews-a\""));
 }

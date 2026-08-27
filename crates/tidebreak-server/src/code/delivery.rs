@@ -22,7 +22,8 @@ use tokio::time::timeout;
 
 use tidebreak_core::db::code::{
     get_workspace, insert_pull_request_attribution, list_attributions_for_pull_requests,
-    list_pull_request_facts_for_repo, save_pull_request_fact,
+    list_pull_request_facts, list_pull_request_facts_for_repo, mark_pull_request_fact_stale,
+    save_pull_request_fact,
 };
 use tidebreak_core::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
@@ -70,7 +71,6 @@ const GITHUB_DETAIL_PAGE_SIZE: usize = 100;
 /// unlucky repository would otherwise blank a whole column.
 const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(700);
 
-const PR_LIST_FIELDS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRepository,headRepositoryOwner,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments";
 const PR_LIST_FIELDS_WITH_CHECKS: &str = "number,url,state,title,isDraft,author,reviewDecision,mergeable,mergeStateStatus,autoMergeRequest,headRepository,headRepositoryOwner,headRefName,headRefOid,baseRefName,updatedAt,createdAt,mergedAt,closedAt,labels,comments,statusCheckRollup";
 
 #[derive(Debug, Clone)]
@@ -131,6 +131,25 @@ enum DeliveryApi {
 }
 
 impl DeliveryApi {
+    fn pull_request_fetch_transport(&self) -> super::pr_fetch::FetchTransport<'_> {
+        match self {
+            Self::Gh { observation, .. } => super::pr_fetch::FetchTransport::Gh {
+                cwd: Path::new("."),
+                binary: observation
+                    .binary
+                    .as_deref()
+                    .expect("authenticated gh has a binary"),
+            },
+            Self::Rest {
+                api_base,
+                credential,
+            } => super::pr_fetch::FetchTransport::Rest {
+                api_base,
+                credential,
+            },
+        }
+    }
+
     fn can_mark_pull_request_ready(&self) -> bool {
         matches!(self, Self::Gh { .. })
     }
@@ -541,36 +560,6 @@ async fn resolve_repository_for_api(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PullRequestRemotePlan {
-    state: &'static str,
-    fields: &'static str,
-    checks_loaded: bool,
-    /// The one author to ask GitHub for, when the query names exactly one.
-    ///
-    /// `gh pr list` caps at 100 rows per repository. Filtering an unscoped
-    /// page down to one author afterwards silently loses that author's older
-    /// pull requests in a busy repository — which is exactly what the default
-    /// "Yours" view asks for. Pushing the login into the remote read keeps the
-    /// cap on the rows the reader wanted.
-    author: Option<String>,
-}
-
-impl PullRequestRemotePlan {
-    fn cache_scope(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            self.state,
-            if self.checks_loaded {
-                "checks"
-            } else {
-                "summary"
-            },
-            self.author.as_deref().unwrap_or("*")
-        )
-    }
-}
-
 /// One host pull-request observation plus identity kept off the public wire.
 ///
 /// `stack_parent_number` stays wire-compatible. The fork-qualified head
@@ -659,12 +648,14 @@ struct RunFetchOptions {
     force_refresh: bool,
 }
 
-/// Short-lived owner/query caches. No GitHub response is durable.
+/// Short-lived run and repository metadata caches.
+///
+/// Pull-request aggregates are intentionally absent: durable fact rows are
+/// the aggregate, and stale identities refresh through the conditional
+/// fetcher before projection.
 #[derive(Debug, Default)]
 pub(crate) struct DeliveryCache {
-    pull_requests: Mutex<HashMap<String, CachedAggregate<CodeDeliveryPullRequestSummary>>>,
     runs: Mutex<HashMap<String, CachedAggregate<CodeDeliveryRunSummary>>>,
-    pull_request_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     run_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     repositories: Mutex<HashMap<String, CachedValue<CodeGitHubRepositoryRef>>>,
     repository_reads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -676,40 +667,6 @@ pub(crate) struct DeliveryCache {
 }
 
 impl DeliveryCache {
-    fn pull_requests(&self, key: &str) -> Option<CachedAggregate<CodeDeliveryPullRequestSummary>> {
-        let mut cache = self.pull_requests.lock().expect("delivery PR cache");
-        cache.retain(|_, value| value.fetched_at.elapsed() <= LIST_CACHE_TTL);
-        cache.get(key).cloned()
-    }
-
-    fn put_pull_requests(
-        &self,
-        key: String,
-        items: Vec<CodeDeliveryPullRequestSummary>,
-        errors: Vec<CodeDeliverySourceError>,
-    ) {
-        self.pull_requests
-            .lock()
-            .expect("delivery PR cache")
-            .insert(
-                key,
-                CachedAggregate {
-                    fetched_at: Instant::now(),
-                    items,
-                    errors,
-                },
-            );
-    }
-
-    fn pull_request_read(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.pull_request_reads
-            .lock()
-            .expect("delivery PR read locks")
-            .entry(key.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
     fn runs(&self, key: &str) -> Option<CachedAggregate<CodeDeliveryRunSummary>> {
         let mut cache = self.runs.lock().expect("delivery run cache");
         cache.retain(|_, value| value.fetched_at.elapsed() <= LIST_CACHE_TTL);
@@ -843,10 +800,6 @@ impl DeliveryCache {
     }
 
     pub(crate) fn invalidate(&self) {
-        self.pull_requests
-            .lock()
-            .expect("delivery PR cache")
-            .clear();
         self.runs.lock().expect("delivery run cache").clear();
     }
 
@@ -870,10 +823,6 @@ impl DeliveryCache {
             .expect("delivery workspace index cache")
             .remove(&owner_key);
         drop(generations);
-        self.pull_requests
-            .lock()
-            .expect("delivery PR cache")
-            .retain(|key, _| !key.starts_with(&aggregate_prefix));
         self.runs
             .lock()
             .expect("delivery run cache")
@@ -1019,7 +968,7 @@ pub(crate) async fn query_pull_requests_by_number(
     // the shared pass sees the same host edges a list read would.
     attach_host_stacks(&apis, &mut items).await;
     let workspaces_gaining_links =
-        persist_and_augment_pull_request_facts(runtime, owner, &workspaces, &mut items).await;
+        persist_and_augment_pull_request_facts(runtime, owner, &workspaces, &mut items, None).await;
     for workspace_id in workspaces_gaining_links {
         super::attention::emit_workspace_digests(&runtime.db, &runtime.bus, owner, workspace_id)
             .await;
@@ -1180,131 +1129,72 @@ pub(crate) async fn query_pull_requests(
     ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
     let access = delivery_access(runtime, owner, force_refresh).await;
     let capability = access.capability.clone();
-    let Some(reader) = access.reader.clone() else {
-        return Ok(CodeDeliveryPullRequestsPage {
-            capability,
-            items: Vec::new(),
-            next_cursor: None,
-            errors: vec![access.source_error()],
-            fetched_at: Utc::now(),
-        });
-    };
+    let target_keys = targets.iter().map(repository_key).collect::<HashSet<_>>();
+    let mut facts = list_pull_request_facts(&runtime.db, owner)
+        .await?
+        .into_iter()
+        .filter(|fact| target_keys.contains(&repository_key_for_fact(fact)))
+        .collect::<Vec<_>>();
 
-    let remote_plan = pull_request_remote_plan(&query);
-    let cache_key = aggregate_cache_key(
-        owner,
-        &format!("prs:{}:{}", reader.cache_scope(), remote_plan.cache_scope()),
-        &targets,
-    );
-    let request_started = Instant::now();
-    // A user refresh must reach GitHub. Paging must not: following a cursor
-    // against a freshly reread aggregate would renumber the offsets underneath
-    // the reader and skip or repeat rows.
-    let cached = if force_refresh {
-        None
+    // The durable row is the aggregate. The first page refreshes only stale
+    // identities (or all selected rows for an explicit refresh); cursor
+    // requests never start another refresh, so this request does not renumber
+    // the offsets it is following.
+    let (attempted_refresh, mut errors) = if query.cursor.is_none() {
+        refresh_pull_request_facts(
+            runtime,
+            owner,
+            access.reader.as_ref(),
+            &facts,
+            force_refresh,
+        )
+        .await
     } else {
-        runtime.delivery_cache.pull_requests(&cache_key)
+        (false, Vec::new())
     };
-    let aggregate = match cached {
-        Some(cached) => cached,
-        None => {
-            let read = runtime.delivery_cache.pull_request_read(&cache_key);
-            let _guard = read.lock().await;
-            if let Some(cached) = runtime.delivery_cache.pull_requests(&cache_key) {
-                if !force_refresh || cached.fetched_at >= request_started {
-                    return pull_request_page(capability, cached, &query);
-                }
-            }
-            let workspace_index = workspace_index(runtime, owner, force_refresh).await?;
-            let remote_plan = &remote_plan;
-            let results = stream::iter(targets.clone())
-                .map(|target| {
-                    let reader = reader.clone();
-                    let workspace_index = workspace_index.clone();
-                    async move {
-                        fetch_pull_requests(
-                            runtime,
-                            owner,
-                            &reader,
-                            &target,
-                            &workspace_index,
-                            remote_plan,
-                            force_refresh,
-                        )
-                        .await
-                        .map_err(|message| (target, message))
-                    }
-                })
-                .buffer_unordered(DELIVERY_CONCURRENCY)
-                .collect::<Vec<_>>()
-                .await;
-            let mut items = Vec::new();
-            let mut errors = Vec::new();
-            for result in results {
-                match result {
-                    Ok(mut repository_items) => items.append(&mut repository_items),
-                    Err((target, message)) => errors.push(source_error(Some(target), message)),
-                }
-            }
-            items.sort_by(|left, right| {
-                right
-                    .summary
-                    .updated_at
-                    .cmp(&left.summary.updated_at)
-                    .then_with(|| left.summary.id.cmp(&right.summary.id))
-            });
-            // Attributed facts that fell off the host page (cap, filter, or
-            // a later empty list) still belong on the aggregate.
-            fold_stored_pull_request_facts(runtime, owner, &targets, &mut items).await;
-            items.sort_by(|left, right| {
-                right
-                    .summary
-                    .updated_at
-                    .cmp(&left.summary.updated_at)
-                    .then_with(|| left.summary.id.cmp(&right.summary.id))
-            });
-            let workspaces_gaining_links = persist_and_augment_pull_request_facts(
-                runtime,
-                owner,
-                &workspace_index,
-                &mut items,
-            )
-            .await;
-            let items = items
-                .into_iter()
-                .map(|item| item.summary)
-                .collect::<Vec<_>>();
-            runtime.delivery_cache.put_pull_requests(
-                cache_key.clone(),
-                items.clone(),
-                errors.clone(),
-            );
-            for workspace_id in workspaces_gaining_links {
-                super::attention::emit_workspace_digests(
-                    &runtime.db,
-                    &runtime.bus,
-                    owner,
-                    workspace_id,
-                )
-                .await;
-            }
-            CachedAggregate {
-                fetched_at: Instant::now(),
-                items,
-                errors,
-            }
-        }
-    };
-    pull_request_page(capability, aggregate, &query)
+    if access.reader.is_none() {
+        errors.push(access.source_error());
+    }
+    if attempted_refresh {
+        facts = list_pull_request_facts(&runtime.db, owner)
+            .await?
+            .into_iter()
+            .filter(|fact| target_keys.contains(&repository_key_for_fact(fact)))
+            .collect();
+    }
+
+    let workspaces = workspace_index(runtime, owner, force_refresh).await?;
+    let catalog = owner_repository_catalog(runtime, owner, force_refresh).await?;
+    let mut observations = observations_from_facts(&facts, &catalog, &workspaces);
+    persist_and_augment_pull_request_facts(
+        runtime,
+        owner,
+        &workspaces,
+        &mut observations,
+        Some(&facts),
+    )
+    .await;
+    observations.sort_by(|left, right| {
+        right
+            .summary
+            .updated_at
+            .cmp(&left.summary.updated_at)
+            .then_with(|| left.summary.id.cmp(&right.summary.id))
+    });
+    let items = observations
+        .into_iter()
+        .map(|observation| observation.summary)
+        .collect();
+    pull_request_page(capability, items, errors, &query)
 }
 
 fn pull_request_page(
     capability: CodeGitHubCapability,
-    aggregate: CachedAggregate<CodeDeliveryPullRequestSummary>,
+    items: Vec<CodeDeliveryPullRequestSummary>,
+    errors: Vec<CodeDeliverySourceError>,
     query: &CodeDeliveryPullRequestQuery,
 ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
-    let filtered = aggregate
-        .items
+    let filtered = items
         .into_iter()
         .filter(|item| pull_request_matches(item, query))
         .collect::<Vec<_>>();
@@ -1313,9 +1203,123 @@ fn pull_request_page(
         capability,
         items,
         next_cursor,
-        errors: aggregate.errors,
+        errors,
         fetched_at: Utc::now(),
     })
+}
+
+/// Refresh only stale pull-request identities through the shared gated
+/// conditional fetcher.
+///
+/// One transport is borrowed per repository group. Hosted delivery therefore
+/// keeps its server-managed credential boundary, while local reads reuse the
+/// authenticated `gh` observation. Individual fetch failures leave the row's
+/// previous projection standing and its stale clock ready for the next pass.
+async fn refresh_pull_request_facts(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    reader: Option<&DeliveryReader>,
+    facts: &[CodePullRequestFact],
+    force_refresh: bool,
+) -> (bool, Vec<CodeDeliverySourceError>) {
+    let now = Utc::now();
+    let stale = facts
+        .iter()
+        .filter(|fact| {
+            force_refresh
+                || (fact.state == CodePullRequestState::Open
+                    && fact
+                        .live
+                        .as_ref()
+                        .is_none_or(|live| !super::reconcile::live_tier_is_fresh(live, now)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if stale.is_empty() {
+        return (false, Vec::new());
+    }
+    let Some(reader) = reader else {
+        return (false, Vec::new());
+    };
+
+    let mut groups: HashMap<String, Vec<CodePullRequestFact>> = HashMap::new();
+    for fact in stale {
+        groups
+            .entry(repository_key_for_fact(&fact))
+            .or_default()
+            .push(fact);
+    }
+    let results = stream::iter(groups.into_values())
+        .map(|facts| {
+            let reader = reader.clone();
+            async move {
+                let first = &facts[0];
+                let target = CodeGitHubRepositoryTarget {
+                    host: first.host.clone(),
+                    owner: first.repo_owner.clone(),
+                    name: first.repo_name.clone(),
+                };
+                let api = Arc::new(
+                    delivery_api(runtime, owner, &reader, &target)
+                        .await
+                        .map_err(|message| (target.clone(), message))?,
+                );
+                stream::iter(facts)
+                    .for_each_concurrent(DELIVERY_CONCURRENCY, |fact| {
+                        let api = Arc::clone(&api);
+                        async move {
+                            runtime
+                                .refresh_pull_request_identity(
+                                    owner,
+                                    &fact.host,
+                                    &fact.repo_owner,
+                                    &fact.repo_name,
+                                    fact.number,
+                                    api.pull_request_fetch_transport(),
+                                )
+                                .await;
+                        }
+                    })
+                    .await;
+                Ok::<(), (CodeGitHubRepositoryTarget, String)>(())
+            }
+        })
+        .buffer_unordered(DELIVERY_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let errors = results
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|(target, message)| source_error(Some(target), message))
+        .collect();
+    (true, errors)
+}
+
+/// Reconcile's system-facing row refresh. Owner scoping is carried by the
+/// fact rows, while transport selection stays identical to an interactive
+/// Delivery read, including hosted credential borrowing.
+pub(crate) async fn refresh_stale_pull_request_facts(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    facts: &[CodePullRequestFact],
+) -> Vec<CodeDeliverySourceError> {
+    let now = Utc::now();
+    if !facts.iter().any(|fact| {
+        fact.state == CodePullRequestState::Open
+            && fact
+                .live
+                .as_ref()
+                .is_none_or(|live| !super::reconcile::live_tier_is_fresh(live, now))
+    }) {
+        return Vec::new();
+    }
+    let access = delivery_access(runtime, owner, false).await;
+    let (_, mut errors) =
+        refresh_pull_request_facts(runtime, owner, access.reader.as_ref(), facts, false).await;
+    if access.reader.is_none() {
+        errors.push(access.source_error());
+    }
+    errors
 }
 
 pub(crate) async fn pull_request_detail(
@@ -1354,6 +1358,7 @@ pub(crate) async fn pull_request_detail(
         owner,
         &workspace_index,
         std::slice::from_mut(&mut observation),
+        None,
     )
     .await;
     for workspace_id in minted {
@@ -1566,6 +1571,62 @@ fn workflow_run_count(count: usize) -> String {
     }
 }
 
+/// Dirty and immediately refresh the one fact a successful action changed.
+///
+/// Clearing the removed aggregate cache no longer affects pull-request
+/// state. Keep the endpoint validators intact, age only this owner's live
+/// tier, then send the already-borrowed action transport through the shared
+/// conditional fetcher. A failed refresh leaves the stale marker behind for
+/// the next aggregate or reconcile pass. The return value tells the caller
+/// whether the shared row refresh handled fanout or the legacy workspace path
+/// is still needed as a fallback.
+async fn refresh_pull_request_after_action(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    api: &DeliveryApi,
+    target: &CodeDeliveryPullRequestTarget,
+) -> bool {
+    match mark_pull_request_fact_stale(
+        &runtime.db,
+        owner,
+        &target.repository.host,
+        &target.repository.owner,
+        &target.repository.name,
+        target.number,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                pull_request = target.number,
+                "could not mark the acted-on pull-request fact stale"
+            );
+            return false;
+        }
+    }
+    let refreshed = runtime
+        .refresh_pull_request_identity(
+            owner,
+            &target.repository.host,
+            &target.repository.owner,
+            &target.repository.name,
+            target.number,
+            api.pull_request_fetch_transport(),
+        )
+        .await
+        .is_some();
+    if !refreshed {
+        tracing::debug!(
+            pull_request = target.number,
+            "the acted-on pull-request fact remains stale for the next sweep"
+        );
+    }
+    refreshed
+}
+
 pub(crate) async fn act_on_pull_request(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
@@ -1640,7 +1701,9 @@ pub(crate) async fn act_on_pull_request(
             api.mark_pull_request_ready(&target.repository, target.number)
                 .await?;
             runtime.delivery_cache.invalidate();
-            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            if !refresh_pull_request_after_action(runtime, owner, &api, &target).await {
+                runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            }
             Ok(delivery_action_result(format!(
                 "Pull request #{} is ready for review",
                 target.number
@@ -1662,7 +1725,9 @@ pub(crate) async fn act_on_pull_request(
             )
             .await?;
             runtime.delivery_cache.invalidate();
-            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            if !refresh_pull_request_after_action(runtime, owner, &api, &target).await {
+                runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            }
             Ok(delivery_action_result(if auto {
                 format!("Auto-merge enabled for pull request #{}", target.number)
             } else if admin {
@@ -1707,7 +1772,9 @@ pub(crate) async fn act_on_pull_request(
             let any_success = results.iter().any(|(_, result)| result.is_ok());
             if any_success {
                 runtime.delivery_cache.invalidate();
-                runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+                if !refresh_pull_request_after_action(runtime, owner, &api, &target).await {
+                    runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+                }
             }
             let outcomes = results
                 .into_iter()
@@ -1737,7 +1804,9 @@ pub(crate) async fn act_on_pull_request(
             api.update_pull_request_state(&target.repository, target.number, "closed")
                 .await?;
             runtime.delivery_cache.invalidate();
-            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            if !refresh_pull_request_after_action(runtime, owner, &api, &target).await {
+                runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            }
             Ok(delivery_action_result(format!(
                 "Pull request #{} closed",
                 target.number
@@ -1747,7 +1816,9 @@ pub(crate) async fn act_on_pull_request(
             api.update_pull_request_state(&target.repository, target.number, "open")
                 .await?;
             runtime.delivery_cache.invalidate();
-            runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            if !refresh_pull_request_after_action(runtime, owner, &api, &target).await {
+                runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
+            }
             Ok(delivery_action_result(format!(
                 "Pull request #{} reopened",
                 target.number
@@ -2692,156 +2763,45 @@ async fn attach_host_stacks(
     }
 }
 
-async fn fetch_pull_requests(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
-    reader: &DeliveryReader,
-    target: &CodeGitHubRepositoryTarget,
-    workspaces: &[WorkspaceIndexEntry],
-    plan: &PullRequestRemotePlan,
-    force_refresh: bool,
-) -> Result<Vec<PullRequestObservation>, String> {
-    // One borrowed transport per repository, shared by the pull-request list
-    // and the stacks enrichment — the credential lender counts one borrow per
-    // repository operation, and a second one here would double it.
-    let api = delivery_api(runtime, owner, reader, target).await?;
-    let (repository, values, stacks) = match &api {
-        DeliveryApi::Gh { observation, .. } => {
-            let binary = observation
-                .binary
-                .as_deref()
-                .expect("authenticated gh has a binary");
-            let repository =
-                resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
-            let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
-            let limit = MAX_REMOTE_ITEMS_PER_REPO.to_string();
-            let mut args = vec![
-                "pr",
-                "list",
-                "--repo",
-                cli_repository.as_str(),
-                "--state",
-                plan.state,
-                "--limit",
-                limit.as_str(),
-                "--json",
-                plan.fields,
-            ];
-            if let Some(author) = plan.author.as_deref() {
-                args.push("--author");
-                args.push(author);
-            }
-            let (raw, stacks) = tokio::join!(
-                with_transient_retry(|| {
-                    gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)
-                }),
-                fetch_stacks(&api, target),
-            );
-            let raw = raw?;
-            let value: Value = serde_json::from_str(&raw)
-                .map_err(|error| format!("could not parse pull requests: {error}"))?;
-            (
-                repository,
-                value.as_array().cloned().unwrap_or_default(),
-                stacks,
-            )
-        }
-        DeliveryApi::Rest {
-            api_base,
-            credential,
-        } => {
-            let repository =
-                resolve_repository_rest_cached(runtime, target, None, force_refresh, credential)
-                    .await?;
-            let (values, stacks) = tokio::join!(
-                with_transient_retry(|| {
-                    super::forge_rest::delivery_pull_requests(
-                        api_base,
-                        target,
-                        credential,
-                        plan.state,
-                        plan.checks_loaded,
-                    )
-                }),
-                fetch_stacks(&api, target),
-            );
-            let values = values?;
-            (repository, values, stacks)
-        }
-    };
-    let mut values = values;
-    overlay_issue_comment_counts(&api, target, plan.state, &mut values).await;
-    // Host stacks ride along as observations; the shared fact pass applies
-    // them so host edges and branch inference meet in one place.
-    let memberships = stacks
-        .as_ref()
-        .map(parse_stack_memberships)
-        .unwrap_or_default();
-    attach_merge_queue_membership(&api, target, &mut values).await;
-    Ok(values
-        .iter()
-        .filter_map(|value| parse_pull_request(&repository, value, workspaces))
-        .map(|mut observation| {
-            observation.host_stack = memberships.get(&observation.summary.number).cloned();
-            observation
-        })
-        .collect())
-}
-
-/// Fold durable facts onto the live page so the delivery aggregate is a
-/// projection of `code_pull_request` plus this request's host rows.
+/// Project the durable pull-request store into Delivery's wire observations.
 ///
-/// A fact whose number is already on the page stays the host observation —
-/// GitHub is still authoritative for volatile fields. A fact the host did
-/// not return becomes a stored row with empty heuristic links; attribution
-/// is applied in [`persist_and_augment_pull_request_facts`].
-async fn fold_stored_pull_request_facts(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
-    targets: &[CodeGitHubRepositoryTarget],
-    items: &mut Vec<PullRequestObservation>,
-) {
-    for target in targets {
-        let facts = match list_pull_request_facts_for_repo(
-            &runtime.db,
-            owner,
-            &target.host,
-            &target.owner,
-            &target.name,
-        )
-        .await
-        {
-            Ok(facts) => facts,
-            Err(err) => {
-                tracing::debug!("fact fold failed for a delivery page: {err}");
-                continue;
-            }
-        };
-        if facts.is_empty() {
-            continue;
-        }
-        let present: HashSet<u64> = items
-            .iter()
-            .filter(|item| repository_key_ref(&item.summary.repository) == repository_key(target))
-            .map(|item| item.summary.number)
-            .collect();
-        let repository = items
-            .iter()
-            .find(|item| repository_key_ref(&item.summary.repository) == repository_key(target))
-            .map(|item| item.summary.repository.clone())
-            .unwrap_or_else(|| repository_ref_from_target(target, None));
-        for fact in facts {
-            if present.contains(&fact.number) {
-                continue;
-            }
-            items.push(observation_from_fact(&fact, repository.clone()));
-        }
-    }
+/// Snapshot fields own identity and lifecycle; the live tier supplies
+/// checks, review, mergeability, auto-merge, and queue state. Fields the fact
+/// store does not own (avatars, labels, and comment counts) stay absent
+/// rather than triggering a second host fetch.
+fn observations_from_facts(
+    facts: &[CodePullRequestFact],
+    catalog: &OwnerRepositoryCatalog,
+    workspaces: &[WorkspaceIndexEntry],
+) -> Vec<PullRequestObservation> {
+    let repositories = catalog
+        .entries
+        .iter()
+        .map(|entry| (repository_key(&entry.target), entry))
+        .collect::<HashMap<_, _>>();
+    facts
+        .iter()
+        .map(|fact| {
+            let target = CodeGitHubRepositoryTarget {
+                host: fact.host.clone(),
+                owner: fact.repo_owner.clone(),
+                name: fact.repo_name.clone(),
+            };
+            let registered = repositories.get(&repository_key(&target)).copied();
+            let mut repository =
+                repository_ref_from_target(&target, registered.map(|entry| entry.repo.id));
+            repository.default_branch = registered
+                .map(|entry| entry.repo.default_base_ref.clone())
+                .filter(|branch| !branch.is_empty());
+            observation_from_fact(fact, repository, workspaces)
+        })
+        .collect()
 }
 
 fn observation_from_fact(
     fact: &CodePullRequestFact,
     repository: CodeGitHubRepositoryRef,
+    workspaces: &[WorkspaceIndexEntry],
 ) -> PullRequestObservation {
     let live = fact.live.as_ref();
     let checks: Vec<CodeDeliveryCheck> = live
@@ -2854,7 +2814,7 @@ fn observation_from_fact(
                     bucket: check.bucket,
                     detail: check.detail.clone(),
                     url: check.url.clone(),
-                    workflow_run_id: None,
+                    workflow_run_id: check.url.as_deref().and_then(workflow_run_id_from_url),
                 })
                 .collect()
         })
@@ -2868,7 +2828,7 @@ fn observation_from_fact(
         .unwrap_or(false);
     let in_merge_queue = live.and_then(|live| live.in_merge_queue);
     let state = fact.state.as_str().to_owned();
-    let attention_reasons = pull_request_attention(
+    let mut attention_reasons = pull_request_attention(
         &state,
         fact.draft,
         review_decision.as_deref(),
@@ -2876,7 +2836,7 @@ fn observation_from_fact(
         merge_state_status.as_deref(),
         &checks,
     );
-    let ready_to_merge = state == "open"
+    let mut ready_to_merge = state == "open"
         && !fact.draft
         && !auto_merge_enabled
         && in_merge_queue != Some(true)
@@ -2886,6 +2846,17 @@ fn observation_from_fact(
             .iter()
             .any(|check| check.bucket == PullRequestCheckBucket::Pending)
         && !matches!(review_decision.as_deref(), Some("review_required"));
+    if in_merge_queue == Some(true) {
+        attention_reasons.clear();
+        ready_to_merge = false;
+    }
+    let workspace_links = links_for_pr(
+        &repository,
+        fact.number,
+        fact.head_sha.as_deref(),
+        &fact.head_branch,
+        workspaces,
+    );
     PullRequestObservation {
         summary: CodeDeliveryPullRequestSummary {
             id: format!("{}#{}", repository_key_ref(&repository), fact.number),
@@ -2909,7 +2880,7 @@ fn observation_from_fact(
             checks,
             attention_reasons,
             ready_to_merge,
-            workspace_links: Vec::new(),
+            workspace_links,
             stack_parent_number: None,
             stack_number: None,
             stack_size: None,
@@ -2923,39 +2894,6 @@ fn observation_from_fact(
         head_repository: None,
         host_stack: None,
         from_host: false,
-    }
-}
-
-fn pull_request_remote_plan(query: &CodeDeliveryPullRequestQuery) -> PullRequestRemotePlan {
-    let state = if query.attention_only
-        || query.ready_only
-        || (query.states.len() == 1 && query.states[0].eq_ignore_ascii_case("open"))
-    {
-        "open"
-    } else if query.states.len() == 1 && query.states[0].eq_ignore_ascii_case("closed") {
-        "closed"
-    } else if query.states.len() == 1 && query.states[0].eq_ignore_ascii_case("merged") {
-        "merged"
-    } else {
-        "all"
-    };
-    let checks_loaded = state == "open" || !query.check_states.is_empty();
-    // Only a single author pushes down: `gh pr list` takes one `--author`,
-    // while the query's list is a union. Several authors still page the
-    // unscoped read and match locally.
-    let author = match query.authors.as_slice() {
-        [only] if !only.trim().is_empty() => Some(only.trim().to_owned()),
-        _ => None,
-    };
-    PullRequestRemotePlan {
-        state,
-        fields: if checks_loaded {
-            PR_LIST_FIELDS_WITH_CHECKS
-        } else {
-            PR_LIST_FIELDS
-        },
-        checks_loaded,
-        author,
     }
 }
 
@@ -3762,12 +3700,15 @@ pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> Pull
 /// on stays a live-only observation. The branch-name tier never mints.
 /// Returns the workspaces that gained an attribution row, so the caller can
 /// restate their digests. Best-effort throughout: a store failure degrades
-/// to the live heuristic links.
+/// to the live heuristic links. Aggregate reads pass their owner-scoped facts
+/// back in so attribution and stack projection do not issue one redundant DB
+/// read per repository.
 async fn persist_and_augment_pull_request_facts(
     runtime: &CodeRuntime,
     owner: &OwnerId,
     workspaces: &[WorkspaceIndexEntry],
     items: &mut [PullRequestObservation],
+    preloaded_facts: Option<&[CodePullRequestFact]>,
 ) -> Vec<WorkspaceId> {
     let db = &runtime.db;
     let mut minted = Vec::new();
@@ -3780,7 +3721,7 @@ async fn persist_and_augment_pull_request_facts(
         })
         .collect();
 
-    // One fact read per repository identity on the page.
+    // Group once per repository; exact/detail paths lazily load each group.
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         groups
@@ -3791,20 +3732,31 @@ async fn persist_and_augment_pull_request_facts(
     let mut fact_ids: HashMap<usize, CodePullRequestId> = HashMap::new();
     for indices in groups.values() {
         let repository = &items[indices[0]].summary.repository;
-        let mut repo_facts = match list_pull_request_facts_for_repo(
-            db,
-            owner,
-            &repository.host,
-            &repository.owner,
-            &repository.name,
-        )
-        .await
-        {
-            Ok(facts) => facts,
-            Err(err) => {
-                tracing::debug!("fact read failed for a delivery page: {err}");
-                continue;
-            }
+        let mut repo_facts = match preloaded_facts {
+            Some(facts) => facts
+                .iter()
+                .filter(|fact| {
+                    fact.host.eq_ignore_ascii_case(&repository.host)
+                        && fact.repo_owner.eq_ignore_ascii_case(&repository.owner)
+                        && fact.repo_name.eq_ignore_ascii_case(&repository.name)
+                })
+                .cloned()
+                .collect(),
+            None => match list_pull_request_facts_for_repo(
+                db,
+                owner,
+                &repository.host,
+                &repository.owner,
+                &repository.name,
+            )
+            .await
+            {
+                Ok(facts) => facts,
+                Err(err) => {
+                    tracing::debug!("fact read failed for a delivery page: {err}");
+                    continue;
+                }
+            },
         };
         let base_repository = stack_repository_identity(repository);
         for fact in &repo_facts {
@@ -4561,6 +4513,15 @@ fn repository_key(target: &CodeGitHubRepositoryTarget) -> String {
     )
 }
 
+fn repository_key_for_fact(fact: &CodePullRequestFact) -> String {
+    format!(
+        "{}/{}/{}",
+        fact.host.to_ascii_lowercase(),
+        fact.repo_owner.to_ascii_lowercase(),
+        fact.repo_name.to_ascii_lowercase()
+    )
+}
+
 fn repository_key_ref(repository: &CodeGitHubRepositoryRef) -> String {
     format!(
         "{}/{}/{}",
@@ -4591,85 +4552,6 @@ fn parse_comment_count(value: &Value) -> Option<u64> {
         .get("totalCount")
         .or_else(|| comments.get("total_count"))
         .and_then(Value::as_u64)
-}
-
-/// GitHub's pull-request list REST payload leaves `comments` null. The issues
-/// list uses the same numbers and carries an integer count. One page mixes
-/// ordinary issues in, so keep paging while listed PR numbers are still
-/// missing. Failures and leftover misses stay absent.
-const ISSUE_COMMENT_PAGE_SIZE: usize = 100;
-const ISSUE_COMMENT_MAX_PAGES: u32 = 10;
-
-fn absorb_issue_comment_counts(
-    issues: &[Value],
-    needed: &mut HashSet<u64>,
-    counts: &mut HashMap<u64, u64>,
-) {
-    for issue in issues {
-        let Some(number) = issue.get("number").and_then(Value::as_u64) else {
-            continue;
-        };
-        if !needed.contains(&number) {
-            continue;
-        }
-        let Some(comments) = issue.get("comments").and_then(Value::as_u64) else {
-            continue;
-        };
-        needed.remove(&number);
-        counts.insert(number, comments);
-    }
-}
-
-async fn overlay_issue_comment_counts(
-    api: &DeliveryApi,
-    target: &CodeGitHubRepositoryTarget,
-    state: &str,
-    values: &mut [Value],
-) {
-    let mut needed = HashSet::new();
-    for value in values.iter() {
-        if parse_comment_count(value).is_some() {
-            continue;
-        }
-        if let Some(number) = value.get("number").and_then(Value::as_u64) {
-            needed.insert(number);
-        }
-    }
-    if needed.is_empty() {
-        return;
-    }
-    let state = if state == "merged" { "closed" } else { state };
-    let mut counts = HashMap::new();
-    for page in 1..=ISSUE_COMMENT_MAX_PAGES {
-        let endpoint = format!(
-            "{}?state={state}&per_page={ISSUE_COMMENT_PAGE_SIZE}&page={page}",
-            api_endpoint(target, "issues")
-        );
-        let Ok(payload) = api.get(&endpoint).await else {
-            break;
-        };
-        let Some(issues) = payload.as_array() else {
-            break;
-        };
-        absorb_issue_comment_counts(issues, &mut needed, &mut counts);
-        if needed.is_empty() || issues.len() < ISSUE_COMMENT_PAGE_SIZE {
-            break;
-        }
-    }
-    for value in values {
-        if parse_comment_count(value).is_some() {
-            continue;
-        }
-        let Some(number) = value.get("number").and_then(Value::as_u64) else {
-            continue;
-        };
-        let Some(count) = counts.get(&number) else {
-            continue;
-        };
-        if let Some(object) = value.as_object_mut() {
-            object.insert("comments".to_owned(), Value::from(*count));
-        }
-    }
 }
 
 fn stack_repository_identity(repository: &CodeGitHubRepositoryRef) -> StackRepositoryIdentity {
@@ -4769,7 +4651,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_fact_projects_a_delivery_row_without_heuristic_links() {
+    fn a_stored_fact_projects_a_delivery_row() {
         let now = Utc::now();
         let fact = CodePullRequestFact {
             id: CodePullRequestId::new(),
@@ -4794,7 +4676,7 @@ mod tests {
             last_seen_at: now,
             live: None,
         };
-        let observation = observation_from_fact(&fact, repository_ref());
+        let observation = observation_from_fact(&fact, repository_ref(), &[]);
         assert!(!observation.from_host);
         assert_eq!(observation.summary.number, 412);
         assert!(observation.summary.workspace_links.is_empty());
@@ -4989,24 +4871,6 @@ mod tests {
         }
     }
 
-    fn pull_request_query() -> CodeDeliveryPullRequestQuery {
-        CodeDeliveryPullRequestQuery {
-            repositories: Vec::new(),
-            search: None,
-            states: Vec::new(),
-            review_states: Vec::new(),
-            check_states: Vec::new(),
-            authors: Vec::new(),
-            attention_only: false,
-            ready_only: false,
-            tidebreak_linked: None,
-            updated_after: None,
-            cursor: None,
-            limit: None,
-            refresh: false,
-        }
-    }
-
     fn run_query() -> CodeDeliveryRunQuery {
         CodeDeliveryRunQuery {
             repositories: Vec::new(),
@@ -5029,25 +4893,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_queries_avoid_unrelated_remote_rows() {
-        let mut pull_requests = pull_request_query();
-        pull_requests.states = vec!["open".into()];
-        assert_eq!(pull_request_remote_plan(&pull_requests).state, "open");
-        assert!(pull_request_remote_plan(&pull_requests).checks_loaded);
-        pull_requests.states.clear();
-        pull_requests.attention_only = true;
-        assert_eq!(pull_request_remote_plan(&pull_requests).state, "open");
-        pull_requests.attention_only = false;
-        let settled = pull_request_remote_plan(&pull_requests);
-        assert_eq!(settled.state, "all");
-        assert!(!settled.checks_loaded);
-        assert!(!settled.fields.contains("statusCheckRollup"));
-        assert!(settled.fields.contains("headRepository"));
-        assert!(settled.fields.contains("headRepositoryOwner"));
-
-        pull_requests.states = vec!["merged".into()];
-        assert_eq!(pull_request_remote_plan(&pull_requests).state, "merged");
-
+    fn focused_run_queries_avoid_unrelated_remote_rows() {
         let mut runs = run_query();
         runs.kinds = vec![CodeDeliveryRunKind::WorkflowRun];
         assert_eq!(run_remote_scope(&runs), ("workflows", true, false));
@@ -5055,28 +4901,6 @@ mod tests {
         assert_eq!(run_remote_scope(&runs), ("deployments", false, true));
         runs.kinds.clear();
         assert_eq!(run_remote_scope(&runs), ("all", true, true));
-    }
-
-    /// The default Delivery view is one author's open pull requests. Asking
-    /// GitHub for everyone's and narrowing afterwards would spend the 100-row
-    /// per-repository cap on other people's work, so a lone author reaches the
-    /// remote read — and takes its own cache scope, because the rows it comes
-    /// back with are not the unscoped aggregate.
-    #[test]
-    fn a_single_author_reaches_the_remote_read() {
-        let mut query = pull_request_query();
-        query.states = vec!["open".into()];
-        let everyone = pull_request_remote_plan(&query);
-        assert_eq!(everyone.author, None);
-
-        query.authors = vec![" mara ".into()];
-        let mine = pull_request_remote_plan(&query);
-        assert_eq!(mine.author.as_deref(), Some("mara"));
-        assert_ne!(mine.cache_scope(), everyone.cache_scope());
-
-        // A union of authors is not something `gh pr list` can express.
-        query.authors = vec!["mara".into(), "devon".into()];
-        assert_eq!(pull_request_remote_plan(&query).author, None);
     }
 
     #[test]
@@ -5373,29 +5197,6 @@ mod tests {
                 .comment_count,
             None
         );
-    }
-
-    #[test]
-    fn issue_comment_overlay_skips_crowding_issues() {
-        let mut needed = HashSet::from([17, 19]);
-        let mut counts = HashMap::new();
-        absorb_issue_comment_counts(
-            &[
-                serde_json::json!({"number": 1, "comments": 9}),
-                serde_json::json!({"number": 17, "comments": 2}),
-            ],
-            &mut needed,
-            &mut counts,
-        );
-        assert_eq!(counts.get(&17), Some(&2));
-        assert!(!needed.contains(&17));
-        absorb_issue_comment_counts(
-            &[serde_json::json!({"number": 19, "comments": 4})],
-            &mut needed,
-            &mut counts,
-        );
-        assert!(needed.is_empty());
-        assert_eq!(counts.get(&19), Some(&4));
     }
 
     #[test]

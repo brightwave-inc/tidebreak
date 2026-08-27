@@ -2499,8 +2499,20 @@ async fn register_delivery_repository(
 /// request stays pinned to the registered host and repository.
 #[tokio::test]
 async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
+    use tidebreak_core::db::code::{
+        get_pull_request_fetch_state, save_pull_request_fact, set_pull_request_fetch_state,
+        set_pull_request_live_state, PullRequestFetchCondition,
+    };
+    use tidebreak_core::{
+        CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
+        PullRequestCheck, PullRequestCheckBucket,
+    };
+
     type RecordedActions = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+    type ConditionalReads = Arc<std::sync::Mutex<Vec<(&'static str, Option<String>)>>>;
     let recorded_actions: RecordedActions = Arc::default();
+    let conditional_reads: ConditionalReads = Arc::default();
+    let aggregate_list_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     fn pull_request() -> serde_json::Value {
         serde_json::json!({
@@ -2540,6 +2552,33 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         })
     }
 
+    fn conditional_answer(
+        seen: &ConditionalReads,
+        endpoint: &'static str,
+        headers: &axum::http::HeaderMap,
+        etag: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        assert_borrowed_forge_credential(headers);
+        let conditional = headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let unchanged = conditional.as_deref() == Some(etag);
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((endpoint, conditional));
+        axum::http::Response::builder()
+            .status(if unchanged { 304 } else { 200 })
+            .header("etag", etag)
+            .body(axum::body::Body::from(if unchanged {
+                String::new()
+            } else {
+                body.to_string()
+            }))
+            .unwrap()
+    }
+
     let repository = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
         axum::Json(serde_json::json!({
@@ -2550,40 +2589,32 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             "owner": { "login": "acme" },
         }))
     };
-    let pulls = |headers: axum::http::HeaderMap,
-                 axum::extract::Query(query): axum::extract::Query<
-        std::collections::HashMap<String, String>,
-    >| async move {
-        assert_borrowed_forge_credential(&headers);
-        assert_eq!(query.get("state").map(String::as_str), Some("open"));
-        // GitHub's pull list omits `comments`; the issues list carries the
-        // integer count the overlay reads.
-        let mut listed = pull_request();
-        listed
-            .as_object_mut()
-            .expect("pull request fixture is an object")
-            .remove("comments");
-        axum::Json(serde_json::json!([listed]))
+    let pull_list_calls = Arc::clone(&aggregate_list_calls);
+    let pulls = move |headers: axum::http::HeaderMap| {
+        let calls = Arc::clone(&pull_list_calls);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            axum::Json(serde_json::json!([]))
+        }
     };
-    let issues = |headers: axum::http::HeaderMap,
-                  axum::extract::Query(query): axum::extract::Query<
-        std::collections::HashMap<String, String>,
-    >| async move {
-        assert_borrowed_forge_credential(&headers);
-        assert_eq!(query.get("state").map(String::as_str), Some("open"));
-        axum::Json(serde_json::json!([{
-            "number": 17,
-            "comments": 2,
-            "pull_request": {
-                "url": "https://github.com/acme/demo/pull/17"
-            }
-        }]))
+    let issue_list_calls = Arc::clone(&aggregate_list_calls);
+    let issues = move |headers: axum::http::HeaderMap| {
+        let calls = Arc::clone(&issue_list_calls);
+        async move {
+            assert_borrowed_forge_credential(&headers);
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            axum::Json(serde_json::json!([]))
+        }
     };
-    let pull = |headers: axum::http::HeaderMap| async move {
-        assert_borrowed_forge_credential(&headers);
-        let mut pull = pull_request();
-        pull["draft"] = serde_json::Value::Bool(true);
-        axum::Json(pull)
+    let pull_reads = Arc::clone(&conditional_reads);
+    let pull = move |headers: axum::http::HeaderMap| {
+        let seen = Arc::clone(&pull_reads);
+        async move {
+            let mut pull = pull_request();
+            pull["draft"] = serde_json::Value::Bool(true);
+            conditional_answer(&seen, "pull", &headers, "W/\"pull-17\"", pull)
+        }
     };
     let issue_comments = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
@@ -2594,9 +2625,18 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             "created_at": "2026-08-25T11:05:00Z"
         }]))
     };
-    let reviews = |headers: axum::http::HeaderMap| async move {
-        assert_borrowed_forge_credential(&headers);
-        axum::Json(serde_json::json!([]))
+    let review_reads = Arc::clone(&conditional_reads);
+    let reviews = move |headers: axum::http::HeaderMap| {
+        let seen = Arc::clone(&review_reads);
+        async move {
+            conditional_answer(
+                &seen,
+                "reviews",
+                &headers,
+                "W/\"reviews-17\"",
+                serde_json::json!([]),
+            )
+        }
     };
     let inline_comments = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
@@ -2612,21 +2652,36 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             "patch": "@@ -1 +1 @@"
         }]))
     };
-    let checks = |headers: axum::http::HeaderMap| async move {
+    let check_reads = Arc::clone(&conditional_reads);
+    let checks = move |headers: axum::http::HeaderMap| {
+        let seen = Arc::clone(&check_reads);
+        async move {
+            conditional_answer(
+                &seen,
+                "checks",
+                &headers,
+                "W/\"checks-17\"",
+                serde_json::json!({
+                    "check_runs": [{
+                        "name": "desktop test",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "details_url": "https://github.com/acme/demo/actions/runs/44",
+                        "html_url": "https://github.com/acme/demo/actions/runs/44"
+                    }, {
+                        "name": "clippy",
+                        "status": "in_progress",
+                        "conclusion": null,
+                        "details_url": "https://github.com/acme/demo/actions/runs/45",
+                        "html_url": "https://github.com/acme/demo/actions/runs/45"
+                    }]
+                }),
+            )
+        }
+    };
+    let rules = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
-        axum::Json(serde_json::json!({
-            "check_runs": [{
-                "name": "desktop test",
-                "status": "completed",
-                "conclusion": "failure",
-                "details_url": "https://github.com/acme/demo/actions/runs/44"
-            }, {
-                "name": "clippy",
-                "status": "in_progress",
-                "conclusion": null,
-                "html_url": "https://github.com/acme/demo/actions/runs/45"
-            }]
-        }))
+        axum::Json(serde_json::json!([{ "type": "merge_queue" }]))
     };
     let workflow_runs = |headers: axum::http::HeaderMap| async move {
         assert_borrowed_forge_credential(&headers);
@@ -2847,6 +2902,10 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             axum::routing::get(checks),
         )
         .route(
+            "/repos/acme/demo/rules/branches/main",
+            axum::routing::get(rules),
+        )
+        .route(
             "/repos/acme/demo/actions/runs",
             axum::routing::get(workflow_runs),
         )
@@ -2917,6 +2976,88 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     );
     assert_eq!(repositories["repositories"][0]["default_branch"], "main");
 
+    let owner = tidebreak_core::OwnerId::local();
+    let created_at = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let updated_at = chrono::DateTime::parse_from_rfc3339("2026-08-25T11:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let stale_at = chrono::Utc::now() - chrono::Duration::minutes(10);
+    let fact = CodePullRequestFact {
+        id: CodePullRequestId::new(),
+        owner: owner.clone(),
+        host: "github.com".into(),
+        repo_owner: "acme".into(),
+        repo_name: "demo".into(),
+        number: 17,
+        url: "https://github.com/acme/demo/pull/17".into(),
+        title: "Repair hosted delivery".into(),
+        state: CodePullRequestState::Open,
+        draft: false,
+        author: Some("mira-chen".into()),
+        head_branch: "hosted-delivery".into(),
+        base_branch: "main".into(),
+        head_sha: Some("feedfeedfeedfeedfeed".into()),
+        created_at,
+        updated_at,
+        merged_at: None,
+        closed_at: None,
+        first_seen_at: created_at,
+        last_seen_at: updated_at,
+        live: None,
+    };
+    save_pull_request_fact(&runtime.db, &fact).await.unwrap();
+    assert!(set_pull_request_fetch_state(
+        &runtime.db,
+        &owner,
+        "github.com",
+        "acme",
+        "demo",
+        17,
+        Some(&fact),
+        PullRequestFetchCondition::Unconditional,
+        Some("W/\"pull-17\""),
+        Some("W/\"checks-17\""),
+        Some("W/\"reviews-17\""),
+    )
+    .await
+    .unwrap());
+    set_pull_request_live_state(
+        &runtime.db,
+        &owner,
+        "github.com",
+        "acme",
+        "demo",
+        17,
+        &CodePullRequestLiveState {
+            checks_summary: Some("0 passing, 1 pending, 1 failing".into()),
+            checks: Some(vec![
+                PullRequestCheck {
+                    name: "desktop test".into(),
+                    bucket: PullRequestCheckBucket::Fail,
+                    detail: Some("failure".into()),
+                    url: Some("https://github.com/acme/demo/actions/runs/44".into()),
+                },
+                PullRequestCheck {
+                    name: "clippy".into(),
+                    bucket: PullRequestCheckBucket::Pending,
+                    detail: Some("in_progress".into()),
+                    url: Some("https://github.com/acme/demo/actions/runs/45".into()),
+                },
+            ]),
+            review_decision: Some("approved".into()),
+            mergeable: Some("mergeable".into()),
+            merge_state_status: Some("clean".into()),
+            auto_merge_enabled: Some(false),
+            in_merge_queue: Some(true),
+            observed_at: stale_at,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the seeded fact exists");
+
     let target = serde_json::json!({
         "host": "github.com",
         "owner": "acme",
@@ -2937,7 +3078,12 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         .unwrap();
     assert_eq!(pull_requests["items"][0]["number"], 17);
     assert_eq!(pull_requests["items"][0]["in_merge_queue"], true);
-    assert_eq!(pull_requests["items"][0]["comment_count"], 2);
+    assert!(pull_requests["items"][0]["comment_count"].is_null());
+    assert!(pull_requests["items"][0]["author_avatar_url"].is_null());
+    assert!(pull_requests["items"][0]["labels"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(
         pull_requests["items"][0]["checks"][0]["name"],
         "desktop test"
@@ -2959,6 +3105,32 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
             .is_empty(),
         "a queued pull request leaves the attention list"
     );
+    assert_eq!(
+        aggregate_list_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the fact-backed aggregate must not call either collection list endpoint"
+    );
+    let aggregate_reads = conditional_reads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for expected in [
+        ("pull", Some("W/\"pull-17\"".to_owned())),
+        ("checks", Some("W/\"checks-17\"".to_owned())),
+        ("reviews", Some("W/\"reviews-17\"".to_owned())),
+    ] {
+        assert!(
+            aggregate_reads.contains(&expected),
+            "the stale identity refresh must send its stored validator: {aggregate_reads:?}"
+        );
+    }
+    let refreshed =
+        get_pull_request_fetch_state(&runtime.db, &owner, "github.com", "acme", "demo", 17)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(refreshed.fact.live.unwrap().observed_at > stale_at);
+    assert_eq!(refreshed.pull_etag.as_deref(), Some("W/\"pull-17\""));
 
     let pull_request_detail: serde_json::Value = client
         .post(format!("http://{addr}/code/delivery/pull-requests/detail"))
@@ -2987,6 +3159,16 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
     assert_eq!(
         pull_request_detail["files"][0]["path"],
         "crates/tidebreak-server/src/code/delivery.rs"
+    );
+    let after_detail =
+        get_pull_request_fetch_state(&runtime.db, &owner, "github.com", "acme", "demo", 17)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        after_detail.pull_etag.as_deref(),
+        Some("W/\"pull-17\""),
+        "the exact detail snapshot must not clear the hot-fetch validator"
     );
 
     let runs: serde_json::Value = client
@@ -3214,9 +3396,15 @@ async fn a_hosted_delivery_page_reads_and_acts_over_forge_rest() {
         "two pull request runs and one run-detail action reach the failed-jobs endpoint"
     );
     assert_eq!(
-        lender.minted(),
-        vec!["acme/demo".to_owned(); 14],
-        "every read and action borrows only for the registered repository"
+        aggregate_list_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no later action may revive the removed aggregate list path"
+    );
+    let minted = lender.minted();
+    assert!(!minted.is_empty());
+    assert!(
+        minted.iter().all(|repository| repository == "acme/demo"),
+        "every read and action borrows only for the registered repository: {minted:?}"
     );
 }
 
