@@ -418,6 +418,37 @@ pub async fn latest_pushed_wip_ref(
         .and_then(|row| row.last_wip_ref))
 }
 
+/// Forget a WIP checkpoint ref the origin no longer advertises.
+///
+/// The remote analog of dropping a rejected resume ref: a spawn already
+/// refused this ref, so every retry through it refuses identically. Clearing
+/// it lets the resume walk-back fall through to an earlier checkpoint, or to
+/// the base ref when none is left.
+pub async fn forget_session_wip_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    reference: &str,
+) -> Result<()> {
+    let now = database_now(&store.conn).await?;
+    entities::code_session_incarnation::Entity::update_many()
+        .col_expr(
+            entities::code_session_incarnation::Column::LastWipRef,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session_incarnation::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session_incarnation::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_session_incarnation::Column::LastWipRef.eq(reference))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
 /// The session's newest incarnation, in any state.
 pub async fn latest_incarnation(
     store: &DbStore,

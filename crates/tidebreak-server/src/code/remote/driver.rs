@@ -17,9 +17,10 @@ use std::sync::Arc;
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    activate_incarnation, create_incarnation_intent, insert_turn, latest_incarnation,
-    latest_pushed_wip_ref, latest_turn, mark_incarnation_terminal_events_journaled, save_turn,
-    stale_incarnation_intents_all_owners, stop_incarnation,
+    activate_incarnation, create_incarnation_intent, forget_session_wip_ref, insert_turn,
+    latest_incarnation, latest_pushed_wip_ref, latest_turn,
+    mark_incarnation_terminal_events_journaled, save_turn, stale_incarnation_intents_all_owners,
+    stop_incarnation,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionIncarnation,
@@ -389,7 +390,12 @@ impl RemoteDriver<'_> {
                 if resumed_from_wip && refusal_names(&error, &resume_ref) {
                     // The WIP ref the predecessor pushed is gone from the
                     // origin: the resume state no longer exists, and retrying
-                    // would refuse identically. Fence so a reap starts fresh.
+                    // would refuse identically. Forget the ref — the local
+                    // resume-lost path drops its rejected ref for the same
+                    // reason — so the turn after a reap resumes from an
+                    // earlier checkpoint or the base instead of looping on
+                    // this refusal. Then fence so a reap starts fresh.
+                    forget_session_wip_ref(db, &owner, session.id, &resume_ref).await?;
                     recovery::fence_session(
                         db,
                         bus,
@@ -1051,6 +1057,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, IncarnationState::Stopped);
+
+        // The gone checkpoint is forgotten: after a reap, the next turn
+        // resumes from the base ref instead of looping on the same refusal.
+        let mut recovered = driver.reap(live).await.unwrap();
+        let outcome = driver
+            .submit_turn(&mut recovered, &workspace, &repo, "continue")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+        let spawns = fake.spawns.lock().unwrap();
+        assert_eq!(
+            spawns.last().unwrap().repository_ref.as_deref(),
+            Some("main")
+        );
     }
 
     /// Reap cancels the sandbox, closes the record, and resolves the fence
