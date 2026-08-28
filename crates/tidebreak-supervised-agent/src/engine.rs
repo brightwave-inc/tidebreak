@@ -95,6 +95,40 @@ pub trait TurnHandle: Send {
     /// usually [`TurnEnd::Interrupted`], but a turn that finished first keeps
     /// its own outcome.
     async fn interrupt(&mut self);
+
+    /// The turn's assistant answer, when the engine surfaced one.
+    ///
+    /// Read once, after the turn ends: implementations may drain their
+    /// buffer, and a second read may return nothing. The driver emits it as
+    /// the `assistant_record` event on completed turns — the per-turn answer
+    /// text the journal retains for rendering, pickup, and memory. Engines
+    /// with no message stream keep the default.
+    fn assistant_record(&mut self) -> Option<AssistantRecord> {
+        None
+    }
+}
+
+/// Ceiling on one turn's assistant record body, in bytes.
+///
+/// Well under the control endpoint's 192 KiB batch ceiling
+/// ([`crate::control::MAX_BATCH_BYTES`]) with the poll envelope beside it,
+/// and generous for an answer: a record this size is narration, not an
+/// artifact — artifacts leave as pushed branches or `TASK_OUTPUT.md`.
+pub const ASSISTANT_RECORD_MAX_BODY_BYTES: usize = 96 * 1024;
+
+/// One turn's assistant answer, bounded.
+///
+/// The parent conversation's completed messages only — subagent messages
+/// (those tagged with a parent call) are activity, not the answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssistantRecord {
+    /// The answer text, truncated on a character boundary at
+    /// [`ASSISTANT_RECORD_MAX_BODY_BYTES`].
+    pub body: String,
+    /// Total bytes the turn produced, before truncation.
+    pub total_bytes: usize,
+    /// Whether `body` was cut at the ceiling.
+    pub truncated: bool,
 }
 
 /// An engine CLI the driver runs turns against.
