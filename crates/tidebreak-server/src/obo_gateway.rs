@@ -439,6 +439,27 @@ impl OboGateway {
         })
     }
 
+    /// The live subject bearer for `owner`, when this process has seen one.
+    fn subject_for(&self, owner: &OwnerId) -> Option<Arc<str>> {
+        let users = self.users.lock().ok()?;
+        let slot = users.get(owner)?;
+        let subject = slot.subject.lock().ok()?;
+        Some(subject.clone())
+    }
+
+    /// Owner-scoped runtime bearers for one confined-sandbox endpoint.
+    ///
+    /// Each token is exchanged for the `runtime:{endpoint_slug}` audience so
+    /// a sandbox is provisioned as its owner, never as a shared machine
+    /// identity (docs/slack-sessions.md).
+    pub(crate) fn runtime_tokens(self: &Arc<Self>, endpoint_slug: &str) -> Arc<RuntimeTokens> {
+        Arc::new(RuntimeTokens {
+            gateway: self.clone(),
+            audience: format!("runtime:{endpoint_slug}"),
+            cache: tokio::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The current inference token for `owner`, exchanging one if the cached
     /// token is missing or near expiry.
     ///
@@ -1171,6 +1192,59 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
     GitForgeError::Unavailable(format!(
         "the Model Gateway git-credential request failed with status {status}"
     ))
+}
+
+/// [`OboGateway`]-backed source of runtime bearers for one endpoint.
+///
+/// Tokens are cached per owner and re-exchanged near expiry, single-flight
+/// per source instance. A caller this process holds no live session for
+/// fails as sign-in-required rather than borrowing another identity.
+pub(crate) struct RuntimeTokens {
+    gateway: Arc<OboGateway>,
+    audience: String,
+    cache: tokio::sync::Mutex<HashMap<OwnerId, CachedToken>>,
+}
+
+#[async_trait::async_trait]
+impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
+    async fn runtime_token(
+        &self,
+        owner: &OwnerId,
+    ) -> std::result::Result<
+        crate::code::remote::RuntimeToken,
+        crate::code::remote::RemoteSandboxError,
+    > {
+        use crate::code::remote::{RemoteSandboxError, RuntimeToken};
+        // Holding the cache across the exchange is the single-flight gate: a
+        // second call for the same owner waits and then finds a fresh token.
+        let mut cache = self.cache.lock().await;
+        if let Some(current) = cache.get(owner) {
+            if current.is_fresh() {
+                return Ok(RuntimeToken {
+                    secret: current.token.to_string(),
+                });
+            }
+        }
+        let Some(subject) = self.gateway.subject_for(owner) else {
+            return Err(RemoteSandboxError::SignInRequired(
+                "this machine holds no live Model Gateway session for you; sign in again".into(),
+            ));
+        };
+        let minted = self
+            .gateway
+            .exchange(&subject, &self.audience)
+            .await
+            .map_err(|error| match error {
+                AgentError::SignInRequired(detail) => RemoteSandboxError::SignInRequired(detail),
+                other => RemoteSandboxError::Unavailable {
+                    operation: "token",
+                    detail: other.to_string(),
+                },
+            })?;
+        let secret = minted.token.to_string();
+        cache.insert(owner.clone(), minted);
+        Ok(RuntimeToken { secret })
+    }
 }
 
 /// Per-caller git-forge lending, as code mode consumes it (decision 63).

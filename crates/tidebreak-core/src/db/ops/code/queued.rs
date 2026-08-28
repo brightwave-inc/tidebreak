@@ -85,6 +85,25 @@ pub async fn queued_turn_head(
         .transpose()
 }
 
+/// Every (owner, session) pair holding at least one queued message. The
+/// remote sweep uses this to find heads to promote; local sessions drain
+/// their own queues through their workers and ignore it.
+pub async fn sessions_with_queued_turns_all_owners(
+    store: &DbStore,
+) -> Result<Vec<(OwnerId, CodeSessionId)>> {
+    let rows = entities::code_queued_turn::Entity::find()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let mut pairs: Vec<(OwnerId, CodeSessionId)> = rows
+        .into_iter()
+        .map(|row| Ok((OwnerId::new(&row.owner)?, CodeSessionId(row.session_id))))
+        .collect::<Result<_>>()?;
+    pairs.sort_by(|a, b| (a.0.as_str(), a.1 .0).cmp(&(b.0.as_str(), b.1 .0)));
+    pairs.dedup();
+    Ok(pairs)
+}
+
 /// Park one message at the queue tail. The caller supplies the row id, which
 /// is the turn id promotion later inserts under.
 pub async fn enqueue_queued_turn(

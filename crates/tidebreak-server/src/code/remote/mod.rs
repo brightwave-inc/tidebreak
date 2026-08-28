@@ -31,15 +31,12 @@
 //!
 //! [`0079`]: ../../../../../docs/decisions/0079-supervised-agent-declines-the-sandbox-protocol.md
 
-// The session runtime consumes this module in a later slice (#2873); until
-// then only the tests construct it. Same stance as `scripted_harness`.
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub(crate) mod driver;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub(crate) mod gateway;
 pub(crate) mod ingest;
+pub(crate) mod service;
 pub(crate) mod wire;
 
 use async_trait::async_trait;

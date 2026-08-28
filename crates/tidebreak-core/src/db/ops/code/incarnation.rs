@@ -487,6 +487,39 @@ pub async fn session_spend_microusd(
 /// request path: the sweep runs machine-wide, and each row it finds is a
 /// spawn whose outcome nothing recorded. The sweep stops the row and, when the environment knows a
 /// matching sandbox, cancels it.
+/// Incarnations a pump still owes work, every owner: the active ones, and
+/// the stopped ones whose terminal events are not journaled yet.
+pub async fn pumpable_incarnations_all_owners(
+    store: &DbStore,
+) -> Result<Vec<CodeSessionIncarnation>> {
+    entities::code_session_incarnation::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    entities::code_session_incarnation::Column::State
+                        .eq(IncarnationState::Active.as_str()),
+                )
+                .add(
+                    sea_orm::Condition::all()
+                        .add(
+                            entities::code_session_incarnation::Column::State
+                                .eq(IncarnationState::Stopped.as_str()),
+                        )
+                        .add(
+                            entities::code_session_incarnation::Column::TerminalEventsJournaled
+                                .eq(false),
+                        ),
+                ),
+        )
+        .order_by_asc(entities::code_session_incarnation::Column::CreatedAt)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(incarnation_from_model)
+        .collect()
+}
+
 pub async fn stale_incarnation_intents_all_owners(
     store: &DbStore,
     cutoff: chrono::DateTime<chrono::Utc>,

@@ -13,6 +13,10 @@
 //!   environment that grows a field — or an older one that lacks one —
 //!   keeps working.
 
+// Wire structs mirror the pinned contract in full; fields the runtime does
+// not read yet still document and deserialize it.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
 
 /// Longest `events` wait the environment honors, in seconds. A larger
