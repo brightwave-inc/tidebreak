@@ -971,6 +971,8 @@ pub(crate) enum CodeSessionIncarnation {
     StopReason,
     SpendMicrousd,
     TerminalEventsJournaled,
+    EventsCursor,
+    TaskOutput,
     CreatedAt,
     ActivatedAt,
     StoppedAt,
