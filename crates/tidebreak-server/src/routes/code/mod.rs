@@ -90,9 +90,10 @@ pub(crate) use types::{
     CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest, CodeSessionSnapshot,
     CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
     CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
-    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
-    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
+    CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspacePrSnapshot,
+    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateCodeTriggerBody,
+    HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
     UpdateCodeTriggerBody,
 };

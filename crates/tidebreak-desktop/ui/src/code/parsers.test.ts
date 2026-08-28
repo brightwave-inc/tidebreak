@@ -513,6 +513,31 @@ describe("parseCodeWorkspaceSearch", () => {
       }),
     ).toBeNull();
   });
+
+  it("accepts history matches that address the producing session", () => {
+    const result = {
+      matches: [],
+      history_matches: [
+        {
+          workspace_id: "workspace-1",
+          workspace_title: "Archived search work",
+          session_id: "session-1",
+          turn_id: "turn-1",
+          source: "turn_user_input",
+          preview: "Find the archived transcript.",
+          created_at: "2026-08-25T12:00:00Z",
+        },
+      ],
+      truncated: false,
+    };
+    expect(parseCodeWorkspaceSearch(result)).toEqual(result);
+    expect(
+      parseCodeWorkspaceSearch({
+        ...result,
+        history_matches: [{ ...result.history_matches[0], session_id: "" }],
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("parseCodeWorkspaceFiles", () => {

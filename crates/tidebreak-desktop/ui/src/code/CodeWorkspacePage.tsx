@@ -578,20 +578,19 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     );
   }, [rememberedSession]);
 
-  // `?task=` names the session to show: a sibling agent, or a watch child
-  // opened from the rail. The param is a request, not a fact — a link outlives
-  // the agent it points at, so it holds only while that agent is still here
-  // and still live.
+  // `?task=` names the session to show: a sibling agent, a watch child
+  // opened from the rail, or an archived conversation from search. The param
+  // is a request, not a fact — a link outlives the agent it points at, so it
+  // holds only while that agent is still listed.
   const namedTask = useMemo(() => {
     if (!taskParam) return null;
-    const found = sessions.find((entry) => entry.id === taskParam);
-    return found && found.lifecycle !== "ended" ? found : null;
+    return sessions.find((entry) => entry.id === taskParam) ?? null;
   }, [sessions, taskParam]);
 
-  // A param that names nothing showable is stale: the agent ended, or the link
-  // came from somewhere else. Drop it, so the fallback below runs and the URL
-  // stops naming an agent that is not there. Replace rather than push, so Back
-  // does not lead to the same dead link.
+  // A param that names no listed session is stale. Drop it so the fallback
+  // below runs and the URL stops naming an agent that is not there. Replace
+  // rather than push, so Back does not lead to the same dead link. An ended
+  // session is still listed, so archive search can open its transcript.
   useEffect(() => {
     if (!sessionsLoaded || !taskParam || namedTask) return;
     openWorkspaceTask(undefined, { replace: true });
@@ -2088,7 +2087,13 @@ function CodeSessionPane({
     ? selectedSubagent?.status === "running"
     : busy;
   const streamStalled = useStreamStalled(transcriptBusy, lastSeq);
-  const lifecycle = store((state) => state.lifecycle) ?? session.lifecycle;
+  const storeLifecycle = store((state) => state.lifecycle);
+  // Archive search opens ended sessions. Hydration then writes idle because
+  // the journal has no ended event, and that would resurrect the composer.
+  const lifecycle =
+    session.lifecycle === "ended"
+      ? "ended"
+      : (storeLifecycle ?? session.lifecycle);
   const [approvals, setApprovals] = useState<
     Record<string, CodeApprovalSnapshot>
   >({});

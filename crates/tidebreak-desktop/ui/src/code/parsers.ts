@@ -111,6 +111,7 @@ import type {
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  CodeWorkspaceHistorySearchMatch as WireCodeWorkspaceHistorySearchMatch,
   CodeWorkspaceSearch as WireCodeWorkspaceSearch,
   CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   CodeWorkspaceBlob as WireCodeWorkspaceBlob,
@@ -2716,8 +2717,14 @@ export function parseCodeWorkspaceSearch(
 ): CodeWorkspaceSearch | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireCodeWorkspaceSearch>(value, ["matches", "truncated"]) ||
+    !onlyKeys<WireCodeWorkspaceSearch>(value, [
+      "matches",
+      "history_matches",
+      "truncated",
+    ]) ||
     !Array.isArray(value.matches) ||
+    (value.history_matches !== undefined &&
+      !Array.isArray(value.history_matches)) ||
     typeof value.truncated !== "boolean"
   ) {
     return null;
@@ -2744,7 +2751,48 @@ export function parseCodeWorkspaceSearch(
       line: item.line,
     });
   }
-  return { matches, truncated: value.truncated };
+  const historyMatches: WireCodeWorkspaceHistorySearchMatch[] = [];
+  for (const item of value.history_matches ?? []) {
+    if (
+      !isRecord(item) ||
+      !onlyKeys<WireCodeWorkspaceHistorySearchMatch>(item, [
+        "workspace_id",
+        "workspace_title",
+        "session_id",
+        "turn_id",
+        "source",
+        "preview",
+        "created_at",
+      ]) ||
+      !nonEmpty(item.workspace_id) ||
+      !nonEmpty(item.workspace_title) ||
+      !nonEmpty(item.session_id) ||
+      (item.turn_id !== undefined && !nonEmpty(item.turn_id)) ||
+      !["turn_user_input", "turn_narrative", "event"].includes(
+        item.source as string,
+      ) ||
+      typeof item.preview !== "string" ||
+      !nonEmpty(item.created_at)
+    ) {
+      return null;
+    }
+    historyMatches.push({
+      workspace_id: item.workspace_id,
+      workspace_title: item.workspace_title,
+      session_id: item.session_id,
+      ...(item.turn_id === undefined ? {} : { turn_id: item.turn_id }),
+      source: item.source as WireCodeWorkspaceHistorySearchMatch["source"],
+      preview: item.preview,
+      created_at: item.created_at,
+    });
+  }
+  return {
+    matches,
+    ...(value.history_matches === undefined
+      ? {}
+      : { history_matches: historyMatches }),
+    truncated: value.truncated,
+  };
 }
 
 export function parseCodeWorkspaceFiles(

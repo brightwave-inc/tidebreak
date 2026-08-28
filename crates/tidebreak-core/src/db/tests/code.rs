@@ -18,10 +18,10 @@ use crate::db::code::{
     list_queued_turns, list_repos, list_sessions, list_turn_metrics, list_turns, mark_repo_removed,
     promote_queued_turn, queue_paused, queued_turn_head, recover_interrupted_session,
     replace_session_attention, replace_session_execution_settings, save_session, save_turn,
-    set_active_workspace_pull_request, set_queue_paused, set_session_harness_resume_ref,
-    set_session_subagents, set_turn_narrative, set_workspace_title_if, settle_approval_claim,
-    update_queued_turn, ClaimedApprovalSettlement, CodeJournalError, CodeSessionExecutionSettings,
-    MAX_REPLAY_EVENTS,
+    save_workspace, search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
+    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
+    set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
+    CodeJournalError, CodeSessionExecutionSettings, CodeTranscriptSearchSource, MAX_REPLAY_EVENTS,
 };
 use crate::{
     BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, ReasoningEffort, Store,
@@ -53,6 +53,85 @@ async fn seeded_session() -> (
     let (dir, store) = temp_store().await;
     let (session_id, turn_id) = seed_owner(&store, &OwnerId::local(), "example").await;
     (dir, store, session_id, turn_id)
+}
+
+#[tokio::test]
+async fn repository_transcript_search_survives_workspace_release() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    let session = get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut workspace = get_workspace(&store, &owner, session.workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let repo_id = workspace.repo_id;
+    workspace.status = CodeWorkspaceStatus::Released;
+    workspace.archived_at = Some(now());
+    workspace.released_at = Some(now());
+    assert!(save_workspace(&store, &workspace).await.unwrap());
+
+    let mut turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    turn.user_input = "Find Needle % literal in the old conversation".into();
+    assert!(save_turn(&store, &owner, &turn).await.unwrap());
+    append_event(
+        &store,
+        &owner,
+        session_id,
+        0,
+        &CodeEvent::AssistantMessage {
+            text: "The archived result contains Needle % literal too".into(),
+            parent_call_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let (other_session, _) = seed_owner(&store, &owner, "other-repo").await;
+    append_event(
+        &store,
+        &owner,
+        other_session,
+        0,
+        &CodeEvent::AssistantMessage {
+            text: "Needle % literal belongs to another repository".into(),
+            parent_call_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let searched = search_repo_transcripts(&store, &owner, repo_id, "needle % literal", 10)
+        .await
+        .unwrap();
+    assert!(!searched.truncated);
+    assert_eq!(searched.matches.len(), 2);
+    assert!(searched.matches.iter().all(|matched| {
+        matched.workspace_id == workspace.id
+            && matched.workspace_title == workspace.title
+            && matched.session_id == session_id
+            && matched.preview.to_lowercase().contains("needle % literal")
+    }));
+    assert!(searched.matches.iter().any(|matched| {
+        matched.source == CodeTranscriptSearchSource::TurnUserInput
+            && matched.turn_id == Some(turn_id)
+    }));
+    assert!(searched.matches.iter().any(|matched| {
+        matched.source == CodeTranscriptSearchSource::Event && matched.turn_id.is_none()
+    }));
+
+    let hidden = search_repo_transcripts(
+        &store,
+        &OwnerId::new("another-owner").unwrap(),
+        repo_id,
+        "needle % literal",
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(hidden.matches.is_empty());
 }
 
 /// Seed one owner's whole code-mode graph into an existing store: repo,

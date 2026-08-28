@@ -2288,9 +2288,9 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
-  it("falls back to the main agent when ?task names an ended session", async () => {
-    // Ended is the common case: the reader stopped the agent, then reloaded.
-    // The session is still listed, so existence alone is not enough to select.
+  it("opens an ended session named by ?task so archive search can show the transcript", async () => {
+    // Archive ends every session. Search navigates with ?task=<session_id>.
+    // The session is listed but not live, so existence is enough to select.
     const client = makeClient();
     const ended: CodeSessionSnapshot = {
       ...SESSION,
@@ -2299,18 +2299,24 @@ describe("CodeWorkspacePage", () => {
       lifecycle: "ended",
       created_at: "2026-08-15T01:00:00.000Z",
     };
-    client.listCodeWorkspaceSessions.mockResolvedValue([ended, SESSION]);
+    client.listCodeWorkspaceSessions.mockResolvedValue([ended]);
+    client.listCodeSessionTurns.mockResolvedValue([
+      {
+        ...TURN,
+        id: "turn-2",
+        session_id: "sess-2",
+        user_input: "keep the reclaim tiers safe",
+      },
+    ]);
     const { router } = await mountWorkspace(client, "/code/w/ws-1?task=sess-2");
 
-    const main = await screen.findByRole("tab", { name: "Main agent" });
-    expect(main).toHaveAttribute("aria-selected", "true");
-    // An ended agent keeps no tab, so there is nothing to switch back to.
     expect(
-      screen.queryByRole("tab", { name: "Codex CLI" }),
+      await screen.findByRole("article", { name: "You" }),
+    ).toHaveTextContent("keep the reclaim tiers safe");
+    expect(
+      screen.queryByRole("textbox", { name: "Message" }),
     ).not.toBeInTheDocument();
-    await waitFor(() =>
-      expect(router.state.location.search).not.toHaveProperty("task"),
-    );
+    expect(router.state.location.search).toMatchObject({ task: "sess-2" });
   });
 
   it("opens a draft tab for a second agent and closes it again", async () => {

@@ -163,6 +163,8 @@ import {
   type CodeUsage as WireCodeUsage,
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
+  type CodeWorkspaceHistorySearchMatch as WireCodeWorkspaceHistorySearchMatch,
+  type CodeWorkspaceHistorySearchSource as WireCodeWorkspaceHistorySearchSource,
   type CodeWorkspaceSearch as WireCodeWorkspaceSearch,
   type CodeWorkspaceSearchMatch as WireCodeWorkspaceSearchMatch,
   type CodeWorkspaceTree as WireCodeWorkspaceTree,
@@ -1221,6 +1223,10 @@ export type Diffstat = WireDiffstat;
 export type FileChangeKind = WireFileChangeKind;
 export type CodeFileChange = WireCodeFileChange;
 export type CodeWorkspaceFiles = WireCodeWorkspaceFiles;
+export type CodeWorkspaceHistorySearchMatch =
+  WireCodeWorkspaceHistorySearchMatch;
+export type CodeWorkspaceHistorySearchSource =
+  WireCodeWorkspaceHistorySearchSource;
 export type CodeWorkspaceSearch = WireCodeWorkspaceSearch;
 export type CodeWorkspaceSearchMatch = WireCodeWorkspaceSearchMatch;
 export type CodeWorkspaceTree = WireCodeWorkspaceTree;
