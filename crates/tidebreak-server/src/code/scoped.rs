@@ -42,7 +42,7 @@ use crate::routes::code::types::{
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
     CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
     CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
-    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, CodeRepoSources,
+    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, CodeRepoSources, CodeStorageSnapshot,
     ResolveCodeDeliveryRepositoriesBody,
 };
 use crate::state::AppState;
@@ -296,6 +296,10 @@ impl ScopedCode {
         repo_id: Option<RepoId>,
     ) -> Result<Vec<CodeWorkspace>, ServerError> {
         self.runtime.list_workspaces(&self.owner, repo_id).await
+    }
+
+    pub(crate) async fn storage_snapshot(&self) -> Result<CodeStorageSnapshot, ServerError> {
+        self.runtime.storage_snapshot(&self.owner).await
     }
 
     pub(crate) async fn get_workspace(

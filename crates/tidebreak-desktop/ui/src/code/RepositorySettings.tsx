@@ -291,7 +291,8 @@ export function RepositorySettings({
               />
             </label>
             <p className="text-xs text-muted-foreground">
-              Runs after a worktree is created or restored.
+              Runs after a worktree is created or restored. Tidebreak sets
+              TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME.
             </p>
           </div>
           <div className="flex min-w-0 flex-col gap-1.5">
@@ -312,6 +313,7 @@ export function RepositorySettings({
             </label>
             <p className="text-xs text-muted-foreground">
               Runs before the worktree is removed. A failure stops the archive.
+              Tidebreak sets TIDEBREAK_REPO_ROOT and TIDEBREAK_WORKSPACE_NAME.
             </p>
           </div>
           <div className="flex flex-col gap-2">

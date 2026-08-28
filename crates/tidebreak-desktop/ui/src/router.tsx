@@ -24,6 +24,7 @@ import { AppSidebar } from "./sidebar/AppSidebar";
 import { CodeHome } from "./code/CodeHome";
 import { CodeAnalyticsPage } from "./code/CodeAnalyticsPage";
 import { CodeArchivePage } from "./code/CodeArchivePage";
+import { CodeStoragePage } from "./code/CodeStoragePage";
 import {
   CodeDeliveryPage,
   codeDeliverySearchFrom,
@@ -249,6 +250,12 @@ const codeArchiveRoute = createRoute({
   component: CodeArchivePage,
 });
 
+const codeStorageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/code/storage",
+  component: CodeStoragePage,
+});
+
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
   return <CodeWorkspacePage workspaceId={workspaceId} />;
@@ -353,6 +360,7 @@ export const routeTree = rootRoute.addChildren([
   codeDeliveryPullRequestsRoute,
   codeDeliveryRunsRoute,
   codeArchiveRoute,
+  codeStorageRoute,
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,

@@ -60,12 +60,16 @@ use super::session_worker::{
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
 use super::worktree::{
-    self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
-    run_archive_script, run_setup_script, slugify, validate_repo_path, worktree_dir, WorktreeError,
+    self, archive_blockers, branch_name, create_worktree, directory_bytes, prune_worktrees,
+    remove_worktree, run_archive_script, run_setup_script, slugify, unique_branch_bytes,
+    validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
 use crate::managed_policy::ManagedPolicy;
-use crate::routes::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
+use crate::routes::code::types::{
+    CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget, CodeRepoStorageSnapshot,
+    CodeStorageAction, CodeStorageSnapshot, CodeWorkspaceStorageSnapshot,
+};
 
 const MANAGED_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 const MANAGED_NODE_STARTUP_GRACE: Duration = Duration::from_secs(2);
@@ -1307,7 +1311,14 @@ impl CodeRuntime {
         // anything this workspace commits should already carry the right
         // name.
         self.name_workspace_author(owner, &path).await;
-        match run_setup_script(&path, repo.setup_script.as_deref()).await {
+        match run_setup_script(
+            &path,
+            std::path::Path::new(&repo.root_path),
+            &workspace.title,
+            repo.setup_script.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
                 match self.save_workspace_final(&workspace).await {
@@ -1370,6 +1381,92 @@ impl CodeRuntime {
         repo_id: Option<RepoId>,
     ) -> Result<Vec<CodeWorkspace>, ServerError> {
         Ok(list_workspaces(&self.db, owner, repo_id).await?)
+    }
+
+    /// Bytes each repo and workspace currently occupy, and what the next
+    /// reclaim tier would free.
+    pub(crate) async fn storage_snapshot(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<CodeStorageSnapshot, ServerError> {
+        let repos = list_repos(&self.db, owner).await?;
+        let workspaces = list_workspaces(&self.db, owner, None).await?;
+        let mut out = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let members: Vec<&CodeWorkspace> = workspaces
+                .iter()
+                .filter(|workspace| workspace.repo_id == repo.id)
+                .collect();
+            let live = members.iter().any(|workspace| {
+                !matches!(
+                    workspace.status,
+                    CodeWorkspaceStatus::Archived | CodeWorkspaceStatus::Released
+                )
+            });
+            let clone_path = std::path::Path::new(&repo.root_path);
+            let clone_bytes = if clone_path.exists() {
+                i64::try_from(directory_bytes(clone_path).await).unwrap_or(i64::MAX)
+            } else {
+                0
+            };
+            let mut rows = Vec::with_capacity(members.len());
+            for workspace in members {
+                rows.push(self.workspace_storage(&repo, workspace).await);
+            }
+            out.push(CodeRepoStorageSnapshot {
+                id: repo.id,
+                display_name: repo.display_name,
+                clone_bytes,
+                clone_reclaimable: repo.cloned_from.is_some() && !live,
+                workspaces: rows,
+            });
+        }
+        Ok(CodeStorageSnapshot { repos: out })
+    }
+
+    async fn workspace_storage(
+        &self,
+        repo: &CodeRepo,
+        workspace: &CodeWorkspace,
+    ) -> CodeWorkspaceStorageSnapshot {
+        let worktree = std::path::Path::new(&workspace.worktree_path);
+        let worktree_bytes = if worktree.exists() {
+            i64::try_from(directory_bytes(worktree).await).unwrap_or(i64::MAX)
+        } else {
+            0
+        };
+        let repo_root = std::path::Path::new(&repo.root_path);
+        let branch_bytes = if workspace.status == CodeWorkspaceStatus::Archived {
+            i64::try_from(
+                unique_branch_bytes(repo_root, &workspace.base_ref, &workspace.branch_name).await,
+            )
+            .unwrap_or(i64::MAX)
+        } else {
+            0
+        };
+        let bundle_bytes = workspace.bundle_bytes.unwrap_or(0);
+        let (on_disk_bytes, next_action, next_reclaim_bytes) = match workspace.status {
+            CodeWorkspaceStatus::Released => (bundle_bytes, None, 0),
+            CodeWorkspaceStatus::Archived => {
+                (branch_bytes, Some(CodeStorageAction::Release), branch_bytes)
+            }
+            CodeWorkspaceStatus::Active => (
+                worktree_bytes,
+                Some(CodeStorageAction::Archive),
+                worktree_bytes,
+            ),
+            CodeWorkspaceStatus::Creating
+            | CodeWorkspaceStatus::SetupFailed
+            | CodeWorkspaceStatus::Archiving => (worktree_bytes, None, 0),
+        };
+        CodeWorkspaceStorageSnapshot {
+            id: workspace.id,
+            title: workspace.title.clone(),
+            status: workspace.status,
+            on_disk_bytes,
+            next_action,
+            next_reclaim_bytes,
+        }
     }
 
     pub(crate) async fn get_workspace(
@@ -1561,7 +1658,14 @@ impl CodeRuntime {
             // Decision 0032: the archive script obeys the same
             // failure-preserves rule as setup. Lifecycle exclusion starts
             // before the hook so no in-process writer can overlap it.
-            if let Err(err) = run_archive_script(path, repo.archive_script.as_deref()).await {
+            if let Err(err) = run_archive_script(
+                path,
+                std::path::Path::new(&repo.root_path),
+                &workspace.title,
+                repo.archive_script.as_deref(),
+            )
+            .await
+            {
                 return Err(ServerError::unprocessable_kind(
                     "archive_script_failed",
                     err.to_string(),
@@ -1816,7 +1920,13 @@ impl CodeRuntime {
         // (Decision 0032's failure-preserves rule). One vocabulary for both
         // paths — a reader debugging "setup_failed" should not need to know
         // whether the workspace was created or restored.
-        let setup = run_setup_script(path, repo.setup_script.as_deref()).await;
+        let setup = run_setup_script(
+            path,
+            std::path::Path::new(&repo.root_path),
+            &workspace.title,
+            repo.setup_script.as_deref(),
+        )
+        .await;
         workspace.status = if setup.is_ok() {
             CodeWorkspaceStatus::Active
         } else {
@@ -1888,7 +1998,14 @@ impl CodeRuntime {
         }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
-        match run_setup_script(&path, repo.setup_script.as_deref()).await {
+        match run_setup_script(
+            &path,
+            std::path::Path::new(&repo.root_path),
+            &workspace.title,
+            repo.setup_script.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 workspace.status = CodeWorkspaceStatus::Active;
                 if !self.save_workspace_final(&workspace).await? {

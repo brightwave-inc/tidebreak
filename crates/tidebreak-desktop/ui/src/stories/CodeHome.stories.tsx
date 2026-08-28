@@ -284,7 +284,13 @@ export const DenseSidebar: Story = {
       destinationButtons.map(
         (button) => button.getAttribute("aria-label") ?? button.textContent,
       ),
-    ).toEqual(["Pull requests", "Notifications", "Analytics", "Archive"]);
+    ).toEqual([
+      "Pull requests",
+      "Notifications",
+      "Analytics",
+      "Archive",
+      "Storage",
+    ]);
     await expect(
       await canvas.findByText("Audit Storybook coverage"),
     ).toBeVisible();

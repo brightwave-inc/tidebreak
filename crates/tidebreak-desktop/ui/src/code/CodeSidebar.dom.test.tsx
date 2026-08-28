@@ -213,7 +213,13 @@ describe("CodeSidebar", () => {
       destinations.map(
         (button) => button.getAttribute("aria-label") ?? button.textContent,
       ),
-    ).toEqual(["Pull requests", "Notifications", "Analytics", "Archive"]);
+    ).toEqual([
+      "Pull requests",
+      "Notifications",
+      "Analytics",
+      "Archive",
+      "Storage",
+    ]);
     expect(
       screen.getByRole("button", { name: "Settings" }),
     ).toBeInTheDocument();
