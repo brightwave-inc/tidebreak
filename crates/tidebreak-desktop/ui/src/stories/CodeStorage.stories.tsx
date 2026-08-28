@@ -10,7 +10,7 @@ import {
 
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
-import type { CodeStorageSnapshot } from "@/api/types";
+import type { CodeStorageSnapshot, HarnessKind } from "@/api/types";
 import { CodeStoragePage } from "@/code/CodeStoragePage";
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "@/code/CodeUiStore";
@@ -82,7 +82,7 @@ function storyClient(report: CodeStorageSnapshot): ApiClient {
     listCodeRepos: async () => [deliveryCodeRepo],
     listCodeWorkspaces: async () => deliveryWorkspaces,
     getHarnessDoctor: async () => harnessDoctor,
-    listCodeHarnessModels: async (kind) => ({ kind, models: [] }),
+    listCodeHarnessModels: async (kind: HarnessKind) => ({ kind, models: [] }),
     getCodeCloneDefaults: async () => ({
       gh_found: true,
       gh_authenticated: true,
