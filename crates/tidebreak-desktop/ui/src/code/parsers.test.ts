@@ -34,6 +34,7 @@ import {
   parseCodeWorkspacePr,
   parseCodeWorkspaceSearch,
   parseCodeWorkspaceTree,
+  parseCodeStorage,
   parseCodeWorktreeRoot,
   parseFenceReason,
   parseHarnessModelList,
@@ -1502,6 +1503,68 @@ describe("parseCodeCheckLogsSnapshot", () => {
     ).toBeNull();
     expect(
       parseCodeCheckLogsSnapshot({ logs: [], errors: [], extra: true }),
+    ).toBeNull();
+  });
+});
+
+describe("parseCodeStorage", () => {
+  const report = {
+    repos: [
+      {
+        id: "repo-1",
+        display_name: "app",
+        clone_bytes: 4096,
+        clone_reclaimable: false,
+        workspaces: [
+          {
+            id: "ws-1",
+            title: "ember-grove",
+            status: "active",
+            on_disk_bytes: 2048,
+            next_action: "archive",
+            next_reclaim_bytes: 2048,
+          },
+        ],
+      },
+    ],
+  };
+
+  it("accepts GET /code/storage", () => {
+    expect(parseCodeStorage(report)).toEqual(report);
+  });
+
+  it("accepts a released workspace with no next action", () => {
+    const released = {
+      repos: [
+        {
+          ...report.repos[0],
+          workspaces: [
+            {
+              id: "ws-2",
+              title: "released",
+              status: "released",
+              on_disk_bytes: 512,
+              next_reclaim_bytes: 0,
+            },
+          ],
+        },
+      ],
+    };
+    expect(parseCodeStorage(released)).toEqual(released);
+  });
+
+  it("rejects an unknown next action", () => {
+    expect(
+      parseCodeStorage({
+        repos: [
+          {
+            ...report.repos[0],
+            workspaces: [
+              { ...report.repos[0].workspaces[0], next_action: "delete" },
+            ],
+          },
+        ],
+      }),
     ).toBeNull();
   });
 });

@@ -98,6 +98,43 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
     }
 }
 
+/// Reclaimable disk for every repo and workspace the principal owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeStorageSnapshot {
+    pub repos: Vec<CodeRepoStorageSnapshot>,
+}
+
+/// One repository on the reclaim surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeRepoStorageSnapshot {
+    pub id: RepoId,
+    pub display_name: String,
+    pub clone_bytes: i64,
+    pub clone_reclaimable: bool,
+    pub workspaces: Vec<CodeWorkspaceStorageSnapshot>,
+}
+
+/// One workspace's current footprint and the next reclaim step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeWorkspaceStorageSnapshot {
+    pub id: WorkspaceId,
+    pub title: String,
+    pub status: CodeWorkspaceStatus,
+    pub on_disk_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_action: Option<CodeStorageAction>,
+    pub next_reclaim_bytes: i64,
+}
+
+/// The next reclaim tier a workspace can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeStorageAction {
+    Archive,
+    Release,
+}
+
 /// One durable conversation with an external agent engine.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct CodeSessionSnapshot {

@@ -10138,6 +10138,35 @@ async fn release_frees_the_branch_and_restore_rebuilds_it_from_the_bundle() {
     );
 }
 
+#[tokio::test]
+async fn storage_report_names_archive_as_the_next_reclaim_for_an_active_workspace() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let path = std::path::PathBuf::from(workspace["worktree_path"].as_str().unwrap());
+    std::fs::write(path.join("payload.bin"), vec![3u8; 2048]).unwrap();
+
+    let report = client
+        .get(format!("http://{addr}/code/storage"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(report.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = report.json().await.unwrap();
+    let row = &body["repos"][0]["workspaces"][0];
+    assert_eq!(row["title"], workspace["title"]);
+    assert_eq!(row["status"], "active");
+    assert_eq!(row["next_action"], "archive");
+    assert!(
+        row["on_disk_bytes"].as_i64().unwrap() >= 2048,
+        "worktree should include the 2 KiB payload: {row}"
+    );
+    assert_eq!(row["next_reclaim_bytes"], row["on_disk_bytes"]);
+}
+
 /// A released restore keeps its only durable recovery material until the
 /// Active row commits. If that write fails after checkout creation, the exact
 /// attempt is removed and the Released row can retry from the same bundle.

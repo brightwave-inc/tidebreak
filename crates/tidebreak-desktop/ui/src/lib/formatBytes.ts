@@ -9,7 +9,8 @@ export function formatBytes(value: number | null): string {
   if (value === null) return "—";
   if (value < 1_024) return `${value} B`;
   if (value < 1_048_576) return `${round(value / 1_024)} KB`;
-  return `${round(value / 1_048_576)} MB`;
+  if (value < 1_073_741_824) return `${round(value / 1_048_576)} MB`;
+  return `${round(value / 1_073_741_824)} GB`;
 }
 
 function round(value: number): string {

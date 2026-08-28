@@ -40,17 +40,27 @@ pub(crate) fn spawn_workspace_script(
     worktree: &Path,
     script: &str,
 ) -> io::Result<ProcessTreeChild> {
-    let mut command = workspace_script_command(worktree, script)?;
+    spawn_workspace_script_with_env(worktree, script, &[])
+}
+
+fn spawn_workspace_script_with_env(
+    worktree: &Path,
+    script: &str,
+    extra_env: &[(&str, OsString)],
+) -> io::Result<ProcessTreeChild> {
+    let mut command = workspace_script_command(worktree, script, extra_env)?;
     tidebreak_harness::spawn_process_tree(&mut command)
 }
 
 /// Run `script` inside `worktree` via the user's login shell.
 ///
 /// The script is a user-authored command string, so it goes through a shell.
-/// Git operations in this crate never do.
-pub(crate) async fn run_workspace_script(
+/// Git operations in this crate never do. Setup and archive hooks pass the
+/// repo root and workspace name so a script can tell what it is touching.
+pub(crate) async fn run_workspace_script_with_env(
     worktree: &Path,
     script: &str,
+    extra_env: &[(&str, OsString)],
 ) -> Result<ScriptRun, String> {
     let script = script.trim();
     if script.is_empty() {
@@ -62,7 +72,7 @@ pub(crate) async fn run_workspace_script(
             output_truncated: false,
         });
     }
-    let child = spawn_workspace_script(worktree, script)
+    let child = spawn_workspace_script_with_env(worktree, script, extra_env)
         .map_err(|err| format!("failed to spawn workspace script: {err}"))?;
     let output = timeout(
         SCRIPT_TIMEOUT,
@@ -85,7 +95,11 @@ pub(crate) async fn run_workspace_script(
     })
 }
 
-fn workspace_script_command(worktree: &Path, script: &str) -> io::Result<Command> {
+fn workspace_script_command(
+    worktree: &Path,
+    script: &str,
+    extra_env: &[(&str, OsString)],
+) -> io::Result<Command> {
     let (program, args) = workspace_script_launcher(script, std::env::var_os("SHELL"))?;
     let mut command = Command::new(program);
     command
@@ -95,6 +109,9 @@ fn workspace_script_command(worktree: &Path, script: &str) -> io::Result<Command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
     Ok(command)
 }
 
@@ -173,10 +190,29 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn workspace_scripts_receive_repo_and_workspace_env() {
+        let directory = tempfile::tempdir().expect("worktree");
+        let repo = directory.path().join("repo");
+        let run = run_workspace_script_with_env(
+            directory.path(),
+            r#"printf '%s' "$TIDEBREAK_REPO_ROOT|$TIDEBREAK_WORKSPACE_NAME""#,
+            &[
+                ("TIDEBREAK_REPO_ROOT", repo.clone().into_os_string()),
+                ("TIDEBREAK_WORKSPACE_NAME", OsString::from("ember-grove")),
+            ],
+        )
+        .await
+        .expect("run env script");
+        assert!(run.success, "{}", run.stderr);
+        assert_eq!(run.stdout.trim(), format!("{}|ember-grove", repo.display()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn workspace_scripts_mark_output_truncated_at_the_read_limit() {
         let directory = tempfile::tempdir().expect("worktree");
         let script = format!("printf '%{}s' '' | tr ' ' x", SCRIPT_OUTPUT_BYTES + 128);
-        let run = run_workspace_script(directory.path(), &script)
+        let run = run_workspace_script_with_env(directory.path(), &script, &[])
             .await
             .expect("run noisy script");
 
@@ -217,7 +253,7 @@ mod tests {
         )
         .expect("write decoy executable");
 
-        let run = run_workspace_script(directory.path(), "Write-Output trusted")
+        let run = run_workspace_script_with_env(directory.path(), "Write-Output trusted", &[])
             .await
             .expect("run trusted PowerShell");
         assert!(run.success, "{}", run.stderr);
@@ -228,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn windows_powershell_runs_in_the_requested_worktree() {
         let directory = tempfile::tempdir().expect("worktree");
-        let run = run_workspace_script(directory.path(), "(Get-Location).Path")
+        let run = run_workspace_script_with_env(directory.path(), "(Get-Location).Path", &[])
             .await
             .expect("run PowerShell");
         assert!(run.success, "{}", run.stderr);
@@ -237,7 +273,7 @@ mod tests {
             .expect("reported worktree");
         assert_eq!(reported, directory.path().canonicalize().unwrap());
 
-        let failed = run_workspace_script(directory.path(), "cmd.exe /c exit 7")
+        let failed = run_workspace_script_with_env(directory.path(), "cmd.exe /c exit 7", &[])
             .await
             .expect("run failing native command");
         assert!(!failed.success);

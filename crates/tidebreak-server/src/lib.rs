@@ -891,6 +891,7 @@ pub fn app(state: AppState) -> Router {
             "/code/workspaces",
             post(routes::code::create_workspace).get(routes::code::list_workspaces),
         )
+        .route("/code/storage", get(routes::code::list_storage))
         .route(
             "/code/workspaces/{id}",
             get(routes::code::get_workspace).patch(routes::code::patch_workspace),

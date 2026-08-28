@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::setup_script::run_workspace_script;
+use super::setup_script::run_workspace_script_with_env;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -31,6 +31,7 @@ const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
 const ARCHIVE_SCAN_MAX_ENTRIES: usize = 10_000;
 const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
 const ARCHIVE_DISPOSABLE_PATH_KEY: &str = "tidebreak.archiveDisposablePath";
+const DIRECTORY_WALK_MAX_ENTRIES: usize = 100_000;
 const WORKTREE_OPERATION_SUFFIX: &str = ".tidebreak-operation";
 const WORKTREE_REGISTRATION_MARKER: &str = "tidebreak-operation.json";
 
@@ -1173,31 +1174,41 @@ async fn branch_is_registered(repo_root: &Path, branch: &str) -> Result<bool, Wo
 /// Run the setup script, if any. Failure preserves the checkout.
 pub(crate) async fn run_setup_script(
     worktree_path: &Path,
+    repo_root: &Path,
+    workspace_name: &str,
     script: Option<&str>,
 ) -> Result<(), WorktreeError> {
-    run_hook_script(worktree_path, script, "setup").await
+    run_hook_script(worktree_path, repo_root, workspace_name, script, "setup").await
 }
 
 /// Run the archive script, if any. Failure preserves the checkout, so the
 /// caller must not remove the worktree when this returns an error.
 pub(crate) async fn run_archive_script(
     worktree_path: &Path,
+    repo_root: &Path,
+    workspace_name: &str,
     script: Option<&str>,
 ) -> Result<(), WorktreeError> {
-    run_hook_script(worktree_path, script, "archive").await
+    run_hook_script(worktree_path, repo_root, workspace_name, script, "archive").await
 }
 
 /// A non-zero exit is a failure, not a completed run: `run_workspace_script`
 /// only reports `Err` when the script could not be spawned or timed out.
 async fn run_hook_script(
     worktree_path: &Path,
+    repo_root: &Path,
+    workspace_name: &str,
     script: Option<&str>,
     label: &str,
 ) -> Result<(), WorktreeError> {
     let Some(script) = script.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    let run = run_workspace_script(worktree_path, script)
+    let env = [
+        ("TIDEBREAK_REPO_ROOT", OsString::from(repo_root.as_os_str())),
+        ("TIDEBREAK_WORKSPACE_NAME", OsString::from(workspace_name)),
+    ];
+    let run = run_workspace_script_with_env(worktree_path, script, &env)
         .await
         .map_err(WorktreeError::user)?;
     if run.success {
@@ -1950,6 +1961,123 @@ async fn git_stdout(cwd: Option<&Path>, args: &[&str], limit: Duration) -> Resul
     Ok(git(cwd, args, limit).await?.stdout)
 }
 
+/// Bytes a path occupies on disk. Symlinks are skipped so a walk cannot
+/// escape the tree. Caps the number of entries so a huge worktree still
+/// answers.
+pub(crate) async fn directory_bytes(path: &Path) -> u64 {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || directory_bytes_sync(&path))
+        .await
+        .unwrap_or(0)
+}
+
+fn directory_bytes_sync(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > DIRECTORY_WALK_MAX_ENTRIES {
+                return total;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            if file_type.is_file() {
+                if let Ok(metadata) = entry.metadata() {
+                    total = total.saturating_add(metadata.len());
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Unpacked size of objects reachable from `branch` but not from `base`.
+///
+/// That is what a release would drop from the clone (minus the tiny bundle
+/// that remains). A missing branch or range is zero, not an error: the
+/// reclaim surface still has to render.
+pub(crate) async fn unique_branch_bytes(repo_root: &Path, base_ref: &str, branch: &str) -> u64 {
+    if !branch_exists(repo_root, branch).await.unwrap_or(false) {
+        return 0;
+    }
+    let range = format!("{base_ref}..{branch}");
+    let listed = git_stdout(
+        Some(repo_root),
+        &["rev-list", "--objects", "--no-object-names", &range],
+        GIT_TIMEOUT,
+    )
+    .await
+    .unwrap_or_default();
+    let objects: String = listed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .flat_map(|line| [line, "\n"])
+        .collect();
+    if objects.is_empty() {
+        return 0;
+    }
+    let sizes = git_stdin(
+        repo_root,
+        &["cat-file", "--batch-check=%(objectsize)"],
+        objects.as_bytes(),
+    )
+    .await
+    .unwrap_or_default();
+    sizes
+        .lines()
+        .filter_map(|line| line.trim().parse::<u64>().ok())
+        .fold(0u64, u64::saturating_add)
+}
+
+async fn git_stdin(cwd: &Path, args: &[&str], stdin: &[u8]) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to spawn git: {err}"))?;
+    if let Some(mut pipe) = child.stdin.take() {
+        pipe.write_all(stdin)
+            .await
+            .map_err(|err| format!("failed to write git stdin: {err}"))?;
+    }
+    let output = timeout(GIT_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| format!("git {} timed out", args.join(" ")))?
+        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if stderr.is_empty() {
+            stdout.trim().to_owned()
+        } else {
+            stderr
+        })
+    }
+}
+
 async fn git_nul_stdout(
     cwd: Option<&Path>,
     args: &[&str],
@@ -2060,7 +2188,9 @@ mod tests {
         create_ready(&repo, &path, "tidebreak/first", "main").await;
         verify_inside_worktree(&path).await.unwrap();
 
-        let err = run_setup_script(&path, Some("exit 7")).await.unwrap_err();
+        let err = run_setup_script(&path, &repo, "first", Some("exit 7"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("setup script failed"), "{err}");
         assert!(path.join("README.md").is_file());
         verify_inside_worktree(&path).await.unwrap();
@@ -2082,7 +2212,7 @@ mod tests {
         } else {
             "while :; do printf '0123456789abcdef'; done"
         };
-        let error = run_setup_script(&path, Some(noisy_script))
+        let error = run_setup_script(&path, &repo, "noisy-setup", Some(noisy_script))
             .await
             .unwrap_err();
 
@@ -2653,5 +2783,30 @@ mod tests {
         assert!(!branch_exists(&repo, "tidebreak/released").await.unwrap());
         assert!(bundle.exists());
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn directory_bytes_counts_files_and_skips_symlinks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/b.txt"), b"world!").unwrap();
+        assert_eq!(directory_bytes(dir.path()).await, 11);
+    }
+
+    #[tokio::test]
+    async fn unique_branch_bytes_are_zero_on_the_base_and_positive_with_a_commit() {
+        let (_dir, repo) = init_repo();
+        assert_eq!(unique_branch_bytes(&repo, "main", "main").await, 0);
+
+        run(&repo, &["git", "checkout", "-b", "tidebreak/bytes"]);
+        std::fs::write(repo.join("payload.bin"), vec![7u8; 4096]).unwrap();
+        run(&repo, &["git", "add", "payload.bin"]);
+        run(&repo, &["git", "commit", "-m", "payload"]);
+        let unique = unique_branch_bytes(&repo, "main", "tidebreak/bytes").await;
+        assert!(
+            unique >= 4096,
+            "unique objects should include the 4 KiB blob, got {unique}"
+        );
     }
 }

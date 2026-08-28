@@ -30,6 +30,9 @@ import type {
   CodeWorkspacePrSnapshot,
   CodeWatchSnapshot,
   CodeWorkspaceSnapshot,
+  CodeStorageSnapshot,
+  CodeRepoStorageSnapshot,
+  CodeWorkspaceStorageSnapshot,
   CodeActionSnapshot,
   CodeCommitSnapshot,
   CodePushSnapshot,
@@ -1999,6 +2002,9 @@ export function parseCodeWorkspace(
       "pr",
       "created_at",
       "archived_at",
+      "released_at",
+      "released_tip",
+      "bundle_bytes",
     ]) ||
     !nonEmpty(value.id) ||
     !nonEmpty(value.repo_id) ||
@@ -2008,7 +2014,10 @@ export function parseCodeWorkspace(
     !nonEmpty(value.base_ref) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
     !nonEmpty(value.created_at) ||
-    !optionalString(value.archived_at)
+    !optionalString(value.archived_at) ||
+    !optionalString(value.released_at) ||
+    !optionalString(value.released_tip) ||
+    (value.bundle_bytes !== undefined && !isFiniteNumber(value.bundle_bytes))
   ) {
     return null;
   }
@@ -2024,6 +2033,15 @@ export function parseCodeWorkspace(
     ...(value.archived_at !== undefined
       ? { archived_at: value.archived_at }
       : {}),
+    ...(value.released_at !== undefined
+      ? { released_at: value.released_at }
+      : {}),
+    ...(value.released_tip !== undefined
+      ? { released_tip: value.released_tip }
+      : {}),
+    ...(value.bundle_bytes !== undefined
+      ? { bundle_bytes: value.bundle_bytes }
+      : {}),
   };
   if (value.pr !== undefined) {
     const pr = parsePullRequestDigest(value.pr);
@@ -2031,6 +2049,93 @@ export function parseCodeWorkspace(
     parsed.pr = pr;
   }
   return parsed;
+}
+
+const STORAGE_ACTIONS = new Set(["archive", "release"]);
+
+export function parseCodeStorage(value: unknown): CodeStorageSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<CodeStorageSnapshot>(value, ["repos"]) ||
+    !Array.isArray(value.repos)
+  ) {
+    return null;
+  }
+  const repos = [];
+  for (const repo of value.repos) {
+    const parsed = parseCodeRepoStorage(repo);
+    if (!parsed) return null;
+    repos.push(parsed);
+  }
+  return { repos };
+}
+
+function parseCodeRepoStorage(value: unknown): CodeRepoStorageSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<CodeRepoStorageSnapshot>(value, [
+      "id",
+      "display_name",
+      "clone_bytes",
+      "clone_reclaimable",
+      "workspaces",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.display_name) ||
+    !isFiniteNumber(value.clone_bytes) ||
+    typeof value.clone_reclaimable !== "boolean" ||
+    !Array.isArray(value.workspaces)
+  ) {
+    return null;
+  }
+  const workspaces = [];
+  for (const workspace of value.workspaces) {
+    const parsed = parseCodeWorkspaceStorage(workspace);
+    if (!parsed) return null;
+    workspaces.push(parsed);
+  }
+  return {
+    id: value.id,
+    display_name: value.display_name,
+    clone_bytes: value.clone_bytes,
+    clone_reclaimable: value.clone_reclaimable,
+    workspaces,
+  };
+}
+
+function parseCodeWorkspaceStorage(
+  value: unknown,
+): CodeWorkspaceStorageSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<CodeWorkspaceStorageSnapshot>(value, [
+      "id",
+      "title",
+      "status",
+      "on_disk_bytes",
+      "next_action",
+      "next_reclaim_bytes",
+    ]) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.title) ||
+    !isMember(value.status, WORKSPACE_STATUSES) ||
+    !isFiniteNumber(value.on_disk_bytes) ||
+    !isFiniteNumber(value.next_reclaim_bytes) ||
+    (value.next_action !== undefined &&
+      !isMember(value.next_action, STORAGE_ACTIONS))
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    title: value.title,
+    status: value.status,
+    on_disk_bytes: value.on_disk_bytes,
+    next_reclaim_bytes: value.next_reclaim_bytes,
+    ...(value.next_action !== undefined
+      ? { next_action: value.next_action }
+      : {}),
+  };
 }
 
 export function parsePullRequestDigest(

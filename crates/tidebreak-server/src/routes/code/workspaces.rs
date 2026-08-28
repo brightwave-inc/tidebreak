@@ -8,12 +8,12 @@ use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
 use super::types::{
-    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch,
-    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
-    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, SetCodeWorktreeRootBody,
-    WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery,
-    WorkspaceTreeQuery,
+    ArchiveWorkspaceBody, CodeFileChange, CodeStorageSnapshot, CodeWorkspaceBlob,
+    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch,
+    CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateWorkspaceBody,
+    ListWorkspacesQuery, PatchWorkspaceBody, SetCodeWorktreeRootBody, WorkspaceBlobQuery,
+    WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -58,6 +58,11 @@ pub async fn list_workspaces(
             .map(CodeWorkspaceSnapshot::from)
             .collect(),
     ))
+}
+
+/// `GET /code/storage` — reclaimable bytes per repo and workspace.
+pub async fn list_storage(code: ScopedCode) -> Result<Json<CodeStorageSnapshot>, ServerError> {
+    Ok(Json(code.storage_snapshot().await?))
 }
 
 pub async fn get_workspace(

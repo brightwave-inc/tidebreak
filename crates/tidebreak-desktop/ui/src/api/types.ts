@@ -205,6 +205,10 @@ import {
   type CodeTerminalRead as WireCodeTerminalRead,
   type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  type CodeStorageSnapshot as WireCodeStorageSnapshot,
+  type CodeRepoStorageSnapshot as WireCodeRepoStorageSnapshot,
+  type CodeWorkspaceStorageSnapshot as WireCodeWorkspaceStorageSnapshot,
+  type CodeStorageAction as WireCodeStorageAction,
   type Diffstat as WireDiffstat,
   type FileChangeKind as WireFileChangeKind,
   type CodeWorkspaceStatus as WireCodeWorkspaceStatus,
@@ -1201,6 +1205,10 @@ export type CodeDeliveryActionResult = WireCodeDeliveryActionResult;
 export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;
 export type WorkspaceId = WireWorkspaceId;
 export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
+export type CodeStorageSnapshot = WireCodeStorageSnapshot;
+export type CodeRepoStorageSnapshot = WireCodeRepoStorageSnapshot;
+export type CodeWorkspaceStorageSnapshot = WireCodeWorkspaceStorageSnapshot;
+export type CodeStorageAction = WireCodeStorageAction;
 
 /** One durable conversation with an external coding engine. */
 export type CodeSessionSnapshot = WireCodeSessionSnapshot;
