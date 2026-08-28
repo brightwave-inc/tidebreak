@@ -456,7 +456,7 @@ impl OboGateway {
         Arc::new(RuntimeTokens {
             gateway: self.clone(),
             audience: format!("runtime:{endpoint_slug}"),
-            cache: tokio::sync::Mutex::new(HashMap::new()),
+            slots: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1196,13 +1196,13 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
 
 /// [`OboGateway`]-backed source of runtime bearers for one endpoint.
 ///
-/// Tokens are cached per owner and re-exchanged near expiry, single-flight
-/// per source instance. A caller this process holds no live session for
-/// fails as sign-in-required rather than borrowing another identity.
+/// Tokens are cached per owner and re-exchanged near expiry. Each owner
+/// has their own mutex, so one hung mint does not block another owner's
+/// spawn or pump.
 pub(crate) struct RuntimeTokens {
     gateway: Arc<OboGateway>,
     audience: String,
-    cache: tokio::sync::Mutex<HashMap<OwnerId, CachedToken>>,
+    slots: std::sync::Mutex<HashMap<OwnerId, Arc<tokio::sync::Mutex<Option<CachedToken>>>>>,
 }
 
 #[async_trait]
@@ -1215,10 +1215,24 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
         crate::code::remote::RemoteSandboxError,
     > {
         use crate::code::remote::{RemoteSandboxError, RuntimeToken};
-        // Holding the cache across the exchange is the single-flight gate: a
-        // second call for the same owner waits and then finds a fresh token.
-        let mut cache = self.cache.lock().await;
-        if let Some(current) = cache.get(owner) {
+        let slot = {
+            let mut slots = self
+                .slots
+                .lock()
+                .map_err(|_| RemoteSandboxError::Unavailable {
+                    operation: "token",
+                    detail: "runtime token state is unavailable in this process".into(),
+                })?;
+            slots
+                .entry(owner.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+        // Holding this owner's slot across the exchange is the single-flight
+        // gate: a second call for the same owner waits and then finds a fresh
+        // token. Other owners are not blocked.
+        let mut cached = slot.lock().await;
+        if let Some(current) = cached.as_ref() {
             if current.is_fresh() {
                 return Ok(RuntimeToken {
                     secret: current.token.to_string(),
@@ -1242,7 +1256,7 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
                 },
             })?;
         let secret = minted.token.to_string();
-        cache.insert(owner.clone(), minted);
+        *cached = Some(minted);
         Ok(RuntimeToken { secret })
     }
 }

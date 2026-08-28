@@ -3827,17 +3827,38 @@ impl CodeRuntime {
                     )
                 })?;
         }
+        // Queue-default, exactly as the local path: a busy session parks the
+        // send as a durable row the remote sweep promotes at the next idle.
+        let in_flight = session.lifecycle == CodeSessionLifecycle::Running
+            || get_open_turn(&self.db, owner, session.id).await?.is_some();
+        let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+            .await?
+            .is_empty();
+        if in_flight || backlog {
+            if !queue_if_busy {
+                return Err(ServerError::conflict_kind(
+                    "trigger_turn_busy",
+                    "the turn was not accepted because the session is busy",
+                ));
+            }
+            return self.park_remote_follow_up(owner, &session, message).await;
+        }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         let driver = remote.driver(&self.db, self.bus.as_ref());
         let outcome = driver
             .submit_turn(&mut session, workspace, &repo, &message)
             .await?;
-        Self::relay_remote_outcome(outcome, queue_if_busy)
+        self.relay_remote_outcome(owner, &session, outcome, message, queue_if_busy)
+            .await
     }
 
     /// Translate a driver outcome into the submit answer the routes speak.
-    fn relay_remote_outcome(
+    async fn relay_remote_outcome(
+        &self,
+        owner: &OwnerId,
+        session: &CodeSession,
         outcome: super::remote::driver::RemoteTurnOutcome,
+        message: String,
         queue_if_busy: bool,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         use super::remote::driver::RemoteTurnOutcome as Outcome;
@@ -3852,10 +3873,7 @@ impl CodeRuntime {
                         "the turn was not accepted because the session is busy",
                     ));
                 }
-                Err(ServerError::conflict_kind(
-                    "session_busy",
-                    "a remote turn is already in flight",
-                ))
+                self.park_remote_follow_up(owner, session, message).await
             }
             Outcome::CapExhausted { running } => Err(ServerError::conflict_kind(
                 "sandbox_cap_exhausted",
@@ -3869,6 +3887,104 @@ impl CodeRuntime {
                 "sign in to the sandbox environment, then retry",
             )),
         }
+    }
+
+    /// Park a message for a remote session. The remote sweep promotes the
+    /// head at the next idle; there is no worker to nudge.
+    async fn park_remote_follow_up(
+        &self,
+        owner: &OwnerId,
+        session: &CodeSession,
+        message: String,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+            .await
+            .map_err(ServerError::from)?;
+        if queued.len() >= CodeQueuedTurn::MAX_PER_SESSION {
+            return Err(ServerError::conflict_kind(
+                "queue_full",
+                format!(
+                    "this session may queue at most {} messages",
+                    CodeQueuedTurn::MAX_PER_SESSION
+                ),
+            ));
+        }
+        let now = chrono::Utc::now();
+        let row = tidebreak_core::db::code::enqueue_queued_turn(
+            &self.db,
+            owner,
+            &CodeQueuedTurn {
+                id: CodeTurnId::new(),
+                session_id: session.id,
+                message,
+                attachments: Vec::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .map_err(ServerError::from)?;
+        Ok(SubmitTurnOutcome::Queued(Box::new(row)))
+    }
+
+    /// Promote the queue head of every idle remote session. Called from the
+    /// remote sweep; local sessions drain their own queues through their
+    /// workers and are skipped here.
+    pub(crate) async fn promote_remote_queue_heads(&self) -> Result<(), ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Ok(());
+        };
+        let sessions = list_sessions_all_owners(&self.db).await?;
+        for mut session in sessions {
+            if session.lifecycle != CodeSessionLifecycle::Idle {
+                continue;
+            }
+            let Ok(workspace) = self
+                .get_workspace(&session.owner, session.workspace_id)
+                .await
+            else {
+                continue;
+            };
+            if !workspace.is_remote() {
+                continue;
+            }
+            if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
+                continue;
+            }
+            let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
+                continue;
+            };
+            let Ok(repo) = self.get_repo(&session.owner, workspace.repo_id).await else {
+                continue;
+            };
+            let driver = remote.driver(&self.db, self.bus.as_ref());
+            let message = head.message.clone();
+            match driver
+                .submit_turn(&mut session, &workspace, &repo, &message)
+                .await
+            {
+                Ok(super::remote::driver::RemoteTurnOutcome::Delivered { .. })
+                | Ok(super::remote::driver::RemoteTurnOutcome::Reincarnated { .. }) => {
+                    let _ = tidebreak_core::db::code::delete_queued_turn(
+                        &self.db,
+                        &session.owner,
+                        session.id,
+                        head.id,
+                    )
+                    .await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session = %session.id,
+                        %error,
+                        "promoting a queued remote message failed; the row stays queued"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Park a message as a durable queue row (decision 69).
@@ -3943,6 +4059,91 @@ impl CodeRuntime {
             &self.db, owner, id, queued_id, message, position,
         )
         .await?)
+    }
+
+    pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        // Interrupt stops only the active turn. The worker and logical code
+        // session continue, so its browser capfile and native capability must
+        // remain live for later turns.
+        if self.workers.lock().expect("code workers").contains_key(&id) {
+            let handle = self.require_worker(id)?;
+            let (reply, rx) = oneshot::channel();
+            handle
+                .commands
+                .send(WorkerCommand::Interrupt { reply })
+                .await
+                .map_err(|_| ServerError::internal("session worker is gone"))?;
+            return rx
+                .await
+                .map_err(|_| ServerError::internal("session worker dropped the interrupt"))?
+                .map_err(map_worker);
+        }
+        // No host worker: a remote session's engine lives in a sandbox.
+        let sessions = list_sessions_all_owners(&self.db).await?;
+        let Some(session) = sessions.into_iter().find(|session| session.id == id) else {
+            return Err(ServerError::conflict_kind(
+                "session_worker_missing",
+                "session worker is not running",
+            ));
+        };
+        let workspace = self
+            .get_workspace(&session.owner, session.workspace_id)
+            .await?;
+        if !workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "session_worker_missing",
+                "session worker is not running",
+            ));
+        }
+        self.interrupt_remote(&session).await
+    }
+
+    async fn interrupt_remote(&self, session: &CodeSession) -> Result<(), ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        };
+        let Some(row) =
+            tidebreak_core::db::code::latest_incarnation(&self.db, &session.owner, session.id)
+                .await?
+        else {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to interrupt",
+            ));
+        };
+        if row.state != tidebreak_core::IncarnationState::Active {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to interrupt",
+            ));
+        }
+        let Some(sandbox_id) = row.sandbox_id.as_deref() else {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to interrupt",
+            ));
+        };
+        let message = super::remote::wire::SandboxMessage {
+            body: "stop".to_owned(),
+            interrupt: true,
+        };
+        match remote
+            .provisioner
+            .send(&session.owner, sandbox_id, &message)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(super::remote::RemoteSandboxError::SignInRequired(_)) => {
+                Err(ServerError::conflict_kind(
+                    "sign_in_required",
+                    "sign in to the sandbox environment, then retry",
+                ))
+            }
+            Err(error) => Err(ServerError::internal(error.to_string())),
+        }
     }
 
     /// Retract one queued message. `false` when the row is gone.
@@ -4028,22 +4229,6 @@ impl CodeRuntime {
                     fenced.id
                 )
             }))
-    }
-
-    pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
-        // Interrupt stops only the active turn. The worker and logical code
-        // session continue, so its browser capfile and native capability must
-        // remain live for later turns.
-        let handle = self.require_worker(id)?;
-        let (reply, rx) = oneshot::channel();
-        handle
-            .commands
-            .send(WorkerCommand::Interrupt { reply })
-            .await
-            .map_err(|_| ServerError::internal("session worker is gone"))?;
-        rx.await
-            .map_err(|_| ServerError::internal("session worker dropped the interrupt"))?
-            .map_err(map_worker)
     }
 
     pub(crate) async fn steer(

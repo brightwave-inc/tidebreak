@@ -219,6 +219,9 @@ pub(crate) async fn sweep_remote(runtime: &Arc<CodeRuntime>) {
         }
         Err(error) => warn!(%error, "could not list sessions for the remote sweep"),
     }
+    if let Err(error) = runtime.promote_remote_queue_heads().await {
+        warn!(error = ?error, "remote queue promotion failed");
+    }
 }
 
 #[cfg(test)]
@@ -228,16 +231,17 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use tidebreak_core::db::code::insert_repo;
+    use tidebreak_core::db::code::{insert_repo, latest_turn};
     use tidebreak_core::{
-        CodeRepo, CodeSessionLifecycle, FenceReason, HarnessKind, OwnerId, PermissionMode, RepoId,
+        CodeRepo, CodeSessionLifecycle, CodeTurnStatus, FenceReason, HarnessKind, OwnerId,
+        PermissionMode, RepoId,
     };
 
     use super::super::super::runtime::{NewSessionSettings, SubmitTurnOutcome};
     use super::super::driver::RemoteSpawnSettings;
     use super::super::wire::{
-        EventCursor, MessageReceipt, SandboxEvents, SandboxLease, SandboxMessage, SandboxState,
-        SandboxStatus, SpawnArguments,
+        EventCursor, MessageReceipt, SandboxEvent, SandboxEvents, SandboxLease, SandboxMessage,
+        SandboxState, SandboxStatus, SpawnArguments,
     };
     use super::super::{RemoteSandboxError, SandboxProvisioner};
     use super::*;
@@ -388,11 +392,21 @@ mod tests {
         }
     }
 
+    fn event(seq: i64, kind: &str, payload: serde_json::Value) -> SandboxEvent {
+        SandboxEvent {
+            seq,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+        }
+    }
+
     /// The runtime carries a turn to a sandbox with no local harness: create
     /// records the empty worktree marker, and submit provisions remotely.
     ///
     /// If submit still went local, `require_worker` would fail (no harness
-    /// child) and the fake would see no spawn.
+    /// child) and the fake would see no spawn. A follow-up while the turn
+    /// runs parks, then promotion delivers it as an inbox message after idle.
     #[tokio::test]
     async fn a_remote_session_carries_a_turn_without_a_local_harness() {
         let dir = tempfile::tempdir().unwrap();
@@ -429,9 +443,54 @@ mod tests {
                 Some("https://github.com/acme/tools")
             );
         }
-        assert!(
-            fake.sends.lock().unwrap().is_empty(),
-            "the first turn is the spawn task, not an inbox send"
+
+        let queued = runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "and then".into(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(queued, SubmitTurnOutcome::Queued(_)));
+
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".to_owned(),
+            state: SandboxState::Running,
+            latest_event_seq: 2,
+            events: vec![
+                event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                event(
+                    2,
+                    "turn_completed",
+                    serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                ),
+            ],
+        });
+        let mut live = runtime.get_session(&owner, session.id).await.unwrap();
+        runtime
+            .remote_sessions()
+            .unwrap()
+            .driver(&runtime.db, runtime.bus.as_ref())
+            .pump(&mut live, 0)
+            .await
+            .unwrap();
+        runtime.promote_remote_queue_heads().await.unwrap();
+
+        let (queued_rows, _) = runtime.list_queued_turns(&owner, session.id).await.unwrap();
+        assert!(queued_rows.is_empty());
+        let turn = latest_turn(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.ordinal, 2);
+        assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_eq!(
+            fake.sends.lock().unwrap().as_slice(),
+            &["and then".to_owned()]
         );
     }
 
@@ -477,6 +536,33 @@ mod tests {
             fake.cancels.lock().unwrap().as_slice(),
             &["sb-1".to_owned()]
         );
+    }
+
+    /// Stop on a remote session sends an interrupt to the sandbox instead of
+    /// looking for a host worker.
+    #[tokio::test]
+    async fn a_remote_interrupt_reaches_the_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .await
+            .unwrap();
+        runtime.interrupt(session.id).await.unwrap();
+        assert_eq!(fake.sends.lock().unwrap().as_slice(), &["stop".to_owned()]);
     }
 
     /// A repository with no recorded origin cannot back a remote workspace:
