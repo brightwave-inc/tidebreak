@@ -67,6 +67,7 @@ pub(crate) enum RemoteTurnOutcome {
         /// The turn row, running.
         turn: Box<CodeTurn>,
         /// The incarnation now active.
+        #[cfg_attr(not(test), allow(dead_code))]
         incarnation: Box<CodeSessionIncarnation>,
     },
     /// The owner's concurrency cap refused, naming what runs.
@@ -301,6 +302,25 @@ impl RemoteDriver<'_> {
         repo: &CodeRepo,
         text: &str,
     ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
+        self.submit_turn_from(session, workspace, repo, text, None)
+            .await
+    }
+
+    /// Submit one turn, optionally as the promotion of a queued row.
+    ///
+    /// Delivery comes first — the sandbox send or spawn — and the claim
+    /// second, because the driver cannot know delivery will succeed before
+    /// trying, and outcomes like a held flush must leave the row queued.
+    /// The claim itself is the local worker's atomic promotion; see
+    /// [`start_turn_row`] for what a stale claim does.
+    pub(crate) async fn submit_turn_from(
+        &self,
+        session: &mut CodeSession,
+        workspace: &CodeWorkspace,
+        repo: &CodeRepo,
+        text: &str,
+        promoted: Option<&tidebreak_core::CodeQueuedTurn>,
+    ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
         let (db, bus, provisioner, settings) = (self.db, self.bus, self.provisioner, self.settings);
         let owner = session.owner.clone();
         let last = latest_turn(db, &owner, session.id).await?;
@@ -380,7 +400,8 @@ impl RemoteDriver<'_> {
                     .map_err(tidebreak_core::AgentError::Store)?;
                 match provisioner.send(&owner, sandbox_id, &message).await {
                     Ok(_) => {
-                        let turn = start_turn_row(db, bus, session, ordinal, text).await?;
+                        let turn =
+                            start_turn_row(db, bus, session, ordinal, text, promoted).await?;
                         return Ok(RemoteTurnOutcome::Delivered {
                             turn: Box::new(turn),
                         });
@@ -509,7 +530,7 @@ impl RemoteDriver<'_> {
                             "the activated incarnation vanished".to_owned(),
                         )
                     })?;
-                let turn = start_turn_row(db, bus, session, ordinal, text).await?;
+                let turn = start_turn_row(db, bus, session, ordinal, text, promoted).await?;
                 Ok(RemoteTurnOutcome::Reincarnated {
                     turn: Box::new(turn),
                     incarnation: Box::new(incarnation),
@@ -810,9 +831,10 @@ async fn start_turn_row(
     session: &mut CodeSession,
     ordinal: i64,
     text: &str,
+    promoted: Option<&tidebreak_core::CodeQueuedTurn>,
 ) -> Result<CodeTurn, tidebreak_core::AgentError> {
-    let turn = CodeTurn {
-        id: CodeTurnId::new(),
+    let mut turn = CodeTurn {
+        id: promoted.map_or_else(CodeTurnId::new, |row| row.id),
         session_id: session.id,
         ordinal,
         status: CodeTurnStatus::Running,
@@ -828,7 +850,28 @@ async fn start_turn_row(
         started_at: chrono::Utc::now(),
         ended_at: None,
     };
-    insert_turn(db, &session.owner, &turn).await?;
+    match promoted {
+        // Claim the queue row and insert its turn in one transaction, the
+        // way a local worker promotes. A stale claim — the row was edited,
+        // reordered, or retracted after the sweep's snapshot — writes the
+        // turn under a fresh id instead: the snapshot's text already reached
+        // the sandbox, so the transcript must show it, and the surviving
+        // queue row keeps its own id so its later promotion cannot collide
+        // with this turn.
+        Some(row) => {
+            if !tidebreak_core::db::code::promote_queued_turn(db, &session.owner, row, &turn)
+                .await?
+            {
+                warn!(
+                    session = %session.id,
+                    "a queued message changed under its promotion; recording the delivered turn separately"
+                );
+                turn.id = CodeTurnId::new();
+                insert_turn(db, &session.owner, &turn).await?;
+            }
+        }
+        None => insert_turn(db, &session.owner, &turn).await?,
+    }
     session.lifecycle = CodeSessionLifecycle::Running;
     super::super::attention::replace_attention(
         session,

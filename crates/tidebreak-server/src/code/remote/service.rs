@@ -28,15 +28,21 @@ const PUMP_HELD_WAIT_SECONDS: u16 = 20;
 /// How long a pump task sleeps after a transport fault before retrying.
 const PUMP_FAULT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Spawn settings a deployment starts with until they are operator-tunable.
-///
-/// Per-session spend ceilings are a later slice. The numbers here are the
-/// per-spawn stubs [`RemoteSpawnSettings`] already carries.
+/// How long promotion leaves a session alone after a machine-side refusal
+/// (cap full, sign-in needed). Refusals journal a notice and poke attention;
+/// retrying every sweep tick would repeat both every two seconds.
+pub(crate) const PROMOTION_RETRY_HOLD: std::time::Duration = std::time::Duration::from_secs(150);
+
+/// Spawn settings a deployment starts with until they are operator-tunable:
+/// three concurrent sandboxes per owner, $5 per spawn, $20 per session. The
+/// per-spawn ceiling bounds one runaway incarnation; the per-session ledger
+/// bounds their sum, since reincarnation multiplies the former (#2874).
 pub(crate) fn default_settings(profile: String) -> RemoteSpawnSettings {
     RemoteSpawnSettings {
         profile,
         incarnation_cap: 3,
         spend_ceiling_microusd: Some(5_000_000),
+        session_spend_ceiling_microusd: Some(20_000_000),
     }
 }
 
@@ -50,6 +56,10 @@ pub(crate) struct RemoteSessions {
     /// Live pump tasks by session. The sweep prunes finished entries and
     /// spawns missing ones; nothing else writes here.
     pumps: Mutex<HashMap<CodeSessionId, tokio::task::JoinHandle<()>>>,
+    /// Sessions whose queue promotion is on hold until the given instant,
+    /// after a machine-side refusal. In-memory on purpose: a restart retries
+    /// once and re-arms the hold from the fresh refusal.
+    promotion_holds: Mutex<HashMap<CodeSessionId, std::time::Instant>>,
 }
 
 impl RemoteSessions {
@@ -61,6 +71,7 @@ impl RemoteSessions {
             provisioner,
             settings,
             pumps: Mutex::new(HashMap::new()),
+            promotion_holds: Mutex::new(HashMap::new()),
         })
     }
 
@@ -76,6 +87,35 @@ impl RemoteSessions {
             provisioner: self.provisioner.as_ref(),
             settings: &self.settings,
         }
+    }
+
+    /// Whether promotion for `session` is inside a refusal hold.
+    pub(crate) fn promotion_held(&self, session: CodeSessionId) -> bool {
+        let mut holds = self.promotion_holds.lock().expect("promotion holds");
+        match holds.get(&session) {
+            Some(until) if *until > std::time::Instant::now() => true,
+            Some(_) => {
+                holds.remove(&session);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Hold promotion for `session` for [`PROMOTION_RETRY_HOLD`].
+    pub(crate) fn hold_promotion(&self, session: CodeSessionId) {
+        self.promotion_holds
+            .lock()
+            .expect("promotion holds")
+            .insert(session, std::time::Instant::now() + PROMOTION_RETRY_HOLD);
+    }
+
+    /// Clear a hold after a promotion that went through.
+    pub(crate) fn clear_promotion_hold(&self, session: CodeSessionId) {
+        self.promotion_holds
+            .lock()
+            .expect("promotion holds")
+            .remove(&session);
     }
 
     /// Make sure `session` has a pump task, spawning one when it has none.
@@ -335,6 +375,7 @@ mod tests {
             profile: "tidebreak-remote".to_owned(),
             incarnation_cap: 2,
             spend_ceiling_microusd: None,
+            session_spend_ceiling_microusd: None,
         }
     }
 
@@ -492,6 +533,313 @@ mod tests {
             fake.sends.lock().unwrap().as_slice(),
             &["and then".to_owned()]
         );
+    }
+
+    /// A queued row edited after the sweep's snapshot does not collide with
+    /// the delivered turn: the stale claim records the delivered text under
+    /// a fresh id, and the edited row promotes later under its own id.
+    #[tokio::test]
+    async fn a_stale_promotion_records_the_turn_without_eating_the_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let remote = runtime.remote_sessions().unwrap();
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "original".into(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let stale = tidebreak_core::db::code::queued_turn_head(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // The edit lands after the snapshot: the claim below must not eat it.
+        tidebreak_core::db::code::update_queued_turn(
+            &runtime.db,
+            &owner,
+            session.id,
+            stale.id,
+            Some("edited"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".to_owned(),
+            state: SandboxState::Running,
+            latest_event_seq: 2,
+            events: vec![
+                event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                event(
+                    2,
+                    "turn_completed",
+                    serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                ),
+            ],
+        });
+        let mut live = runtime.get_session(&owner, session.id).await.unwrap();
+        let driver = remote.driver(&runtime.db, runtime.bus.as_ref());
+        driver.pump(&mut live, 0).await.unwrap();
+
+        // Deliver against the stale snapshot, as a sweep that raced the edit
+        // would.
+        driver
+            .submit_turn_from(&mut live, &workspace, &repo, &stale.message, Some(&stale))
+            .await
+            .unwrap();
+        let delivered = latest_turn(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.user_input, "original");
+        assert_ne!(
+            delivered.id, stale.id,
+            "a stale claim must not take the row's id"
+        );
+        let (queued_rows, _) = runtime.list_queued_turns(&owner, session.id).await.unwrap();
+        assert_eq!(queued_rows.len(), 1);
+        assert_eq!(queued_rows[0].message, "edited");
+        assert_eq!(queued_rows[0].id, stale.id);
+
+        // The edited row promotes cleanly afterwards — no duplicate key.
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".to_owned(),
+            state: SandboxState::Running,
+            latest_event_seq: 4,
+            events: vec![
+                event(3, "turn_started", serde_json::json!({ "turn": 2 })),
+                event(
+                    4,
+                    "turn_completed",
+                    serde_json::json!({ "turn": 2, "exit_code": 0 }),
+                ),
+            ],
+        });
+        let mut live = runtime.get_session(&owner, session.id).await.unwrap();
+        driver.pump(&mut live, 0).await.unwrap();
+        runtime.promote_remote_queue_heads().await.unwrap();
+        let (queued_rows, _) = runtime.list_queued_turns(&owner, session.id).await.unwrap();
+        assert!(queued_rows.is_empty());
+        let promoted = latest_turn(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(promoted.user_input, "edited");
+        assert_eq!(promoted.id, stale.id);
+    }
+
+    /// A cap-refused promotion holds instead of re-journaling the refusal
+    /// every sweep tick.
+    #[tokio::test]
+    async fn a_refused_promotion_holds_instead_of_spamming() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let remote = runtime.remote_sessions().unwrap();
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("occupied".into()))
+            .await
+            .unwrap();
+        // Session A holds every cap slot (the test settings cap is 2; take
+        // both through direct core reservations).
+        for _ in 0..2 {
+            let filler = runtime
+                .create_remote_session(
+                    &owner,
+                    workspace.id,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                )
+                .await
+                .unwrap();
+            let admission = tidebreak_core::db::code::create_incarnation_intent(
+                &runtime.db,
+                &owner,
+                filler.id,
+                1,
+                2,
+            )
+            .await
+            .unwrap();
+            let tidebreak_core::IncarnationAdmission::Admitted(row) = admission else {
+                panic!("expected admission");
+            };
+            tidebreak_core::db::code::activate_incarnation(&runtime.db, &owner, row.id, "sb-x")
+                .await
+                .unwrap();
+        }
+        // Session B is idle with a queued head the sweep wants to promote.
+        let blocked = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        tidebreak_core::db::code::enqueue_queued_turn(
+            &runtime.db,
+            &owner,
+            &tidebreak_core::CodeQueuedTurn {
+                id: tidebreak_core::CodeTurnId::new(),
+                session_id: blocked.id,
+                message: "waiting".into(),
+                attachments: Vec::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        runtime.promote_remote_queue_heads().await.unwrap();
+        assert!(remote.promotion_held(blocked.id));
+        let notices = |events: &[tidebreak_core::SequencedCodeEvent]| {
+            events
+                .iter()
+                .filter(|row| matches!(row.event, tidebreak_core::CodeEvent::HarnessNotice { .. }))
+                .count()
+        };
+        let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, blocked.id, 0, 50)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(notices(&events), 1);
+
+        // The next tick skips the held session: no second notice, the row
+        // stays queued.
+        runtime.promote_remote_queue_heads().await.unwrap();
+        let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, blocked.id, 0, 50)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(notices(&events), 1);
+        let (queued_rows, _) = runtime.list_queued_turns(&owner, blocked.id).await.unwrap();
+        assert_eq!(queued_rows.len(), 1);
+    }
+
+    /// A spend-exhausted promotion pauses the queue: the condition is
+    /// permanent for the session, so retrying would re-journal the refusal
+    /// and re-cancel the sandbox every tick.
+    #[tokio::test]
+    async fn a_spend_exhausted_promotion_pauses_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        // Rebuild the runtime context with a session ceiling for this test.
+        let fake = Arc::new(FakeProvisioner::default());
+        let runtime = {
+            let db = runtime.db.clone();
+            drop(runtime);
+            Arc::new(
+                CodeRuntime::new(
+                    db,
+                    dir.path().to_path_buf(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .with_remote_sessions(RemoteSessions::new(
+                    fake.clone(),
+                    RemoteSpawnSettings {
+                        session_spend_ceiling_microusd: Some(2_000_000),
+                        ..settings()
+                    },
+                )),
+            )
+        };
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("expensive".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let admission = tidebreak_core::db::code::create_incarnation_intent(
+            &runtime.db,
+            &owner,
+            session.id,
+            1,
+            4,
+        )
+        .await
+        .unwrap();
+        let tidebreak_core::IncarnationAdmission::Admitted(row) = admission else {
+            panic!("expected admission");
+        };
+        tidebreak_core::db::code::record_incarnation_spend(&runtime.db, &owner, row.id, 2_500_000)
+            .await
+            .unwrap();
+        tidebreak_core::db::code::stop_incarnation(&runtime.db, &owner, row.id, Some("done"))
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        tidebreak_core::db::code::enqueue_queued_turn(
+            &runtime.db,
+            &owner,
+            &tidebreak_core::CodeQueuedTurn {
+                id: tidebreak_core::CodeTurnId::new(),
+                session_id: session.id,
+                message: "one more".into(),
+                attachments: Vec::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        runtime.promote_remote_queue_heads().await.unwrap();
+        let (queued_rows, paused) = runtime.list_queued_turns(&owner, session.id).await.unwrap();
+        assert_eq!(queued_rows.len(), 1);
+        assert!(paused, "spend exhaustion must pause the queue");
+
+        // Paused queues are skipped outright: nothing new journals.
+        let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, session.id, 0, 50)
+            .await
+            .unwrap()
+            .events;
+        let before = events.len();
+        runtime.promote_remote_queue_heads().await.unwrap();
+        let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, session.id, 0, 50)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(events.len(), before);
     }
 
     /// A fenced remote session reaps through the driver: the sandbox is
