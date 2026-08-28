@@ -130,8 +130,6 @@ struct NativeActionResolution {
     #[serde(default)]
     viewport_height: Option<f64>,
     #[serde(default)]
-    option_label: Option<String>,
-    #[serde(default)]
     option_index: Option<i64>,
     #[serde(default)]
     selected_index: Option<i64>,
@@ -1265,22 +1263,31 @@ async fn execute_native_action(
         Err(failure) => return Ok(native_failure_result(arguments, failure, None, false)),
     };
 
+    let resolution = *resolution;
     let status = native_resolution_status(resolution.status);
     let performed = resolution.status == NativeActionResolutionStatus::Ready;
+    if let Some(failure) = dispatch_error {
+        let requires_resnapshot = failure.requires_resnapshot();
+        if requires_resnapshot {
+            registry.invalidate_semantic_snapshot(
+                &arguments.browser_id,
+                &workspace_id,
+                &arguments.snapshot_id,
+            );
+        }
+        return Ok(native_failure_result(
+            arguments,
+            failure,
+            Some(&resolution),
+            requires_resnapshot,
+        ));
+    }
     if performed {
         registry.invalidate_semantic_snapshot(
             &arguments.browser_id,
             &workspace_id,
             &arguments.snapshot_id,
         );
-        if let Some(error) = dispatch_error {
-            return Ok(native_failure_result(
-                arguments,
-                NativeInputFailure::Engine(error),
-                Some(&resolution),
-                true,
-            ));
-        }
         if let Err(failure) = wait_for_native_action_processing(&webview, &arguments.action).await {
             return Ok(native_failure_result(
                 arguments,
@@ -1360,6 +1367,7 @@ fn target_error_message(error: BrowserTargetError) -> &'static str {
 #[derive(Debug)]
 enum NativeInputFailure {
     Engine(String),
+    HiddenTab(String),
     Timeout(String),
 }
 
@@ -1367,21 +1375,26 @@ impl NativeInputFailure {
     fn status(&self) -> tidebreak_core::BrowserActStatus {
         match self {
             Self::Engine(_) => tidebreak_core::BrowserActStatus::EngineFailure,
+            Self::HiddenTab(_) => tidebreak_core::BrowserActStatus::HiddenTab,
             Self::Timeout(_) => tidebreak_core::BrowserActStatus::Timeout,
         }
     }
 
+    fn requires_resnapshot(&self) -> bool {
+        !matches!(self, Self::HiddenTab(_))
+    }
+
     fn message(self) -> String {
         match self {
-            Self::Engine(message) | Self::Timeout(message) => message,
+            Self::Engine(message) | Self::HiddenTab(message) | Self::Timeout(message) => message,
         }
     }
 }
 
 enum NativeActionDispatchOutcome {
     Resolved {
-        resolution: NativeActionResolution,
-        dispatch_error: Option<String>,
+        resolution: Box<NativeActionResolution>,
+        dispatch_error: Option<NativeInputFailure>,
     },
     TargetRejected(BrowserTargetError),
 }
@@ -1480,7 +1493,7 @@ async fn resolve_and_dispatch_native_action(
                         })?;
                     if resolution.status != NativeActionResolutionStatus::Ready {
                         return Ok(NativeActionDispatchOutcome::Resolved {
-                            resolution,
+                            resolution: Box::new(resolution),
                             dispatch_error: None,
                         });
                     }
@@ -1505,14 +1518,14 @@ async fn resolve_and_dispatch_native_action(
                             "Password, file, and verification-code fields require human takeover."
                                 .to_owned();
                         return Ok(NativeActionDispatchOutcome::Resolved {
-                            resolution,
+                            resolution: Box::new(resolution),
                             dispatch_error: None,
                         });
                     }
                     let dispatch_error =
                         dispatch_native_action(&retained_view, &resolution, &action).err();
                     Ok(NativeActionDispatchOutcome::Resolved {
-                        resolution,
+                        resolution: Box::new(resolution),
                         dispatch_error,
                     })
                 })();
@@ -1675,25 +1688,18 @@ async fn finish_native_action(
     action: &tidebreak_core::BrowserAction,
 ) -> Result<(), NativeInputFailure> {
     if let tidebreak_core::BrowserAction::Select { .. } = action {
-        let label = resolution.option_label.as_deref().ok_or_else(|| {
-            NativeInputFailure::Engine("browser select target has no option label".to_owned())
-        })?;
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            registry
-                .begin_agent_observation(capability_id, browser_id)
-                .map_err(NativeInputFailure::Engine)?;
-            if press_accessibility_menu_item(webview, registry, capability_id, browser_id, label)
-                .await?
-            {
-                return Ok(());
-            }
-        }
         registry
             .begin_agent_observation(capability_id, browser_id)
             .map_err(NativeInputFailure::Engine)?;
         perform_select_key_fallback(webview, registry, capability_id, browser_id, resolution)
             .await?;
+        wait_for_native_action_processing(
+            webview,
+            &tidebreak_core::BrowserAction::Press {
+                key: "Enter".to_owned(),
+            },
+        )
+        .await?;
     }
 
     Ok(())
@@ -1730,45 +1736,66 @@ unsafe fn dispatch_native_action(
     view: &objc2_web_kit::WKWebView,
     resolution: &NativeActionResolution,
     action: &tidebreak_core::BrowserAction,
-) -> Result<(), String> {
+) -> Result<(), NativeInputFailure> {
     use objc2_app_kit::{NSStandardKeyBindingResponding, NSView};
 
     let native_view: &NSView = &*(view as *const _ as *const NSView);
     let window = native_view
         .window()
-        .ok_or_else(|| "browser window is not available".to_owned())?;
-    window.makeKeyAndOrderFront(None);
-    let window_point = native_window_point(native_view, resolution)?;
+        .ok_or_else(|| NativeInputFailure::Engine("browser window is not available".to_owned()))?;
+    ensure_active_browser_window(&window)?;
+    let window_point =
+        native_window_point(native_view, resolution).map_err(NativeInputFailure::Engine)?;
     let screen_point = window.convertPointToScreen(window_point);
 
     match action {
         tidebreak_core::BrowserAction::Click
         | tidebreak_core::BrowserAction::Check { .. }
         | tidebreak_core::BrowserAction::Select { .. } => {
-            send_native_click(&window, window_point)?;
+            send_native_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::Hover => {
-            send_native_hover(view, &window, window_point)?;
+            send_native_hover(view, &window, window_point).map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::Focus => {
-            focus_accessibility_target(view, &window, screen_point)?;
+            focus_accessibility_target(view, &window, screen_point)
+                .map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::Fill { value } => {
-            focus_accessibility_target(view, &window, screen_point)?;
-            let responder = window
-                .firstResponder()
-                .ok_or_else(|| "browser input target did not accept focus".to_owned())?;
+            let target = focus_accessibility_target(view, &window, screen_point)
+                .map_err(NativeInputFailure::Engine)?;
+            let responder = window.firstResponder().ok_or_else(|| {
+                NativeInputFailure::Engine("browser input target did not accept focus".to_owned())
+            })?;
+            ensure_accessibility_target_focused(&target).map_err(NativeInputFailure::Engine)?;
             responder.selectAll(None);
             let text = objc2_foundation::NSString::from_str(value);
             responder.insertText(&text);
         }
         tidebreak_core::BrowserAction::Press { key } => {
-            focus_accessibility_target(view, &window, screen_point)?;
-            send_native_key(&window, window_point, key)?;
+            focus_accessibility_target(view, &window, screen_point)
+                .map_err(NativeInputFailure::Engine)?;
+            send_native_key(&window, window_point, key).map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::ScrollIntoView => {
-            send_native_scroll(view, resolution)?;
+            send_native_scroll(view, resolution).map_err(NativeInputFailure::Engine)?;
         }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ensure_active_browser_window(
+    window: &objc2_app_kit::NSWindow,
+) -> Result<(), NativeInputFailure> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let app = NSApplication::sharedApplication(MainThreadMarker::new_unchecked());
+    if !app.isActive() || !window.isVisible() || window.isMiniaturized() || !window.isKeyWindow() {
+        return Err(NativeInputFailure::HiddenTab(
+            "Bring Tidebreak and this browser tab to the foreground before acting.".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1905,7 +1932,8 @@ unsafe fn focus_accessibility_target(
     view: &objc2_web_kit::WKWebView,
     window: &objc2_app_kit::NSWindow,
     screen_point: objc2_foundation::NSPoint,
-) -> Result<(), String> {
+) -> Result<objc2::rc::Retained<objc2::runtime::AnyObject>, String> {
+    use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, sel};
     use objc2_app_kit::NSResponder;
@@ -1914,16 +1942,34 @@ unsafe fn focus_accessibility_target(
     if !window.makeFirstResponder(Some(responder)) {
         return Err("browser view did not accept keyboard focus".to_owned());
     }
-    let target: *mut AnyObject = msg_send![view, accessibilityHitTest: screen_point];
-    if target.is_null() {
-        return Err("browser target is not exposed to native accessibility".to_owned());
-    }
+    let target: Option<Retained<AnyObject>> = msg_send![view, accessibilityHitTest: screen_point];
+    let target =
+        target.ok_or_else(|| "browser target is not exposed to native accessibility".to_owned())?;
     let supports_focus: bool =
-        msg_send![target, respondsToSelector: sel!(setAccessibilityFocused:)];
+        msg_send![&*target, respondsToSelector: sel!(setAccessibilityFocused:)];
     if !supports_focus {
         return Err("browser target cannot accept native accessibility focus".to_owned());
     }
-    let _: () = msg_send![target, setAccessibilityFocused: true];
+    let _: () = msg_send![&*target, setAccessibilityFocused: true];
+    ensure_accessibility_target_focused(&target)?;
+    Ok(target)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ensure_accessibility_target_focused(
+    target: &objc2::runtime::AnyObject,
+) -> Result<(), String> {
+    use objc2::{msg_send, sel};
+
+    let supports_focus_state: bool =
+        msg_send![target, respondsToSelector: sel!(isAccessibilityFocused)];
+    if !supports_focus_state {
+        return Err("browser target cannot confirm native accessibility focus".to_owned());
+    }
+    let focused: bool = msg_send![target, isAccessibilityFocused];
+    if !focused {
+        return Err("browser input target did not accept accessibility focus".to_owned());
+    }
     Ok(())
 }
 
@@ -2037,130 +2083,6 @@ fn send_native_scroll(
 }
 
 #[cfg(target_os = "macos")]
-async fn press_accessibility_menu_item(
-    webview: &Webview,
-    registry: &BrowserRegistry,
-    capability_id: Uuid,
-    browser_id: &str,
-    label: &str,
-) -> Result<bool, NativeInputFailure> {
-    use std::sync::Mutex;
-
-    use objc2_web_kit::WKWebView;
-    use tokio::{sync::oneshot, time::timeout};
-
-    let (sender, receiver) = oneshot::channel();
-    let sender = Mutex::new(Some(sender));
-    let registry = registry.clone();
-    let browser_id = browser_id.to_owned();
-    let label = label.to_owned();
-    webview
-        .with_webview(move |platform| unsafe {
-            let _view: &WKWebView = &*platform.inner().cast();
-            let result = registry
-                .begin_agent_observation(capability_id, &browser_id)
-                .and_then(|_| press_accessibility_menu_item_now(&label));
-            if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
-                let _ = sender.send(result);
-            }
-        })
-        .map_err(|error| NativeInputFailure::Engine(format!("browser host: {error}")))?;
-    timeout(std::time::Duration::from_secs(1), receiver)
-        .await
-        .map_err(|_| {
-            NativeInputFailure::Timeout("browser select menu inspection timed out".to_owned())
-        })?
-        .map_err(|_| {
-            NativeInputFailure::Engine("browser select menu inspection was interrupted".to_owned())
-        })?
-        .map_err(NativeInputFailure::Engine)
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn press_accessibility_menu_item_now(label: &str) -> Result<bool, String> {
-    use objc2::runtime::AnyObject;
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    let app = NSApplication::sharedApplication(MainThreadMarker::new_unchecked());
-    let root: &AnyObject = &*(objc2::rc::Retained::as_ptr(&app).cast());
-    let mut remaining = 512usize;
-    Ok(find_and_press_menu_item(root, label, false, &mut remaining))
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn find_and_press_menu_item(
-    node: &objc2::runtime::AnyObject,
-    label: &str,
-    inside_menu: bool,
-    remaining: &mut usize,
-) -> bool {
-    use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
-    use objc2::{msg_send, sel};
-    use objc2_foundation::NSArray;
-
-    if *remaining == 0 {
-        return false;
-    }
-    *remaining -= 1;
-    let role = accessibility_string(node, sel!(accessibilityRole));
-    let inside_menu = inside_menu || role.as_deref().is_some_and(|role| role.contains("Menu"));
-    if inside_menu {
-        let matches = [
-            accessibility_string(node, sel!(accessibilityLabel)),
-            accessibility_string(node, sel!(accessibilityTitle)),
-            accessibility_string(node, sel!(accessibilityValue)),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|candidate| candidate == label);
-        if matches {
-            let can_press: bool =
-                msg_send![node, respondsToSelector: sel!(accessibilityPerformPress)];
-            if can_press {
-                let pressed: bool = msg_send![node, accessibilityPerformPress];
-                if pressed {
-                    return true;
-                }
-            }
-        }
-    }
-
-    let can_read_children: bool = msg_send![node, respondsToSelector: sel!(accessibilityChildren)];
-    if !can_read_children {
-        return false;
-    }
-    let children: Option<Retained<NSArray<AnyObject>>> = msg_send![node, accessibilityChildren];
-    let Some(children) = children else {
-        return false;
-    };
-    for child in children.iter() {
-        if find_and_press_menu_item(&child, label, inside_menu, remaining) {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn accessibility_string(
-    node: &objc2::runtime::AnyObject,
-    selector: objc2::runtime::Sel,
-) -> Option<String> {
-    use objc2::msg_send;
-    use objc2::rc::Retained;
-    use objc2_foundation::NSString;
-
-    let responds: bool = msg_send![node, respondsToSelector: selector];
-    if !responds {
-        return None;
-    }
-    let value: Option<Retained<NSString>> = msg_send![node, performSelector: selector];
-    value.map(|value| value.to_string())
-}
-
-#[cfg(target_os = "macos")]
 async fn perform_select_key_fallback(
     webview: &Webview,
     registry: &BrowserRegistry,
@@ -2188,11 +2110,14 @@ async fn perform_select_key_fallback(
         .with_webview(move |platform| unsafe {
             let view: &WKWebView = &*platform.inner().cast();
             let native_view: &NSView = &*(view as *const _ as *const NSView);
-            let result = (|| {
-                registry.begin_agent_observation(capability_id, &browser_id)?;
-                let window = native_view
-                    .window()
-                    .ok_or_else(|| "browser window is not available".to_owned())?;
+            let result = (|| -> Result<(), NativeInputFailure> {
+                registry
+                    .begin_agent_observation(capability_id, &browser_id)
+                    .map_err(NativeInputFailure::Engine)?;
+                let window = native_view.window().ok_or_else(|| {
+                    NativeInputFailure::Engine("browser window is not available".to_owned())
+                })?;
+                ensure_active_browser_window(&window)?;
                 let point = native_view.convertPoint_toView(native_view.bounds().origin, None);
                 let (key, count) = if desired >= current {
                     ("ArrowDown", desired.saturating_sub(current))
@@ -2200,9 +2125,9 @@ async fn perform_select_key_fallback(
                     ("ArrowUp", current.saturating_sub(desired))
                 };
                 for _ in 0..count {
-                    send_native_key(&window, point, key)?;
+                    send_native_key(&window, point, key).map_err(NativeInputFailure::Engine)?;
                 }
-                send_native_key(&window, point, "Enter")
+                send_native_key(&window, point, "Enter").map_err(NativeInputFailure::Engine)
             })();
             if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
                 let _ = sender.send(result);
@@ -2212,8 +2137,9 @@ async fn perform_select_key_fallback(
     timeout(std::time::Duration::from_secs(1), receiver)
         .await
         .map_err(|_| NativeInputFailure::Timeout("browser select input timed out".to_owned()))?
-        .map_err(|_| NativeInputFailure::Engine("browser select input was interrupted".to_owned()))?
-        .map_err(NativeInputFailure::Engine)
+        .map_err(|_| {
+            NativeInputFailure::Engine("browser select input was interrupted".to_owned())
+        })?
 }
 
 fn act_result(
@@ -3458,7 +3384,6 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     if (element.value === action.value) {
       return result("no_op", "The requested option is already selected.");
     }
-    payload.optionLabel = clean(option.label || option.textContent, 240);
     payload.optionIndex = optionIndex;
     payload.selectedIndex = element.selectedIndex;
   } else if (action.type === "check") {
@@ -3517,7 +3442,6 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     height: rect.height,
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
-    optionLabel: payload.optionLabel || null,
     optionIndex: payload.optionIndex ?? null,
     selectedIndex: payload.selectedIndex ?? null,
   });
@@ -3735,6 +3659,29 @@ mod tests {
         assert!(source.contains("_simulateMouseMove:"));
         assert!(source.contains("_doAfterProcessingAllPendingMouseEvents:"));
         assert!(source.contains("native_event_timestamp()"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_input_fails_closed_without_active_target_focus() {
+        let source = include_str!("browser_semantics.rs");
+        assert!(source.contains("app.isActive()"));
+        assert!(source.contains("window.isKeyWindow()"));
+        assert!(source.contains("window.isVisible()"));
+        assert!(source.contains("window.isMiniaturized()"));
+        assert!(source.contains("isAccessibilityFocused"));
+        let app_wide_menu_search = ["find_and_press", "_menu_item"].concat();
+        assert!(!source.contains(&app_wide_menu_search));
+    }
+
+    #[test]
+    fn inactive_native_input_returns_hidden_tab_without_invalidating_the_snapshot() {
+        let failure = NativeInputFailure::HiddenTab("inactive".to_owned());
+        assert_eq!(
+            failure.status(),
+            tidebreak_core::BrowserActStatus::HiddenTab
+        );
+        assert!(!failure.requires_resnapshot());
     }
 
     #[test]
