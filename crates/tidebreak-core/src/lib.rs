@@ -182,12 +182,12 @@ pub use code::{
     CodeTriggerAction, CodeTriggerCondition, CodeTriggerDeliveryId, CodeTriggerDeliverySink,
     CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload, CodeTriggerFireState,
     CodeTriggerId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatch, CodeWatchId,
-    CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FileChangeKind, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, PullRequestCheck,
-    PullRequestCheckBucket, PullRequestComment, PullRequestCommentKind, PullRequestDigest,
-    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS,
-    MAX_TOOL_SUMMARY_CHARS,
+    CodeWatchState, CodeWorkflowRunFact, CodeWorkflowRunId, CodeWorkspace, CodeWorkspaceStatus,
+    Diffstat, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
+    HarnessTier, PullRequestCheck, PullRequestCheckBucket, PullRequestComment,
+    PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail,
+    ToolOutcome, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

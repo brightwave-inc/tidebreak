@@ -114,6 +114,10 @@ code_id_type!(
     /// Identifies one observed pull request across every repository.
     CodePullRequestId
 );
+code_id_type!(
+    /// Identifies one observed GitHub Actions workflow run.
+    CodeWorkflowRunId
+);
 
 /// Which external agent engine a session is bound to.
 ///
@@ -889,6 +893,80 @@ impl CodePullRequestLiveState {
             || self.merge_state_status != other.merge_state_status
             || self.auto_merge_enabled != other.auto_merge_enabled
             || self.in_merge_queue != other.in_merge_queue
+    }
+}
+
+/// Durable observation of one GitHub Actions workflow run.
+///
+/// GitHub stays authoritative; a row is a confirmed observation, never a
+/// guess. Identity is `(owner, host, repo_owner, repo_name, github_id)`, so
+/// a run in a repository with no local checkout is representable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeWorkflowRunFact {
+    /// Stable id.
+    pub id: CodeWorkflowRunId,
+    /// Principal whose credential observed the run.
+    pub owner: crate::OwnerId,
+    /// Host, e.g. `github.com`.
+    pub host: String,
+    /// Repository owner login.
+    pub repo_owner: String,
+    /// Repository name.
+    pub repo_name: String,
+    /// GitHub workflow run id.
+    pub github_id: u64,
+    /// Attempt number, when the host reported one.
+    pub run_attempt: Option<u64>,
+    /// Display title at last observation.
+    pub name: String,
+    /// Web URL.
+    pub url: String,
+    /// Lowercased host status (`queued`, `in_progress`, `completed`).
+    pub status: String,
+    /// Lowercased host conclusion, when finished.
+    pub conclusion: Option<String>,
+    /// Workflow name or path.
+    pub workflow: Option<String>,
+    /// Head branch, when the host reported one.
+    pub branch: Option<String>,
+    /// Head SHA, when the host reported one.
+    pub sha: Option<String>,
+    /// Triggering event.
+    pub event: Option<String>,
+    /// Actor login, when the host reported one.
+    pub actor: Option<String>,
+    /// When the host says the run started.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the host says it last changed.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// When this store first observed the run.
+    pub first_seen_at: chrono::DateTime<chrono::Utc>,
+    /// When this store last confirmed the snapshot.
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl CodeWorkflowRunFact {
+    /// Whether any snapshot field other than id and the seen timestamps
+    /// differs. Broadcasts key on this, so a read that confirms no movement
+    /// stays silent.
+    #[must_use]
+    pub fn snapshot_differs(&self, other: &Self) -> bool {
+        self.host != other.host
+            || self.repo_owner != other.repo_owner
+            || self.repo_name != other.repo_name
+            || self.github_id != other.github_id
+            || self.run_attempt != other.run_attempt
+            || self.name != other.name
+            || self.url != other.url
+            || self.status != other.status
+            || self.conclusion != other.conclusion
+            || self.workflow != other.workflow
+            || self.branch != other.branch
+            || self.sha != other.sha
+            || self.event != other.event
+            || self.actor != other.actor
+            || self.created_at != other.created_at
+            || self.updated_at != other.updated_at
     }
 }
 

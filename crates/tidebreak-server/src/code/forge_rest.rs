@@ -319,6 +319,7 @@ pub(crate) async fn delivery_pull_requests(
 }
 
 /// Read one repository's GitHub Actions runs.
+#[allow(dead_code)]
 pub(crate) async fn workflow_runs(
     api_base: &str,
     target: &CodeGitHubRepositoryTarget,

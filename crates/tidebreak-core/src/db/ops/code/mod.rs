@@ -23,6 +23,7 @@ mod transcript_search;
 pub mod trigger;
 pub mod turn;
 pub mod watch;
+pub mod workflow_run;
 pub mod workspace;
 
 pub use approval::*;
@@ -37,6 +38,7 @@ pub use transcript_search::*;
 pub use trigger::*;
 pub use turn::*;
 pub use watch::*;
+pub use workflow_run::*;
 pub use workspace::*;
 
 /// Insert a Code notification when an interactive session turn settles.

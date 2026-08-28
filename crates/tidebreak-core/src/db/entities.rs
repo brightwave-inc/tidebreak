@@ -2119,3 +2119,62 @@ pub mod code_trigger_delivery_receipt {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod code_workflow_run {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_workflow_run")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub host: String,
+        pub repo_owner: String,
+        pub repo_name: String,
+        pub github_id: i64,
+        pub run_attempt: Option<i64>,
+        pub name: String,
+        pub url: String,
+        pub status: String,
+        pub conclusion: Option<String>,
+        pub workflow: Option<String>,
+        pub branch: Option<String>,
+        pub sha: Option<String>,
+        pub event: Option<String>,
+        pub actor: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub first_seen_at: DateTimeUtc,
+        pub last_seen_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_workflow_run_fetch {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_workflow_run_fetch")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub owner: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub host: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repo_owner: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repo_name: String,
+        pub list_etag: Option<String>,
+        pub observed_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

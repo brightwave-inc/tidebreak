@@ -1080,3 +1080,39 @@ pub(crate) enum CodeSessionImage {
     CreatedAt,
     Owner,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeWorkflowRun {
+    Table,
+    Id,
+    Owner,
+    Host,
+    RepoOwner,
+    RepoName,
+    GithubId,
+    RunAttempt,
+    Name,
+    Url,
+    Status,
+    Conclusion,
+    Workflow,
+    Branch,
+    Sha,
+    Event,
+    Actor,
+    CreatedAt,
+    UpdatedAt,
+    FirstSeenAt,
+    LastSeenAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeWorkflowRunFetch {
+    Table,
+    Owner,
+    Host,
+    RepoOwner,
+    RepoName,
+    ListEtag,
+    ObservedAt,
+}

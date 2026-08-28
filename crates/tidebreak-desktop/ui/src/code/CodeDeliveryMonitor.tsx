@@ -17,11 +17,10 @@ import {
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 // Freshness rides the `delivery` nudge on the updates socket (decision 66):
-// the server says when the pull-request store changed, and this monitor
-// re-reads then. The remaining timers are a safety net — run summaries have
-// no store yet, and a dropped socket must not silence notifications.
-const SAFETY_POLL_MS = 5 * 60_000;
-const HIDDEN_POLL_MS = 10 * 60_000;
+// the server says when the pull-request or workflow-run store changed, and
+// this monitor re-reads then. There is no clock. Deployments stay live
+// GitHub observations, so this monitor asks only for workflow runs. The
+// first mount still reads once, and becoming visible again reads once.
 const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
 const MAX_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1_000;
 const OVERLAP_MS = 2 * 60 * 1_000;
@@ -41,8 +40,8 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
   );
 
   useEffect(() => {
-    // A nudge while hidden waits for the hidden-window poll; visibility
-    // returning schedules its own immediate pass.
+    // A nudge while hidden waits; visibility returning schedules its own
+    // immediate pass.
     if (document.hidden) return;
     wakeRef.current?.();
   }, [deliveryRevision]);
@@ -57,12 +56,7 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     const isCurrent = () =>
       !cancelled && isCodeClientGenerationActive(clientGeneration);
 
-    const interval = () => {
-      if (document.hidden) return HIDDEN_POLL_MS;
-      return SAFETY_POLL_MS;
-    };
-
-    const schedule = (delay = interval()) => {
+    const schedule = (delay = 0) => {
       if (!isCurrent()) return;
       if (running) {
         rerunRequested = true;
@@ -168,12 +162,13 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
       } finally {
         queryController = null;
         running = false;
-        if (isCurrent()) schedule(rerunRequested ? 0 : interval());
+        const delay = nextMonitorDelayMs({ rerunRequested });
+        if (isCurrent() && delay !== null) schedule(delay);
       }
     };
 
     const onVisibilityChange = () => {
-      schedule(document.hidden ? interval() : 0);
+      if (!document.hidden) schedule(0);
     };
     wakeRef.current = () => schedule(0);
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -187,6 +182,14 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
     };
   }, [client]);
 
+  return null;
+}
+
+/** Delay until the next monitor pass. `null` means there is no clock. */
+export function nextMonitorDelayMs(args: {
+  rerunRequested: boolean;
+}): number | null {
+  if (args.rerunRequested) return 0;
   return null;
 }
 
@@ -246,7 +249,7 @@ export async function monitorRuns(
     const page = await client.queryCodeDeliveryRuns(
       {
         repositories,
-        kinds: [],
+        kinds: ["workflow_run"],
         statuses: [],
         conclusions: [],
         workflows: [],

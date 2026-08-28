@@ -175,7 +175,7 @@ pub(crate) async fn sweep_reconcile(runtime: &Arc<CodeRuntime>) {
             continue;
         }
         let query = CodeDeliveryPullRequestQuery {
-            repositories: deduped,
+            repositories: deduped.clone(),
             search: None,
             states: Vec::new(),
             review_states: Vec::new(),
@@ -195,6 +195,7 @@ pub(crate) async fn sweep_reconcile(runtime: &Arc<CodeRuntime>) {
         if let Err(err) = query_pull_requests(runtime, &owner, true, query).await {
             debug!("reconcile read failed: {err:?}");
         }
+        super::delivery::refresh_workflow_runs(runtime, &owner, &deduped).await;
     }
 }
 

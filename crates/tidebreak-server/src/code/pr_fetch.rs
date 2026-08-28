@@ -302,6 +302,36 @@ pub(crate) async fn read_check_runs(
     }
 }
 
+/// GET `repos/{owner}/{name}/actions/runs?per_page=100`, conditionally.
+pub(crate) async fn read_workflow_runs(
+    gate: &HostGate,
+    transport: FetchTransport<'_>,
+    host: &str,
+    owner: &str,
+    name: &str,
+    etag: Option<&str>,
+) -> Result<EndpointRead<Vec<Value>>, FetchFailure> {
+    let path = format!("repos/{owner}/{name}/actions/runs?per_page=100");
+    let response = gated_read(gate, transport, host, &path, etag).await?;
+    match response.status {
+        200 => {
+            let body = parse_body(&response)?;
+            let runs = body
+                .get("workflow_runs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Ok(EndpointRead::Fresh {
+                value: runs,
+                etag: response.etag,
+            })
+        }
+        304 => Ok(EndpointRead::NotModified),
+        404 => Ok(EndpointRead::Missing),
+        status => Err(FetchFailure::Refused(status, bounded_body(&response))),
+    }
+}
+
 /// GET `repos/{owner}/{name}/pulls/{number}/reviews`, conditionally.
 ///
 /// One page of one hundred: a pull request with more reviews than that has
@@ -1144,6 +1174,80 @@ mod tests {
             ),
             "the second read sends the stored ETag"
         );
+    }
+
+    /// Workflow-run list reads send the stored ETag and keep the row on 304
+    /// (issue 2578): an unconditional second GET would fail this.
+    #[tokio::test]
+    async fn a_workflow_run_list_sends_the_stored_etag_and_reads_the_304() {
+        type Seen = Arc<Mutex<Vec<Option<String>>>>;
+        let seen: Seen = Arc::default();
+        let recorded = Arc::clone(&seen);
+        let list = move |headers: axum::http::HeaderMap| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let etag = headers
+                    .get(axum::http::header::IF_NONE_MATCH)
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToOwned::to_owned);
+                recorded.lock().unwrap().push(etag.clone());
+                let unchanged = etag.as_deref() == Some("W/\"runs-1\"");
+                let body = if unchanged {
+                    String::new()
+                } else {
+                    serde_json::json!({
+                        "workflow_runs": [{
+                            "id": 77,
+                            "status": "completed",
+                            "conclusion": "success",
+                            "html_url": "https://github.com/acme/demo/actions/runs/77",
+                            "name": "CI",
+                            "display_title": "CI",
+                            "head_sha": "abc",
+                            "event": "push",
+                            "created_at": "2026-08-27T00:00:00Z",
+                            "updated_at": "2026-08-27T00:01:00Z",
+                        }]
+                    })
+                    .to_string()
+                };
+                axum::http::Response::builder()
+                    .status(if unchanged { 304 } else { 200 })
+                    .header("etag", "W/\"runs-1\"")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        };
+        let api = serve_forge(
+            axum::Router::new().route("/repos/acme/demo/actions/runs", axum::routing::get(list)),
+        )
+        .await;
+
+        let credential = GitCredential {
+            username: "x-access-token".into(),
+            secret: "ghs_test_borrowed".into(),
+        };
+        let api_base = format!("http://{api}");
+        let transport = FetchTransport::Rest {
+            api_base: &api_base,
+            credential: &credential,
+        };
+        let gate = HostGate::default();
+        let first = read_workflow_runs(&gate, transport, "github.com", "acme", "demo", None)
+            .await
+            .unwrap();
+        let EndpointRead::Fresh { value, etag } = first else {
+            panic!("expected fresh: {first:?}");
+        };
+        assert_eq!(value.len(), 1);
+        let etag = etag.expect("a 200 carries the etag to send next time");
+        let second =
+            read_workflow_runs(&gate, transport, "github.com", "acme", "demo", Some(&etag))
+                .await
+                .unwrap();
+        assert_eq!(second, EndpointRead::NotModified);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![None, Some("W/\"runs-1\"".into())]);
     }
 
     /// A limit answer over the hosted transport parks the host exactly as
