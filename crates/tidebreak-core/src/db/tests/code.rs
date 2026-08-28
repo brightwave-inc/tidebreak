@@ -4681,7 +4681,11 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
         epoch,
         intent.id,
         7,
-        std::slice::from_ref(&first),
+        crate::db::code::IncarnationSideEffects {
+            journal: std::slice::from_ref(&first),
+            wip_ref: Some("mg-wip/sb-1-i1"),
+            ..Default::default()
+        },
     )
     .await
     .unwrap()
@@ -4698,7 +4702,10 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
             epoch,
             intent.id,
             replayed,
-            std::slice::from_ref(&first),
+            crate::db::code::IncarnationSideEffects {
+                journal: std::slice::from_ref(&first),
+                ..Default::default()
+            },
         )
         .await
         .unwrap()
@@ -4713,7 +4720,12 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
         epoch,
         intent.id,
         8,
-        std::slice::from_ref(&second),
+        crate::db::code::IncarnationSideEffects {
+            journal: std::slice::from_ref(&second),
+            task_output: Some("the findings"),
+            terminal_events_journaled: true,
+            ..Default::default()
+        },
     )
     .await
     .unwrap()
@@ -4721,12 +4733,15 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
 
     let page = list_events(&store, &owner, session, 0, 10).await.unwrap();
     assert_eq!(page.events.len(), 2);
-    let cursor = crate::db::code::latest_incarnation(&store, &owner, session)
+    let row = crate::db::code::latest_incarnation(&store, &owner, session)
         .await
         .unwrap()
-        .unwrap()
-        .events_cursor;
-    assert_eq!(cursor, 8);
+        .unwrap();
+    assert_eq!(row.events_cursor, 8);
+    // Side effects committed with their event's cursor advance.
+    assert_eq!(row.last_wip_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+    assert_eq!(row.task_output.as_deref(), Some("the findings"));
+    assert!(row.terminal_events_journaled);
 
     // A superseded worker's epoch cannot journal into the session.
     assert!(crate::db::code::ingest_incarnation_event(
@@ -4736,26 +4751,11 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
         epoch + 1,
         intent.id,
         9,
-        std::slice::from_ref(&second),
+        crate::db::code::IncarnationSideEffects {
+            journal: std::slice::from_ref(&second),
+            ..Default::default()
+        },
     )
     .await
     .is_err());
-}
-
-/// The supervisor's terminal deliverable is retained on the incarnation
-/// that produced it.
-#[tokio::test]
-async fn the_task_output_is_retained_on_the_incarnation() {
-    let (_dir, store) = temp_store().await;
-    let owner = OwnerId::local();
-    let (session, _) = seed_owner(&store, &owner, "deliverable").await;
-    let intent = admitted(admit(&store, &owner, session, 1, 4).await);
-    crate::db::code::record_incarnation_task_output(&store, &owner, intent.id, "the findings")
-        .await
-        .unwrap();
-    let row = crate::db::code::latest_incarnation(&store, &owner, session)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.task_output.as_deref(), Some("the findings"));
 }

@@ -11,8 +11,9 @@
 //!
 //! The projection itself is pure ([`project_event`]); [`ingest_events`]
 //! applies one cursor read. Attention and the bus publish ride after the
-//! journal commit: a crash between the two leaves attention one event stale,
-//! which the next batch corrects, never a journal gap.
+//! journal commit: a crash between the two leaves attention stale until the
+//! next read replays the sequence, and attention — unlike the journal — is
+//! re-applied on replay, so the replay is what corrects it.
 
 use std::sync::Arc;
 
@@ -20,8 +21,7 @@ use serde_json::Value;
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    ingest_incarnation_event, latest_incarnation, mark_incarnation_terminal_events_journaled,
-    record_incarnation_task_output,
+    ingest_incarnation_event, latest_incarnation, IncarnationSideEffects,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, BoundedError, CodeEvent, CodeIncarnationId,
@@ -58,6 +58,8 @@ pub(crate) struct Projection {
     pub attention: Option<Attention>,
     /// The terminal deliverable to retain on the incarnation.
     pub task_output: Option<String>,
+    /// The WIP checkpoint ref to retain on the incarnation, for resume.
+    pub wip_ref: Option<String>,
     /// Whether this event closes the incarnation's stream: the supervisor
     /// said goodbye, so its terminal events are now journaled.
     pub terminal_flush: bool,
@@ -70,8 +72,9 @@ pub(crate) struct Projection {
 pub(crate) struct IngestOutcome {
     /// Sandbox event sequences whose projection committed in this call.
     pub ingested: u64,
-    /// Whether the supervisor's own stop marker has been journaled, in this
-    /// batch or an earlier one.
+    /// Whether the supervisor's own stop marker has been journaled — read
+    /// from the durable incarnation row after the batch, never inferred
+    /// from a replayed projection.
     pub terminal_flush_journaled: bool,
     /// The fence this read demands, when the environment reports the sandbox
     /// gone without the supervisor having said goodbye.
@@ -169,11 +172,15 @@ pub(crate) fn project_event(binding: &IngestBinding, kind: &str, payload: &Value
             ));
         }
         "wip_pushed" => {
-            let reference = payload_str(payload, "reference").unwrap_or("a WIP ref");
+            let reference = payload_str(payload, "ref");
             out.journal.push(notice(
                 HarnessNoticeLevel::Info,
-                format!("Work in progress was checkpointed to {reference}."),
+                format!(
+                    "Work in progress was checkpointed to {}.",
+                    reference.unwrap_or("a WIP ref")
+                ),
             ));
+            out.wip_ref = reference.map(str::to_owned);
         }
         "wip_push_failed" | "wip_push_unavailable" => {
             let reason = payload_str(payload, "reason").unwrap_or(kind);
@@ -239,18 +246,18 @@ pub(crate) async fn ingest_events(
     for event in &read.events {
         outcome.ingested += u64::from(apply_one(db, bus, binding, event, &mut outcome).await?);
     }
+    // The durable row is the truth about the goodbye — the batch that
+    // carried it may have committed before a restart, and a replayed
+    // sequence's projection must not claim a gate the row does not show.
+    outcome.terminal_flush_journaled = latest_incarnation(db, &binding.owner, binding.session_id)
+        .await?
+        .is_some_and(|row| row.id == binding.incarnation && row.terminal_events_journaled);
     let drained = read
         .events
         .last()
         .is_none_or(|event| event.seq >= read.latest_event_seq);
     if read.state.is_terminal() && drained && !outcome.terminal_flush_journaled {
-        // The goodbye may have been journaled by an earlier batch; the
-        // incarnation row remembers across restarts.
-        let already = latest_incarnation(db, &binding.owner, binding.session_id)
-            .await?
-            .is_some_and(|row| row.id == binding.incarnation && row.terminal_events_journaled);
-        outcome.terminal_flush_journaled = already;
-        if !already {
+        {
             outcome.fence = Some(if read.state == SandboxState::Completed {
                 // The run ended the way the environment expected, but its last
                 // events never reached this journal: a resume would run without
@@ -300,39 +307,36 @@ async fn apply_one(
             "a sandbox event kind this server does not recognize was skipped"
         );
     }
-    if projection.terminal_flush {
-        outcome.terminal_flush_journaled = true;
-    }
-    let Some(seqs) = ingest_incarnation_event(
+    let ingested = ingest_incarnation_event(
         db,
         &binding.owner,
         binding.session_id,
         binding.spawn_epoch,
         binding.incarnation,
         event.seq,
-        &projection.journal,
+        IncarnationSideEffects {
+            journal: &projection.journal,
+            task_output: projection.task_output.as_deref(),
+            wip_ref: projection.wip_ref.as_deref(),
+            terminal_events_journaled: projection.terminal_flush,
+        },
     )
-    .await?
-    else {
-        // The cursor already covers this sequence: a replay after a restart.
-        // Its side effects committed with it the first time.
-        return Ok(false);
-    };
-    for (seq, journal_event) in seqs.into_iter().zip(projection.journal) {
-        bus.publish(
-            binding.session_id,
-            SequencedCodeEvent {
-                seq,
-                event: journal_event,
-            },
-        );
+    .await?;
+    if let Some(seqs) = &ingested {
+        for (seq, journal_event) in seqs.iter().zip(&projection.journal) {
+            bus.publish(
+                binding.session_id,
+                SequencedCodeEvent {
+                    seq: *seq,
+                    event: journal_event.clone(),
+                },
+            );
+        }
     }
-    if let Some(body) = &projection.task_output {
-        record_incarnation_task_output(db, &binding.owner, binding.incarnation, body).await?;
-    }
-    if projection.terminal_flush {
-        mark_incarnation_terminal_events_journaled(db, &binding.owner, binding.incarnation).await?;
-    }
+    // Attention is applied even for a replayed sequence: the journal write
+    // and the attention write are separate transactions, so a crash between
+    // them leaves attention stale, and the replay is what corrects it.
+    // Re-applying an attention the session already holds is a no-op.
     if let Some(next) = projection.attention {
         let _ = super::super::attention::apply_attention(
             db,
@@ -344,7 +348,7 @@ async fn apply_one(
         )
         .await?;
     }
-    Ok(true)
+    Ok(ingested.is_some())
 }
 
 #[cfg(test)]
@@ -355,7 +359,7 @@ mod tests {
 
     use tidebreak_core::db::code::{
         activate_incarnation, create_incarnation_intent, get_session, insert_repo, insert_session,
-        insert_workspace, latest_incarnation, list_events,
+        insert_workspace, latest_incarnation, list_events, replace_session_attention,
     };
     use tidebreak_core::{
         CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
@@ -439,6 +443,9 @@ mod tests {
         let stopped = project_event(&b, "supervisor_stopped", &json!({ "reason": "stopped" }));
         assert!(stopped.terminal_flush);
 
+        let wip = project_event(&b, "wip_pushed", &json!({ "ref": "mg-wip/sb-1-i1" }));
+        assert_eq!(wip.wip_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+
         // Environment lifecycle events are recognized, not vocabulary drift.
         assert!(!project_event(&b, "running", &json!({})).unrecognized);
         assert!(project_event(&b, "brand_new_kind", &json!({})).unrecognized);
@@ -472,23 +479,24 @@ mod tests {
         assert_eq!(live.attention.state, AttentionState::Working);
 
         // The server restarts and re-reads from an older cursor: sequences
-        // 1..3 replay and write nothing; 4 and 5 land once.
+        // 1..3 replay and write nothing; 4 through 6 land once.
         let second = read(
             SandboxState::Completed,
-            5,
+            6,
             vec![
                 event(2, "turn_started", json!({ "turn": 1 })),
                 event(3, "assistant_record", json!({ "body": "hello" })),
-                event(4, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+                event(4, "wip_pushed", json!({ "ref": "mg-wip/sb-1-i1" })),
+                event(5, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
                 event(
-                    5,
+                    6,
                     "supervisor_stopped",
                     json!({ "reason": "task_complete" }),
                 ),
             ],
         );
         let outcome = ingest_events(&db, &bus, &b, &second).await.unwrap();
-        assert_eq!(outcome.ingested, 2);
+        assert_eq!(outcome.ingested, 3);
         assert!(outcome.terminal_flush_journaled);
         assert!(outcome.fence.is_none());
 
@@ -513,6 +521,7 @@ mod tests {
                 "session_started",
                 "turn_started",
                 "assistant_message",
+                "notice",
                 "turn_completed",
                 "notice",
             ],
@@ -528,7 +537,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(row.terminal_events_journaled);
-        assert_eq!(row.events_cursor, 5);
+        assert_eq!(row.events_cursor, 6);
+        assert_eq!(row.last_wip_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+
+        // A crash can land between the journal commit and the attention
+        // write. Simulate the stale half: force the session back to Working,
+        // then replay the whole batch — the journal takes nothing twice, and
+        // the replayed attention corrects the session.
+        replace_session_attention(
+            &db,
+            &b.owner,
+            b.session_id,
+            &Attention::working(AttentionSource::Lifecycle),
+            false,
+        )
+        .await
+        .unwrap();
+        let outcome = ingest_events(&db, &bus, &b, &second).await.unwrap();
+        assert_eq!(outcome.ingested, 0);
+        assert!(outcome.terminal_flush_journaled);
+        assert!(outcome.fence.is_none());
+        let page = list_events(&db, &b.owner, b.session_id, 0, 50)
+            .await
+            .unwrap();
+        assert_eq!(page.events.len(), 6);
+        let live = get_session(&db, &b.owner, b.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.attention.state, AttentionState::DoneUnreviewed);
     }
 
     /// A terminal environment state without the supervisor's goodbye demands

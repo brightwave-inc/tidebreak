@@ -2789,6 +2789,21 @@ impl MigrationTrait for IncarnationIngest {
                 )
                 .await?;
         }
+        if !manager
+            .has_column("code_session_incarnation", "last_wip_ref")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeSessionIncarnation::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodeSessionIncarnation::LastWipRef).text(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
         Ok(())
     }
 
