@@ -892,6 +892,14 @@ pub fn app(state: AppState) -> Router {
             "/code/workspaces",
             post(routes::code::create_workspace).get(routes::code::list_workspaces),
         )
+        .route(
+            "/code/remote/workspaces",
+            post(routes::code::create_remote_workspace),
+        )
+        .route(
+            "/code/remote/workspaces/{id}/sessions",
+            post(routes::code::create_remote_session),
+        )
         .route("/code/storage", get(routes::code::list_storage))
         .route(
             "/code/workspaces/{id}",

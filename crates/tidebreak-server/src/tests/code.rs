@@ -16,6 +16,13 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
+use crate::code::remote::driver::RemoteSpawnSettings;
+use crate::code::remote::service::RemoteSessions;
+use crate::code::remote::wire::{
+    EventCursor, MessageReceipt, SandboxEvents, SandboxLease, SandboxMessage, SandboxStatus,
+    SpawnArguments,
+};
+use crate::code::remote::{RemoteSandboxError, SandboxProvisioner};
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
@@ -110,6 +117,53 @@ impl BrowserRuntime for RecordingBrowserRuntime {
     }
 }
 
+struct UnusedRemoteProvisioner;
+
+#[async_trait]
+impl SandboxProvisioner for UnusedRemoteProvisioner {
+    async fn spawn(
+        &self,
+        _owner: &tidebreak_core::OwnerId,
+        _arguments: &SpawnArguments,
+    ) -> Result<SandboxLease, RemoteSandboxError> {
+        panic!("remote create-route tests must not provision a sandbox")
+    }
+
+    async fn status(
+        &self,
+        _owner: &tidebreak_core::OwnerId,
+        _sandbox_id: &str,
+    ) -> Result<SandboxStatus, RemoteSandboxError> {
+        panic!("remote create-route tests must not read sandbox status")
+    }
+
+    async fn events(
+        &self,
+        _owner: &tidebreak_core::OwnerId,
+        _sandbox_id: &str,
+        _cursor: EventCursor,
+    ) -> Result<SandboxEvents, RemoteSandboxError> {
+        panic!("remote create-route tests must not read sandbox events")
+    }
+
+    async fn send(
+        &self,
+        _owner: &tidebreak_core::OwnerId,
+        _sandbox_id: &str,
+        _message: &SandboxMessage,
+    ) -> Result<MessageReceipt, RemoteSandboxError> {
+        panic!("remote create-route tests must not send sandbox messages")
+    }
+
+    async fn cancel(
+        &self,
+        _owner: &tidebreak_core::OwnerId,
+        _sandbox_id: &str,
+    ) -> Result<(), RemoteSandboxError> {
+        panic!("remote create-route tests must not cancel a sandbox")
+    }
+}
+
 async fn code_app(
     events: Vec<HarnessEvent>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
@@ -146,14 +200,14 @@ async fn code_app_with_optional_browser(
     adapter: ScriptedAdapter,
     browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
-    code_app_with_options(adapter, browser_runtime, None, None).await
+    code_app_with_options(adapter, browser_runtime, None, None, false).await
 }
 
 async fn code_app_with_put_gate(
     adapter: ScriptedAdapter,
     gate: Arc<PutGate>,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
-    code_app_with_options(adapter, None, Some(gate), None).await
+    code_app_with_options(adapter, None, Some(gate), None, false).await
 }
 
 /// A code app whose OS policy asserts a permission-mode ceiling.
@@ -161,7 +215,14 @@ async fn code_app_with_ceiling(
     adapter: ScriptedAdapter,
     ceiling: PermissionMode,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
-    code_app_with_options(adapter, None, None, Some(ceiling)).await
+    code_app_with_options(adapter, None, None, Some(ceiling), false).await
+}
+
+async fn code_app_with_remote(
+    adapter: ScriptedAdapter,
+    permission_mode_ceiling: Option<PermissionMode>,
+) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
+    code_app_with_options(adapter, None, None, permission_mode_ceiling, true).await
 }
 
 async fn code_app_with_options(
@@ -169,6 +230,7 @@ async fn code_app_with_options(
     browser_runtime: Option<Arc<RecordingBrowserRuntime>>,
     put_gate: Option<Arc<PutGate>>,
     permission_mode_ceiling: Option<PermissionMode>,
+    remote: bool,
 ) -> (Router, Arc<str>, Arc<CodeRuntime>, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
@@ -180,13 +242,27 @@ async fn code_app_with_options(
     let browser_bridge_command = installed_browser_runtime
         .as_ref()
         .map(|_| crate::code::browser_channel::test_bridge_command());
-    let runtime = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
+    let runtime = CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().to_path_buf(),
         registry,
         installed_browser_runtime,
         browser_bridge_command,
-    ));
+    );
+    let runtime = if remote {
+        runtime.with_remote_sessions(RemoteSessions::new(
+            Arc::new(UnusedRemoteProvisioner),
+            RemoteSpawnSettings {
+                profile: "test-remote".to_owned(),
+                incarnation_cap: 2,
+                spend_ceiling_microusd: None,
+                session_spend_ceiling_microusd: None,
+            },
+        ))
+    } else {
+        runtime
+    };
+    let runtime = Arc::new(runtime);
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store_trait,
@@ -474,6 +550,35 @@ fn init_git_repo_named(dir: &std::path::Path, name: &str) -> std::path::PathBuf 
 
 fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
     init_git_repo_named(dir, "origin")
+}
+
+fn add_github_remote(repo: &std::path::Path, name: &str) {
+    assert!(std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            &format!("https://github.com/acme/{name}.git"),
+        ])
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .status()
+        .unwrap()
+        .success());
+}
+
+async fn record_github_origin(runtime: &CodeRuntime, repo: &serde_json::Value, name: &str) {
+    let repo_id: RepoId = json_id(repo).parse().unwrap();
+    assert!(tidebreak_core::db::code::set_repo_origin(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        repo_id,
+        "github.com",
+        "acme",
+        name,
+    )
+    .await
+    .unwrap());
 }
 
 async fn register_and_workspace(
@@ -1070,6 +1175,189 @@ async fn listing_session_turns_returns_user_input_and_usage() {
     assert_eq!(listed[1]["id"], second["id"]);
     assert_eq!(listed[1]["ordinal"], 2);
     assert_eq!(listed[1]["user_input"], "again");
+}
+
+#[tokio::test]
+async fn remote_create_routes_write_remote_rows_without_a_host_checkout() {
+    let (router, token, runtime, dir) =
+        code_app_with_remote(ScriptedAdapter::new(plain_text_script()), None).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo_named(dir.path(), "remote-create");
+    add_github_remote(&repo, "remote-create");
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let registered: serde_json::Value = registered.json().await.unwrap();
+    record_github_origin(&runtime, &registered, "remote-create").await;
+
+    let workspace_url = format!("http://{addr}/code/remote/workspaces");
+    let unauthenticated = client
+        .post(&workspace_url)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&registered),
+            "title": "remote route",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let created = client
+        .post(&workspace_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&registered),
+            "title": "remote route",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let workspace_id: WorkspaceId = json_id(&workspace).parse().unwrap();
+    assert_eq!(workspace["title"], "remote route");
+    assert_eq!(workspace["worktree_path"], format!("remote:{workspace_id}"));
+    assert_eq!(workspace["base_ref"], "main");
+
+    let stored = runtime
+        .get_workspace(&tidebreak_core::OwnerId::local(), workspace_id)
+        .await
+        .unwrap();
+    assert!(stored.is_remote());
+
+    let session_url = format!("http://{addr}/code/remote/workspaces/{workspace_id}/sessions");
+    let unauthenticated = client
+        .post(&session_url)
+        .json(&serde_json::json!({ "harness": "claude_code" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let created = client
+        .post(&session_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "model": "openai::gpt-5.6-sol",
+            "reasoning_effort": "high",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(session["workspace_id"], workspace_id.to_string());
+    assert_eq!(session["permission_mode"], "allow");
+    assert_eq!(session["fast_mode"], false);
+    assert_eq!(session["model"], "openai::gpt-5.6-sol");
+    assert_eq!(session["reasoning_effort"], "high");
+    assert_eq!(session["lifecycle"], "idle");
+
+    let unsupported_mode = client
+        .post(&session_url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported_mode.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = unsupported_mode.json().await.unwrap();
+    assert_eq!(body["kind"], "bad_request", "{body}");
+    assert!(body["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("unknown field `permission_mode`")));
+}
+
+#[tokio::test]
+async fn remote_create_routes_keep_configuration_and_workspace_refusals_typed() {
+    let (router, token, _runtime, _dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let disabled = client
+        .post(format!("http://{addr}/code/remote/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "repo_id": RepoId::new() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = disabled.json().await.unwrap();
+    assert_eq!(body["kind"], "remote_disabled", "{body}");
+
+    let (router, token, _runtime, dir) =
+        code_app_with_remote(ScriptedAdapter::new(plain_text_script()), None).await;
+    let addr = serve(router).await;
+    let repo = init_git_repo_named(dir.path(), "local-create");
+    add_github_remote(&repo, "local-create");
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/remote/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "harness": "claude_code" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "workspace_not_remote", "{body}");
+}
+
+#[tokio::test]
+async fn a_managed_ceiling_can_refuse_remote_allow_sessions() {
+    let (router, token, runtime, dir) = code_app_with_remote(
+        ScriptedAdapter::new(plain_text_script()),
+        Some(PermissionMode::Ask),
+    )
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo_named(dir.path(), "remote-ceiling");
+    add_github_remote(&repo, "remote-ceiling");
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let registered = registered.json::<serde_json::Value>().await.unwrap();
+    record_github_origin(&runtime, &registered, "remote-ceiling").await;
+    let workspace = client
+        .post(format!("http://{addr}/code/remote/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "repo_id": json_id(&registered) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(workspace.status(), reqwest::StatusCode::CREATED);
+    let workspace = workspace.json::<serde_json::Value>().await.unwrap();
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/remote/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "harness": "claude_code" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_locked", "{body}");
 }
 
 #[tokio::test]

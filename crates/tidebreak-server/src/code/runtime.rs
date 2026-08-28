@@ -1253,12 +1253,12 @@ impl CodeRuntime {
     }
 
     /// Create a workspace whose checkout lives in a sandbox, not on this
-    /// machine. The empty worktree path is the durable remote marker
-    /// ([`CodeWorkspace::is_remote`]); nothing here touches the filesystem.
+    /// machine. A per-workspace `remote:<id>` worktree marker records that
+    /// state ([`CodeWorkspace::is_remote`]); nothing here touches the
+    /// filesystem.
     ///
-    /// No route speaks this yet: the Slack adapter slice is its first caller,
-    /// and until then the runtime tests are.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The authenticated remote-workspace route exposes this owner-scoped
+    /// runtime path.
     pub(crate) async fn create_remote_workspace(
         &self,
         owner: &OwnerId,
@@ -1439,9 +1439,8 @@ impl CodeRuntime {
     /// local harness is probed or spawned — the sandbox carries the engine,
     /// and the first turn provisions it.
     ///
-    /// No route speaks this yet: the Slack adapter slice is its first caller,
-    /// and until then the runtime tests are.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The authenticated remote-session route exposes this owner-scoped
+    /// runtime path.
     pub(crate) async fn create_remote_session(
         &self,
         owner: &OwnerId,
@@ -1455,6 +1454,8 @@ impl CodeRuntime {
                 "this deployment has no sandbox runtime configured",
             ));
         }
+        let lifecycle = self.workspace_lifecycle_lock(workspace_id);
+        let _lifecycle_guard = lifecycle.lock().await;
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if !workspace.is_remote() {
             return Err(ServerError::conflict_kind(
