@@ -13,13 +13,13 @@ mod event;
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
     ApprovalDecisionKind, BoundedError, CheckpointHint, CodeEvent, CodeUsage, Diffstat,
-    FileChangeKind, HarnessNoticeLevel, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
-    MAX_TOOL_SUMMARY_CHARS, SequencedCodeEvent, ToolDetail, ToolOutcome,
+    FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
-use crate::PermissionMode;
 use crate::attention::{Attention, FenceReason};
 use crate::image::ImageRef;
+use crate::PermissionMode;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;

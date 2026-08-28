@@ -29,8 +29,8 @@ use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use tidebreak_core::{
     Attention, CodeEvent, CodeSessionActivity, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentSummary, CodeTurnId, CodeWatchState, HarnessKind,
-    MAX_EVENT_TEXT_CHARS, OwnerId, PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId,
+    CodeSessionLifecycle, CodeSubagentSummary, CodeTurnId, CodeWatchState, HarnessKind, OwnerId,
+    PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId, MAX_EVENT_TEXT_CHARS,
 };
 use tokio::sync::broadcast;
 

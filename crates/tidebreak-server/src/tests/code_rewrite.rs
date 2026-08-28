@@ -8,7 +8,7 @@
 use super::*;
 
 use crate::code::CodeRuntime;
-use crate::scripted_harness::{ScriptedAdapter, plain_text_script};
+use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use axum::Router;
 use tidebreak_harness::AdapterRegistry;
 use tokio::net::TcpListener;
@@ -191,29 +191,25 @@ fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
         ["git", "config", "user.email", "dev@example.com"].as_slice(),
         ["git", "config", "user.name", "Dev"].as_slice(),
     ] {
-        assert!(
-            std::process::Command::new(args[0])
-                .args(&args[1..])
-                .current_dir(&repo)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(&repo)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .unwrap()
+            .success());
     }
     std::fs::write(repo.join("README.md"), "hello\n").unwrap();
     for args in [
         ["git", "add", "README.md"].as_slice(),
         ["git", "commit", "-m", "init"].as_slice(),
     ] {
-        assert!(
-            std::process::Command::new(args[0])
-                .args(&args[1..])
-                .current_dir(&repo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
     }
     repo
 }

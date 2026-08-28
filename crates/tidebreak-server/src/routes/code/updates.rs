@@ -8,18 +8,18 @@
 //! alternative, filtering an install-wide stream at the route or in the
 //! client, as the wrong implementation.
 
-use axum::Extension;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::response::Response;
+use axum::Extension;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::OwnerId;
 
-use crate::auth::{GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL, offered_handshake_subprotocol};
-use crate::code::ScopedCode;
+use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::attention::list_digests;
 use crate::code::bus::CodeLiveUpdate;
+use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::routes::events::{gateway_auth_revalidation_timer, wait_for_gateway_auth_revalidation};
 use crate::state::AppState;

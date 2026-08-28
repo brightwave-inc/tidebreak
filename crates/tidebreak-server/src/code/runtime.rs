@@ -749,7 +749,6 @@ impl CodeRuntime {
         self.rewrite.lock().expect("code rewrite hook").clone()
     }
 
-
     /// Revoke the session browser token and permanently tombstone its native
     /// adapter authority. Idempotent — safe to call multiple times.
     ///

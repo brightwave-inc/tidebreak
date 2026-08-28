@@ -21,7 +21,7 @@ use tidebreak_core::{
     CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, OwnerId, Result,
 };
 
-use crate::chat_titling::{Proposal, derive_text_with_retries, head};
+use crate::chat_titling::{derive_text_with_retries, head, Proposal};
 use crate::resolver::ProviderResolver;
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, TurnRewriteNotice, TurnRewriteState};

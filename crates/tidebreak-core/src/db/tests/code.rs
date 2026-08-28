@@ -4075,7 +4075,6 @@ async fn saving_a_turn_does_not_blank_its_rewrite() {
     );
 }
 
-
 fn queued_message(session_id: CodeSessionId, message: &str) -> CodeQueuedTurn {
     CodeQueuedTurn {
         id: CodeTurnId::new(),

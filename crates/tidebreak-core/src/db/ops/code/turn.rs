@@ -3,14 +3,14 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
-use crate::OwnerId;
 use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
 use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
 use crate::image::ImageRef;
 use crate::model::MAX_MESSAGE_ATTACHMENTS;
+use crate::OwnerId;
 
-use super::super::super::{DbStore, entities, store_err};
+use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
 
 /// The fields analytics needs from one turn.
