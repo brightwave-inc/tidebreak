@@ -34,6 +34,7 @@ fn incarnation_from_model(
 ) -> Result<CodeSessionIncarnation> {
     Ok(CodeSessionIncarnation {
         id: CodeIncarnationId(model.id),
+        owner: OwnerId::new(&model.owner)?,
         session_id: CodeSessionId(model.session_id),
         incarnation: model.incarnation,
         state: IncarnationState::from_str(&model.state).ok_or_else(|| {
@@ -142,9 +143,9 @@ pub async fn create_incarnation_intent(
     };
     let inserted = model.insert(&txn).await.map_err(store_err)?;
     txn.commit().await.map_err(store_err)?;
-    Ok(IncarnationAdmission::Admitted(incarnation_from_model(
-        inserted,
-    )?))
+    Ok(IncarnationAdmission::Admitted(Box::new(
+        incarnation_from_model(inserted)?,
+    )))
 }
 
 /// Records the spawned sandbox on an intent row and marks it active.

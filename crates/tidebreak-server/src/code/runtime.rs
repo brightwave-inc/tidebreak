@@ -3072,6 +3072,12 @@ impl CodeRuntime {
                 format!("workspace is {}", workspace.status.as_str()),
             ));
         }
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         if !std::path::Path::new(&workspace.worktree_path).exists() {
             return Err(ServerError::not_found("workspace worktree is gone"));
         }

@@ -4495,7 +4495,7 @@ async fn admit(
 
 fn admitted(admission: crate::code::IncarnationAdmission) -> crate::code::CodeSessionIncarnation {
     match admission {
-        crate::code::IncarnationAdmission::Admitted(row) => row,
+        crate::code::IncarnationAdmission::Admitted(row) => *row,
         crate::code::IncarnationAdmission::CapExhausted { running } => {
             panic!("expected admission, cap named {running:?}")
         }

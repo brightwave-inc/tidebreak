@@ -353,19 +353,15 @@ async fn apply_one(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use serde_json::json;
 
     use tidebreak_core::db::code::{
-        activate_incarnation, create_incarnation_intent, get_session, insert_repo, insert_session,
-        insert_workspace, latest_incarnation, list_events, replace_session_attention,
+        get_session, latest_incarnation, list_events, replace_session_attention,
     };
-    use tidebreak_core::{
-        CodeRepo, CodeSession, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace,
-        CodeWorkspaceStatus, IncarnationAdmission, PermissionMode, RepoId, WorkspaceId,
-    };
+    use tidebreak_core::CodeSession;
 
+    use super::super::fixtures::{seed, seeded_incarnation, session_value};
     use super::*;
 
     fn binding(session: &CodeSession, incarnation: CodeIncarnationId) -> IngestBinding {
@@ -456,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn a_driven_stream_survives_a_restart_mid_stream() {
         let dir = tempfile::tempdir().unwrap();
-        let (db, bus, session) = seed(dir.path()).await;
+        let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
         let incarnation = seeded_incarnation(&db, &session).await;
         let b = binding(&session, incarnation);
 
@@ -573,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn a_terminal_state_without_a_goodbye_demands_a_fence() {
         let dir = tempfile::tempdir().unwrap();
-        let (db, bus, session) = seed(dir.path()).await;
+        let (db, bus, session, _workspace, _repo) = seed(dir.path()).await;
         let incarnation = seeded_incarnation(&db, &session).await;
         let b = binding(&session, incarnation);
 
@@ -606,104 +602,5 @@ mod tests {
         );
         let outcome = ingest_events(&db, &bus, &b, &undrained).await.unwrap();
         assert!(outcome.fence.is_none());
-    }
-
-    fn session_value() -> CodeSession {
-        CodeSession {
-            id: CodeSessionId::new(),
-            owner: OwnerId::local(),
-            workspace_id: WorkspaceId::new(),
-            kind: CodeSessionKind::Interactive,
-            harness_kind: HarnessKind::ClaudeCode,
-            harness_version: None,
-            harness_resume_ref: None,
-            permission_mode: PermissionMode::Allow,
-            model: None,
-            reasoning_effort: None,
-            fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Running,
-            fence_reason: None,
-            child_pid: None,
-            child_process_identity: None,
-            spawn_epoch: 1,
-            attention: Attention::working(tidebreak_core::AttentionSource::Lifecycle),
-            unrecognized_event_count: 0,
-            subagents: Vec::new(),
-            created_at: chrono::Utc::now(),
-        }
-    }
-
-    async fn seed(root: &Path) -> (Arc<DbStore>, CodeEventBus, CodeSession) {
-        let db = Arc::new(
-            DbStore::connect(&format!(
-                "sqlite://{}?mode=rwc",
-                root.join("code.db").display()
-            ))
-            .await
-            .unwrap(),
-        );
-        let owner = OwnerId::local();
-        let repo_id = RepoId::new();
-        insert_repo(
-            &db,
-            &CodeRepo {
-                id: repo_id,
-                owner: owner.clone(),
-                root_path: root.join("repo").display().to_string(),
-                display_name: "example".into(),
-                default_base_ref: "main".into(),
-                branch_prefix: "tidebreak/".into(),
-                setup_script: None,
-                archive_script: None,
-                quick_actions: Vec::new(),
-                created_at: chrono::Utc::now(),
-                removed_at: None,
-                cloned_from: None,
-                origin_host: None,
-                origin_owner: None,
-                origin_name: None,
-            },
-        )
-        .await
-        .unwrap();
-        let workspace_id = WorkspaceId::new();
-        insert_workspace(
-            &db,
-            &CodeWorkspace {
-                id: workspace_id,
-                owner: owner.clone(),
-                repo_id,
-                title: "remote".into(),
-                worktree_path: root.join("tree").display().to_string(),
-                branch_name: "tidebreak/remote".into(),
-                base_ref: "main".into(),
-                status: CodeWorkspaceStatus::Active,
-                pr: None,
-                created_at: chrono::Utc::now(),
-                archived_at: None,
-                released_at: None,
-                released_tip: None,
-                bundle_bytes: None,
-            },
-        )
-        .await
-        .unwrap();
-        let mut session = session_value();
-        session.workspace_id = workspace_id;
-        insert_session(&db, &session).await.unwrap();
-        (db, CodeEventBus::default(), session)
-    }
-
-    async fn seeded_incarnation(db: &Arc<DbStore>, session: &CodeSession) -> CodeIncarnationId {
-        let admission = create_incarnation_intent(db, &session.owner, session.id, 1, 4)
-            .await
-            .unwrap();
-        let IncarnationAdmission::Admitted(row) = admission else {
-            panic!("expected admission");
-        };
-        activate_incarnation(db, &session.owner, row.id, "sb-1")
-            .await
-            .unwrap();
-        row.id
     }
 }

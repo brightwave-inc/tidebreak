@@ -226,3 +226,85 @@ fn write_sidecar(sidecar: &Path, record: &OrphanedWorktrees) -> std::io::Result<
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote workspace has no host worktree by design: the scan must not
+    /// record it as an orphan, while a real on-disk tree is recorded.
+    #[tokio::test]
+    async fn the_scan_leaves_remote_workspace_rows_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("code.db");
+        let store =
+            tidebreak_core::DbStore::connect(&format!("sqlite://{}?mode=rwc", database.display()))
+                .await
+                .unwrap();
+        let owner = tidebreak_core::OwnerId::local();
+        let repo = tidebreak_core::CodeRepo {
+            id: tidebreak_core::RepoId::new(),
+            owner: owner.clone(),
+            root_path: dir.path().join("repo").display().to_string(),
+            display_name: "example".into(),
+            default_base_ref: "main".into(),
+            branch_prefix: "tidebreak/".into(),
+            setup_script: None,
+            archive_script: None,
+            quick_actions: Vec::new(),
+            created_at: chrono::Utc::now(),
+            removed_at: None,
+            cloned_from: None,
+            origin_host: None,
+            origin_owner: None,
+            origin_name: None,
+        };
+        tidebreak_core::db::code::insert_repo(&store, &repo)
+            .await
+            .unwrap();
+        let workspace = |title: &str, path: String| tidebreak_core::CodeWorkspace {
+            id: tidebreak_core::WorkspaceId::new(),
+            owner: owner.clone(),
+            repo_id: repo.id,
+            title: title.into(),
+            worktree_path: path,
+            branch_name: format!("tidebreak/{title}"),
+            base_ref: "main".into(),
+            status: tidebreak_core::CodeWorkspaceStatus::Active,
+            pr: None,
+            created_at: chrono::Utc::now(),
+            archived_at: None,
+            released_at: None,
+            released_tip: None,
+            bundle_bytes: None,
+        };
+        let on_disk = dir.path().join("tree");
+        std::fs::create_dir_all(&on_disk).unwrap();
+        tidebreak_core::db::code::insert_workspace(
+            &store,
+            &workspace("local", on_disk.display().to_string()),
+        )
+        .await
+        .unwrap();
+        tidebreak_core::db::code::insert_workspace(&store, &workspace("remote", String::new()))
+            .await
+            .unwrap();
+        // The scan opens the file immutable, which cannot see a live WAL;
+        // checkpoint so the rows are in the main file, as they are by the
+        // time a reset scans a closed database.
+        use sea_orm::ConnectionTrait as _;
+        drop(store);
+        let checkpoint = Database::connect(format!("sqlite://{}?mode=rw", database.display()))
+            .await
+            .unwrap();
+        checkpoint
+            .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
+            .await
+            .unwrap();
+        checkpoint.close().await.unwrap();
+
+        let found = scan(&database).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].worktree_path, on_disk.display().to_string());
+    }
+}
