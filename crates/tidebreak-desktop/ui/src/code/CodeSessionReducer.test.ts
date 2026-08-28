@@ -16,7 +16,6 @@ import {
   userItemId,
   type CodeSessionDeps,
   type CodeSessionState,
-  type CodeTranscriptItem,
 } from "./CodeSessionReducer";
 
 const NOW = "2026-08-15T12:00:00.000Z";
