@@ -40,6 +40,7 @@ import {
 import {
   clearLegacyBrowserSession,
   readLegacyBrowserSession,
+  type LegacyBrowserStateRead,
 } from "./browserPersistence";
 import {
   type BrowserViewport,
@@ -109,6 +110,22 @@ export function CodeBrowserTab(props: CodeBrowserTabProps) {
       {...props}
     />
   );
+}
+
+function hydrateSessionFromLegacy(
+  session: BrowserSession,
+  legacy: LegacyBrowserStateRead | null,
+): BrowserSession {
+  if (legacy?.kind !== "valid") return session;
+  if (legacy.state.workspaceId !== session.workspaceId) return session;
+  let next = session;
+  if (!next.url && legacy.state.url) {
+    next = finishBrowserNavigation(next, legacy.state.url);
+  }
+  if (legacy.state.title) {
+    next = setBrowserTitle(next, legacy.state.title);
+  }
+  return next;
 }
 
 function CodeBrowserTabSession({
@@ -574,12 +591,40 @@ function CodeBrowserTabSession({
     let unsubscribe: (() => void) | undefined;
 
     async function boot() {
-      const current = sessionRef.current;
-      if (!host.available()) {
-        if (current.url) {
-          updateSession((value) =>
-            failBrowserSession(value, browserUnavailableMessage()),
+      async function importLegacy() {
+        if (!legacyState) return;
+        const imported = await host.importLegacyState(
+          workspaceId,
+          browserId,
+          legacyState.state,
+        );
+        if (
+          imported.browserId !== browserId ||
+          imported.workspaceId !== workspaceId
+        ) {
+          throw new Error(
+            "The browser host acknowledged another workspace's session",
           );
+        }
+        clearLegacyBrowserSession(browserId);
+      }
+
+      if (!host.available()) {
+        try {
+          await importLegacy();
+        } catch {
+          // Leftover renderer state stays until a host can acknowledge it.
+        }
+        if (!cancelled) {
+          updateSession((value) =>
+            failBrowserSession(
+              hydrateSessionFromLegacy(value, legacyState),
+              browserUnavailableMessage(),
+            ),
+          );
+          if (sessionRef.current.url) {
+            setAddress(browserDisplayAddress(sessionRef.current.url));
+          }
         }
         return;
       }
@@ -616,26 +661,10 @@ function CodeBrowserTabSession({
       const snapshotGeneration = nativeSurfaceGeneration.current;
       let legacyImportError: unknown = null;
       try {
-        if (legacyState) {
-          try {
-            const imported = await host.importLegacyState(
-              workspaceId,
-              browserId,
-              legacyState.state,
-            );
-            if (cancelled) return;
-            if (
-              imported.browserId !== browserId ||
-              imported.workspaceId !== workspaceId
-            ) {
-              throw new Error(
-                "The browser host acknowledged another workspace's session",
-              );
-            }
-            clearLegacyBrowserSession(browserId);
-          } catch (error) {
-            legacyImportError = error;
-          }
+        try {
+          await importLegacy();
+        } catch (error) {
+          legacyImportError = error;
         }
 
         const snapshot = await host.command(workspaceId, browserId, {

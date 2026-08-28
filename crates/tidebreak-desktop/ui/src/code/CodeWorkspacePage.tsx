@@ -112,6 +112,7 @@ import {
 } from "./CodeCenterTabs";
 import { DiffPanel } from "./DiffPanel";
 import { closeCodeBrowser } from "./browser/browserHost";
+import { seedBrowserSession } from "./browser/browserPersistence";
 
 const FileViewer = lazy(async () => {
   const module = await import("./FileViewer");
@@ -830,6 +831,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
 
   function openBrowser(url?: string, preferredRegion?: CodeEditorRegion) {
     const browserId = crypto.randomUUID();
+    seedBrowserSession({
+      browserId,
+      workspaceId,
+      initialUrl: url,
+    });
     if (url) {
       setBrowserInitialUrls((current) => ({
         ...current,

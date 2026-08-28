@@ -19,8 +19,10 @@ import type {
   BrowserHostSnapshot,
   CodeBrowserHost,
 } from "./browserHost";
+import { browserUnavailableMessage } from "./browserHost";
 import {
   LEGACY_BROWSER_STORAGE_KEY,
+  seedBrowserSession,
   type LegacyBrowserState,
 } from "./browserPersistence";
 import { CodeBrowserTab } from "./CodeBrowserTab";
@@ -82,6 +84,7 @@ function agentAccess(
 }
 
 function browserHost(options?: {
+  available?: boolean;
   createGate?: Promise<void>;
   createGates?: Array<Promise<void> | undefined>;
   createError?: string;
@@ -108,7 +111,7 @@ function browserHost(options?: {
   let handler: ((event: BrowserHostEvent) => void) | null = null;
   const openExternal = vi.fn().mockResolvedValue(undefined);
   const host: CodeBrowserHost = {
-    available: () => true,
+    available: () => options?.available ?? true,
     importLegacyState: vi.fn(
       async (
         workspaceId,
@@ -841,6 +844,113 @@ describe("CodeBrowserTab", () => {
         action: expect.objectContaining({ url: "https://example.com/one" }),
       }),
     );
+  });
+
+  it("creates from a seeded URL when the panel remounts without initialUrl", async () => {
+    seedBrowserSession({
+      browserId: "browser-1",
+      workspaceId: "workspace-1",
+      initialUrl: "https://docs.example/path",
+    });
+    const runtime = browserHost({
+      runtime: { url: "https://docs.example/path" },
+      legacyImportResult: {
+        status: "imported",
+        url: "https://docs.example/path",
+      },
+    });
+
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() => expect(runtime.imports).toHaveLength(1));
+    expect(runtime.imports[0]?.legacyState?.url).toBe(
+      "https://docs.example/path",
+    );
+    await waitFor(() =>
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: expect.objectContaining({
+          type: "create",
+          url: "https://docs.example/path",
+        }),
+      }),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("docs.example/path");
+  });
+
+  it("migrates leftover state and names why the browser cannot run here", async () => {
+    storeLegacySession("browser-1", {
+      url: "https://legacy.example/docs",
+      title: "Docs",
+    });
+    const runtime = browserHost({
+      available: false,
+      legacyImportResult: {
+        status: "imported",
+        url: "https://legacy.example/docs",
+        title: "Docs",
+      },
+    });
+
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() => expect(runtime.imports).toHaveLength(1));
+    expect(runtime.imports[0]).toEqual({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      legacyState: {
+        version: 1,
+        id: "browser-1",
+        workspaceId: "workspace-1",
+        url: "https://legacy.example/docs",
+        title: "Docs",
+      },
+    });
+    expect(runtime.calls).toEqual([]);
+    expect(
+      await screen.findByText(browserUnavailableMessage()),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Bring the live work into the workspace"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("legacy.example/docs");
+  });
+
+  it("explains the missing host even when no leftover URL exists", async () => {
+    const runtime = browserHost({ available: false });
+
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+
+    expect(
+      await screen.findByText(browserUnavailableMessage()),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Bring the live work into the workspace"),
+    ).not.toBeInTheDocument();
+    expect(runtime.imports).toEqual([]);
+    expect(runtime.calls).toEqual([]);
   });
 
   it("never writes browser session state after native acknowledgement", async () => {

@@ -76,6 +76,66 @@ export function clearLegacyBrowserSession(
   }
 }
 
+/**
+ * Persist a URL before the browser panel mounts.
+ *
+ * Native recovery only commits after `page_finished`. Reload the window
+ * before that and the layout still names this tab, so the URL has to land
+ * in leftover renderer storage the boot path already migrates.
+ */
+export function seedBrowserSession({
+  browserId,
+  workspaceId,
+  initialUrl,
+  storage = window.localStorage,
+}: {
+  browserId: string;
+  workspaceId: string;
+  initialUrl?: string;
+  storage?: Pick<Storage, "getItem" | "setItem">;
+}): void {
+  const target = initialUrl ? validateBrowserUrl(initialUrl) : null;
+  const url = target?.ok ? target.url : null;
+  if (!url) return;
+  writeLegacyBrowserSession(
+    {
+      version: 1,
+      id: browserId,
+      workspaceId,
+      url,
+      title: null,
+    },
+    storage,
+  );
+}
+
+function writeLegacyBrowserSession(
+  state: LegacyBrowserState,
+  storage: Pick<Storage, "getItem" | "setItem">,
+): void {
+  try {
+    const raw = storage.getItem(LEGACY_BROWSER_STORAGE_KEY);
+    let sessions: Record<string, unknown> = {};
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        sessions = { ...(parsed as Record<string, unknown>) };
+      }
+    }
+    sessions[state.id] = {
+      version: 1,
+      id: state.id,
+      workspaceId: state.workspaceId,
+      url: state.url,
+      title: state.title ?? "",
+      updatedAt: Date.now(),
+    };
+    storage.setItem(LEGACY_BROWSER_STORAGE_KEY, JSON.stringify(sessions));
+  } catch {
+    // Opening a tab must not fail if storage is unavailable.
+  }
+}
+
 function parseLegacyBrowserState(
   value: unknown,
   expectedId: string,

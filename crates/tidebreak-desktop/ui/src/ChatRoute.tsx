@@ -45,6 +45,7 @@ import { hasLocalHostAuthority, hasNativeHost } from "./host";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import { foregroundBrowserScope } from "./code/browser/foregroundBrowserScope";
+import { seedBrowserSession } from "./code/browser/browserPersistence";
 import { MarkdownLinkProvider } from "./MessageMarkdown";
 
 import { friendlyErrorMessage } from "./lib/utils";
@@ -703,6 +704,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
       }
     }
     const browserId = crypto.randomUUID();
+    seedBrowserSession({
+      browserId,
+      workspaceId: foregroundBrowserScope(chatId),
+      initialUrl: url,
+    });
     if (url) {
       setBrowserInitialUrls((current) => ({
         ...current,

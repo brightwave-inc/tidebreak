@@ -5,6 +5,7 @@ import {
   clearLegacyBrowserSession,
   LEGACY_BROWSER_STORAGE_KEY,
   readLegacyBrowserSession,
+  seedBrowserSession,
 } from "./browserPersistence";
 
 function storeLegacySession(
@@ -93,5 +94,29 @@ describe("legacy browser persistence migration", () => {
 
     clearLegacyBrowserSession("browser-1");
     expect(window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)).toBeNull();
+  });
+
+  it("writes a URL before the panel mounts and skips empty tabs", () => {
+    seedBrowserSession({
+      browserId: "browser-1",
+      workspaceId: "workspace-1",
+    });
+    expect(readLegacyBrowserSession("browser-1")).toBeNull();
+
+    seedBrowserSession({
+      browserId: "browser-1",
+      workspaceId: "workspace-1",
+      initialUrl: "https://docs.example/path",
+    });
+    expect(readLegacyBrowserSession("browser-1")).toEqual({
+      kind: "valid",
+      state: {
+        version: 1,
+        id: "browser-1",
+        workspaceId: "workspace-1",
+        url: "https://docs.example/path",
+        title: null,
+      },
+    });
   });
 });

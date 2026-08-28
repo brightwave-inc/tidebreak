@@ -48,10 +48,29 @@ import { LEGACY_BROWSER_STORAGE_KEY } from "./browser/browserPersistence";
 const browserMocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
 }));
+const persistMocks = vi.hoisted(() => ({
+  seed: vi.fn(),
+}));
 
 vi.mock("./browser/browserHost", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./browser/browserHost")>();
   return { ...actual, closeCodeBrowser: browserMocks.close };
+});
+
+vi.mock("./browser/browserPersistence", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./browser/browserPersistence")>();
+  return {
+    ...actual,
+    seedBrowserSession: (args: {
+      browserId: string;
+      workspaceId: string;
+      initialUrl?: string;
+    }) => {
+      persistMocks.seed(args);
+      return actual.seedBrowserSession(args);
+    },
+  };
 });
 
 vi.mock("./browser/CodeBrowserTab", () => ({
@@ -701,6 +720,7 @@ afterEach(() => {
   });
   resetWorkflowPromptStore();
   browserMocks.close.mockClear();
+  persistMocks.seed.mockClear();
   window.localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -2750,6 +2770,11 @@ describe("CodeWorkspacePage", () => {
     expect(
       await screen.findByTestId("browser-panel-browser-1"),
     ).toBeInTheDocument();
+    expect(persistMocks.seed).toHaveBeenCalledWith({
+      browserId: "browser-1",
+      workspaceId: "ws-1",
+      initialUrl: undefined,
+    });
     expect(window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)).toBeNull();
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({
