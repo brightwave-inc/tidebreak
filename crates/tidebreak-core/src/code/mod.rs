@@ -1272,6 +1272,13 @@ pub struct CodeSessionIncarnation {
     /// Reincarnation waits on this: a successor built before the
     /// predecessor's terminal events land would resume without them.
     pub terminal_events_journaled: bool,
+    /// Highest sandbox event sequence whose journal projection committed.
+    ///
+    /// Ingestion resumes after this sequence, so a server restart replays
+    /// nothing and loses nothing.
+    pub events_cursor: i64,
+    /// The supervisor's terminal deliverable, when the run reported one.
+    pub task_output: Option<String>,
     /// Intent time.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Activation time, when the spawn returned.

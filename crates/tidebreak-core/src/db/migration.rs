@@ -60,6 +60,7 @@ impl MigratorTrait for Migrator {
             Box::new(AgentNotification),
             Box::new(CodeWorkflowRuns),
             Box::new(CodeSessionIncarnations),
+            Box::new(IncarnationIngest),
         ]
     }
 }
@@ -2737,6 +2738,67 @@ impl MigrationTrait for CodeSessionIncarnations {
     }
 }
 
+/// Give each incarnation a durable ingest cursor and a place to keep the
+/// run's deliverable.
+///
+/// The cursor is the highest sandbox event sequence whose journal projection
+/// committed, so ingestion resumes exactly where it stopped after a server
+/// restart. The task output is the supervisor's terminal deliverable, kept
+/// on the incarnation that produced it.
+struct IncarnationIngest;
+
+impl MigrationName for IncarnationIngest {
+    fn name(&self) -> &str {
+        "m20260827_000023_incarnation_ingest"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for IncarnationIngest {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager
+            .has_column("code_session_incarnation", "events_cursor")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeSessionIncarnation::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodeSessionIncarnation::EventsCursor)
+                                .big_integer()
+                                .not_null()
+                                .default(0),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        if !manager
+            .has_column("code_session_incarnation", "task_output")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeSessionIncarnation::Table)
+                        .add_column(
+                            ColumnDef::new(idens::CodeSessionIncarnation::TaskOutput).text(),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the columns would lose ingest positions for sessions that
+        // are still running.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -2808,6 +2870,7 @@ mod tests {
                 "m20260826_000020_agent_notification",
                 "m20260827_000021_code_workflow_runs",
                 "m20260827_000022_code_session_incarnations",
+                "m20260827_000023_incarnation_ingest",
             ]
         );
         assert!(db

@@ -4651,3 +4651,111 @@ async fn stale_intents_list_only_old_unactivated_rows() {
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0].id, orphan.id);
 }
+
+/// The journal write and the cursor advance commit together, so a restart
+/// that replays an already-ingested sandbox event writes nothing and the
+/// next unseen sequence resumes cleanly.
+#[tokio::test]
+async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, _) = seed_owner(&store, &owner, "ingest").await;
+    let intent = admitted(admit(&store, &owner, session, 1, 4).await);
+    crate::db::code::activate_incarnation(&store, &owner, intent.id, "sandbox-1")
+        .await
+        .unwrap();
+    let epoch = get_session(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap()
+        .spawn_epoch;
+
+    let first = CodeEvent::AssistantMessage {
+        text: "the first answer".to_owned(),
+        parent_call_id: None,
+    };
+    let seqs = crate::db::code::ingest_incarnation_event(
+        &store,
+        &owner,
+        session,
+        epoch,
+        intent.id,
+        7,
+        std::slice::from_ref(&first),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(seqs.len(), 1);
+
+    // A crash between reads replays the same sandbox sequence: nothing is
+    // written twice. An older sequence is equally a no-op.
+    for replayed in [7, 3] {
+        assert!(crate::db::code::ingest_incarnation_event(
+            &store,
+            &owner,
+            session,
+            epoch,
+            intent.id,
+            replayed,
+            std::slice::from_ref(&first),
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+
+    let second = CodeEvent::TurnInterrupted;
+    crate::db::code::ingest_incarnation_event(
+        &store,
+        &owner,
+        session,
+        epoch,
+        intent.id,
+        8,
+        std::slice::from_ref(&second),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let page = list_events(&store, &owner, session, 0, 10).await.unwrap();
+    assert_eq!(page.events.len(), 2);
+    let cursor = crate::db::code::latest_incarnation(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap()
+        .events_cursor;
+    assert_eq!(cursor, 8);
+
+    // A superseded worker's epoch cannot journal into the session.
+    assert!(crate::db::code::ingest_incarnation_event(
+        &store,
+        &owner,
+        session,
+        epoch + 1,
+        intent.id,
+        9,
+        std::slice::from_ref(&second),
+    )
+    .await
+    .is_err());
+}
+
+/// The supervisor's terminal deliverable is retained on the incarnation
+/// that produced it.
+#[tokio::test]
+async fn the_task_output_is_retained_on_the_incarnation() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, _) = seed_owner(&store, &owner, "deliverable").await;
+    let intent = admitted(admit(&store, &owner, session, 1, 4).await);
+    crate::db::code::record_incarnation_task_output(&store, &owner, intent.id, "the findings")
+        .await
+        .unwrap();
+    let row = crate::db::code::latest_incarnation(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.task_output.as_deref(), Some("the findings"));
+}

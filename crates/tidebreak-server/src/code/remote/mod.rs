@@ -36,6 +36,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod gateway;
+pub(crate) mod ingest;
 pub(crate) mod wire;
 
 use async_trait::async_trait;
