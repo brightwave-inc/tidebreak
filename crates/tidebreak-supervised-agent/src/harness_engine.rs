@@ -41,7 +41,10 @@ use tidebreak_harness::{
     SessionSpec, TurnInput, TurnOutcome,
 };
 
-use crate::engine::{Engine, EngineError, SteerOutcome, TurnEnd, TurnHandle, TurnRequest};
+use crate::engine::{
+    AssistantRecord, Engine, EngineError, SteerOutcome, TurnEnd, TurnHandle, TurnRequest,
+    ASSISTANT_RECORD_MAX_BODY_BYTES,
+};
 
 /// The placeholder credential the environment hands a sandboxed pod.
 ///
@@ -142,7 +145,7 @@ pub struct HarnessEngine {
     kind: HarnessKind,
     spec: HarnessEngineSpec,
     session: Option<Arc<dyn HarnessSession>>,
-    sink: Arc<TerminalSink>,
+    sink: Arc<TurnSink>,
 }
 
 impl HarnessEngine {
@@ -153,7 +156,7 @@ impl HarnessEngine {
             kind: spec.adapter.kind(),
             spec,
             session: None,
-            sink: Arc::new(TerminalSink::default()),
+            sink: Arc::new(TurnSink::default()),
         }
     }
 
@@ -277,41 +280,100 @@ enum Terminal {
     Interrupted,
 }
 
-/// Records the last terminal turn event; every other event is dropped.
+/// Accumulates the current turn's terminal state and parent assistant text.
 ///
 /// The supervising environment's event vocabulary is lifecycle-only, so
-/// assistant text and tool activity stay inside the pod. Only the terminal
-/// state feeds the turn outcome.
+/// tool activity stays inside the pod. Terminal state feeds the turn
+/// outcome; parent assistant messages feed the per-turn record.
 #[derive(Default)]
-struct TerminalSink {
+struct TurnSink {
     last: Mutex<Option<Terminal>>,
+    assistant: Mutex<AssistantBuffer>,
 }
 
-impl TerminalSink {
+#[derive(Default)]
+struct AssistantBuffer {
+    body: String,
+    total_bytes: usize,
+    truncated: bool,
+}
+
+impl TurnSink {
     fn clear(&self) {
         *self.last.lock().unwrap() = None;
+        *self.assistant.lock().unwrap() = AssistantBuffer::default();
     }
 
     fn read(&self) -> Option<Terminal> {
         *self.last.lock().unwrap()
     }
+
+    fn take_record(&self) -> Option<AssistantRecord> {
+        let buffer = std::mem::take(&mut *self.assistant.lock().unwrap());
+        if buffer.body.is_empty() && buffer.total_bytes == 0 {
+            return None;
+        }
+        Some(AssistantRecord {
+            body: buffer.body,
+            total_bytes: buffer.total_bytes,
+            truncated: buffer.truncated,
+        })
+    }
+
+    fn append_assistant(&self, text: &str) {
+        let mut buffer = self.assistant.lock().unwrap();
+        let separator = if buffer.body.is_empty() && buffer.total_bytes == 0 {
+            ""
+        } else {
+            "\n\n"
+        };
+        buffer.total_bytes += separator.len() + text.len();
+        let remaining = ASSISTANT_RECORD_MAX_BODY_BYTES.saturating_sub(buffer.body.len());
+        if remaining == 0 {
+            buffer.truncated = true;
+            return;
+        }
+        let incoming = format!("{separator}{text}");
+        if incoming.len() <= remaining {
+            buffer.body.push_str(&incoming);
+            return;
+        }
+        buffer.truncated = true;
+        let mut cut = remaining;
+        while cut > 0 && !incoming.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        buffer.body.push_str(&incoming[..cut]);
+    }
 }
 
 #[async_trait]
-impl HarnessEventSink for TerminalSink {
+impl HarnessEventSink for TurnSink {
     async fn emit(&self, event: HarnessEvent) {
-        let terminal = match event {
-            HarnessEvent::TurnCompleted { .. } => Terminal::Completed,
+        match event {
+            HarnessEvent::TurnCompleted { .. } => {
+                *self.last.lock().unwrap() = Some(Terminal::Completed);
+            }
             HarnessEvent::TurnFailed { error } => {
                 // The failure detail stays in the pod log; the supervising
                 // environment only learns the turn's exit status.
                 eprintln!("the engine reported a failed turn: {}", error.message);
-                Terminal::Failed
+                *self.last.lock().unwrap() = Some(Terminal::Failed);
             }
-            HarnessEvent::TurnInterrupted => Terminal::Interrupted,
-            _ => return,
-        };
-        *self.last.lock().unwrap() = Some(terminal);
+            HarnessEvent::TurnInterrupted => {
+                *self.last.lock().unwrap() = Some(Terminal::Interrupted);
+            }
+            HarnessEvent::AssistantMessage {
+                text,
+                parent_call_id: None,
+            } => self.append_assistant(&text),
+            HarnessEvent::AssistantMessage {
+                parent_call_id: Some(_),
+                ..
+            }
+            | HarnessEvent::AssistantDelta { .. } => {}
+            _ => {}
+        }
     }
 }
 
@@ -319,7 +381,7 @@ impl HarnessEventSink for TerminalSink {
 struct HarnessTurn {
     session: Arc<dyn HarnessSession>,
     run: tokio::task::JoinHandle<Result<TurnOutcome, HarnessError>>,
-    sink: Arc<TerminalSink>,
+    sink: Arc<TurnSink>,
     interrupted: bool,
     ended: Option<TurnEnd>,
 }
@@ -411,6 +473,10 @@ impl TurnHandle for HarnessTurn {
         // wait reports how the turn actually ended either way.
         let _ = self.session.interrupt().await;
     }
+
+    fn assistant_record(&mut self) -> Option<AssistantRecord> {
+        self.sink.take_record()
+    }
 }
 
 #[cfg(test)]
@@ -425,9 +491,9 @@ mod tests {
     use super::*;
     use crate::engine::TurnSource;
 
-    /// One scripted engine turn: an optional terminal event, then an outcome.
+    /// One scripted engine turn: stream events, then an outcome.
     struct ScriptedTurn {
-        event: Option<HarnessEvent>,
+        events: Vec<HarnessEvent>,
         outcome: Result<TurnOutcome, HarnessError>,
         /// Wait for an interrupt before ending, to model a turn in flight.
         waits_for_interrupt: bool,
@@ -451,7 +517,7 @@ mod tests {
             if turn.waits_for_interrupt {
                 self.interrupt.notified().await;
             }
-            if let Some(event) = turn.event {
+            for event in turn.events {
                 self.sink.emit(event).await;
             }
             turn.outcome
@@ -616,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn a_clean_turn_with_a_completed_event_succeeds() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(completed_event()),
+            events: vec![completed_event()],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -631,11 +697,11 @@ mod tests {
     #[tokio::test]
     async fn a_failed_turn_completes_unsuccessfully() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(HarnessEvent::TurnFailed {
+            events: vec![HarnessEvent::TurnFailed {
                 error: tidebreak_core::BoundedError {
                     message: "model refused".to_owned(),
                 },
-            }),
+            }],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -648,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn a_child_that_dies_mid_turn_is_fatal() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: None,
+            events: vec![],
             outcome: Ok(TurnOutcome::Incomplete {
                 detail: "exited with signal 9".to_owned(),
             }),
@@ -667,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_turn_reports_interrupted_not_fatal() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: None,
+            events: vec![],
             outcome: Ok(TurnOutcome::Incomplete {
                 detail: "exited with signal 2".to_owned(),
             }),
@@ -684,7 +750,7 @@ mod tests {
     #[tokio::test]
     async fn an_engine_reported_interrupt_reports_interrupted() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(HarnessEvent::TurnInterrupted),
+            events: vec![HarnessEvent::TurnInterrupted],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -696,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn a_lost_resume_is_fatal_never_a_fresh_start() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: None,
+            events: vec![],
             outcome: Err(HarnessError::ResumeLost("session gone".to_owned())),
             waits_for_interrupt: false,
         }]));
@@ -712,18 +778,18 @@ mod tests {
     async fn the_terminal_state_clears_between_turns() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![
             ScriptedTurn {
-                event: Some(HarnessEvent::TurnFailed {
+                events: vec![HarnessEvent::TurnFailed {
                     error: tidebreak_core::BoundedError {
                         message: "first turn failed".to_owned(),
                     },
-                }),
+                }],
                 outcome: Ok(TurnOutcome::Clean),
                 waits_for_interrupt: false,
             },
             // No terminal event at all: a stale `Failed` from turn one would
             // wrongly fail this turn too.
             ScriptedTurn {
-                event: None,
+                events: vec![],
                 outcome: Ok(TurnOutcome::Clean),
                 waits_for_interrupt: false,
             },
@@ -761,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn an_engine_without_a_steering_channel_keeps_the_message_queued() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(completed_event()),
+            events: vec![completed_event()],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -777,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn a_completed_turn_wins_over_a_late_steer() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(completed_event()),
+            events: vec![completed_event()],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -794,7 +860,7 @@ mod tests {
     #[tokio::test]
     async fn the_launch_runs_allow_with_the_trust_environment() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(completed_event()),
+            events: vec![completed_event()],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -821,7 +887,7 @@ mod tests {
     #[tokio::test]
     async fn a_placeholder_credential_wires_the_engine_at_the_gateway() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(completed_event()),
+            events: vec![completed_event()],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -866,7 +932,7 @@ mod tests {
     #[tokio::test]
     async fn the_worktree_and_read_roots_reach_the_launch() {
         let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
-            event: Some(completed_event()),
+            events: vec![completed_event()],
             outcome: Ok(TurnOutcome::Clean),
             waits_for_interrupt: false,
         }]));
@@ -883,5 +949,102 @@ mod tests {
             captured.allowed_read_roots,
             vec![PathBuf::from("/workspace")]
         );
+    }
+
+    fn parent_message(text: &str) -> HarnessEvent {
+        HarnessEvent::AssistantMessage {
+            text: text.to_owned(),
+            parent_call_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_assistant_messages_join_into_the_record() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![
+                parent_message("first"),
+                HarnessEvent::AssistantMessage {
+                    text: "subagent".to_owned(),
+                    parent_call_id: Some("task-1".to_owned()),
+                },
+                parent_message("second"),
+                completed_event(),
+            ],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        assert_eq!(turn.wait().await, TurnEnd::Completed { success: true });
+        let record = turn.assistant_record().expect("a parent answer");
+        assert_eq!(record.body, "first\n\nsecond");
+        assert!(!record.truncated);
+        assert_eq!(record.total_bytes, "first\n\nsecond".len());
+    }
+
+    #[tokio::test]
+    async fn the_assistant_buffer_clears_between_turns() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![
+            ScriptedTurn {
+                events: vec![parent_message("turn one"), completed_event()],
+                outcome: Ok(TurnOutcome::Clean),
+                waits_for_interrupt: false,
+            },
+            ScriptedTurn {
+                events: vec![parent_message("turn two"), completed_event()],
+                outcome: Ok(TurnOutcome::Clean),
+                waits_for_interrupt: false,
+            },
+        ]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut first = engine.start_turn(request("one")).await.unwrap();
+        first.wait().await;
+        let first_record = first.assistant_record().unwrap();
+        assert_eq!(first_record.body, "turn one");
+        let mut second = engine.start_turn(request("two")).await.unwrap();
+        second.wait().await;
+        let second_record = second.assistant_record().unwrap();
+        assert_eq!(second_record.body, "turn two");
+        assert!(!second_record.body.contains("turn one"));
+    }
+
+    #[tokio::test]
+    async fn a_message_past_the_cap_truncates_on_a_character_boundary() {
+        let cap = ASSISTANT_RECORD_MAX_BODY_BYTES;
+        let mut text = "x".repeat(cap - 1);
+        text.push('€');
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![parent_message(&text), completed_event()],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        turn.wait().await;
+        let record = turn.assistant_record().unwrap();
+        assert!(record.truncated);
+        assert!(record.body.len() <= cap);
+        assert!(record.body.is_char_boundary(record.body.len()));
+        assert!(std::str::from_utf8(record.body.as_bytes()).is_ok());
+        assert!(record.total_bytes > cap);
+        assert_eq!(record.body, "x".repeat(cap - 1));
+    }
+
+    #[tokio::test]
+    async fn assistant_deltas_alone_yield_no_record() {
+        let adapter = Arc::new(FakeAdapter::scripted(vec![ScriptedTurn {
+            events: vec![
+                HarnessEvent::AssistantDelta {
+                    text: "streaming".to_owned(),
+                },
+                completed_event(),
+            ],
+            outcome: Ok(TurnOutcome::Clean),
+            waits_for_interrupt: false,
+        }]));
+        let mut engine = engine_over(adapter, probe(true));
+        let mut turn = engine.start_turn(request("go")).await.unwrap();
+        turn.wait().await;
+        assert_eq!(turn.assistant_record(), None);
     }
 }
