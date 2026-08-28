@@ -148,7 +148,9 @@ export function reduceCodeUpdates(
   switch (action.type) {
     case "snapshot": {
       // The snapshot restates every live session, so both maps rebuild from
-      // scratch — a reconnect self-heals a missed end notice.
+      // scratch — a reconnect self-heals a missed end notice. TurnRewrite is
+      // live-only; drop those notices so a lagged replay cannot overlay
+      // rewriting onto a turn snapshot that already stored the rewrite.
       const conversationsByWorkspace: DigestsByWorkspace = {};
       const childrenByWorkspace: DigestsByWorkspace = {};
       for (const digest of action.sessions) {
@@ -158,7 +160,12 @@ export function reduceCodeUpdates(
             : conversationsByWorkspace;
         (map[digest.workspace] ??= {})[digest.session] = digest;
       }
-      return { ...state, conversationsByWorkspace, childrenByWorkspace };
+      return {
+        ...state,
+        conversationsByWorkspace,
+        childrenByWorkspace,
+        turnRewrites: {},
+      };
     }
     case "digest": {
       if (action.digest.kind === "watch") {

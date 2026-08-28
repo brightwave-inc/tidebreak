@@ -680,4 +680,18 @@ describe("turn rewrite notices", () => {
       rewrite: "The turn added three tools.",
     });
   });
+
+  it("drops live rewrite notices on snapshot reconnect", () => {
+    const withNotice = reduceCodeUpdates(EMPTY_STATE, {
+      type: "turn_rewrite",
+      session: "sess-1",
+      turnId: "t1",
+      state: "rewriting",
+    });
+    const snapped = reduceCodeUpdates(withNotice, {
+      type: "snapshot",
+      sessions: [digest()],
+    });
+    expect(snapped.turnRewrites).toEqual({});
+  });
 });
