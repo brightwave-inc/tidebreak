@@ -18,7 +18,8 @@ use tracing::warn;
 
 use tidebreak_core::db::code::{
     activate_incarnation, create_incarnation_intent, insert_turn, latest_incarnation, latest_turn,
-    save_turn, stale_incarnation_intents_all_owners, stop_incarnation,
+    mark_incarnation_terminal_events_journaled, save_turn, stale_incarnation_intents_all_owners,
+    stop_incarnation,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionIncarnation,
@@ -74,6 +75,10 @@ pub(crate) enum RemoteTurnOutcome {
     FlushPending,
     /// A reincarnation is already in flight for this session.
     ReincarnationInFlight,
+    /// A turn is already running. The caller queues at the turn boundary,
+    /// the way every other submit path does; the driver never interleaves
+    /// two running turn rows on one session.
+    TurnInFlight,
 }
 
 /// The driver one remote session's lifecycle calls go through: the store,
@@ -127,6 +132,11 @@ fn state_token<'a>(
 }
 
 /// Settle the running turn row from the batch's terminal turn events.
+///
+/// The agent numbers its turns from `starting_turn`, so its `turn` payload
+/// is the session ordinal. Only the event carrying the running turn's own
+/// ordinal settles it: a batch that still holds an earlier turn's ending
+/// must not close a turn that started after it.
 async fn settle_turn_rows(
     db: &Arc<DbStore>,
     owner: &OwnerId,
@@ -153,6 +163,13 @@ async fn settle_turn_rows(
             "turn_interrupted" => CodeTurnStatus::Interrupted,
             _ => continue,
         };
+        let event_ordinal = event
+            .payload
+            .get("turn")
+            .and_then(serde_json::Value::as_i64);
+        if event_ordinal != Some(turn.ordinal) {
+            continue;
+        }
         turn.status = status;
         turn.ended_at = Some(chrono::Utc::now());
         save_turn(db, owner, &turn).await?;
@@ -176,9 +193,14 @@ impl RemoteDriver<'_> {
     ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
         let (db, bus, provisioner, settings) = (self.db, self.bus, self.provisioner, self.settings);
         let owner = session.owner.clone();
-        let ordinal = latest_turn(db, &owner, session.id)
-            .await?
-            .map_or(1, |turn| turn.ordinal + 1);
+        let last = latest_turn(db, &owner, session.id).await?;
+        if last
+            .as_ref()
+            .is_some_and(|turn| turn.status == CodeTurnStatus::Running)
+        {
+            return Ok(RemoteTurnOutcome::TurnInFlight);
+        }
+        let ordinal = last.map_or(1, |turn| turn.ordinal + 1);
 
         let current = latest_incarnation(db, &owner, session.id).await?;
         match current.as_ref().map(|row| row.state) {
@@ -208,14 +230,15 @@ impl RemoteDriver<'_> {
                     Err(RemoteSandboxError::Refused { code, message, .. }) => {
                         // The environment no longer takes messages for this
                         // sandbox: it ended without this server having drained
-                        // the news yet. Close the record and fall through to
-                        // reincarnation only once its terminal events are in.
+                        // the news yet. The row stays active so the pump can
+                        // drain the remaining events — including the goodbye
+                        // that raises the reincarnation gate — and close it
+                        // against the terminal state it reads.
                         warn!(
                             session = %session.id,
                             %code,
-                            "a live sandbox refused a message; closing the incarnation ({message})"
+                            "a live sandbox refused a message; the pump will drain and close it ({message})"
                         );
-                        stop_incarnation(db, &owner, row.id, Some(&code)).await?;
                         return Ok(RemoteTurnOutcome::FlushPending);
                     }
                     Err(error) => {
@@ -226,7 +249,10 @@ impl RemoteDriver<'_> {
             Some(IncarnationState::Stopped) | None => {}
         }
         if let Some(predecessor) = &current {
-            if !predecessor.terminal_events_journaled {
+            // The gate holds only for a predecessor that actually ran: an
+            // intent that never activated, or a spawn that failed, has no
+            // output a resume could miss.
+            if predecessor.sandbox_id.is_some() && !predecessor.terminal_events_journaled {
                 return Ok(RemoteTurnOutcome::FlushPending);
             }
         }
@@ -276,7 +302,22 @@ impl RemoteDriver<'_> {
         };
         match provisioner.spawn(&owner, &arguments).await {
             Ok(lease) => {
-                activate_incarnation(db, &owner, intent.id, &lease.sandbox_id).await?;
+                if let Err(error) =
+                    activate_incarnation(db, &owner, intent.id, &lease.sandbox_id).await
+                {
+                    // The protocol closed the row under us (the sweep, say).
+                    // The sandbox this call holds is orphaned: cancel it, or
+                    // a later turn provisions a second one for this session.
+                    if let Err(cancel_error) = provisioner.cancel(&owner, &lease.sandbox_id).await {
+                        warn!(
+                            session = %session.id,
+                            sandbox = %lease.sandbox_id,
+                            %cancel_error,
+                            "an orphaned sandbox could not be cancelled; its ceilings bound it"
+                        );
+                    }
+                    return Err(error);
+                }
                 let incarnation = latest_incarnation(db, &owner, session.id)
                     .await?
                     .ok_or_else(|| {
@@ -328,7 +369,15 @@ impl RemoteDriver<'_> {
         let Some(row) = latest_incarnation(db, &owner, session.id).await? else {
             return Ok(report);
         };
-        if row.state != IncarnationState::Active {
+        // Active rows are pumped for progress. A stopped row that still has
+        // events to drain — its goodbye has not raised the gate — is pumped
+        // too, so a stop can never strand the terminal flush undelivered.
+        let drains = match row.state {
+            IncarnationState::Active => true,
+            IncarnationState::Stopped => !row.terminal_events_journaled,
+            IncarnationState::Intent => false,
+        };
+        if !drains {
             return Ok(report);
         }
         let Some(sandbox_id) = row.sandbox_id.clone() else {
@@ -374,7 +423,7 @@ impl RemoteDriver<'_> {
 
         settle_turn_rows(db, &owner, running_turn, &read.events).await?;
 
-        if read.state.is_terminal() {
+        if read.state.is_terminal() && row.state == IncarnationState::Active {
             stop_incarnation(
                 db,
                 &owner,
@@ -420,6 +469,13 @@ impl RemoteDriver<'_> {
                     }
                 }
                 let _ = stop_incarnation(db, &owner, row.id, Some("reaped")).await;
+            }
+            if !row.terminal_events_journaled {
+                // Reap is the person accepting whatever the sandbox never
+                // delivered — the fence said so. Waive the gate, or the next
+                // turn after a successful reap waits forever instead of
+                // reincarnating on demand.
+                let _ = mark_incarnation_terminal_events_journaled(db, &owner, row.id).await;
             }
         }
         recovery::reap_session(db, bus, session).await
@@ -528,8 +584,13 @@ mod tests {
     };
     use super::*;
 
+    type SpawnHook = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
     #[derive(Default)]
     struct FakeProvisioner {
+        /// Awaited inside the next spawn, after the intent row exists —
+        /// the window an activation race lives in.
+        on_spawn: Mutex<Option<SpawnHook>>,
         spawns: Mutex<Vec<SpawnArguments>>,
         spawn_results: Mutex<VecDeque<Result<SandboxLease, RemoteSandboxError>>>,
         sends: Mutex<Vec<(String, String)>>,
@@ -580,6 +641,10 @@ mod tests {
             _owner: &OwnerId,
             arguments: &SpawnArguments,
         ) -> Result<SandboxLease, RemoteSandboxError> {
+            let hook = self.on_spawn.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook.await;
+            }
             self.spawns.lock().unwrap().push(arguments.clone());
             self.spawn_results
                 .lock()
@@ -898,6 +963,15 @@ mod tests {
             .unwrap();
         assert_eq!(row.state, IncarnationState::Stopped);
         assert_eq!(row.stop_reason.as_deref(), Some("reaped"));
+        // The reap waived the terminal-flush gate the sandbox never raised,
+        // so the next turn reincarnates on demand instead of waiting forever.
+        assert!(row.terminal_events_journaled);
+        let mut recovered = recovered;
+        let outcome = driver
+            .submit_turn(&mut recovered, &_workspace, &_repo, "again")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
     }
 
     /// At the owner's cap the refusal names the sessions holding the live
@@ -928,6 +1002,196 @@ mod tests {
         };
         assert_eq!(running, vec![session_a.id]);
         assert!(fake.spawns.lock().unwrap().is_empty());
+    }
+
+    /// A live sandbox that refuses a message stays open for the pump: the
+    /// drain delivers the goodbye, closes the row, and the next turn then
+    /// reincarnates instead of waiting forever.
+    #[tokio::test]
+    async fn a_refused_message_leaves_the_row_for_the_pump_to_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        fake.send_results
+            .lock()
+            .unwrap()
+            .push_back(Err(RemoteSandboxError::Refused {
+                operation: "send",
+                code: "sandbox_not_running".to_owned(),
+                message: "the sandbox has ended".to_owned(),
+            }));
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "late")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::FlushPending));
+        let row = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncarnationState::Active);
+
+        // The pump drains the terminal events and closes the row.
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Expired,
+            2,
+            vec![
+                event(1, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+                event(2, "supervisor_stopped", json!({ "reason": "expired" })),
+            ],
+        ));
+        let report = driver.pump(&mut session, 0).await.unwrap();
+        assert!(report.incarnation_stopped);
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "late")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+    }
+
+    /// A spawn that fails releases a reservation with nothing to drain: the
+    /// next turn reincarnates instead of waiting on a gate no sandbox can
+    /// ever raise.
+    #[tokio::test]
+    async fn a_failed_spawn_does_not_gate_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        fake.spawn_results
+            .lock()
+            .unwrap()
+            .push_back(Err(RemoteSandboxError::Refused {
+                operation: "spawn",
+                code: "profile_not_found".to_owned(),
+                message: "no such profile".to_owned(),
+            }));
+        assert!(driver
+            .submit_turn(&mut session, &workspace, &repo, "start")
+            .await
+            .is_err());
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "retry")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+    }
+
+    /// One running turn at a time: a second submit is refused for the
+    /// caller's queue, never interleaved as a second running row.
+    #[tokio::test]
+    async fn a_second_submit_while_a_turn_runs_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        driver
+            .submit_turn(&mut session, &workspace, &repo, "first")
+            .await
+            .unwrap();
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "second")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::TurnInFlight));
+        assert!(fake.sends.lock().unwrap().is_empty());
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+    }
+
+    /// A batch still carrying an earlier turn's ending must not settle a
+    /// turn that started after it.
+    #[tokio::test]
+    async fn an_earlier_turns_ending_does_not_settle_the_running_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, _bus, session, _workspace, _repo) = seed(dir.path()).await;
+        let running = CodeTurn {
+            id: CodeTurnId::new(),
+            session_id: session.id,
+            ordinal: 2,
+            status: CodeTurnStatus::Running,
+            model: None,
+            fast_mode: false,
+            user_input: "second".to_owned(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+        };
+        insert_turn(&db, &session.owner, &running).await.unwrap();
+
+        let stale = [event(
+            9,
+            "turn_completed",
+            json!({ "turn": 1, "exit_code": 0 }),
+        )];
+        settle_turn_rows(&db, &session.owner, Some(running.clone()), &stale)
+            .await
+            .unwrap();
+        let row = latest_turn(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, CodeTurnStatus::Running);
+
+        let own = [event(
+            10,
+            "turn_completed",
+            json!({ "turn": 2, "exit_code": 0 }),
+        )];
+        settle_turn_rows(&db, &session.owner, Some(running), &own)
+            .await
+            .unwrap();
+        let row = latest_turn(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, CodeTurnStatus::Completed);
+    }
+
+    /// A lease whose activation loses to the protocol is cancelled, not
+    /// leaked beside a released cap slot.
+    #[tokio::test]
+    async fn an_activation_race_cancels_the_orphaned_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        // While the spawn is in flight, the sweep closes the intent.
+        let hook_db = db.clone();
+        let hook_owner = session.owner.clone();
+        let hook_session = session.id;
+        *fake.on_spawn.lock().unwrap() = Some(Box::pin(async move {
+            let row = latest_incarnation(&hook_db, &hook_owner, hook_session)
+                .await
+                .unwrap()
+                .unwrap();
+            stop_incarnation(&hook_db, &hook_owner, row.id, Some("intent_expired"))
+                .await
+                .unwrap();
+        }));
+
+        assert!(driver
+            .submit_turn(&mut session, &workspace, &repo, "start")
+            .await
+            .is_err());
+        assert_eq!(
+            fake.cancels.lock().unwrap().as_slice(),
+            &["sb-next".to_owned()]
+        );
     }
 
     /// The sweep closes intents that never activated and fences their
