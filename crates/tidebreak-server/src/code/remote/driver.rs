@@ -79,6 +79,9 @@ pub(crate) enum RemoteTurnOutcome {
     /// the way every other submit path does; the driver never interleaves
     /// two running turn rows on one session.
     TurnInFlight,
+    /// The environment rejected the owner's credential. Nothing was sent or
+    /// provisioned; sign in and retry.
+    SignInRequired,
 }
 
 /// The driver one remote session's lifecycle calls go through: the store,
@@ -93,6 +96,27 @@ pub(crate) struct RemoteDriver<'a> {
     pub provisioner: &'a dyn SandboxProvisioner,
     /// Spawn-time settings.
     pub settings: &'a RemoteSpawnSettings,
+}
+
+/// Surface the sign-in need on the session's attention.
+async fn sign_in_needed(
+    db: &Arc<DbStore>,
+    bus: &CodeEventBus,
+    session: &CodeSession,
+) -> Result<(), tidebreak_core::AgentError> {
+    let _ = super::super::attention::apply_attention(
+        db,
+        bus,
+        &session.owner,
+        session.id,
+        Attention::needs_you(
+            "sign in to the sandbox environment",
+            AttentionSource::Lifecycle,
+        ),
+        false,
+    )
+    .await?;
+    Ok(())
 }
 
 /// Whether a refusal's own description names this ref.
@@ -233,6 +257,14 @@ impl RemoteDriver<'_> {
                             turn: Box::new(turn),
                         });
                     }
+                    Err(RemoteSandboxError::SignInRequired(detail)) => {
+                        // Token expiry between pumps is not a failed turn:
+                        // hold the row beside the live lease and surface the
+                        // sign-in, the same way the pump path does.
+                        warn!(session = %session.id, %detail, "a send needs a sign-in");
+                        sign_in_needed(db, bus, session).await?;
+                        return Ok(RemoteTurnOutcome::SignInRequired);
+                    }
                     Err(RemoteSandboxError::Refused { code, message, .. }) => {
                         // The environment no longer takes messages for this
                         // sandbox: it ended without this server having drained
@@ -337,6 +369,14 @@ impl RemoteDriver<'_> {
                     incarnation: Box::new(incarnation),
                 })
             }
+            Err(RemoteSandboxError::SignInRequired(detail)) => {
+                // No sandbox exists, so the reservation is safe to release;
+                // the retry after a sign-in reserves again.
+                stop_incarnation(db, &owner, intent.id, Some("sign_in_required")).await?;
+                warn!(session = %session.id, %detail, "a spawn needs a sign-in");
+                sign_in_needed(db, bus, session).await?;
+                Ok(RemoteTurnOutcome::SignInRequired)
+            }
             Err(error) => {
                 // The reservation must not outlive the spawn it reserved for.
                 stop_incarnation(db, &owner, intent.id, Some("spawn_failed")).await?;
@@ -414,18 +454,7 @@ impl RemoteDriver<'_> {
                 // the row — closing it here would release the cap slot
                 // beside a live sandbox — and surface the sign-in.
                 report.sign_in_required = true;
-                let _ = super::super::attention::apply_attention(
-                    db,
-                    bus,
-                    &owner,
-                    session.id,
-                    Attention::needs_you(
-                        "sign in to the sandbox environment",
-                        AttentionSource::Lifecycle,
-                    ),
-                    false,
-                )
-                .await?;
+                sign_in_needed(db, bus, session).await?;
                 warn!(session = %session.id, %detail, "the sandbox stream needs a sign-in");
                 return Ok(report);
             }
@@ -482,6 +511,15 @@ impl RemoteDriver<'_> {
             .await?;
             report.incarnation_stopped = true;
             if session.lifecycle == CodeSessionLifecycle::Running {
+                // The ingest just wrote this turn's verdict (DoneUnreviewed,
+                // needs-you) onto the stored row. Refresh this snapshot
+                // before persisting, or the stale Working it still carries
+                // from turn start would overwrite the verdict.
+                if let Some(stored) =
+                    tidebreak_core::db::code::get_session(db, &owner, session.id).await?
+                {
+                    *session = stored;
+                }
                 session.lifecycle = CodeSessionLifecycle::Idle;
                 let _ = persist_session(db, bus, session).await?;
             }
@@ -883,6 +921,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(turn.status, CodeTurnStatus::Completed);
+        // The persist after the sandbox stop must not write the snapshot's
+        // stale Working back over the verdict the ingest just journaled.
+        let live = tidebreak_core::db::code::get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            live.attention.state,
+            tidebreak_core::AttentionState::DoneUnreviewed
+        );
+        assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
 
         // Turn 2 reincarnates from the pushed ref, starting at turn 2.
         let outcome = driver
@@ -1478,6 +1527,47 @@ mod tests {
         assert!(report.fenced.is_none());
         assert!(!report.incarnation_stopped);
         assert!(fake.cancels.lock().unwrap().is_empty());
+        let row = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncarnationState::Active);
+        let live = tidebreak_core::db::code::get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            live.attention.state,
+            tidebreak_core::AttentionState::NeedsYou { .. }
+        ));
+    }
+
+    /// A send that needs a sign-in fails no turn: the row stays open, no
+    /// turn row is inserted, and the sign-in need is surfaced.
+    #[tokio::test]
+    async fn a_send_that_needs_sign_in_holds_the_turn_and_surfaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        fake.send_results
+            .lock()
+            .unwrap()
+            .push_back(Err(RemoteSandboxError::SignInRequired(
+                "token expired".to_owned(),
+            )));
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "held")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::SignInRequired));
+        assert!(latest_turn(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .is_none());
         let row = latest_incarnation(&db, &session.owner, session.id)
             .await
             .unwrap()
