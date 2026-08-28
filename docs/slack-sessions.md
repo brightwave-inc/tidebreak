@@ -376,10 +376,16 @@ thread with `repo:owner/name`."
 The session's engine runs in a per-session confined sandbox driven by
 `tidebreak-supervised-agent`
 ([`0079`](decisions/0079-supervised-agent-declines-the-sandbox-protocol.md)).
-Tidebreak calls the confining environment's provisioning API — that
-external contract (spawn, steer, events, ceilings) is a named stage 1
-dependency, and this section is written against it, not against
-machinery Tidebreak owns. This unparks remote session execution in
+Tidebreak calls the confining environment's runtime API. That contract
+is pinned in `crates/tidebreak-server/src/code/remote/`: spawn on
+`POST /api/v1/runtime/endpoints/{endpoint_slug}/sandboxes` (preflight
+refuses loudly before anything is provisioned), status, a durable
+gap-free events cursor with a held wait of at most 25 seconds, inbox
+messages, and cancel — each call authenticated with a short-lived
+per-owner bearer minted for the `runtime:{endpoint_slug}` resource with
+the `runtime:execute` scope, so a sandbox is provisioned as its owner
+and never as a shared machine identity. This unparks remote session
+execution in
 [`deferred.md`](deferred.md); the parking of "deeper isolation" there
 concerned detached execution under Tidebreak's own container trust root,
 which this path does not use.
@@ -532,8 +538,9 @@ none.
 
 ### Stage 1: remote execution for repository sessions
 
-The heaviest stage, and named as such: provisioning client against the
-confining environment's API, incarnation intent protocol, event
+The heaviest stage, and named as such: the provisioning client against
+the pinned runtime contract (landed in `code/remote/`), incarnation
+intent protocol, event
 ingestion into the journal, WIP-ref resume with the new remote fence
 causes, cap reservation, spend ledger, per-session idle stop. It also
 widens the supervised agent's event vocabulary with a bounded per-turn
