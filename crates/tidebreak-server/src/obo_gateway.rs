@@ -439,6 +439,27 @@ impl OboGateway {
         })
     }
 
+    /// The live subject bearer for `owner`, when this process has seen one.
+    fn subject_for(&self, owner: &OwnerId) -> Option<Arc<str>> {
+        let users = self.users.lock().ok()?;
+        let slot = users.get(owner)?;
+        let subject = slot.subject.lock().ok()?;
+        Some(subject.clone())
+    }
+
+    /// Owner-scoped runtime bearers for one confined-sandbox endpoint.
+    ///
+    /// Each token is exchanged for the `runtime:{endpoint_slug}` audience so
+    /// a sandbox is provisioned as its owner, never as a shared machine
+    /// identity (`docs/slack-sessions.md`).
+    pub(crate) fn runtime_tokens(self: &Arc<Self>, endpoint_slug: &str) -> Arc<RuntimeTokens> {
+        Arc::new(RuntimeTokens {
+            gateway: self.clone(),
+            audience: format!("runtime:{endpoint_slug}"),
+            cache: tokio::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The current inference token for `owner`, exchanging one if the cached
     /// token is missing or near expiry.
     ///
@@ -1173,6 +1194,59 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
     ))
 }
 
+/// [`OboGateway`]-backed source of runtime bearers for one endpoint.
+///
+/// Tokens are cached per owner and re-exchanged near expiry, single-flight
+/// per source instance. A caller this process holds no live session for
+/// fails as sign-in-required rather than borrowing another identity.
+pub(crate) struct RuntimeTokens {
+    gateway: Arc<OboGateway>,
+    audience: String,
+    cache: tokio::sync::Mutex<HashMap<OwnerId, CachedToken>>,
+}
+
+#[async_trait]
+impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
+    async fn runtime_token(
+        &self,
+        owner: &OwnerId,
+    ) -> std::result::Result<
+        crate::code::remote::RuntimeToken,
+        crate::code::remote::RemoteSandboxError,
+    > {
+        use crate::code::remote::{RemoteSandboxError, RuntimeToken};
+        // Holding the cache across the exchange is the single-flight gate: a
+        // second call for the same owner waits and then finds a fresh token.
+        let mut cache = self.cache.lock().await;
+        if let Some(current) = cache.get(owner) {
+            if current.is_fresh() {
+                return Ok(RuntimeToken {
+                    secret: current.token.to_string(),
+                });
+            }
+        }
+        let Some(subject) = self.gateway.subject_for(owner) else {
+            return Err(RemoteSandboxError::SignInRequired(
+                "this machine holds no live Model Gateway session for you; sign in again".into(),
+            ));
+        };
+        let minted = self
+            .gateway
+            .exchange(&subject, &self.audience)
+            .await
+            .map_err(|error| match error {
+                AgentError::SignInRequired(detail) => RemoteSandboxError::SignInRequired(detail),
+                other => RemoteSandboxError::Unavailable {
+                    operation: "token",
+                    detail: other.to_string(),
+                },
+            })?;
+        let secret = minted.token.to_string();
+        cache.insert(owner.clone(), minted);
+        Ok(RuntimeToken { secret })
+    }
+}
+
 /// Per-caller git-forge lending, as code mode consumes it (decision 63).
 ///
 /// A seam rather than a concrete handle so code-mode tests fake the
@@ -1587,7 +1661,9 @@ mod tests {
                         );
                         let audience = form.get("audience").cloned().unwrap_or_default();
                         assert!(
-                            audience == INFERENCE_AUDIENCE || audience == CATALOG_AUDIENCE,
+                            audience == INFERENCE_AUDIENCE
+                                || audience == CATALOG_AUDIENCE
+                                || audience.starts_with("runtime:"),
                             "unexpected audience {audience:?}"
                         );
                         let subject = form
@@ -1617,6 +1693,8 @@ mod tests {
                         let serial = state.mints.fetch_add(1, Ordering::SeqCst);
                         let label = if audience == CATALOG_AUDIENCE {
                             "catalog"
+                        } else if audience.starts_with("runtime:") {
+                            "runtime"
                         } else {
                             "inference"
                         };
@@ -1862,6 +1940,28 @@ mod tests {
         let token = inference.bearer_for(&alice).await.unwrap();
         assert!(token.starts_with("mg_at_inference_"));
         assert!(token.ends_with("mg_at_alice"));
+        assert_eq!(gateway.served(), 1);
+        server.abort();
+    }
+
+    /// A runtime bearer is exchanged for the `runtime:{endpoint}` audience,
+    /// never the inference or catalog one.
+    #[tokio::test]
+    async fn runtime_tokens_exchange_for_the_endpoint_audience() {
+        use crate::code::remote::RuntimeTokenSource;
+        let gateway = FakeGateway::new();
+        let (inference, server) = gateway.clone().start().await;
+        let alice = owner("user:alice");
+        inference.record_caller(&alice, "mg_at_alice".into());
+
+        let tokens = inference.runtime_tokens("primary");
+        let token = tokens.runtime_token(&alice).await.unwrap();
+        assert!(token.secret.starts_with("mg_at_runtime_"));
+        assert!(token.secret.ends_with("mg_at_alice"));
+        assert_eq!(gateway.served(), 1);
+        // A second call inside the lifetime reuses the cached token.
+        let again = tokens.runtime_token(&alice).await.unwrap();
+        assert_eq!(again.secret, token.secret);
         assert_eq!(gateway.served(), 1);
         server.abort();
     }
