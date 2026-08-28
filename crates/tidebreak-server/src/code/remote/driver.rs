@@ -310,6 +310,12 @@ impl RemoteDriver<'_> {
             IncarnationAdmission::CapExhausted { running } => {
                 return Ok(RemoteTurnOutcome::CapExhausted { running });
             }
+            IncarnationAdmission::AlreadyLive { .. } => {
+                // Another submit won the race between observing the stopped
+                // predecessor and reserving. Same answer as observing its
+                // intent directly.
+                return Ok(RemoteTurnOutcome::ReincarnationInFlight);
+            }
         };
 
         // Walk back to the last incarnation that actually pushed: the row

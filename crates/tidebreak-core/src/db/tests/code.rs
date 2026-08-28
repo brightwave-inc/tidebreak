@@ -4496,9 +4496,7 @@ async fn admit(
 fn admitted(admission: crate::code::IncarnationAdmission) -> crate::code::CodeSessionIncarnation {
     match admission {
         crate::code::IncarnationAdmission::Admitted(row) => *row,
-        crate::code::IncarnationAdmission::CapExhausted { running } => {
-            panic!("expected admission, cap named {running:?}")
-        }
+        other => panic!("expected admission, got {other:?}"),
     }
 }
 
@@ -4570,8 +4568,13 @@ async fn a_second_live_incarnation_for_one_session_is_refused() {
     let (session, _) = seed_owner(&store, &owner, "double").await;
 
     admitted(admit(&store, &owner, session, 1, 4).await);
-    let second = crate::db::code::create_incarnation_intent(&store, &owner, session, 2, 4).await;
-    assert!(second.is_err());
+    let second = crate::db::code::create_incarnation_intent(&store, &owner, session, 2, 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        crate::code::IncarnationAdmission::AlreadyLive { incarnation: 1 }
+    );
 }
 
 /// Reincarnation counts up, keeps the starting turn, and the session ledger

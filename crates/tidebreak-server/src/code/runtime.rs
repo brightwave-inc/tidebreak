@@ -829,17 +829,36 @@ impl CodeRuntime {
         // that is still usable so submit_turn is not stuck after a restart.
         // Concurrently: each attach launches an engine child, so a serial pass
         // charged app launch the sum of every restored session.
+        // Remote sessions have no local worker to re-attach: their engine
+        // lives in a sandbox, and spawning a host harness against the empty
+        // worktree path would fail loudly for a session that is healthy.
+        let mut remote_workspaces = std::collections::HashSet::new();
+        let mut checked_workspaces = std::collections::HashSet::new();
+        for session in &recovered_sessions {
+            if !checked_workspaces.insert(session.workspace_id) {
+                continue;
+            }
+            if let Ok(workspace) = self
+                .get_workspace(&session.owner, session.workspace_id)
+                .await
+            {
+                if workspace.is_remote() {
+                    remote_workspaces.insert(session.workspace_id);
+                }
+            }
+        }
         let resumable: Vec<CodeSession> = recovered_sessions
             .into_iter()
             .filter(|session| {
                 !matches!(
                     session.lifecycle,
                     CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
-                ) && !self
-                    .workers
-                    .lock()
-                    .expect("code workers")
-                    .contains_key(&session.id)
+                ) && !remote_workspaces.contains(&session.workspace_id)
+                    && !self
+                        .workers
+                        .lock()
+                        .expect("code workers")
+                        .contains_key(&session.id)
             })
             .collect();
         futures::future::join_all(resumable.into_iter().map(|session| async move {

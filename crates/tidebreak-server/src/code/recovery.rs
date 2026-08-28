@@ -52,6 +52,18 @@ pub(crate) async fn recover_running_sessions_with(
         list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Running).await?;
     let mut actions = Vec::new();
     for session in running {
+        // A remote session's engine lives in a sandbox, not a local child:
+        // Running with no pid is its normal shape, and interrupting it here
+        // would abandon a lease that is still spending. Its own lifecycle
+        // (the pump, the stale-intent sweep, reap) settles it.
+        if let Some(workspace) =
+            tidebreak_core::db::code::get_workspace(store, &session.owner, session.workspace_id)
+                .await?
+        {
+            if workspace.is_remote() {
+                continue;
+            }
+        }
         if let Some(action) = recover_one(store, bus, session, &probe).await? {
             actions.push(action);
         }
@@ -643,6 +655,39 @@ mod tests {
         .await
         .unwrap();
         (directory, store, session_id)
+    }
+
+    /// A remote session runs with no local pid on purpose: boot recovery
+    /// must leave it alone rather than interrupt a turn whose sandbox is
+    /// still working.
+    #[tokio::test]
+    async fn boot_recovery_leaves_remote_sessions_running() {
+        let (_directory, store, session_id, _turn) = seeded_running(None).await;
+        let owner = tidebreak_core::OwnerId::local();
+        let session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut workspace =
+            tidebreak_core::db::code::get_workspace(&store, &owner, session.workspace_id)
+                .await
+                .unwrap()
+                .unwrap();
+        workspace.worktree_path = String::new();
+        tidebreak_core::db::code::save_workspace(&store, &workspace)
+            .await
+            .unwrap();
+
+        let bus = CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Dead)
+            .await
+            .unwrap();
+        assert!(actions.is_empty());
+        let untouched = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.lifecycle, CodeSessionLifecycle::Running);
     }
 
     async fn seeded_fenced_orphan(

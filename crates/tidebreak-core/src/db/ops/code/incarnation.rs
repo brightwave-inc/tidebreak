@@ -110,13 +110,14 @@ pub async fn create_incarnation_intent(
     if let Some(last) = &last {
         // One live incarnation per session: the serialize-stop-then-resume
         // rule. A successor minted beside a live predecessor would race it
-        // for the same engine session.
+        // for the same engine session. Two submits can both observe a
+        // stopped predecessor and race to here, so the loser gets an
+        // admission answer to relay, not an error.
         if IncarnationState::from_str(&last.state) != Some(IncarnationState::Stopped) {
             txn.rollback().await.map_err(store_err)?;
-            return Err(AgentError::Store(format!(
-                "session {} already has a live incarnation {}",
-                session_id.0, last.incarnation
-            )));
+            return Ok(IncarnationAdmission::AlreadyLive {
+                incarnation: last.incarnation,
+            });
         }
     }
     let incarnation = last.as_ref().map_or(1, |row| row.incarnation + 1);

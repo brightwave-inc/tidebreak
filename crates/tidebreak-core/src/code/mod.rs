@@ -1312,6 +1312,13 @@ pub enum IncarnationAdmission {
     /// The intent row committed; provision against it. Boxed because the
     /// row dwarfs the refusal variant.
     Admitted(Box<CodeSessionIncarnation>),
+    /// The session already holds a live incarnation — another submit won
+    /// the race between observing a stopped predecessor and reserving.
+    /// Retry after it settles.
+    AlreadyLive {
+        /// The live incarnation's 1-based counter.
+        incarnation: i32,
+    },
     /// The owner is at their concurrent-sandbox cap.
     CapExhausted {
         /// Sessions holding the live incarnations, so the refusal can name
