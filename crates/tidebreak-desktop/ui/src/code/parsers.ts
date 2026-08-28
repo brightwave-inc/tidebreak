@@ -33,6 +33,7 @@ import type {
   CodeStorageSnapshot,
   CodeRepoStorageSnapshot,
   CodeWorkspaceStorageSnapshot,
+  CodeStorageAction,
   CodeActionSnapshot,
   CodeCommitSnapshot,
   CodePushSnapshot,
@@ -2051,7 +2052,7 @@ export function parseCodeWorkspace(
   return parsed;
 }
 
-const STORAGE_ACTIONS = new Set(["archive", "release"]);
+const STORAGE_ACTIONS = new Set<CodeStorageAction>(["archive", "release"]);
 
 export function parseCodeStorage(value: unknown): CodeStorageSnapshot | null {
   if (

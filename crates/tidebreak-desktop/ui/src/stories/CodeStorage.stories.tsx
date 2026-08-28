@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import {
   createMemoryHistory,
@@ -19,9 +20,13 @@ import {
 } from "@/code/CodeUpdatesStore";
 import { SidebarExpandStrip } from "@/sidebar/SidebarExpandStrip";
 import { useUiStore } from "@/UiStore";
-import { deliveryCodeRepo, deliveryWorkspaces } from "./fixtures";
+import {
+  deliveryCodeRepo,
+  deliveryWorkspaces,
+  harnessDoctor,
+} from "./fixtures";
 
-const REPORT: CodeStorageSnapshot = {
+const POPULATED: CodeStorageSnapshot = {
   repos: [
     {
       id: deliveryCodeRepo.id,
@@ -70,74 +75,151 @@ function idleSocket(): WebSocket {
   return socket;
 }
 
-function app(report: CodeStorageSnapshot): AppContextValue {
+function storyClient(report: CodeStorageSnapshot): ApiClient {
   return {
-    client: {
-      listCodeStorage: async () => report,
-      listCodeRepos: async () => [deliveryCodeRepo],
-      listCodeWorkspaces: async () => deliveryWorkspaces,
-      getHarnessDoctor: async () => ({ harnesses: [] }),
-      getCodeCloneDefaults: async () => ({
-        parent_dir: "/tmp/src",
-        gh_found: false,
-        gh_remediation: "gh is not installed.",
-      }),
-      openCodeUpdates: () => idleSocket(),
-    } as unknown as ApiClient,
+    openCodeUpdates: () => idleSocket(),
+    listCodeStorage: async () => report,
+    listCodeRepos: async () => [deliveryCodeRepo],
+    listCodeWorkspaces: async () => deliveryWorkspaces,
+    getHarnessDoctor: async () => harnessDoctor,
+    listCodeHarnessModels: async (kind) => ({ kind, models: [] }),
+    getCodeCloneDefaults: async () => ({
+      gh_found: true,
+      gh_authenticated: true,
+      gh_remediation: "",
+    }),
+    startCodeWatch: async () => ({}) as never,
+  } as unknown as ApiClient;
+}
+
+function appContext(client: ApiClient): AppContextValue {
+  return {
+    client,
+    models: [],
+    defaultModelKey: null,
+    providers: [],
+    refreshCatalog: async () => {},
+    refreshChats: async () => {},
+    status: "",
+    setStatus: () => {},
+    newChat: () => {},
+    deleteChat: () => {},
+    startRename: () => {},
+    commitRename: () => {},
+    cancelRename: () => {},
+    newProject: async () => false,
+    deleteProject: () => {},
+    startProjectRename: () => {},
+    commitProjectRename: () => {},
+    cancelProjectRename: () => {},
+    newChatInProject: () => {},
+    moveChatToProject: () => {},
+    updateState: { status: "idle", version: null, error: null, enabled: false },
+    updateUpToDate: false,
+    checkForUpdate: async () => ({
+      status: "idle",
+      version: null,
+      error: null,
+      enabled: false,
+    }),
     attachment: "local",
-    serverInfo: null,
-    setServerInfo: () => {},
-    connectedFolderPaths: [],
-    refreshConnectedFolderPaths: async () => {},
+    restartForUpdate: async () => {},
   };
 }
 
-function StorageHarness({ report }: { report: CodeStorageSnapshot }) {
-  useCodeCatalogStore.setState({
-    repos: [deliveryCodeRepo],
-    workspaces: deliveryWorkspaces,
-    loaded: true,
-    error: null,
-  });
-  useCodeUiStore.setState({ railPrefs: DEFAULT_RAIL_PREFS });
-  useUiStore.setState({ sidebarCollapsed: false });
-  useCodeUpdatesStore.setState({ connected: true });
-  const root = createRootRoute();
-  const storage = createRoute({
-    getParentRoute: () => root,
+function storyRouter() {
+  const rootRoute = createRootRoute();
+  const storageRoute = createRoute({
+    getParentRoute: () => rootRoute,
     path: "/code/storage",
     component: CodeStoragePage,
   });
-  const router = createRouter({
-    history: createMemoryHistory({ initialEntries: ["/code/storage"] }),
-    routeTree: root.addChildren([storage]),
+  const placeholders = [
+    "/",
+    "/code",
+    "/code/delivery/pull-requests",
+    "/code/archive",
+    "/code/analytics",
+    "/settings",
+  ].map((path) =>
+    createRoute({
+      getParentRoute: () => rootRoute,
+      path,
+      component: () => <p className="p-6">{path}</p>,
+    }),
+  );
+  const workspaceRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/code/w/$workspaceId",
+    component: () => <p className="p-6">Workspace</p>,
   });
+  return createRouter({
+    routeTree: rootRoute.addChildren([
+      ...placeholders,
+      workspaceRoute,
+      storageRoute,
+    ]),
+    history: createMemoryHistory({ initialEntries: ["/code/storage"] }),
+  });
+}
+
+function resetStoryState() {
+  disconnectCodeUpdates();
+  useCodeCatalogStore.getState().reset();
+  useCodeUpdatesStore.getState().reset();
+  useCodeUiStore.setState({
+    railPrefs: DEFAULT_RAIL_PREFS,
+    reviewSidebarOpen: false,
+    newWorkspaceOpen: false,
+    addRepoOpen: false,
+    pendingComposerPrompt: null,
+    composerActionScope: null,
+  });
+  useUiStore.setState({ sidebarCollapsed: false, sidebarWidth: 280 });
+}
+
+function CodeStorageStory({ report }: { report: CodeStorageSnapshot }) {
+  const [state] = useState(() => {
+    resetStoryState();
+    useCodeCatalogStore.setState({
+      repos: [deliveryCodeRepo],
+      workspaces: deliveryWorkspaces,
+      loaded: true,
+      error: null,
+    });
+    return { client: storyClient(report), router: storyRouter() };
+  });
+  useEffect(
+    () => () => {
+      disconnectCodeUpdates();
+      useCodeCatalogStore.getState().reset();
+      useCodeUpdatesStore.getState().reset();
+    },
+    [],
+  );
   return (
-    <AppContextProvider value={app(report)}>
-      <SidebarExpandStrip />
-      <RouterProvider router={router} />
+    <AppContextProvider value={appContext(state.client)}>
+      <div className="app-shell h-full min-h-0 w-full overflow-hidden">
+        <SidebarExpandStrip macOverlay />
+        <div className="app-body">
+          <RouterProvider router={state.router as never} />
+        </div>
+      </div>
     </AppContextProvider>
   );
 }
 
 const meta = {
   title: "Code/Storage",
-  component: StorageHarness,
+  component: CodeStorageStory,
+  args: { report: POPULATED },
   parameters: { layout: "fullscreen" },
-  decorators: [
-    (Story) => {
-      disconnectCodeUpdates();
-      return <Story />;
-    },
-  ],
-} satisfies Meta<typeof StorageHarness>;
+} satisfies Meta<typeof CodeStorageStory>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Populated: Story = {
-  args: { report: REPORT },
-};
+export const Populated: Story = {};
 
 export const Empty: Story = {
   args: { report: { repos: [] } },
