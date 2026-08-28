@@ -1222,6 +1222,157 @@ mod tests {
         assert!(ended.is_err(), "an ended session must refuse");
     }
 
+    /// The race the channel's out-of-order delivery creates: the sweep
+    /// snapshots head B, message A arrives with an earlier `channel_ts` and
+    /// moves B, and the claim then runs with a stale position. B's text has
+    /// already reached the sandbox, so B's row must be consumed under its
+    /// own id — a surviving row would promote later and run the same
+    /// message twice — while A stays queued for the next idle.
+    #[tokio::test]
+    async fn a_moved_head_is_consumed_by_its_promotion_not_run_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let grant = tidebreak_core::CodeGrantId::new();
+        let resolved = runtime
+            .external_get_or_create(
+                &owner,
+                grant,
+                "slack",
+                "T1/C4/5.5",
+                repo.id,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Created(binding) = resolved else {
+            panic!("expected a create");
+        };
+        let session_id = binding.session_id;
+
+        // Turn 1 runs; B parks behind it.
+        runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "start".into(),
+                "Ev0",
+                "1700000000.000100",
+            )
+            .await
+            .unwrap();
+        let queued_b = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "message B".into(),
+                "EvB",
+                "1700000002.000100",
+            )
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::Queued(row_b) = queued_b else {
+            panic!("B must queue behind the running turn");
+        };
+
+        // The sweep's snapshot of head B, taken before A arrives.
+        let stale = tidebreak_core::db::code::queued_turn_head(&runtime.db, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.id, row_b.id);
+
+        // A lands with an earlier channel token and moves B.
+        runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "message A".into(),
+                "EvA",
+                "1700000001.000100",
+            )
+            .await
+            .unwrap();
+
+        // Turn 1 settles; the session is idle for the promotion.
+        fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+            sandbox_id: "sb-1".to_owned(),
+            state: SandboxState::Running,
+            latest_event_seq: 2,
+            events: vec![
+                event(1, "turn_started", serde_json::json!({ "turn": 1 })),
+                event(
+                    2,
+                    "turn_completed",
+                    serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                ),
+            ],
+        });
+        let mut live = runtime.get_session(&owner, session_id).await.unwrap();
+        let remote = runtime.remote_sessions().unwrap();
+        let driver = remote.driver(&runtime.db, runtime.bus.as_ref());
+        driver.pump(&mut live, 0).await.unwrap();
+
+        // The promotion runs with the stale snapshot: B's text goes to the
+        // sandbox, and the claim must consume B's row under its own id.
+        let workspace = runtime
+            .get_workspace(&owner, live.workspace_id)
+            .await
+            .unwrap();
+        let stored_repo = runtime.get_repo(&owner, workspace.repo_id).await.unwrap();
+        let mut promoting = runtime.get_session(&owner, session_id).await.unwrap();
+        let outcome = driver
+            .submit_turn_from(
+                &mut promoting,
+                &workspace,
+                &stored_repo,
+                &stale.message,
+                Some(&stale),
+            )
+            .await
+            .unwrap();
+        let super::super::driver::RemoteTurnOutcome::Delivered { turn } = outcome else {
+            panic!("the promotion must deliver, got {outcome:?}");
+        };
+        assert_eq!(
+            turn.id, row_b.id,
+            "a moved row promotes under its own id, keeping the event linkage"
+        );
+        let remaining =
+            tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|row| row.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message A"],
+            "B's row must be consumed; only A stays queued"
+        );
+
+        // The channel's replay of EvB now answers the promoted turn.
+        let replay = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "message B".into(),
+                "EvB",
+                "1700000002.000100",
+            )
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::NewTurn(replayed) = replay else {
+            panic!("EvB's replay must answer the promoted turn, got {replay:?}");
+        };
+        assert_eq!(replayed.id, row_b.id);
+    }
+
     /// A repository with no recorded origin cannot back a remote workspace:
     /// the sandbox would have nothing to clone.
     #[tokio::test]

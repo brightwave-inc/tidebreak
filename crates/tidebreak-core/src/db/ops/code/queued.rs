@@ -171,6 +171,44 @@ pub async fn promote_queued_turn(
     Ok(true)
 }
 
+/// Claim a snapshot whose row only moved since it was taken.
+///
+/// Like [`promote_queued_turn`], but the delete does not match on
+/// `position`. Content edits bump `updated_at`, so a successful claim here
+/// proves the delivered text is still exactly the row's text — the row was
+/// only reordered, which cannot change what already ran. The remote driver
+/// uses this after the strict claim fails: its message has already reached
+/// the sandbox by then, so a moved row must be consumed under its own id
+/// rather than left behind to run the same text twice. Returns `false` —
+/// with nothing written — when the row was edited or retracted.
+pub async fn promote_moved_queued_turn(
+    store: &DbStore,
+    owner: &OwnerId,
+    expected: &CodeQueuedTurn,
+    turn: &CodeTurn,
+) -> Result<bool> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, expected.session_id).await? {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    let deleted = entities::code_queued_turn::Entity::delete_many()
+        .filter(entities::code_queued_turn::Column::Id.eq(expected.id.0))
+        .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_queued_turn::Column::SessionId.eq(expected.session_id.0))
+        .filter(entities::code_queued_turn::Column::UpdatedAt.eq(expected.updated_at))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if deleted.rows_affected != 1 {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(false);
+    }
+    super::turn::insert_turn_on(&transaction, owner, turn).await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(true)
+}
+
 /// Drop one queued message that can no longer run (a dead attachment, a
 /// failed start). Deletes by id alone, so it also cleans up after a promotion
 /// that already removed the row. Returns whether a row was deleted.

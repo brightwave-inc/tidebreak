@@ -852,14 +852,24 @@ async fn start_turn_row(
     };
     match promoted {
         // Claim the queue row and insert its turn in one transaction, the
-        // way a local worker promotes. A stale claim — the row was edited,
-        // reordered, or retracted after the sweep's snapshot — writes the
-        // turn under a fresh id instead: the snapshot's text already reached
-        // the sandbox, so the transcript must show it, and the surviving
-        // queue row keeps its own id so its later promotion cannot collide
-        // with this turn.
+        // way a local worker promotes. The strict claim can fail on a
+        // position-only move — an out-of-order external message reorders
+        // still-queued rows — and that must not count as stale: the text
+        // already reached the sandbox, so the moved row is consumed under
+        // its own id, or the same message would promote and run again.
+        // Only an edit or retraction writes the turn under a fresh id
+        // instead: the delivered text differs from what the row now says,
+        // so the transcript must show what ran, and the surviving row
+        // keeps its own id so its later promotion cannot collide.
         Some(row) => {
             if !tidebreak_core::db::code::promote_queued_turn(db, &session.owner, row, &turn)
+                .await?
+                && !tidebreak_core::db::code::promote_moved_queued_turn(
+                    db,
+                    &session.owner,
+                    row,
+                    &turn,
+                )
                 .await?
             {
                 warn!(
