@@ -110,9 +110,11 @@ async fn sign_in_needed(
         bus,
         &session.owner,
         session.id,
+        // Structured, so the stall sweep's heuristic cannot replace the
+        // prompt while the user is away signing in.
         Attention::needs_you(
             "sign in to the sandbox environment",
-            AttentionSource::Lifecycle,
+            AttentionSource::Structured,
         ),
         false,
     )
@@ -528,17 +530,18 @@ impl RemoteDriver<'_> {
             // A turn the dying incarnation never settled — one delivered in
             // the stop window, after its last turn event — would otherwise
             // stay Running and refuse every later submit as TurnInFlight.
-            // Interrupt it when the incarnation closes, the way a dead local
-            // worker interrupts its open turn. Re-query rather than reuse
+            // Run dead-worker recovery when the incarnation closes: it
+            // interrupts the turn, journals it, sets needs-you, and goes
+            // Idle in one fenced transaction. Re-query rather than reuse
             // the pre-ingest snapshot: the open turn may have been inserted
             // while this read was in flight.
-            if let Some(mut open) = latest_turn(db, &owner, session.id)
+            let open = latest_turn(db, &owner, session.id)
                 .await?
-                .filter(|turn| turn.status == CodeTurnStatus::Running)
-            {
-                open.status = CodeTurnStatus::Interrupted;
-                open.ended_at = Some(chrono::Utc::now());
-                save_turn(db, &owner, &open).await?;
+                .filter(|turn| turn.status == CodeTurnStatus::Running);
+            if open.is_some() {
+                if let Some(recovered) = recovery::recover_dead_worker(db, bus, session).await? {
+                    *session = recovered;
+                }
             }
         }
         // A settled turn ends the Running lifecycle whether or not the
@@ -991,6 +994,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
+        // The interrupt surfaces: the session must not keep showing work in
+        // progress for a message the dead incarnation never ran.
+        assert!(matches!(
+            live.attention.state,
+            tidebreak_core::AttentionState::NeedsYou { .. }
+        ));
 
         // The session can continue: the next turn reincarnates instead of
         // refusing as TurnInFlight.

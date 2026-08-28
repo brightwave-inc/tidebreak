@@ -294,7 +294,11 @@ async fn recover_one(
     }
 }
 
-async fn recover_dead_worker(
+/// Settle a session whose worker died with a turn still open: interrupt the
+/// turn, journal it, set needs-you, and go Idle, all in one fenced
+/// transaction. Remote sessions reuse this when the sandbox ends beneath an
+/// unsettled turn.
+pub(crate) async fn recover_dead_worker(
     store: &DbStore,
     bus: &CodeEventBus,
     session: &CodeSession,
