@@ -3695,6 +3695,14 @@ export function parseFenceReason(value: unknown): FenceReason | null {
     return { type: "resume_lost", detail: value.detail };
   }
   if (
+    (value.type === "incarnation_unresolved" ||
+      value.type === "sandbox_lost" ||
+      value.type === "terminal_flush_missing") &&
+    typeof value.detail === "string"
+  ) {
+    return { type: value.type, detail: value.detail };
+  }
+  if (
     value.type === "repeated_turn_failures" &&
     typeof value.count === "number" &&
     typeof value.detail === "string"

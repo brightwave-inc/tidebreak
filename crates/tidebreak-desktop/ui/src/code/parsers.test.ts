@@ -1311,6 +1311,26 @@ describe("parseFenceReason", () => {
         detail: "401",
       }),
     ).toEqual({ type: "repeated_turn_failures", count: 3, detail: "401" });
+    // The remote-session causes (issue 2870): a null would drop a fenced
+    // remote session from the list rather than just its badge.
+    expect(
+      parseFenceReason({
+        type: "incarnation_unresolved",
+        detail: "no spawn outcome",
+      }),
+    ).toEqual({ type: "incarnation_unresolved", detail: "no spawn outcome" });
+    expect(
+      parseFenceReason({ type: "sandbox_lost", detail: "node loss" }),
+    ).toEqual({
+      type: "sandbox_lost",
+      detail: "node loss",
+    });
+    expect(
+      parseFenceReason({
+        type: "terminal_flush_missing",
+        detail: "events unread",
+      }),
+    ).toEqual({ type: "terminal_flush_missing", detail: "events unread" });
   });
 
   it("rejects a malformed reason", () => {
@@ -1322,6 +1342,7 @@ describe("parseFenceReason", () => {
         detail: "x",
       }),
     ).toBeNull();
+    expect(parseFenceReason({ type: "sandbox_lost" })).toBeNull();
     expect(parseFenceReason({ type: "who_knows" })).toBeNull();
   });
 });

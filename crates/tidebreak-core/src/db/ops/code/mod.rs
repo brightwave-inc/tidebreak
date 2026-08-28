@@ -12,6 +12,7 @@ use crate::OwnerId;
 use super::super::{entities, store_err};
 
 pub mod approval;
+pub mod incarnation;
 pub mod journal;
 pub mod pull_request;
 pub mod queued;
@@ -27,6 +28,7 @@ pub mod workflow_run;
 pub mod workspace;
 
 pub use approval::*;
+pub use incarnation::*;
 pub use journal::*;
 pub use pull_request::*;
 pub use queued::*;

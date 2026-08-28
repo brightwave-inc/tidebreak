@@ -59,6 +59,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodePermissionModeIntent),
             Box::new(AgentNotification),
             Box::new(CodeWorkflowRuns),
+            Box::new(CodeSessionIncarnations),
         ]
     }
 }
@@ -2591,6 +2592,151 @@ impl MigrationTrait for CodeQueuedTurns {
     }
 }
 
+/// Record every sandbox lifetime of a remote session as a durable row.
+///
+/// The intent → active → stopped protocol for remote execution (issue
+/// 2870): the row is written *before* the environment is asked to
+/// provision, so a crash between the spawn returning and the activation
+/// update leaves an intent row a reconcile sweep can find, instead of a
+/// spending sandbox nothing remembers. The `sandbox_incarnation` advisory
+/// row serializes the per-owner concurrency reservation the same way the
+/// claim paths serialize theirs.
+struct CodeSessionIncarnations;
+
+impl MigrationName for CodeSessionIncarnations {
+    fn name(&self) -> &str {
+        "m20260827_000022_code_session_incarnations"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeSessionIncarnations {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeSessionIncarnation::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::Owner)
+                            .text()
+                            .not_null()
+                            .default("local"),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::SessionId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::Incarnation)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::State)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeSessionIncarnation::SandboxId).text())
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::StartingTurn)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeSessionIncarnation::StopReason).text())
+                    .col(ColumnDef::new(idens::CodeSessionIncarnation::SpendMicrousd).big_integer())
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::TerminalEventsJournaled)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::ActivatedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::StoppedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeSessionIncarnation::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_session_incarnation_session")
+                            .from(
+                                idens::CodeSessionIncarnation::Table,
+                                idens::CodeSessionIncarnation::SessionId,
+                            )
+                            .to(idens::CodeSession::Table, idens::CodeSession::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .check(
+                        Expr::col(idens::CodeSessionIncarnation::State)
+                            .is_in(["intent", "active", "stopped"]),
+                    )
+                    .check(Expr::col(idens::CodeSessionIncarnation::Incarnation).gte(1))
+                    .check(Expr::col(idens::CodeSessionIncarnation::StartingTurn).gte(1))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_session_incarnation_session")
+                    .table(idens::CodeSessionIncarnation::Table)
+                    .col(idens::CodeSessionIncarnation::SessionId)
+                    .col(idens::CodeSessionIncarnation::Incarnation)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_session_incarnation_owner_state")
+                    .table(idens::CodeSessionIncarnation::Table)
+                    .col(idens::CodeSessionIncarnation::Owner)
+                    .col(idens::CodeSessionIncarnation::State)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        // The reservation lock, seeded the way the baseline seeds the claim
+        // paths: a missing row reads as a hard error at acquire time.
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "INSERT INTO advisory_lock (name) VALUES ('sandbox_incarnation') \
+                 ON CONFLICT DO NOTHING",
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the table would forget sandboxes that may still be
+        // running; the reconcile sweep needs these rows to cancel them.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -2661,6 +2807,7 @@ mod tests {
                 "m20260826_000019_code_permission_mode_intent",
                 "m20260826_000020_agent_notification",
                 "m20260827_000021_code_workflow_runs",
+                "m20260827_000022_code_session_incarnations",
             ]
         );
         assert!(db

@@ -1906,6 +1906,35 @@ pub mod code_queued_turn {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_session_incarnation {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_session_incarnation")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub incarnation: i32,
+        pub state: String,
+        pub sandbox_id: Option<String>,
+        pub starting_turn: i32,
+        pub stop_reason: Option<String>,
+        pub spend_microusd: Option<i64>,
+        pub terminal_events_journaled: bool,
+        pub created_at: DateTimeUtc,
+        pub activated_at: Option<DateTimeUtc>,
+        pub stopped_at: Option<DateTimeUtc>,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_session_image {
     use sea_orm::entity::prelude::*;
 

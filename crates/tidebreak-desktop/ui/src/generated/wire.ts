@@ -2399,6 +2399,18 @@ count: number,
 /**
  * Bounded detail from the last failure, as the engine reported it.
  */
+detail: string, } | { "type": "incarnation_unresolved", 
+/**
+ * Bounded human-readable detail.
+ */
+detail: string, } | { "type": "sandbox_lost", 
+/**
+ * Bounded detail, as the environment classified it.
+ */
+detail: string, } | { "type": "terminal_flush_missing", 
+/**
+ * Bounded human-readable detail.
+ */
 detail: string, };
 
 /**

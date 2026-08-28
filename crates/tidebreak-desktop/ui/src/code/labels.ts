@@ -135,6 +135,13 @@ export function fenceReasonText(reason: FenceReason): string {
   if (reason.type === "resume_lost") {
     return `The engine no longer has this session, so it cannot continue (${reason.detail}). Reap it to start a fresh engine session in this workspace; the transcript above is kept.`;
   }
+  if (
+    reason.type === "incarnation_unresolved" ||
+    reason.type === "sandbox_lost" ||
+    reason.type === "terminal_flush_missing"
+  ) {
+    return `${reason.detail} Reap the session to close out the remote sandbox and start fresh; the journal above is kept.`;
+  }
   return reason.detail;
 }
 
