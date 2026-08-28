@@ -262,6 +262,35 @@ pub async fn set_workflow_run_fetch_state(
     }
 }
 
+/// Drop observed runs that fell off GitHub's first page.
+///
+/// A 200 writes at most one hundred facts. Without this prune, a later 304
+/// would paint every row ever seen.
+pub async fn delete_workflow_run_facts_absent_from(
+    store: &DbStore,
+    owner: &OwnerId,
+    host: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    keep_github_ids: &[u64],
+) -> Result<u64> {
+    let keep: Vec<i64> = keep_github_ids
+        .iter()
+        .copied()
+        .filter_map(|id| i64::try_from(id).ok())
+        .collect();
+    let mut delete = entities::code_workflow_run::Entity::delete_many()
+        .filter(entities::code_workflow_run::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_workflow_run::Column::Host.eq(host))
+        .filter(entities::code_workflow_run::Column::RepoOwner.eq(repo_owner))
+        .filter(entities::code_workflow_run::Column::RepoName.eq(repo_name));
+    if !keep.is_empty() {
+        delete = delete.filter(entities::code_workflow_run::Column::GithubId.is_not_in(keep));
+    }
+    let deleted = delete.exec(&store.conn).await.map_err(store_err)?;
+    Ok(deleted.rows_affected)
+}
+
 async fn find_fact_row(
     store: &DbStore,
     owner: &OwnerId,

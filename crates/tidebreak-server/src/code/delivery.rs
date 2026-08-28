@@ -23,10 +23,10 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use tidebreak_core::db::code::{
-    get_workflow_run_fetch_state, get_workspace, insert_pull_request_attribution,
-    list_attributions_for_pull_requests, list_pull_request_facts_for_repo,
-    list_workflow_run_facts_for_repo, save_pull_request_fact, save_workflow_run_fact,
-    set_workflow_run_fetch_state, WorkflowRunFetchCondition,
+    delete_workflow_run_facts_absent_from, get_workflow_run_fetch_state, get_workspace,
+    insert_pull_request_attribution, list_attributions_for_pull_requests,
+    list_pull_request_facts_for_repo, list_workflow_run_facts_for_repo, save_pull_request_fact,
+    save_workflow_run_fact, set_workflow_run_fetch_state, WorkflowRunFetchCondition,
 };
 use tidebreak_core::{
     CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
@@ -3604,6 +3604,20 @@ async fn persist_fresh_workflow_runs(
         }
         summaries.push(summary);
     }
+    let keep: Vec<u64> = summaries.iter().map(|summary| summary.github_id).collect();
+    match delete_workflow_run_facts_absent_from(
+        &runtime.db,
+        owner,
+        &target.host,
+        &target.owner,
+        &target.name,
+        &keep,
+    )
+    .await
+    {
+        Ok(pruned) => changed |= pruned > 0,
+        Err(err) => tracing::debug!(error = %err, "workflow-run prune failed"),
+    }
     let _ = set_workflow_run_fetch_state(
         &runtime.db,
         owner,
@@ -3622,6 +3636,7 @@ async fn persist_fresh_workflow_runs(
     Ok(summaries)
 }
 
+/// Project stored facts for one repository, capped at GitHub's first page.
 async fn stored_workflow_run_summaries(
     runtime: &CodeRuntime,
     owner: &OwnerId,
@@ -3640,6 +3655,7 @@ async fn stored_workflow_run_summaries(
     .map_err(|err| err.to_string())?;
     Ok(facts
         .into_iter()
+        .take(MAX_REMOTE_ITEMS_PER_REPO)
         .map(|fact| summary_from_run_fact(&fact, repository, workspaces))
         .collect())
 }

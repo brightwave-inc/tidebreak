@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { monitorSince, nextMonitorDelayMs } from "./CodeDeliveryMonitor";
+import type { CodeDeliveryRunQuery } from "../api/types";
+import {
+  monitorRuns,
+  monitorSince,
+  nextMonitorDelayMs,
+} from "./CodeDeliveryMonitor";
 
 describe("nextMonitorDelayMs", () => {
   it("has no safety or hidden poll clock", () => {
@@ -9,6 +14,29 @@ describe("nextMonitorDelayMs", () => {
 
   it("reruns immediately when a pass was skipped because one was already running", () => {
     expect(nextMonitorDelayMs({ rerunRequested: true })).toBe(0);
+  });
+});
+
+describe("monitorRuns", () => {
+  it("asks only for persisted workflow runs", async () => {
+    const queries: CodeDeliveryRunQuery[] = [];
+    await monitorRuns(
+      {
+        queryCodeDeliveryRuns: async (query) => {
+          queries.push(query);
+          return {
+            capability: { found: false, remediation: "test" },
+            items: [],
+            errors: [],
+            fetched_at: "2026-08-20T12:00:00.000Z",
+          };
+        },
+      },
+      [],
+      "2026-08-20T00:00:00.000Z",
+    );
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.kinds).toEqual(["workflow_run"]);
   });
 });
 

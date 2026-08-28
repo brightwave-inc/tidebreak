@@ -4337,3 +4337,65 @@ async fn workflow_run_facts_upsert_and_conditional_etag() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].github_id, 77);
 }
+
+#[tokio::test]
+async fn workflow_run_facts_drop_rows_that_left_the_host_page() {
+    use crate::code::{CodeWorkflowRunFact, CodeWorkflowRunId};
+    use crate::db::code::{
+        delete_workflow_run_facts_absent_from, list_workflow_run_facts_for_repo,
+        save_workflow_run_fact,
+    };
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let seen = now();
+    let on_page = CodeWorkflowRunFact {
+        id: CodeWorkflowRunId::new(),
+        owner: owner.clone(),
+        host: "github.com".into(),
+        repo_owner: "acme".into(),
+        repo_name: "tools".into(),
+        github_id: 77,
+        run_attempt: Some(1),
+        name: "Desktop CI".into(),
+        url: "https://github.com/acme/tools/actions/runs/77".into(),
+        status: "completed".into(),
+        conclusion: Some("success".into()),
+        workflow: Some("Desktop CI".into()),
+        branch: Some("main".into()),
+        sha: Some("aaa111".into()),
+        event: Some("push".into()),
+        actor: Some("octocat".into()),
+        created_at: seen,
+        updated_at: seen,
+        first_seen_at: seen,
+        last_seen_at: seen,
+    };
+    let fallen_off = CodeWorkflowRunFact {
+        id: CodeWorkflowRunId::new(),
+        github_id: 12,
+        url: "https://github.com/acme/tools/actions/runs/12".into(),
+        ..on_page.clone()
+    };
+    save_workflow_run_fact(&store, &on_page).await.unwrap();
+    save_workflow_run_fact(&store, &fallen_off).await.unwrap();
+
+    assert_eq!(
+        delete_workflow_run_facts_absent_from(
+            &store,
+            &owner,
+            "github.com",
+            "acme",
+            "tools",
+            &[77],
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let listed = list_workflow_run_facts_for_repo(&store, &owner, "github.com", "acme", "tools")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].github_id, 77);
+}

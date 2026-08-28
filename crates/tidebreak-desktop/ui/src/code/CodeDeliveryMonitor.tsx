@@ -18,8 +18,9 @@ import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 // Freshness rides the `delivery` nudge on the updates socket (decision 66):
 // the server says when the pull-request or workflow-run store changed, and
-// this monitor re-reads then. There is no clock. The first mount still
-// reads once, and becoming visible again reads once.
+// this monitor re-reads then. There is no clock. Deployments stay live
+// GitHub observations, so this monitor asks only for workflow runs. The
+// first mount still reads once, and becoming visible again reads once.
 const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1_000;
 const MAX_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1_000;
 const OVERLAP_MS = 2 * 60 * 1_000;
@@ -248,7 +249,7 @@ export async function monitorRuns(
     const page = await client.queryCodeDeliveryRuns(
       {
         repositories,
-        kinds: [],
+        kinds: ["workflow_run"],
         statuses: [],
         conclusions: [],
         workflows: [],
