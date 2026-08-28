@@ -180,6 +180,12 @@ export type CodeSessionState = {
    */
   contentRevision: number;
   /**
+   * Recap text from durable turn snapshots, keyed by turn id. Hydration
+   * runs before journal replay, so these stamp onto the closing message
+   * after assistant rows exist.
+   */
+  storedRewrites: Record<string, string>;
+  /**
    * Latest `attention_changed` from the journal. Not a transcript item — the
    * header badge reads this so a stall or a need-you does not grow the log.
    */
@@ -239,6 +245,7 @@ export function initialCodeSessionState(): CodeSessionState {
     lastUsage: null,
     lifecycle: null,
     contentRevision: 0,
+    storedRewrites: {},
     attention: null,
   };
 }
@@ -344,9 +351,16 @@ export function applyCodeTurnSnapshot(
     ),
   };
   if (!turn.rewrite) return withBoundary;
-  return {
+  const withStored = {
     ...withBoundary,
-    items: applyTurnRewrite(withBoundary.items, turn.id, {
+    storedRewrites: {
+      ...withBoundary.storedRewrites,
+      [turn.id]: turn.rewrite,
+    },
+  };
+  return {
+    ...withStored,
+    items: applyTurnRewrite(withStored.items, turn.id, {
       rewrite: turn.rewrite,
       rewriteState: "rewritten",
     }),
@@ -1657,10 +1671,10 @@ function mergeToolDetail(
 }
 
 /**
- * Stamp a rewrite onto the last parent assistant row of a turn.
+ * Stamp a recap onto the last parent assistant row of a turn.
  *
- * The journal text stays on `text`. Live notices and the turn snapshot both
- * land here so the transcript can toggle without a second source of truth.
+ * The journal text stays on `text`. A later `rewriting` or `failed` notice
+ * does not clear a recap the turn snapshot already stored.
  */
 export function applyTurnRewrite(
   items: CodeTranscriptItem[],
@@ -1698,4 +1712,21 @@ export function applyTurnRewrite(
     rewriteState: nextState,
   };
   return next;
+}
+
+/** Stamp stored recaps onto closing messages that exist after replay. */
+export function applyStoredRewrites(state: CodeSessionState): CodeSessionState {
+  let items = state.items;
+  let changed = false;
+  for (const [turnId, rewrite] of Object.entries(state.storedRewrites)) {
+    const next = applyTurnRewrite(items, turnId, {
+      rewrite,
+      rewriteState: "rewritten",
+    });
+    if (next !== items) {
+      items = next;
+      changed = true;
+    }
+  }
+  return changed ? { ...state, items } : state;
 }

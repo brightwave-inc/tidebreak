@@ -3,6 +3,7 @@ import type { CodeEvent, SequencedCodeEventFrame } from "../api/types";
 import {
   applyAcceptedTurn,
   applyCodeTurnSnapshot,
+  applyStoredRewrites,
   applyTurnRewrite,
   hydrateCodeTurns,
   initialCodeSessionState,
@@ -15,6 +16,7 @@ import {
   userItemId,
   type CodeSessionDeps,
   type CodeSessionState,
+  type CodeTranscriptItem,
 } from "./CodeSessionReducer";
 
 const NOW = "2026-08-15T12:00:00.000Z";
@@ -2226,6 +2228,33 @@ describe("applyTurnRewrite", () => {
     const next = applyTurnRewrite([closing], "t1", { rewriteState: "failed" });
     expect(next[0]).toMatchObject({
       rewrite: "The turn added three tools.",
+      rewriteState: "rewritten",
+    });
+  });
+});
+
+describe("stored recaps", () => {
+  it("stamps a stored recap after replay builds the closing message", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, rewrite: "The recap." },
+    ]);
+    expect(hydrated.storedRewrites.t1).toBe("The recap.");
+    const { state } = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "assistant_delta", text: "The original closing message." },
+        { type: "turn_completed", usage: NO_USAGE },
+      ],
+      hydrated,
+    );
+    const stamped = applyStoredRewrites(state);
+    const assistant = stamped.items.find(
+      (item) => item.kind === "assistant" && item.turnId === "t1",
+    );
+    expect(assistant).toMatchObject({
+      kind: "assistant",
+      text: "The original closing message.",
+      rewrite: "The recap.",
       rewriteState: "rewritten",
     });
   });
