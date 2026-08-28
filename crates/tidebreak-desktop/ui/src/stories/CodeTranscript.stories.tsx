@@ -122,12 +122,12 @@ const rewrittenItems: CodeTranscriptItem[] = items.map((item) =>
     : item,
 );
 
-/** Off: the original closing message, no recap. */
+/** Off: the original closing message, no rewrite control. */
 export const RewriteOff: Story = {
   args: { items },
 };
 
-/** Rewriting: the original stays visible while the recap is written. */
+/** Rewriting: the original stays visible while the utility model works. */
 export const RewriteRewriting: Story = {
   args: {
     items: items.map((item) =>
@@ -138,12 +138,14 @@ export const RewriteRewriting: Story = {
   },
 };
 
-/** Rewritten: original stays, recap sits under it. */
+/** Rewritten: lucid prose leads, with a toggle back to the original. */
 export const RewriteRewritten: Story = {
   args: { items: rewrittenItems },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("Recap")).toBeInTheDocument();
+    await expect(
+      canvas.getByRole("button", { name: "Show original" }),
+    ).toBeInTheDocument();
   },
 };
 

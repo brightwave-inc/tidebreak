@@ -970,7 +970,7 @@ describe("CodeTranscript", () => {
     expect(screen.getAllByText(recap)).toHaveLength(1);
   });
 
-  it("keeps the original closing message and shows the recap beside it", () => {
+  it("toggles the original closing message after a rewrite lands", async () => {
     const original = "Workspace switching now reuses recent transcript stores.";
     const rewrite =
       "Workspace switching reuses recent transcript stores. It reconnects from the last event sequence.";
@@ -991,8 +991,16 @@ describe("CodeTranscript", () => {
       />,
     );
 
-    expect(screen.getByText(original)).toBeInTheDocument();
     expect(screen.getByText(rewrite)).toBeInTheDocument();
-    expect(screen.getByText("Recap")).toBeInTheDocument();
+    expect(screen.queryByText(original)).not.toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show original" }),
+    );
+    expect(screen.getByText(original)).toBeInTheDocument();
+    expect(screen.queryByText(rewrite)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Show rewrite" }));
+    expect(screen.getByText(rewrite)).toBeInTheDocument();
   });
 });
