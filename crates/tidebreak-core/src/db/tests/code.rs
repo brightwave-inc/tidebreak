@@ -4527,6 +4527,46 @@ async fn the_incarnation_cap_refuses_and_names_the_running_sessions() {
     admitted(admit(&store, &owner, session_b, 1, 1).await);
 }
 
+/// The cap is a reservation taken with the intent, not a check-then-act
+/// count: six concurrent intents against a cap of two admit exactly two.
+/// The tasks interleave at every await inside the op, which is where a
+/// check-then-act count would double-admit.
+#[tokio::test]
+async fn the_cap_admits_exactly_the_cap_under_a_race() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let owner = OwnerId::local();
+    let mut sessions = Vec::new();
+    for index in 0..6 {
+        let (session, _) = seed_owner(&store, &owner, &format!("race-{index}")).await;
+        sessions.push(session);
+    }
+    let mut handles = Vec::new();
+    for session in sessions {
+        let store = std::sync::Arc::clone(&store);
+        let owner = owner.clone();
+        handles.push(tokio::spawn(async move {
+            crate::db::code::create_incarnation_intent(&store, &owner, session, 1, 2)
+                .await
+                .unwrap()
+        }));
+    }
+    let mut winners = 0;
+    let mut refusals = 0;
+    for handle in handles {
+        match handle.await.unwrap() {
+            crate::code::IncarnationAdmission::Admitted(_) => winners += 1,
+            crate::code::IncarnationAdmission::CapExhausted { running } => {
+                assert!(!running.is_empty());
+                refusals += 1;
+            }
+            other => panic!("unexpected admission: {other:?}"),
+        }
+    }
+    assert_eq!(winners, 2);
+    assert_eq!(refusals, 4);
+}
+
 /// Activation is guarded on the intent state: a row the protocol already
 /// closed refuses, so the caller cancels the sandbox it spawned instead of
 /// running against a closed row.
