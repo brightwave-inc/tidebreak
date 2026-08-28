@@ -1574,6 +1574,7 @@ async fn agent_deps_for_test(
     dir: &std::path::Path,
     computer_use: bool,
     foreground_browser: bool,
+    foreground_browser_semantic_actions: bool,
 ) -> (ToolRegistry, AgentConfig) {
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect(&format!(
@@ -1609,6 +1610,7 @@ async fn agent_deps_for_test(
         ),
         computer_use,
         foreground_browser,
+        foreground_browser_semantic_actions,
     )
 }
 
@@ -1618,7 +1620,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // Disabled (self-host, non-macOS, or any non-desktop profile): none of
     // the contracts exist, so no surface can advertise or checkpoint them.
-    let (tools, _) = agent_deps_for_test(dir.path(), false, false).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, false, false).await;
     for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert!(
             tools.registered_class(name).is_none(),
@@ -1636,7 +1638,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // Enabled: every contract registers as a validated client tool the server
     // parks for the desktop to claim; the server itself never executes one.
-    let (tools, _) = agent_deps_for_test(dir.path(), true, false).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), true, false, false).await;
     for name in tidebreak_core::COMPUTER_USE_TOOLS {
         assert_eq!(
             tools.execution(name),
@@ -1737,7 +1739,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 #[tokio::test]
 async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut tools, config) = agent_deps_for_test(dir.path(), false, false).await;
+    let (mut tools, config) = agent_deps_for_test(dir.path(), false, false, false).await;
     assert!(
         config.system_prompt.is_none(),
         "prompt must not be frozen before boot-time tools are mounted"
@@ -2057,7 +2059,7 @@ async fn promoting_a_document_shares_it_with_the_project_and_keeps_the_original(
 #[tokio::test]
 async fn foreground_browser_tools_absent_by_default() {
     let dir = tempfile::tempdir().unwrap();
-    let (tools, _) = agent_deps_for_test(dir.path(), false, false).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, false, false).await;
     for name in tidebreak_core::BROWSER_TOOLS {
         assert!(
             tools.registered_class(name).is_none(),
@@ -2081,7 +2083,7 @@ async fn foreground_browser_tools_absent_by_default() {
 #[tokio::test]
 async fn foreground_browser_tools_register_exactly_five() {
     let dir = tempfile::tempdir().unwrap();
-    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true, false).await;
 
     // Exactly five observation tools register as client-executed.
     let observation_tools = [
@@ -2115,9 +2117,40 @@ async fn foreground_browser_tools_register_exactly_five() {
 }
 
 #[tokio::test]
+async fn foreground_browser_act_registers_only_with_semantic_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true, true).await;
+
+    assert_eq!(
+        tools.execution(tidebreak_core::BROWSER_ACT_TOOL),
+        Some(tidebreak_core::ToolCallExecution::Client),
+        "browser_act must be client-executed when semantic actions are available"
+    );
+    assert_eq!(
+        tools.registered_class(tidebreak_core::BROWSER_ACT_TOOL),
+        Some(ApprovalClass::Sensitive),
+        "browser_act synthesizes native input and must be Sensitive"
+    );
+    assert!(
+        tools.get(tidebreak_core::BROWSER_ACT_TOOL).is_none(),
+        "browser_act has no server-side executor"
+    );
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_ACT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 1,
+            "ref": "@e1",
+            "action": { "type": "click" }
+        })
+    ));
+}
+
+#[tokio::test]
 async fn foreground_browser_tools_have_correct_approval_classes() {
     let dir = tempfile::tempdir().unwrap();
-    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true, true).await;
 
     // Observation reads are ReadOnly.
     for &name in &[
@@ -2139,12 +2172,17 @@ async fn foreground_browser_tools_have_correct_approval_classes() {
         Some(ApprovalClass::Sensitive),
         "browser_navigate can cross origins and must be Sensitive"
     );
+    assert_eq!(
+        tools.registered_class(tidebreak_core::BROWSER_ACT_TOOL),
+        Some(ApprovalClass::Sensitive),
+        "browser_act synthesizes native input and must be Sensitive"
+    );
 }
 
 #[tokio::test]
 async fn foreground_browser_tools_reject_malformed_arguments() {
     let dir = tempfile::tempdir().unwrap();
-    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true, true).await;
 
     // list has no required fields — an empty object must pass.
     assert!(
@@ -2232,12 +2270,34 @@ async fn foreground_browser_tools_reject_malformed_arguments() {
             "max_width": 0
         })
     ));
+
+    // act requires a live snapshot target and a supported action payload.
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_ACT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "ref": "@e1",
+            "action": { "type": "fill", "value": "hello" }
+        })
+    ));
+    assert!(!tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_ACT_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "ref": "@e1",
+            "action": { "type": "press", "key": "Ctrl+C" }
+        })
+    ));
 }
 
 #[tokio::test]
 async fn foreground_browser_plan_mode_includes_reads_excludes_navigate() {
     let dir = tempfile::tempdir().unwrap();
-    let (tools, _) = agent_deps_for_test(dir.path(), false, true).await;
+    let (tools, _) = agent_deps_for_test(dir.path(), false, true, true).await;
 
     // Plan mode surfaces only ReadOnly tools (specs_for_surface(_, true)).
     let plan_specs = tools
@@ -2265,7 +2325,7 @@ async fn foreground_browser_plan_mode_includes_reads_excludes_navigate() {
         "plan mode must exclude browser_navigate (Sensitive)"
     );
 
-    // The act tool was never registered, so it cannot appear.
+    // Act is registered but Sensitive, so plan mode excludes it.
     assert!(
         !plan_specs.contains(tidebreak_core::BROWSER_ACT_TOOL),
         "plan mode must not contain browser_act"

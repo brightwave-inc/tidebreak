@@ -623,6 +623,8 @@ pub enum BrowserAction {
     Click,
     /// Move focus to the element without scrolling.
     Focus,
+    /// Move the native pointer over the element without clicking.
+    Hover,
     /// Fill a text input, textarea, or contenteditable with the given value.
     Fill { value: String },
     /// Select one `<option>` by its value attribute.
@@ -639,7 +641,7 @@ impl BrowserAction {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         match self {
-            Self::Click | Self::Focus | Self::ScrollIntoView => true,
+            Self::Click | Self::Focus | Self::Hover | Self::ScrollIntoView => true,
             Self::Fill { value } | Self::Select { value } => {
                 !value.is_empty() && value.chars().count() <= MAX_BROWSER_ACTION_VALUE_CHARS
             }
@@ -667,6 +669,7 @@ impl BrowserAction {
         match self {
             Self::Click => "click",
             Self::Focus => "focus",
+            Self::Hover => "hover",
             Self::Fill { .. } => "fill",
             Self::Select { .. } => "select",
             Self::Check { .. } => "check",
@@ -1236,6 +1239,7 @@ mod tests {
             Some("Hi")
         );
         assert_eq!(BrowserAction::Focus.value(), None);
+        assert_eq!(BrowserAction::Hover.kind(), "hover");
         assert!(!BrowserAction::Fill {
             value: String::new(),
         }

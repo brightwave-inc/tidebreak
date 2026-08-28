@@ -4016,6 +4016,7 @@ dependencies = [
  "block2",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
 ]
 
@@ -7288,6 +7289,8 @@ dependencies = [
  "libc",
  "minisign-verify",
  "objc2",
+ "objc2-app-kit",
+ "objc2-core-graphics",
  "objc2-foundation",
  "objc2-web-kit",
  "opus-decoder",

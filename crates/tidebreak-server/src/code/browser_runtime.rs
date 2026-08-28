@@ -15,9 +15,9 @@
 use async_trait::async_trait;
 
 use tidebreak_core::{
-    BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
+    BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
+    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
 };
 
 // ── BrowserRuntimeScope ─────────────────────────────────────────────────────
@@ -83,6 +83,14 @@ pub enum BrowserRuntimeError {
 /// route layer maps errors to stable HTTP responses centrally.
 #[async_trait]
 pub trait BrowserRuntime: Send + Sync {
+    /// Whether this runtime can synthesize trusted native semantic actions.
+    ///
+    /// The server uses this flag only to advertise the action tool. The
+    /// runtime still revalidates every action request at dispatch time.
+    fn supports_semantic_actions(&self) -> bool {
+        false
+    }
+
     /// List browser tabs visible to the session identified by `scope`.
     async fn list(
         &self,
@@ -126,6 +134,17 @@ pub trait BrowserRuntime: Send + Sync {
         scope: &BrowserRuntimeScope,
         args: &BrowserScreenshotArgs,
     ) -> Result<BrowserScreenshotResult, BrowserRuntimeError>;
+
+    /// Perform one semantic action against an exact snapshot target.
+    async fn act(
+        &self,
+        _scope: &BrowserRuntimeScope,
+        _args: &BrowserActArgs,
+    ) -> Result<BrowserActResult, BrowserRuntimeError> {
+        Err(BrowserRuntimeError::Unsupported(
+            "trusted native semantic actions".to_owned(),
+        ))
+    }
 
     /// Synchronously revoke all browser capability for `scope.session`.
     ///

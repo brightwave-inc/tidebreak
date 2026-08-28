@@ -12,9 +12,9 @@ use std::sync::{Mutex, MutexGuard};
 use async_trait::async_trait;
 use tauri::AppHandle;
 use tidebreak_core::{
-    BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
+    BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
+    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
 };
 use tidebreak_server::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use uuid::Uuid;
@@ -40,6 +40,10 @@ impl DesktopBrowserRuntime {
 
 #[async_trait]
 impl BrowserRuntime for DesktopBrowserRuntime {
+    fn supports_semantic_actions(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
     async fn list(
         &self,
         scope: &BrowserRuntimeScope,
@@ -106,6 +110,22 @@ impl BrowserRuntime for DesktopBrowserRuntime {
     ) -> Result<BrowserScreenshotResult, BrowserRuntimeError> {
         let capability_id = self.sessions.capability_for(&self.registry, scope)?;
         crate::browser_semantics::browser_screenshot(
+            &self.app,
+            &self.registry,
+            capability_id,
+            args.clone(),
+        )
+        .await
+        .map_err(|error| map_native_error(Some(&args.browser_id), error))
+    }
+
+    async fn act(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserActArgs,
+    ) -> Result<BrowserActResult, BrowserRuntimeError> {
+        let capability_id = self.sessions.capability_for(&self.registry, scope)?;
+        crate::browser_semantics::browser_native_act(
             &self.app,
             &self.registry,
             capability_id,

@@ -11,9 +11,10 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 
 use tidebreak_core::{
-    db, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitResult, CodeSessionLifecycle, CodeWorkspaceStatus,
+    db, BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
+    BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeSessionLifecycle,
+    CodeWorkspaceStatus,
 };
 
 use crate::code::browser_channel::BrowserSubject;
@@ -95,6 +96,22 @@ pub async fn browser_screenshot(
     runtime
         .as_ref()
         .screenshot(&BrowserRuntimeScope::from(subject), &args)
+        .await
+        .map(Json)
+        .map_err(map_runtime_error)
+}
+
+pub async fn browser_act(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<BrowserActArgs>,
+) -> Result<Json<BrowserActResult>, ServerError> {
+    let subject = authorize(&state, &headers).await?;
+    require_well_formed(args.is_well_formed())?;
+    let runtime = attached_runtime(&state)?;
+    runtime
+        .as_ref()
+        .act(&BrowserRuntimeScope::from(subject), &args)
         .await
         .map(Json)
         .map_err(map_runtime_error)

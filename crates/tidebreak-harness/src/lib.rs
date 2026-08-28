@@ -465,6 +465,11 @@ pub struct BrowserChannelSpec {
     /// sidecar). The server validates absoluteness; the desktop sibling
     /// resolver validates existence and executability.
     pub bridge_command: std::path::PathBuf,
+    /// Whether the native runtime can synthesize trusted semantic actions.
+    ///
+    /// Adapters use this only to advertise an action verb. The browser
+    /// runtime still authorizes every action at dispatch time.
+    pub semantic_actions: bool,
 }
 
 impl BrowserChannelSpec {
@@ -486,7 +491,15 @@ impl BrowserChannelSpec {
         Self {
             capability_file,
             bridge_command,
+            semantic_actions: false,
         }
+    }
+
+    /// Advertise semantic actions when the native runtime supports them.
+    #[must_use]
+    pub fn with_semantic_actions(mut self, semantic_actions: bool) -> Self {
+        self.semantic_actions = semantic_actions;
+        self
     }
 
     /// Return the trusted bridge executable path.

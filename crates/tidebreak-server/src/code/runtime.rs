@@ -5975,7 +5975,7 @@ impl CodeRuntime {
             self.browser_runtime.as_ref(),
             self.browser_bridge_command.as_ref(),
         ) {
-            (Some(_runtime), Some(bridge)) => {
+            (Some(runtime), Some(bridge)) => {
                 let browser_subject = BrowserSubject {
                     owner: session.owner.clone(),
                     workspace: session.workspace_id,
@@ -5983,7 +5983,11 @@ impl CodeRuntime {
                 };
                 Some(
                     self.browser_tokens
-                        .issue(browser_subject, bridge)
+                        .issue_with_semantic_actions(
+                            browser_subject,
+                            bridge,
+                            runtime.supports_semantic_actions(),
+                        )
                         .map_err(ServerError::internal)?,
                 )
             }
