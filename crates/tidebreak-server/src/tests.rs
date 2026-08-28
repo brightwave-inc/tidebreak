@@ -49,6 +49,7 @@ mod code_git;
 #[cfg(unix)]
 mod code_pr_facts;
 mod code_recap;
+mod code_rewrite;
 #[cfg(unix)]
 mod code_reconcile;
 mod code_terminals;

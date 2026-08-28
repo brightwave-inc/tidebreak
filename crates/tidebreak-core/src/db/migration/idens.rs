@@ -927,6 +927,7 @@ pub(crate) enum CodeTurn {
     Diffstat,
     Usage,
     Narrative,
+    Rewrite,
     StartedAt,
     EndedAt,
     Owner,

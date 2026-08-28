@@ -3,14 +3,14 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
+use crate::OwnerId;
 use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
 use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
 use crate::image::ImageRef;
 use crate::model::MAX_MESSAGE_ATTACHMENTS;
-use crate::OwnerId;
 
-use super::super::super::{entities, store_err, DbStore};
+use super::super::super::{DbStore, entities, store_err};
 use super::super::blob as blob_ops;
 
 /// The fields analytics needs from one turn.
@@ -65,6 +65,7 @@ where
             None => None,
         }),
         narrative: Set(turn.narrative.clone()),
+        rewrite: Set(turn.rewrite.clone()),
         started_at: Set(turn.started_at),
         ended_at: Set(turn.ended_at),
     }
@@ -332,12 +333,13 @@ pub async fn next_turn_ordinal(
 
 /// Persist mutable turn fields. `id`, `session_id`, `ordinal`, and `started_at` stay as stored.
 ///
-/// `narrative` is deliberately not among them. It is derived asynchronously
-/// after a turn ends and can land at any point, while the callers here hold a
-/// [`CodeTurn`] read before that — `checkpoint::after_turn_ended` takes its
-/// snapshot before the turn is even terminal. Writing the whole row from a
-/// stale snapshot would blank a recap that had already been stored, so the
-/// column has exactly one writer: [`set_turn_narrative`].
+/// `narrative` and `rewrite` are deliberately not among them. Both are derived
+/// asynchronously after a turn ends and can land at any point, while the
+/// callers here hold a [`CodeTurn`] read before that — `checkpoint::after_turn_ended`
+/// takes its snapshot before the turn is even terminal. Writing the whole row
+/// from a stale snapshot would blank a recap or rewrite that had already been
+/// stored, so each column has exactly one writer: [`set_turn_narrative`] and
+/// [`set_turn_rewrite`].
 pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<bool> {
     let result = entities::code_turn::Entity::update_many()
         .col_expr(
@@ -406,6 +408,30 @@ pub async fn set_turn_narrative(
     Ok(result.rows_affected == 1)
 }
 
+/// Store one turn's derived rewrite, touching no other column.
+///
+/// Targeted for the reason [`save_turn`] documents: this lands while other
+/// writers hold a `CodeTurn` read before the rewrite existed, so it must not
+/// be carried on a whole-row write in either direction.
+pub async fn set_turn_rewrite(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeTurnId,
+    rewrite: &str,
+) -> Result<bool> {
+    let result = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Rewrite,
+            sea_orm::sea_query::Expr::value(Some(rewrite.to_owned())),
+        )
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 async fn turn_from_stored(
     store: &DbStore,
     owner: &OwnerId,
@@ -440,6 +466,7 @@ pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn>
         diffstat,
         usage,
         narrative: row.narrative,
+        rewrite: row.rewrite,
         started_at: row.started_at,
         ended_at: row.ended_at,
     })

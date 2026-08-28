@@ -12,9 +12,15 @@ import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
 import { hasLocalHostAuthority, pickCodeDirectory } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { hostMachineLabel } from "@/remoteMachine";
-import { SettingsError, SettingsPanel } from "./primitives";
+import {
+  SettingsError,
+  SettingsField,
+  SettingsPanel,
+  SettingsSection,
+} from "./primitives";
 import { ExternalEditorSection } from "./ExternalEditorSection";
 import { WorktreeRootSection } from "./WorktreeRootSection";
+import { Switch } from "@/components/ui/switch";
 
 /**
  * Settings: the coding-harness doctor, and where workspaces land on disk.
@@ -41,6 +47,8 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
   );
   const [rootDraft, setRootDraft] = useState("");
   const [savingRoot, setSavingRoot] = useState(false);
+  const [rewriteClosing, setRewriteClosing] = useState(false);
+  const [savingRewrite, setSavingRewrite] = useState(false);
 
   async function load(refresh: boolean) {
     if (refresh) setRefreshing(true);
@@ -76,6 +84,21 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
         if (!cancelled) setError(String(err));
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .getSettings()
+      .then((settings) => {
+        if (!cancelled) setRewriteClosing(settings.rewrite_closing_messages);
+      })
+      .catch(() => {
+        // The toggle stays off until a later load succeeds.
+      });
     return () => {
       cancelled = true;
     };
@@ -173,6 +196,35 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
         />
       )}
       <ExternalEditorSection canDetect={hasLocalHostAuthority()} />
+      <SettingsSection
+        title="Transcript"
+        description="A completed turn can rewrite its closing message into lucid prose. The original stays; you can switch between them."
+      >
+        <SettingsField
+          label="Rewrite closing messages"
+          hint="Uses the utility model after each completed turn. Off by default."
+        >
+          <Switch
+            checked={rewriteClosing}
+            disabled={savingRewrite}
+            onCheckedChange={(enabled) => {
+              setRewriteClosing(enabled);
+              setSavingRewrite(true);
+              void client
+                .putSettings({ rewrite_closing_messages: enabled })
+                .then((settings) => {
+                  setRewriteClosing(settings.rewrite_closing_messages);
+                })
+                .catch((caught: unknown) => {
+                  setRewriteClosing(!enabled);
+                  toast.error(friendlyErrorMessage(caught));
+                })
+                .finally(() => setSavingRewrite(false));
+            }}
+            aria-label="Rewrite closing messages"
+          />
+        </SettingsField>
+      </SettingsSection>
     </SettingsPanel>
   );
 }

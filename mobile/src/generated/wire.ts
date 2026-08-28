@@ -1475,6 +1475,11 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
 export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
 
 /**
+ * One repository on the reclaim surface.
+ */
+export type CodeRepoStorageSnapshot = { id: RepoId, display_name: string, clone_bytes: number, clone_reclaimable: boolean, workspaces: Array<CodeWorkspaceStorageSnapshot>, };
+
+/**
  * What a running interactive session is actually occupied with. This is
  * intentionally coarser than a transcript tool name: list surfaces need to
  * distinguish agent generation, a shell, a passive monitor, and delegated
@@ -1544,6 +1549,16 @@ reasoning_effort?: ReasoningEffort,
  * Whether this session runs its turns in the engine's fast mode.
  */
 fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+
+/**
+ * The next reclaim tier a workspace can take.
+ */
+export type CodeStorageAction = "archive" | "release";
+
+/**
+ * Reclaimable disk for every repo and workspace the principal owns.
+ */
+export type CodeStorageSnapshot = { repos: Array<CodeRepoStorageSnapshot>, };
 
 /**
  * Status of a harness subagent, derived from its spanning `Task` call
@@ -1630,9 +1645,18 @@ export type CodeTriggerSnapshot = { id: CodeTriggerId, repo_id: RepoId, conditio
 export type CodeTurnId = string;
 
 /**
+ * Where one closing-message rewrite stands.
+ */
+export type CodeTurnRewriteState = "rewriting" | "rewritten" | "failed";
+
+/**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, 
+/**
+ * Lucid rewrite of the closing message. The journal keeps the original.
+ */
+rewrite?: string, };
 
 /**
  * Status of one user→engine turn.
@@ -1680,7 +1704,7 @@ subagents?: Array<CodeSubagentSummary>,
  * Where this session stands, in a sentence, derived from the newest
  * turn that carries one.
  */
-recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" };
+recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
 
 /**
  * Token accounting for one turn.
@@ -1777,6 +1801,16 @@ export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffst
 export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, };
 
 /**
+ * One repository-wide conversation-history match.
+ */
+export type CodeWorkspaceHistorySearchMatch = { workspace_id: WorkspaceId, workspace_title: string, session_id: CodeSessionId, turn_id?: CodeTurnId, source: CodeWorkspaceHistorySearchSource, preview: string, created_at: string, };
+
+/**
+ * Stored field that produced a workspace conversation-history match.
+ */
+export type CodeWorkspaceHistorySearchSource = "turn_user_input" | "turn_narrative" | "event";
+
+/**
  * PR + checks digest plus the local git facts the PR card needs.
  */
 export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, 
@@ -1819,7 +1853,7 @@ export type CodeWorkspacePullRequests = { items: Array<CodeWorkspacePullRequestF
 /**
  * Bounded content-search response for `GET /code/workspaces/{id}/search`.
  */
-export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, truncated: boolean, };
+export type CodeWorkspaceSearch = { matches: Array<CodeWorkspaceSearchMatch>, history_matches?: Array<CodeWorkspaceHistorySearchMatch>, truncated: boolean, };
 
 /**
  * One matching line from a workspace content search.
@@ -1844,6 +1878,11 @@ bundle_bytes?: number, };
  * Status of a persisted workspace.
  */
 export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archiving" | "archived" | "released";
+
+/**
+ * One workspace's current footprint and the next reclaim step.
+ */
+export type CodeWorkspaceStorageSnapshot = { id: WorkspaceId, title: string, status: CodeWorkspaceStatus, on_disk_bytes: number, next_action?: CodeStorageAction, next_reclaim_bytes: number, };
 
 /**
  * Bounded path listing for `GET /code/workspaces/{id}/tree`.
@@ -2388,6 +2427,18 @@ detail: string, } | { "type": "repeated_turn_failures",
 count: number, 
 /**
  * Bounded detail from the last failure, as the engine reported it.
+ */
+detail: string, } | { "type": "incarnation_unresolved", 
+/**
+ * Bounded human-readable detail.
+ */
+detail: string, } | { "type": "sandbox_lost", 
+/**
+ * Bounded detail, as the environment classified it.
+ */
+detail: string, } | { "type": "terminal_flush_missing", 
+/**
+ * Bounded human-readable detail.
  */
 detail: string, };
 
@@ -4117,7 +4168,12 @@ model_visibility_overrides: { [key in string]: ModelVisibility },
  * enabled. Read at boot; turning it off unregisters the tools on the next
  * launch.
  */
-computer_use_enabled: boolean, };
+computer_use_enabled: boolean, 
+/**
+ * Whether completed code turns rewrite their closing message into lucid
+ * prose. Default off.
+ */
+rewrite_closing_messages: boolean, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.

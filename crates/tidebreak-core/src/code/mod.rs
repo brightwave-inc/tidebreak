@@ -13,13 +13,13 @@ mod event;
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
     ApprovalDecisionKind, BoundedError, CheckpointHint, CodeEvent, CodeUsage, Diffstat,
-    FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    FileChangeKind, HarnessNoticeLevel, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_TOOL_SUMMARY_CHARS, SequencedCodeEvent, ToolDetail, ToolOutcome,
 };
 
+use crate::PermissionMode;
 use crate::attention::{Attention, FenceReason};
 use crate::image::ImageRef;
-use crate::PermissionMode;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -1200,6 +1200,13 @@ pub struct CodeTurn {
     /// the column alone, because its callers hold a snapshot taken before this
     /// existed.
     pub narrative: Option<String>,
+    /// Lucid rewrite of the closing message. The journal keeps the original.
+    ///
+    /// Derived after the turn ends and written only by
+    /// [`crate::db::code::set_turn_rewrite`]. `save_turn` deliberately leaves
+    /// the column alone, the same single-writer rule as `narrative`.
+    #[serde(default)]
+    pub rewrite: Option<String>,
     /// Start time.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// End time, when terminal.

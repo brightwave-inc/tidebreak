@@ -58,6 +58,9 @@ export type CodeTranscriptItem =
       parentCallId: string | null;
       text: string;
       streaming: boolean;
+      /** Lucid rewrite of the closing message. The journal text stays in `text`. */
+      rewrite?: string;
+      rewriteState?: "rewriting" | "rewritten" | "failed";
     }
   | {
       kind: "reasoning";
@@ -324,7 +327,7 @@ export function applyCodeTurnSnapshot(
   if (turn.status === "running") return next;
   const durableBoundaryTurnIds = new Set(next.durableBoundaryTurnIds);
   durableBoundaryTurnIds.add(turn.id);
-  return {
+  const withBoundary = {
     ...next,
     durableBoundaryTurnIds,
     items: upsertTurnBoundary(
@@ -339,6 +342,14 @@ export function applyCodeTurnSnapshot(
       },
       next.turnOrdinals,
     ),
+  };
+  if (!turn.rewrite) return withBoundary;
+  return {
+    ...withBoundary,
+    items: applyTurnRewrite(withBoundary.items, turn.id, {
+      rewrite: turn.rewrite,
+      rewriteState: "rewritten",
+    }),
   };
 }
 
@@ -1643,4 +1654,41 @@ function mergeToolDetail(
   return toolDetailSpecificity(correction) >= toolDetailSpecificity(current)
     ? correction
     : current;
+}
+
+/**
+ * Stamp a rewrite onto the last parent assistant row of a turn.
+ *
+ * The journal text stays on `text`. Live notices and the turn snapshot both
+ * land here so the transcript can toggle without a second source of truth.
+ */
+export function applyTurnRewrite(
+  items: CodeTranscriptItem[],
+  turnId: string,
+  rewrite: {
+    rewrite?: string;
+    rewriteState: "rewriting" | "rewritten" | "failed";
+  },
+): CodeTranscriptItem[] {
+  let last = -1;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (
+      item?.kind === "assistant" &&
+      item.turnId === turnId &&
+      item.parentCallId === null
+    ) {
+      last = index;
+    }
+  }
+  if (last < 0) return items;
+  const item = items[last];
+  if (item?.kind !== "assistant") return items;
+  const next = items.slice();
+  next[last] = {
+    ...item,
+    rewrite: rewrite.rewrite,
+    rewriteState: rewrite.rewriteState,
+  };
+  return next;
 }

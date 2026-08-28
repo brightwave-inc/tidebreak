@@ -602,18 +602,11 @@ const TranscriptItem = memo(function TranscriptItem({
       return <FileActivityRow files={item.files} onReveal={onReveal} />;
     case "assistant":
       return (
-        <article className="message message-assistant" aria-label="Assistant">
-          <AssistantMessageBody
-            text={item.text}
-            streaming={item.streaming && animateStreaming}
-          />
-          <MessageFooter
-            role="assistant"
-            text={item.text}
-            settled={!item.streaming}
-            sequenceEnd={ownsCopyAction}
-          />
-        </article>
+        <AssistantRewriteMessage
+          item={item}
+          animateStreaming={animateStreaming}
+          ownsCopyAction={ownsCopyAction}
+        />
       );
     case "reasoning":
       return (
@@ -687,6 +680,54 @@ const TranscriptItem = memo(function TranscriptItem({
       );
   }
 });
+
+function AssistantRewriteMessage({
+  item,
+  animateStreaming,
+  ownsCopyAction,
+}: {
+  item: Extract<CodeTranscriptItem, { kind: "assistant" }>;
+  animateStreaming: boolean;
+  ownsCopyAction?: boolean;
+}) {
+  const [showOriginal, setShowOriginal] = useState(false);
+  const rewritten = item.rewriteState === "rewritten" && Boolean(item.rewrite);
+  const text =
+    rewritten && !showOriginal && item.rewrite ? item.rewrite : item.text;
+  return (
+    <article className="message message-assistant" aria-label="Assistant">
+      {item.rewriteState === "rewriting" && (
+        <p className="text-muted-foreground mb-2 text-xs" role="status">
+          Rewriting…
+        </p>
+      )}
+      {item.rewriteState === "failed" && (
+        <p className="text-muted-foreground mb-2 text-xs" role="status">
+          Couldn't rewrite this turn. The original stands.
+        </p>
+      )}
+      <AssistantMessageBody
+        text={text}
+        streaming={item.streaming && animateStreaming}
+      />
+      {rewritten && (
+        <button
+          type="button"
+          className="text-muted-foreground mt-2 text-xs underline-offset-2 hover:underline"
+          onClick={() => setShowOriginal((current) => !current)}
+        >
+          {showOriginal ? "Show rewrite" : "Show original"}
+        </button>
+      )}
+      <MessageFooter
+        role="assistant"
+        text={text}
+        settled={!item.streaming}
+        sequenceEnd={ownsCopyAction}
+      />
+    </article>
+  );
+}
 
 /**
  * A run of tool calls behind one line.

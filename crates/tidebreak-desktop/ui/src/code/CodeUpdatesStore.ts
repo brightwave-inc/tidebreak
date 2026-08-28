@@ -98,6 +98,17 @@ export type CodeUpdatesState = {
    * instead of running their own poll timers.
    */
   deliveryRevision: number;
+  /** Live rewrite notices, keyed session → turn. Not restated on connect. */
+  turnRewrites: Record<
+    string,
+    Record<
+      string,
+      {
+        state: "rewriting" | "rewritten" | "failed";
+        rewrite?: string;
+      }
+    >
+  >;
 };
 
 export type CodeUpdatesAction =
@@ -106,6 +117,13 @@ export type CodeUpdatesAction =
   | { type: "clone_progress"; job: CodeCloneJobSnapshot }
   | { type: "harness_install"; install: CodeHarnessInstallSnapshot }
   | { type: "delivery" }
+  | {
+      type: "turn_rewrite";
+      session: string;
+      turnId: string;
+      state: "rewriting" | "rewritten" | "failed";
+      rewrite?: string;
+    }
   | { type: "view"; workspaceId: string | null }
   | { type: "reset" };
 
@@ -120,6 +138,7 @@ const EMPTY: CodeUpdatesState = {
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
+  turnRewrites: {},
 };
 
 export function reduceCodeUpdates(
@@ -187,6 +206,22 @@ export function reduceCodeUpdates(
       };
     case "delivery":
       return { ...state, deliveryRevision: state.deliveryRevision + 1 };
+    case "turn_rewrite": {
+      const sessionRewrites = {
+        ...(state.turnRewrites[action.session] ?? {}),
+        [action.turnId]: {
+          state: action.state,
+          ...(action.rewrite !== undefined ? { rewrite: action.rewrite } : {}),
+        },
+      };
+      return {
+        ...state,
+        turnRewrites: {
+          ...state.turnRewrites,
+          [action.session]: sessionRewrites,
+        },
+      };
+    }
     case "view":
       return { ...state, viewedWorkspaceId: action.workspaceId };
     case "reset":
@@ -418,6 +453,15 @@ export function noticeToAction(
   }
   if (notice.type === "delivery") {
     return { type: "delivery" };
+  }
+  if (notice.type === "turn_rewrite") {
+    return {
+      type: "turn_rewrite",
+      session: notice.session,
+      turnId: notice.turn_id,
+      state: notice.state,
+      ...(notice.rewrite !== undefined ? { rewrite: notice.rewrite } : {}),
+    };
   }
   return null;
 }

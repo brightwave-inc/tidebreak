@@ -256,6 +256,9 @@ pub(crate) struct LiveSink {
     /// Derives the turn's recap once it completes. `None` in headless
     /// deployments and tests that install none, which simply have no recaps.
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
+    /// Derives a lucid rewrite of the closing message once the turn
+    /// completes. `None` in headless deployments and tests that install none.
+    rewrite: Option<Arc<dyn super::rewrite::TurnRewrite>>,
     /// The runtime's hot pull-request tier (decision 66). A turn whose fact
     /// detector confirms a push or a create marks this workspace, so the
     /// next hot pass reads the head the turn just moved (issue 2799).
@@ -676,6 +679,11 @@ impl HarnessEventSink for LiveSink {
         if let (true, Some(turn_id), Some(recap)) = (journaled, completed_turn, self.recap.as_ref())
         {
             recap.spawn(self.owner.clone(), self.session_id, turn_id);
+        }
+        if let (true, Some(turn_id), Some(rewrite)) =
+            (journaled, completed_turn, self.rewrite.as_ref())
+        {
+            rewrite.spawn(self.owner.clone(), self.session_id, turn_id);
         }
     }
 }
@@ -1491,6 +1499,7 @@ async fn drive_turn_inner(
         diffstat: None,
         usage: None,
         narrative: None,
+        rewrite: None,
         started_at: Utc::now(),
         ended_at: None,
     };
@@ -2220,6 +2229,7 @@ pub(crate) fn sink_for(
     subagents: Vec<CodeSubagentSummary>,
     gh_search_path: Option<String>,
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
+    rewrite: Option<Arc<dyn super::rewrite::TurnRewrite>>,
     hot_prs: super::pr_refresh::HotPullRequests,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
@@ -2236,6 +2246,7 @@ pub(crate) fn sink_for(
         flushed_unrecognized: AtomicU64::new(0),
         subagents: std::sync::Mutex::new(subagents),
         recap,
+        rewrite,
         hot_prs,
     })
 }
@@ -2885,6 +2896,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         (directory, store, sink, session_id)
@@ -3162,6 +3174,7 @@ mod tests {
             false,
             None,
             attached.subagents,
+            None,
             None,
             None,
             crate::code::pr_refresh::HotPullRequests::default(),
@@ -3623,6 +3636,7 @@ mod tests {
             true,
             None,
             Vec::new(),
+            None,
             None,
             None,
             crate::code::pr_refresh::HotPullRequests::default(),

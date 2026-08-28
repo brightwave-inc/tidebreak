@@ -420,11 +420,11 @@ pub(crate) fn probe_recorded_process(pid: i64, expected_identity: Option<&str>) 
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tidebreak_core::db::code::{
-        get_approval, get_session, get_turn, insert_approval, insert_repo, insert_session,
-        insert_turn, insert_workspace, list_events, set_session_subagents, MAX_REPLAY_EVENTS,
+        MAX_REPLAY_EVENTS, get_approval, get_session, get_turn, insert_approval, insert_repo,
+        insert_session, insert_turn, insert_workspace, list_events, set_session_subagents,
     };
     use tidebreak_core::{
         ApprovalDecisionKind, Attention, CodeApproval, CodeApprovalId, CodeApprovalKind,
@@ -565,6 +565,7 @@ mod tests {
                 diffstat: None,
                 usage: None,
                 narrative: None,
+                rewrite: None,
                 started_at: now(),
                 ended_at: None,
             },
@@ -1068,6 +1069,7 @@ mod tests {
             false,
             None,
             session.subagents.clone(),
+            None,
             None,
             None,
             crate::code::pr_refresh::HotPullRequests::default(),

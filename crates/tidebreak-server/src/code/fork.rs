@@ -1208,6 +1208,7 @@ mod tests {
             diffstat: None,
             usage: None,
             narrative: None,
+            rewrite: None,
             started_at: chrono::Utc::now(),
             ended_at: None,
         }

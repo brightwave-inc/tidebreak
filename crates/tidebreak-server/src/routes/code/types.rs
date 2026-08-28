@@ -217,6 +217,10 @@ pub struct CodeTurnSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Lucid rewrite of the closing message. The journal keeps the original.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rewrite: Option<String>,
 }
 
 impl From<CodeTurn> for CodeTurnSnapshot {
@@ -235,6 +239,7 @@ impl From<CodeTurn> for CodeTurnSnapshot {
             diffstat: turn.diffstat,
             started_at: turn.started_at,
             ended_at: turn.ended_at,
+            rewrite: turn.rewrite,
         }
     }
 }
@@ -2162,6 +2167,25 @@ pub enum CodeUpdateNotice {
     /// surface re-reads its query, which the server answers from its own
     /// store and caches. Not restated on connect.
     Delivery,
+    /// Lucid rewrite of a completed turn's closing message. Not restated on
+    /// connect: the turn snapshot carries the stored rewrite.
+    TurnRewrite {
+        session: tidebreak_core::CodeSessionId,
+        turn_id: tidebreak_core::CodeTurnId,
+        state: CodeTurnRewriteState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        rewrite: Option<String>,
+    },
+}
+
+/// Where one closing-message rewrite stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeTurnRewriteState {
+    Rewriting,
+    Rewritten,
+    Failed,
 }
 
 impl CodeUpdateNotice {
@@ -2205,6 +2229,19 @@ impl CodeUpdateNotice {
             watch_cycles: wire.watch_cycles,
             subagents: wire.subagents,
             recap: wire.recap,
+        }
+    }
+
+    pub(crate) fn turn_rewrite(notice: crate::code::bus::TurnRewriteNotice) -> Self {
+        Self::TurnRewrite {
+            session: notice.session,
+            turn_id: notice.turn_id,
+            state: match notice.state {
+                crate::code::bus::TurnRewriteState::Rewriting => CodeTurnRewriteState::Rewriting,
+                crate::code::bus::TurnRewriteState::Rewritten => CodeTurnRewriteState::Rewritten,
+                crate::code::bus::TurnRewriteState::Failed => CodeTurnRewriteState::Failed,
+            },
+            rewrite: notice.rewrite,
         }
     }
 }

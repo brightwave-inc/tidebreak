@@ -19,7 +19,7 @@ use crate::db::code::{
     promote_queued_turn, queue_paused, queued_turn_head, recover_interrupted_session,
     replace_session_attention, replace_session_execution_settings, save_session, save_turn,
     save_workspace, search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
-    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative,
+    set_session_harness_resume_ref, set_session_subagents, set_turn_narrative, set_turn_rewrite,
     set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
     CodeJournalError, CodeSessionExecutionSettings, CodeTranscriptSearchSource, MAX_REPLAY_EVENTS,
 };
@@ -233,6 +233,7 @@ async fn seed_owner(
             diffstat: None,
             usage: None,
             narrative: None,
+            rewrite: None,
             started_at: now(),
             ended_at: None,
         },
@@ -1700,6 +1701,7 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
             diffstat: None,
             usage: None,
             narrative: None,
+            rewrite: None,
             started_at: now(),
             ended_at: Some(now()),
         },
@@ -4040,6 +4042,40 @@ async fn saving_a_turn_does_not_blank_its_narrative() {
     );
 }
 
+/// The rewrite column has the same single-writer rule as `narrative`.
+#[tokio::test]
+async fn saving_a_turn_does_not_blank_its_rewrite() {
+    let (_dir, store, _session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+
+    set_turn_rewrite(
+        &store,
+        &owner,
+        turn_id,
+        "The retry test passes. Fold the same backoff into refresh.",
+    )
+    .await
+    .unwrap();
+
+    let mut stale = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    stale.rewrite = None;
+    stale.checkpoint_ref = Some("refs/tidebreak/checkpoints/ws/1".into());
+    assert!(save_turn(&store, &owner, &stale).await.unwrap());
+
+    let stored = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.rewrite.as_deref(),
+        Some("The retry test passes. Fold the same backoff into refresh."),
+        "the checkpoint save must not carry a stale rewrite over the stored one"
+    );
+    assert_eq!(
+        stored.checkpoint_ref.as_deref(),
+        Some("refs/tidebreak/checkpoints/ws/1"),
+        "and it still writes what it owns"
+    );
+}
+
+
 fn queued_message(session_id: CodeSessionId, message: &str) -> CodeQueuedTurn {
     CodeQueuedTurn {
         id: CodeTurnId::new(),
@@ -4067,6 +4103,7 @@ fn turn_for(row: &CodeQueuedTurn, ordinal: i64) -> CodeTurn {
         diffstat: None,
         usage: None,
         narrative: None,
+        rewrite: None,
         started_at: now(),
         ended_at: None,
     }

@@ -813,6 +813,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             diffstat: None,
             usage: None,
             narrative: None,
+            rewrite: None,
             started_at: now,
             ended_at: Some(now),
         },
