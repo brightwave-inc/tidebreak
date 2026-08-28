@@ -17,10 +17,10 @@ use std::sync::Arc;
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    activate_incarnation, create_incarnation_intent, forget_session_wip_ref, insert_turn,
-    latest_incarnation, latest_pushed_wip_ref, latest_turn,
-    mark_incarnation_terminal_events_journaled, save_turn, stale_incarnation_intents_all_owners,
-    stop_incarnation,
+    activate_incarnation, create_incarnation_intent, forget_session_wip_ref, get_workspace,
+    insert_turn, latest_incarnation, latest_pushed_wip_ref, latest_turn,
+    mark_incarnation_terminal_events_journaled, record_incarnation_spend, save_turn,
+    session_spend_microusd, stale_incarnation_intents_all_owners, stop_incarnation,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionIncarnation,
@@ -49,6 +49,9 @@ pub(crate) struct RemoteSpawnSettings {
     pub incarnation_cap: usize,
     /// Per-spawn spend ceiling in micro-USD, when one is set.
     pub spend_ceiling_microusd: Option<i64>,
+    /// Cumulative per-session spend ceiling in micro-USD, when one is set.
+    /// Per-spawn ceilings multiply by reincarnation; this one does not.
+    pub session_spend_ceiling_microusd: Option<i64>,
 }
 
 /// What one submitted turn became.
@@ -83,6 +86,14 @@ pub(crate) enum RemoteTurnOutcome {
     /// The environment rejected the owner's credential. Nothing was sent or
     /// provisioned; sign in and retry.
     SignInRequired,
+    /// The session's cumulative spend reached the owner's ceiling. Nothing
+    /// was sent or provisioned.
+    SpendExhausted {
+        /// Micro-USD the session's incarnations have consumed.
+        spent_microusd: i64,
+        /// The configured ceiling in micro-USD.
+        ceiling_microusd: i64,
+    },
 }
 
 /// The driver one remote session's lifecycle calls go through: the store,
@@ -120,6 +131,72 @@ async fn sign_in_needed(
     )
     .await?;
     Ok(())
+}
+
+/// Journal a machine-side refusal and ask for the owner's attention.
+///
+/// A refused turn produced no sandbox event, so nothing else would put the
+/// reason in the transcript.
+async fn refusal_notice(
+    db: &Arc<DbStore>,
+    bus: &CodeEventBus,
+    session: &CodeSession,
+    message: String,
+    attention: &str,
+) -> Result<(), tidebreak_core::AgentError> {
+    let _ = super::super::session_worker::journal_event(
+        db,
+        bus,
+        &session.owner,
+        session.id,
+        session.spawn_epoch,
+        tidebreak_core::CodeEvent::HarnessNotice {
+            level: tidebreak_core::HarnessNoticeLevel::Warning,
+            message,
+        },
+    )
+    .await;
+    let _ = super::super::attention::apply_attention(
+        db,
+        bus,
+        &session.owner,
+        session.id,
+        Attention::needs_you(attention, AttentionSource::Lifecycle),
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Human-recognizable names for the sessions holding cap slots: their
+/// workspace titles. The owner knows workspaces, not session ids; a title
+/// that is empty falls back to the branch, and a row that vanished mid-read
+/// falls back to the id rather than failing the refusal.
+async fn occupying_names(
+    db: &Arc<DbStore>,
+    owner: &OwnerId,
+    running: &[CodeSessionId],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for id in running {
+        let name = match tidebreak_core::db::code::get_session(db, owner, *id).await {
+            Ok(Some(session)) => match get_workspace(db, owner, session.workspace_id).await {
+                Ok(Some(workspace)) if !workspace.title.is_empty() => workspace.title,
+                Ok(Some(workspace)) => workspace.branch_name,
+                _ => id.to_string(),
+            },
+            _ => id.to_string(),
+        };
+        names.push(name);
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Micro-USD rendered as dollars for a human-readable reason.
+fn dollars(microusd: i64) -> String {
+    format!("${:.2}", microusd as f64 / 1_000_000.0)
 }
 
 /// Whether a refusal's own description names this ref.
@@ -235,6 +312,54 @@ impl RemoteDriver<'_> {
         }
         let ordinal = last.map_or(1, |turn| turn.ordinal + 1);
 
+        // The ledger gates every turn, delivery and spawn alike: a mention is
+        // a purchase, and per-spawn ceilings multiply by reincarnation.
+        if let Some(ceiling) = settings.session_spend_ceiling_microusd {
+            let spent = session_spend_microusd(db, &owner, session.id).await?;
+            if spent >= ceiling {
+                // An exhausted session cannot take another turn, so a live
+                // sandbox would hold a cap slot doing nothing. Ask the
+                // environment to stop it — best effort, and the pump drains
+                // the goodbye and closes the row the ordinary way.
+                let mut releasing = false;
+                if let Some(row) = latest_incarnation(db, &owner, session.id).await? {
+                    if row.state == IncarnationState::Active {
+                        if let Some(sandbox_id) = row.sandbox_id.as_deref() {
+                            releasing = true;
+                            if let Err(error) = provisioner.cancel(&owner, sandbox_id).await {
+                                warn!(
+                                    session = %session.id,
+                                    %error,
+                                    "could not cancel an exhausted session's sandbox; its ceilings bound it"
+                                );
+                            }
+                        }
+                    }
+                }
+                let release = if releasing {
+                    " Its sandbox is being stopped so the slot frees for other sessions."
+                } else {
+                    ""
+                };
+                refusal_notice(
+                    db,
+                    bus,
+                    session,
+                    format!(
+                        "The turn was refused: this session has spent {} of its {} ceiling and takes no more turns.{release}",
+                        dollars(spent),
+                        dollars(ceiling)
+                    ),
+                    "the session reached its spend ceiling",
+                )
+                .await?;
+                return Ok(RemoteTurnOutcome::SpendExhausted {
+                    spent_microusd: spent,
+                    ceiling_microusd: ceiling,
+                });
+            }
+        }
+
         let current = latest_incarnation(db, &owner, session.id).await?;
         match current.as_ref().map(|row| row.state) {
             Some(IncarnationState::Intent) => return Ok(RemoteTurnOutcome::ReincarnationInFlight),
@@ -311,6 +436,18 @@ impl RemoteDriver<'_> {
         let intent = match admission {
             IncarnationAdmission::Admitted(row) => *row,
             IncarnationAdmission::CapExhausted { running } => {
+                let names = occupying_names(db, &owner, &running).await.join(", ");
+                refusal_notice(
+                    db,
+                    bus,
+                    session,
+                    format!(
+                        "The turn was refused: all {} sandbox slots are in use by {}. Stop one of those sessions to continue.",
+                        settings.incarnation_cap, names
+                    ),
+                    "the sandbox cap refused this turn",
+                )
+                .await?;
                 return Ok(RemoteTurnOutcome::CapExhausted { running });
             }
             IncarnationAdmission::AlreadyLive { .. } => {
@@ -498,6 +635,15 @@ impl RemoteDriver<'_> {
                 return Ok(report);
             }
         };
+
+        // Feed the spend ledger from the environment's own meter. Best
+        // effort: a status fault costs one reading, and the terminal pump
+        // records the final figure.
+        if let Ok(status) = provisioner.status(&owner, &sandbox_id).await {
+            if let Some(spend) = status.spend_microusd {
+                record_incarnation_spend(db, &owner, row.id, spend).await?;
+            }
+        }
 
         let running_turn = latest_turn(db, &owner, session.id)
             .await?
@@ -723,6 +869,8 @@ mod tests {
         send_results: Mutex<VecDeque<Result<MessageReceipt, RemoteSandboxError>>>,
         event_reads: Mutex<VecDeque<SandboxEvents>>,
         cancels: Mutex<Vec<String>>,
+        /// Reported as `spend_microusd` by every status read.
+        spend: Mutex<Option<i64>>,
     }
 
     fn lease(sandbox_id: &str) -> SandboxLease {
@@ -791,7 +939,7 @@ mod tests {
                 termination_reason: None,
                 latest_event_seq: 0,
                 pending_messages: 0,
-                spend_microusd: None,
+                spend_microusd: *self.spend.lock().unwrap(),
                 spend_ceiling_microusd: None,
                 possibly_stalled: false,
                 repository_url: None,
@@ -847,6 +995,7 @@ mod tests {
             profile: "tidebreak-remote".to_owned(),
             incarnation_cap: 2,
             spend_ceiling_microusd: Some(5_000_000),
+            session_spend_ceiling_microusd: None,
         }
     }
 
@@ -1267,6 +1416,136 @@ mod tests {
         };
         assert_eq!(running, vec![session_a.id]);
         assert!(fake.spawns.lock().unwrap().is_empty());
+        // The refusal is a session event with a human-readable reason
+        // naming what runs, and it asks for the owner's attention.
+        let events =
+            tidebreak_core::db::code::list_events(&db, &session_b.owner, session_b.id, 0, 50)
+                .await
+                .unwrap()
+                .events;
+        let notice = events
+            .iter()
+            .find_map(|row| match &row.event {
+                tidebreak_core::CodeEvent::HarnessNotice { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("expected a refusal notice");
+        assert!(notice.contains("sandbox slots"), "{notice}");
+        // The occupier is named by its workspace, which the owner
+        // recognizes, not by a session id, which they do not.
+        assert!(notice.contains("remote"), "{notice}");
+        assert!(!notice.contains(&session_a.id.to_string()), "{notice}");
+        assert!(notice.contains("Stop one of those sessions"), "{notice}");
+        let live = get_session(&db, &session_b.owner, session_b.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            live.attention.state,
+            AttentionState::NeedsYou { .. }
+        ));
+    }
+
+    /// The spend ledger gates the turn before anything is sent or spawned,
+    /// with a reason in dollars.
+    #[tokio::test]
+    async fn the_spend_ceiling_refuses_the_turn_before_any_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let incarnation = super::super::fixtures::seeded_incarnation(&db, &session).await;
+        record_incarnation_spend(&db, &session.owner, incarnation, 2_500_000)
+            .await
+            .unwrap();
+        let fake = FakeProvisioner::default();
+        let settings = RemoteSpawnSettings {
+            session_spend_ceiling_microusd: Some(2_000_000),
+            ..settings()
+        };
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "one more")
+            .await
+            .unwrap();
+        let RemoteTurnOutcome::SpendExhausted {
+            spent_microusd,
+            ceiling_microusd,
+        } = outcome
+        else {
+            panic!("expected the ceiling to refuse");
+        };
+        assert_eq!(spent_microusd, 2_500_000);
+        assert_eq!(ceiling_microusd, 2_000_000);
+        assert!(fake.spawns.lock().unwrap().is_empty());
+        assert!(fake.sends.lock().unwrap().is_empty());
+        let events = tidebreak_core::db::code::list_events(&db, &session.owner, session.id, 0, 50)
+            .await
+            .unwrap()
+            .events;
+        let notice = events
+            .iter()
+            .find_map(|row| match &row.event {
+                tidebreak_core::CodeEvent::HarnessNotice { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("expected a refusal notice");
+        assert!(notice.contains("$2.50"), "{notice}");
+        assert!(notice.contains("$2.00"), "{notice}");
+        // The refusal frees the cap slot instead of telling the owner to do
+        // something the product does not offer: the idle sandbox is asked to
+        // stop, and the copy says so.
+        assert!(!notice.contains("Raise the ceiling"), "{notice}");
+        assert!(notice.contains("stopped"), "{notice}");
+        assert_eq!(
+            fake.cancels.lock().unwrap().as_slice(),
+            &["sb-1".to_owned()]
+        );
+    }
+
+    /// The pump feeds the ledger from the environment's meter, and the
+    /// session total accumulates across incarnations.
+    #[tokio::test]
+    async fn the_pump_feeds_the_ledger_across_incarnations() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        driver
+            .submit_turn(&mut session, &workspace, &repo, "start")
+            .await
+            .unwrap();
+        *fake.spend.lock().unwrap() = Some(1_500_000);
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Completed,
+            2,
+            vec![
+                event(1, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+                event(2, "supervisor_stopped", json!({ "reason": "turn_mode" })),
+            ],
+        ));
+        driver.pump(&mut session, 0).await.unwrap();
+
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+        *fake.spend.lock().unwrap() = Some(700_000);
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Running,
+            1,
+            vec![event(1, "turn_started", json!({ "turn": 1 }))],
+        ));
+        driver.pump(&mut session, 0).await.unwrap();
+
+        assert_eq!(
+            session_spend_microusd(&db, &session.owner, session.id)
+                .await
+                .unwrap(),
+            2_200_000
+        );
     }
 
     /// A live sandbox that refuses a message stays open for the pump: the
