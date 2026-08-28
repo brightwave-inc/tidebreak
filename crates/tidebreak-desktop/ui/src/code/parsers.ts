@@ -142,6 +142,7 @@ import type {
   ToolDetail as WireToolDetail,
   CodeSessionDigest as WireCodeSessionDigest,
   CodeUpdateNotice as WireCodeUpdateNotice,
+  CodeTurnRewriteState,
   CodeCloneDefaults as WireCodeCloneDefaults,
   CodeRepoSource as WireCodeRepoSource,
   CodeRepoSources as WireCodeRepoSources,
@@ -277,6 +278,11 @@ const TURN_STATUSES = new Set<CodeTurnStatus>([
   "completed",
   "failed",
   "interrupted",
+]);
+const TURN_REWRITE_STATES = new Set<CodeTurnRewriteState>([
+  "rewriting",
+  "rewritten",
+  "failed",
 ]);
 const NOTICE_LEVELS = new Set<HarnessNoticeLevel>(["info", "warning", "error"]);
 const FILE_CHANGE_KINDS = new Set<FileChangeKind>([
@@ -4142,7 +4148,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         ) ||
         !nonEmpty(value.session) ||
         !nonEmpty(value.turn_id) ||
-        !isMember(value.state, ["rewriting", "rewritten", "failed"] as const) ||
+        !isMember(value.state, TURN_REWRITE_STATES) ||
         !optionalString(value.rewrite)
       ) {
         return null;

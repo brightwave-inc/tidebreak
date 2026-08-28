@@ -65,6 +65,7 @@ const EMPTY_STATE: CodeUpdatesState = {
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
+  turnRewrites: {},
 };
 
 afterEach(() => {
