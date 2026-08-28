@@ -1657,10 +1657,10 @@ function mergeToolDetail(
 }
 
 /**
- * Stamp a rewrite onto the last parent assistant row of a turn.
+ * Stamp a recap onto the last parent assistant row of a turn.
  *
  * The journal text stays on `text`. Live notices and the turn snapshot both
- * land here so the transcript can toggle without a second source of truth.
+ * land here so the transcript can show the recap beside the original.
  */
 export function applyTurnRewrite(
   items: CodeTranscriptItem[],
