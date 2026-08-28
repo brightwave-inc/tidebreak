@@ -49,6 +49,8 @@ pub(in crate::db) enum AdvisoryLockName {
     AgentRunClaim,
     /// Serializes parking and resuming turns that wait on agent runs.
     TurnAgentRunWait,
+    /// Serializes per-owner sandbox incarnation reservations.
+    SandboxIncarnation,
 }
 
 impl AdvisoryLockName {
@@ -60,6 +62,7 @@ impl AdvisoryLockName {
             Self::TurnClaim => "turn_claim",
             Self::AgentRunClaim => "agent_run_claim",
             Self::TurnAgentRunWait => "turn_agent_run_wait",
+            Self::SandboxIncarnation => "sandbox_incarnation",
         }
     }
 }

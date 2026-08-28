@@ -103,6 +103,10 @@ code_id_type!(
     CodeWatchId
 );
 code_id_type!(
+    /// Identifies one sandbox lifetime within a remote session.
+    CodeIncarnationId
+);
+code_id_type!(
     /// Identifies one durable trigger rule bound to a repository.
     CodeTriggerId
 );
@@ -1201,6 +1205,94 @@ pub struct CodeQueuedTurn {
 impl CodeQueuedTurn {
     /// Queue depth cap per session, matching the chat queue's per-chat cap.
     pub const MAX_PER_SESSION: usize = 32;
+}
+
+/// Lifecycle of one sandbox lifetime within a remote session.
+///
+/// Written in the order the protocol runs: the intent row commits before the
+/// environment is asked to provision, activation records what the spawn
+/// returned, and stopped is terminal. A row that never leaves intent marks a
+/// spawn whose outcome nothing recorded — the reconcile sweep's quarry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncarnationState {
+    /// Committed before provisioning; no sandbox is known yet.
+    Intent,
+    /// The environment accepted the spawn; `sandbox_id` names the sandbox.
+    Active,
+    /// Terminal. `stop_reason` says why, when known.
+    Stopped,
+}
+
+impl IncarnationState {
+    /// The stored token, matching the table's CHECK constraint.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Intent => "intent",
+            Self::Active => "active",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// Parses a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "intent" => Some(Self::Intent),
+            "active" => Some(Self::Active),
+            "stopped" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+
+/// One sandbox lifetime of a remote session, as stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeSessionIncarnation {
+    /// Stable id.
+    pub id: CodeIncarnationId,
+    /// Owning session.
+    pub session_id: CodeSessionId,
+    /// 1-based counter within the session; the agent names WIP refs with it.
+    pub incarnation: i32,
+    /// Where in the protocol this row is.
+    pub state: IncarnationState,
+    /// The environment's sandbox identifier, recorded at activation.
+    pub sandbox_id: Option<String>,
+    /// The turn number this incarnation starts at, for resume.
+    pub starting_turn: i32,
+    /// Terminal classification, when the environment named one.
+    pub stop_reason: Option<String>,
+    /// Last observed inference spend in micro-USD, for the session ledger.
+    pub spend_microusd: Option<i64>,
+    /// Whether this incarnation's terminal events reached the journal.
+    ///
+    /// Reincarnation waits on this: a successor built before the
+    /// predecessor's terminal events land would resume without them.
+    pub terminal_events_journaled: bool,
+    /// Intent time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Activation time, when the spawn returned.
+    pub activated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Stop time.
+    pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last write time.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The outcome of asking for a new incarnation under the owner's cap.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IncarnationAdmission {
+    /// The intent row committed; provision against it.
+    Admitted(CodeSessionIncarnation),
+    /// The owner is at their concurrent-sandbox cap.
+    CapExhausted {
+        /// Sessions holding the live incarnations, so the refusal can name
+        /// what is running instead of only a number.
+        running: Vec<CodeSessionId>,
+    },
 }
 
 /// Bounded image reference recorded on a code-mode user turn.

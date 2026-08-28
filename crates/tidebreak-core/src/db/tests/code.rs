@@ -4478,3 +4478,176 @@ async fn workflow_run_facts_drop_rows_that_left_the_host_page() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].github_id, 77);
 }
+
+// --- Sandbox incarnations (the intent -> active -> stopped protocol) ---
+
+async fn admit(
+    store: &crate::db::DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    starting_turn: i32,
+    cap: usize,
+) -> crate::code::IncarnationAdmission {
+    crate::db::code::create_incarnation_intent(store, owner, session_id, starting_turn, cap)
+        .await
+        .unwrap()
+}
+
+fn admitted(admission: crate::code::IncarnationAdmission) -> crate::code::CodeSessionIncarnation {
+    match admission {
+        crate::code::IncarnationAdmission::Admitted(row) => row,
+        crate::code::IncarnationAdmission::CapExhausted { running } => {
+            panic!("expected admission, cap named {running:?}")
+        }
+    }
+}
+
+/// The reservation is the cap: a second owner-wide live incarnation past the
+/// cap is refused naming what runs, and a stop frees the slot.
+#[tokio::test]
+async fn the_incarnation_cap_refuses_and_names_the_running_sessions() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session_a, _) = seed_owner(&store, &owner, "cap-a").await;
+    let (session_b, _) = seed_owner(&store, &owner, "cap-b").await;
+
+    let first = admitted(admit(&store, &owner, session_a, 1, 1).await);
+    assert_eq!(first.incarnation, 1);
+    assert_eq!(first.state, crate::code::IncarnationState::Intent);
+
+    let refused = admit(&store, &owner, session_b, 1, 1).await;
+    match refused {
+        crate::code::IncarnationAdmission::CapExhausted { running } => {
+            assert_eq!(running, vec![session_a]);
+        }
+        other => panic!("expected the cap to refuse, got {other:?}"),
+    }
+
+    crate::db::code::stop_incarnation(&store, &owner, first.id, Some("cancelled"))
+        .await
+        .unwrap();
+    admitted(admit(&store, &owner, session_b, 1, 1).await);
+}
+
+/// Activation is guarded on the intent state: a row the protocol already
+/// closed refuses, so the caller cancels the sandbox it spawned instead of
+/// running against a closed row.
+#[tokio::test]
+async fn activation_records_the_sandbox_and_only_from_an_open_intent() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, _) = seed_owner(&store, &owner, "activate").await;
+
+    let intent = admitted(admit(&store, &owner, session, 1, 4).await);
+    crate::db::code::activate_incarnation(&store, &owner, intent.id, "sandbox-1")
+        .await
+        .unwrap();
+    let live = crate::db::code::latest_incarnation(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.state, crate::code::IncarnationState::Active);
+    assert_eq!(live.sandbox_id.as_deref(), Some("sandbox-1"));
+    assert!(live.activated_at.is_some());
+
+    let again = crate::db::code::activate_incarnation(&store, &owner, intent.id, "sandbox-2").await;
+    assert!(again.is_err());
+
+    crate::db::code::stop_incarnation(&store, &owner, intent.id, Some("expired"))
+        .await
+        .unwrap();
+    let stopped =
+        crate::db::code::activate_incarnation(&store, &owner, intent.id, "sandbox-3").await;
+    assert!(stopped.is_err());
+}
+
+/// One live incarnation per session: a successor minted beside a live
+/// predecessor would race it for the same engine session.
+#[tokio::test]
+async fn a_second_live_incarnation_for_one_session_is_refused() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, _) = seed_owner(&store, &owner, "double").await;
+
+    admitted(admit(&store, &owner, session, 1, 4).await);
+    let second = crate::db::code::create_incarnation_intent(&store, &owner, session, 2, 4).await;
+    assert!(second.is_err());
+}
+
+/// Reincarnation counts up, keeps the starting turn, and the session ledger
+/// sums spend across every incarnation.
+#[tokio::test]
+async fn reincarnation_counts_up_and_the_ledger_sums_across_incarnations() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, _) = seed_owner(&store, &owner, "ledger").await;
+
+    let first = admitted(admit(&store, &owner, session, 1, 4).await);
+    crate::db::code::activate_incarnation(&store, &owner, first.id, "sandbox-1")
+        .await
+        .unwrap();
+    crate::db::code::record_incarnation_spend(&store, &owner, first.id, 1_500_000)
+        .await
+        .unwrap();
+    crate::db::code::stop_incarnation(&store, &owner, first.id, Some("completed"))
+        .await
+        .unwrap();
+    crate::db::code::mark_incarnation_terminal_events_journaled(&store, &owner, first.id)
+        .await
+        .unwrap();
+
+    let second = admitted(admit(&store, &owner, session, 5, 4).await);
+    assert_eq!(second.incarnation, 2);
+    assert_eq!(second.starting_turn, 5);
+    crate::db::code::activate_incarnation(&store, &owner, second.id, "sandbox-2")
+        .await
+        .unwrap();
+    crate::db::code::record_incarnation_spend(&store, &owner, second.id, 700_000)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        crate::db::code::session_spend_microusd(&store, &owner, session)
+            .await
+            .unwrap(),
+        2_200_000
+    );
+    let latest = crate::db::code::latest_incarnation(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.incarnation, 2);
+    // The predecessor's journaled gate is on its own row, not the latest.
+    assert!(!latest.terminal_events_journaled);
+}
+
+/// The sweep reads exactly the intents whose spawn outcome nothing recorded:
+/// old enough, never activated.
+#[tokio::test]
+async fn stale_intents_list_only_old_unactivated_rows() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session_a, _) = seed_owner(&store, &owner, "stale-a").await;
+    let (session_b, _) = seed_owner(&store, &owner, "stale-b").await;
+
+    let orphan = admitted(admit(&store, &owner, session_a, 1, 4).await);
+    let activated = admitted(admit(&store, &owner, session_b, 1, 4).await);
+    crate::db::code::activate_incarnation(&store, &owner, activated.id, "sandbox-ok")
+        .await
+        .unwrap();
+
+    let past = Utc::now() - chrono::Duration::minutes(5);
+    assert!(
+        crate::db::code::stale_incarnation_intents_all_owners(&store, past)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let future = Utc::now() + chrono::Duration::minutes(5);
+    let stale = crate::db::code::stale_incarnation_intents_all_owners(&store, future)
+        .await
+        .unwrap();
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].id, orphan.id);
+}

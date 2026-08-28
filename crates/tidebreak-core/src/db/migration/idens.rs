@@ -959,6 +959,25 @@ pub(crate) enum CodeQueuedTurn {
 }
 
 #[derive(DeriveIden)]
+pub(crate) enum CodeSessionIncarnation {
+    Table,
+    Id,
+    Owner,
+    SessionId,
+    Incarnation,
+    State,
+    SandboxId,
+    StartingTurn,
+    StopReason,
+    SpendMicrousd,
+    TerminalEventsJournaled,
+    CreatedAt,
+    ActivatedAt,
+    StoppedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
 pub(crate) enum CodeEvent {
     Table,
     SessionId,

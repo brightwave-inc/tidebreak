@@ -96,6 +96,27 @@ pub enum FenceReason {
         /// Bounded detail from the last failure, as the engine reported it.
         detail: String,
     },
+    /// A remote session's incarnation record cannot say whether a sandbox
+    /// runs: an intent that never activated, or an environment answer the
+    /// protocol could not reconcile. Reap closes the record; the reconcile
+    /// sweep cancels whatever the environment still holds.
+    IncarnationUnresolved {
+        /// Bounded human-readable detail.
+        detail: String,
+    },
+    /// The environment reports a remote session's sandbox gone mid-turn —
+    /// node loss, a substrate refusal, a kill the session did not ask for.
+    SandboxLost {
+        /// Bounded detail, as the environment classified it.
+        detail: String,
+    },
+    /// A remote incarnation stopped but its terminal events never reached
+    /// the journal, so a resume would run without its predecessor's last
+    /// output. Reap acknowledges the gap and unblocks a fresh incarnation.
+    TerminalFlushMissing {
+        /// Bounded human-readable detail.
+        detail: String,
+    },
 }
 
 impl FenceReason {
@@ -111,11 +132,20 @@ impl FenceReason {
     /// answered and the turns failed — an expired credential, a refused
     /// prompt, a provider outage. The process is accounted for and the
     /// worktree is not at risk, so a healthy sibling session keeps working.
+    ///
+    /// Also false for the remote causes ([`Self::IncarnationUnresolved`],
+    /// [`Self::SandboxLost`], [`Self::TerminalFlushMissing`]): a remote
+    /// session's engine writes inside its sandbox, never to a host worktree,
+    /// so there is nothing on this machine its fence must protect. The
+    /// session itself still waits for an explicit reap.
     #[must_use]
     pub const fn blocks_workspace(&self) -> bool {
         match self {
             Self::OrphanAlive | Self::ProbeAmbiguous { .. } | Self::ResumeLost { .. } => true,
-            Self::RepeatedTurnFailures { .. } => false,
+            Self::RepeatedTurnFailures { .. }
+            | Self::IncarnationUnresolved { .. }
+            | Self::SandboxLost { .. }
+            | Self::TerminalFlushMissing { .. } => false,
         }
     }
 }
