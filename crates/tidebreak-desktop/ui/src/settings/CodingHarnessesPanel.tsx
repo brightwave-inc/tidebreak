@@ -218,7 +218,10 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
                 .catch((caught: unknown) => {
                   setRewriteClosing(!enabled);
                   toast.error(
-                    friendlyErrorMessage(caught, "Could not save that setting."),
+                    friendlyErrorMessage(
+                      caught,
+                      "Could not save that setting.",
+                    ),
                   );
                 })
                 .finally(() => setSavingRewrite(false));
