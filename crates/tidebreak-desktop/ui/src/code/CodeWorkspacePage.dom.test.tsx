@@ -694,6 +694,7 @@ afterEach(() => {
   useCodeUiStore.setState({ reviewSidebarOpen: true, inspectorScope: null });
   useCodeUiStore.setState({
     pendingComposerPrompt: null,
+    pendingComposerImages: null,
     composerActionScope: null,
     workflowShortcutPending: null,
     archivePending: false,

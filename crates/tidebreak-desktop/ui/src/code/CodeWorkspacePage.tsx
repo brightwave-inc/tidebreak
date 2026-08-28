@@ -132,6 +132,9 @@ import {
 import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
 import { DiffOverview } from "./DiffOverview";
 import { useCodeUiStore } from "./CodeUiStore";
+import { publishCodeImage } from "../attachments";
+import { hasLocalHostAuthority } from "../host";
+import { uploadImageAttachment } from "../ImageAttachments";
 import { forkFraming, forkTranscriptFile } from "./fork";
 import {
   useCodeUpdatesStore,
@@ -710,6 +713,10 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         throw err;
       }
 
+      const heldImages = useCodeUiStore
+        .getState()
+        .takeComposerImages(workspaceId);
+
       const recovery: FirstTurnRecovery = {
         id: `${created.id}:${request}`,
         sessionId: created.id,
@@ -719,6 +726,11 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         status: "sending",
       };
       if (!isCurrent()) {
+        if (heldImages && heldImages.length > 0) {
+          useCodeUiStore
+            .getState()
+            .offerComposerPrompt(workspaceId, draft, heldImages);
+        }
         const message =
           "The Code connection changed after the session was created. Send the message again.";
         writeFirstTurnRecovery(startedWithClient, {
@@ -748,9 +760,46 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       }
 
       try {
-        await startedWithClient.submitCodeTurn(created.id, message);
+        const attachments = heldImages?.length
+          ? await Promise.all(
+              heldImages.map(async (file) => {
+                const published = hasLocalHostAuthority()
+                  ? await publishCodeImage(created.id, file)
+                  : await uploadImageAttachment(
+                      startedWithClient,
+                      created.id,
+                      file,
+                      {
+                        onProgress: () => undefined,
+                        signal: new AbortController().signal,
+                        path: (id) =>
+                          `/code/sessions/${encodeURIComponent(id)}/attachments/images`,
+                      },
+                    );
+                return {
+                  blob_id: published.attachmentId,
+                  media_type: published.mediaType,
+                };
+              }),
+            )
+          : [];
+        if (attachments.length > 0) {
+          await startedWithClient.submitCodeTurn(
+            created.id,
+            message,
+            undefined,
+            attachments,
+          );
+        } else {
+          await startedWithClient.submitCodeTurn(created.id, message);
+        }
         clearFirstTurnRecovery(startedWithClient, created.id, recovery.id);
       } catch (err) {
+        if (heldImages && heldImages.length > 0) {
+          useCodeUiStore
+            .getState()
+            .offerComposerPrompt(workspaceId, draft, heldImages);
+        }
         const detail = friendlyErrorMessage(err, "Try sending it again.");
         writeFirstTurnRecovery(startedWithClient, {
           ...recovery,

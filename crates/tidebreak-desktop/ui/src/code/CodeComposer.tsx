@@ -906,7 +906,8 @@ export function CodeComposer({
       return;
     }
     setDraft((current) => appendComposerPrompt(current, request.text));
-    if (request.images && request.images.length > 0) {
+    if (sessionId && request.images && request.images.length > 0) {
+      useCodeUiStore.getState().takeComposerImages(composerPromptScope);
       images.attachFiles(request.images);
     }
     window.requestAnimationFrame(() => {
@@ -914,7 +915,15 @@ export function CodeComposer({
         .querySelector<HTMLTextAreaElement>("[data-composer-input]")
         ?.focus();
     });
-  }, [composerPromptScope, pendingPrompt]);
+  }, [composerPromptScope, pendingPrompt, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const files = useCodeUiStore
+      .getState()
+      .takeComposerImages(composerPromptScope);
+    if (files && files.length > 0) images.attachFiles(files);
+  }, [composerPromptScope, sessionId]);
 
   useEffect(() => {
     if (model) setSelectedModel(model);

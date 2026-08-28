@@ -79,6 +79,7 @@ afterEach(() => {
   useCodeUiStore.setState({
     lastCreate: null,
     pendingComposerPrompt: null,
+    pendingComposerImages: null,
     newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
   });
   toastError.mockReset();
