@@ -53,11 +53,7 @@ fn platform_default_engine() -> BrowserEngineDescriptor {
             // These become true only when the platform adapter is wired to
             // the engine-neutral semantic command contract.
             semantic_snapshot: cfg!(target_os = "macos"),
-            // Snapshot re-resolution is implemented on macOS, but the current
-            // action adapter still dispatches DOM events inside the page. Do
-            // not advertise acting until the adapter sends trusted native
-            // input to the freshly resolved target.
-            semantic_actions: false,
+            semantic_actions: cfg!(target_os = "macos"),
             // WKWebView can consume parser-created closed shadow roots before
             // Tidebreak can prove that their rendered content is safe.
             screenshot: false,
@@ -3388,9 +3384,12 @@ mod tests {
     }
 
     #[test]
-    fn platform_does_not_claim_unverified_agent_capabilities() {
+    fn platform_claims_only_implemented_agent_capabilities() {
         let descriptor = platform_default_engine();
-        assert!(!descriptor.capabilities.semantic_actions);
+        assert_eq!(
+            descriptor.capabilities.semantic_actions,
+            cfg!(target_os = "macos")
+        );
         assert!(!descriptor.capabilities.screenshot);
         assert_eq!(
             descriptor.capabilities.profile_reset,

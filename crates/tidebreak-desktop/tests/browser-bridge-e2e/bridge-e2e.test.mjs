@@ -1,8 +1,9 @@
 // Deterministic shipped-path E2E tests for the agent browser bridge.
 //
 // These tests exercise the real v1 capfile JSON shape {version, endpoint,
-// token} and the real HTTP route shapes at /code/browser/list, /navigate,
-// /snapshot, /wait, /screenshot through a loopback-only mock bridge server.
+// token, semantic_actions} and the real HTTP route shapes at /code/browser/list, /navigate,
+// /snapshot, /wait, /screenshot, and /act through a loopback-only mock bridge
+// server.
 // The mock is honest: it does NOT claim to prove native BrowserRegistry
 // internals. Rust-backed authority, token registry transactionality, and
 // desktop runtime integration are CI-only.
@@ -21,6 +22,7 @@ import { startBridgeServer, close } from "./bridge-server.mjs";
 import {
   readCapfile,
   callBrowserRoute,
+  BROWSER_ACTION_TOOL,
   BROWSER_TOOLS,
   FORBIDDEN_TOOLS,
   assertToolRegistry,
@@ -29,6 +31,7 @@ import {
   assertSnapshotShape,
   assertWaitShape,
   assertScreenshotShape,
+  assertActShape,
   drivePositiveContract,
   simulateAbsoluteLaunch,
   writeCapfile,
@@ -105,14 +108,24 @@ test("exact tool registry is five browser tools, no act/semantic", () => {
   }
 });
 
+test("semantic_actions adds only browser_act to the tool registry", () => {
+  const registry = [...BROWSER_TOOLS, BROWSER_ACTION_TOOL].map((name) => ({ name }));
+  assertToolRegistry(registry, { semanticActions: true });
+  assert.throws(
+    () => assertToolRegistry([...registry, { name: "unexpected" }], { semanticActions: true }),
+    /unexpected extra tool/,
+  );
+});
+
 // ── capfile v1 protocol ─────────────────────────────────────────────────────
 
-test("capfile schema is exactly {version:1, endpoint, token}", async () => {
+test("capfile schema includes the semantic_actions capability", async () => {
   const { capfilePath, token } = await writeCapfile(tmpDir, "http://127.0.0.1:0/code/browser");
   const parsed = await readCapfile(capfilePath);
 
   assert.equal(parsed.endpoint, "http://127.0.0.1:0/code/browser");
   assert.equal(parsed.token, token);
+  assert.equal(parsed.semanticActions, false);
   assert.ok(token.startsWith("tbreak_bt_"), "token must start with tbreak_bt_");
 });
 
@@ -137,10 +150,20 @@ test("capfile rejects missing or extra keys", async () => {
       version: 1,
       endpoint: "http://127.0.0.1:0/code/browser",
       token: "tbreak_bt_uuid",
+      semantic_actions: false,
       workspace_id: "leak",
     })
   );
   await assert.rejects(() => readCapfile(bad2), /unexpected keys/);
+});
+
+test("capfile advertises semantic actions when the runtime supports them", async () => {
+  const { capfilePath } = await writeCapfile(
+    tmpDir,
+    "http://127.0.0.1:0/code/browser",
+    { semanticActions: true },
+  );
+  assert.equal((await readCapfile(capfilePath)).semanticActions, true);
 });
 
 // ── positive contract: list → navigate → snapshot → wait → screenshot ───────
@@ -201,6 +224,70 @@ test("snapshot with max_nodes returns camelCase shape", async () => {
   );
   assert.equal(snap.status, 200);
   assertSnapshotShape(snap.body);
+});
+
+test("act invalidates its snapshot and the next snapshot restores actionability", async () => {
+  const actionBridge = await startBridgeServer({
+    port: 0,
+    fixtureOrigin: fixture.origin,
+    semanticActions: true,
+  });
+
+  try {
+    const token = actionBridge.tokenRegistry.issue();
+    const snapshot = await callBrowserRoute(
+      actionBridge.endpoint,
+      "snapshot",
+      { browser_id: "browser-1" },
+      token
+    );
+    assert.equal(snapshot.status, 200);
+
+    const act = await callBrowserRoute(
+      actionBridge.endpoint,
+      "act",
+      {
+        browser_id: "browser-1",
+        snapshot_id: snapshot.body.snapshotId,
+        document_epoch: snapshot.body.documentEpoch,
+        ref: "@e2",
+        action: { type: "hover" },
+      },
+      token
+    );
+    assert.equal(act.status, 200);
+    assertActShape(act.body);
+    assert.equal(act.body.status, "ok");
+    assert.equal(act.body.action, "hover");
+    assert.equal(act.body.requiresResnapshot, true);
+
+    const stale = await callBrowserRoute(
+      actionBridge.endpoint,
+      "act",
+      {
+        browser_id: "browser-1",
+        snapshot_id: snapshot.body.snapshotId,
+        document_epoch: snapshot.body.documentEpoch,
+        ref: "@e2",
+        action: { type: "click" },
+      },
+      token
+    );
+    assert.equal(stale.status, 200);
+    assertActShape(stale.body);
+    assert.equal(stale.body.status, "stale_target");
+
+    const refreshed = await callBrowserRoute(
+      actionBridge.endpoint,
+      "snapshot",
+      { browser_id: "browser-1" },
+      token
+    );
+    assert.equal(refreshed.status, 200);
+    assert.notEqual(refreshed.body.snapshotId, snapshot.body.snapshotId);
+  } finally {
+    await close(actionBridge.server);
+  }
 });
 
 // ── positive: wait contract ─────────────────────────────────────────────────

@@ -13,9 +13,13 @@ const policyMatch = semanticsSource.match(
 const snapshotMatch = semanticsSource.match(
   /const SNAPSHOT_SCRIPT: &str = r#"([\s\S]*?)"#;/,
 );
+const identityStoreMatch = semanticsSource.match(
+  /const TARGET_IDENTITY_STORE_SCRIPT: &str = r#"([\s\S]*?)"#;/,
+);
 
 assert.ok(policyMatch, "the browser semantics source must expose one shared policy");
 assert.ok(snapshotMatch, "the browser semantics source must expose the snapshot script");
+assert.ok(identityStoreMatch, "the snapshot must use private target identities");
 
 const buildClassifier = new Function(`
   const clean = (value, limit = 240) => String(value || "")
@@ -117,6 +121,7 @@ function runSensitiveSnapshot({ tag, attrs, secret }) {
   const script = snapshotMatch[1]
     .replace("__MAX_NODES__", "25")
     .replace("__MARKER__", "__fixture_marker__")
+    .replace("__TARGET_IDENTITY_STORE__", identityStoreMatch[1])
     .replace("__SENSITIVE_FIELD_POLICY__", policyMatch[1]);
   const execute = new Function(
     "document",
@@ -232,7 +237,7 @@ test("every browser surface injects the shared policy", () => {
     "WAIT_TEXT_SCRIPT",
     "INSPECT_OVERLAY_SCRIPT",
     "SCREENSHOT_PRIVACY_SCRIPT",
-    "ACTION_SCRIPT",
+    "NATIVE_ACTION_RESOLUTION_SCRIPT",
   ]) {
     const start = semanticsSource.indexOf(`const ${constant}: &str`);
     assert.notEqual(start, -1, `${constant} must exist`);

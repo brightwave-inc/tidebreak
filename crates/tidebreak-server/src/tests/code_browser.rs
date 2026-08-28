@@ -13,13 +13,14 @@ use crate::code::browser_channel::BrowserSubject;
 use crate::code::browser_runtime::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use crate::code::CodeRuntime;
 use tidebreak_core::{
-    db, Attention, AttentionSource, AttentionState, BrowserContentTrust, BrowserControllerState,
-    BrowserEngineCapabilities, BrowserEngineDescriptor, BrowserEngineName, BrowserListResult,
-    BrowserLoadState, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSessionSummary, BrowserSnapshotArgs,
-    BrowserViewport, BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodeRepo, CodeSession,
-    CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus,
-    DbStore, HarnessKind, OwnerId, PermissionMode, RepoId, Store, WorkspaceId,
+    db, Attention, AttentionSource, AttentionState, BrowserActArgs, BrowserActResult,
+    BrowserActStatus, BrowserContentTrust, BrowserControllerState, BrowserEngineCapabilities,
+    BrowserEngineDescriptor, BrowserEngineName, BrowserListResult, BrowserLoadState,
+    BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs,
+    BrowserScreenshotResult, BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport,
+    BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodeRepo, CodeSession, CodeSessionId,
+    CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus, DbStore,
+    HarnessKind, OwnerId, PermissionMode, RepoId, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -69,6 +70,10 @@ fn engine() -> BrowserEngineDescriptor {
 
 #[async_trait]
 impl BrowserRuntime for FakeBrowserRuntime {
+    fn supports_semantic_actions(&self) -> bool {
+        true
+    }
+
     async fn list(
         &self,
         scope: &BrowserRuntimeScope,
@@ -179,6 +184,33 @@ impl BrowserRuntime for FakeBrowserRuntime {
             document_epoch: 2,
             image_base64: "AAAA".into(),
             mime_type: "image/png".into(),
+        })
+    }
+    async fn act(
+        &self,
+        scope: &BrowserRuntimeScope,
+        args: &BrowserActArgs,
+    ) -> Result<BrowserActResult, BrowserRuntimeError> {
+        self.record("act", scope);
+        if args.browser_id != "browser-1" {
+            return Err(BrowserRuntimeError::UnknownBrowserId(
+                args.browser_id.clone(),
+            ));
+        }
+        if self.stale {
+            return Err(BrowserRuntimeError::StaleTarget);
+        }
+        Ok(BrowserActResult {
+            browser_id: args.browser_id.clone(),
+            snapshot_id: args.snapshot_id.clone(),
+            document_epoch: args.document_epoch,
+            target_ref: args.target_ref.clone(),
+            action: args.action.kind().to_owned(),
+            status: BrowserActStatus::Ok,
+            message: "Action completed. Take a new snapshot before the next action.".to_owned(),
+            requires_resnapshot: true,
+            url: Some("https://example.com".to_owned()),
+            title: Some("Example".to_owned()),
         })
     }
     fn revoke_session(&self, scope: &BrowserRuntimeScope) {
@@ -733,6 +765,98 @@ async fn screenshot_missing_runtime_501() {
 }
 
 #[tokio::test]
+async fn act_roundtrip() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "act",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "ref": "@e1",
+            "action": {"type": "click"}
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["action"], "click");
+    assert_eq!(body["requiresResnapshot"], true);
+    assert_eq!(a.fake.as_ref().unwrap().subjects()[0].0, "act");
+}
+
+#[tokio::test]
+async fn act_refuses_non_well_formed_or_stale_requests() {
+    let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    assert_eq!(
+        post(
+            a.addr,
+            "act",
+            Some(&t),
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2,
+                "ref": "@e1",
+                "action": {"type": "press", "key": "Ctrl+C"}
+            })
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let stale = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
+    let (ws, s) = seed_session(&stale.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&stale.code, ws, s);
+    assert_eq!(
+        post(
+            stale.addr,
+            "act",
+            Some(&t),
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2,
+                "ref": "@e1",
+                "action": {"type": "click"}
+            })
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn act_missing_runtime_501() {
+    let a = browser_app(None).await;
+    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let t = mint_token(&a.code, ws, s);
+    let r = post(
+        a.addr,
+        "act",
+        Some(&t),
+        serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "ref": "@e1",
+            "action": {"type": "click"}
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
 async fn new_routes_require_capability_token() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
     let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
@@ -753,6 +877,16 @@ async fn new_routes_require_capability_token() {
                 "browser_id": "browser-1",
                 "snapshot_id": "snapshot-1",
                 "document_epoch": 2
+            }),
+        ),
+        (
+            "act",
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 2,
+                "ref": "@e1",
+                "action": {"type": "click"}
             }),
         ),
     ] {
@@ -777,6 +911,10 @@ async fn new_routes_refuse_wrong_workspace_scope() {
             "screenshot",
             serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0}),
         ),
+        (
+            "act",
+            serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0,"ref":"@e1","action":{"type":"click"}}),
+        ),
     ] {
         assert_eq!(
             post(a.addr, rt, Some(&t), body).await.status(),
@@ -799,6 +937,10 @@ async fn new_routes_refuse_ended_session() {
         (
             "screenshot",
             serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0}),
+        ),
+        (
+            "act",
+            serde_json::json!({"browser_id":"browser-1","snapshot_id":"s","document_epoch":0,"ref":"@e1","action":{"type":"click"}}),
         ),
     ] {
         assert_eq!(
@@ -853,6 +995,17 @@ async fn bodies_reject_subject_ids() {
                 "snapshot_id":"snapshot-1",
                 "document_epoch":0,
                 "owner_id":"g"
+            }),
+        ),
+        (
+            "act",
+            serde_json::json!({
+                "browser_id":"b-1",
+                "snapshot_id":"snapshot-1",
+                "document_epoch":0,
+                "ref":"@e1",
+                "action":{"type":"click"},
+                "workspace_id":"g"
             }),
         ),
     ] {

@@ -12,13 +12,14 @@ use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use base64::Engine as _;
 use tauri::{AppHandle, Manager};
 use tidebreak_core::{
-    validate_browser_list_arguments, validate_browser_navigate_arguments,
-    validate_browser_screenshot_arguments, validate_browser_snapshot_arguments,
-    validate_browser_wait_arguments, BrowserListArgs, BrowserListResult, BrowserNavigateArgs,
-    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
-    BrowserWaitArgs, BrowserWaitResult, CallId, ChatId, ImageRef, ToolCallExecution,
-    ToolCallRecord, ToolCallStatus, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL,
-    BROWSER_SCREENSHOT_TOOL, BROWSER_SNAPSHOT_TOOL, BROWSER_WAIT_TOOL,
+    validate_browser_act_arguments, validate_browser_list_arguments,
+    validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
+    validate_browser_snapshot_arguments, validate_browser_wait_arguments, BrowserActArgs,
+    BrowserListArgs, BrowserListResult, BrowserNavigateArgs, BrowserPageSnapshot,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
+    BrowserWaitResult, CallId, ChatId, ImageRef, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    BROWSER_ACT_TOOL, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_SCREENSHOT_TOOL,
+    BROWSER_SNAPSHOT_TOOL, BROWSER_WAIT_TOOL,
 };
 use uuid::Uuid;
 
@@ -425,6 +426,7 @@ fn is_foreground_browser_call(call: &ToolCallRecord) -> bool {
         BROWSER_SNAPSHOT_TOOL => validate_browser_snapshot_arguments(&call.arguments),
         BROWSER_WAIT_TOOL => validate_browser_wait_arguments(&call.arguments),
         BROWSER_SCREENSHOT_TOOL => validate_browser_screenshot_arguments(&call.arguments),
+        BROWSER_ACT_TOOL => validate_browser_act_arguments(&call.arguments),
         _ => false,
     }
 }
@@ -515,6 +517,23 @@ async fn execute_operation(
             .await
             {
                 Ok(result) => finish_screenshot(app, state, context, result).await,
+                Err(error) => map_native_error(Some(&arguments.browser_id), error),
+            }
+        }
+        BROWSER_ACT_TOOL => {
+            let Ok(arguments) = serde_json::from_value::<BrowserActArgs>(call.arguments.clone())
+            else {
+                return invalid_request();
+            };
+            match crate::browser_semantics::browser_native_act(
+                app,
+                registry,
+                capability_id,
+                arguments.clone(),
+            )
+            .await
+            {
+                Ok(result) => completed(&result),
                 Err(error) => map_native_error(Some(&arguments.browser_id), error),
             }
         }
@@ -773,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_accepts_only_the_five_validated_foreground_browser_tools() {
+    fn discovery_accepts_only_the_six_validated_foreground_browser_tools() {
         assert!(is_foreground_browser_call(&call(
             BROWSER_LIST_TOOL,
             serde_json::json!({}),
@@ -807,14 +826,24 @@ mod tests {
             }),
         )));
 
-        assert!(!is_foreground_browser_call(&call(
-            tidebreak_core::BROWSER_ACT_TOOL,
+        assert!(is_foreground_browser_call(&call(
+            BROWSER_ACT_TOOL,
             serde_json::json!({
                 "browser_id": "browser-1",
                 "snapshot_id": "snapshot-1",
                 "document_epoch": 1,
                 "ref": "ref-1",
                 "action": { "type": "click" }
+            }),
+        )));
+        assert!(!is_foreground_browser_call(&call(
+            BROWSER_ACT_TOOL,
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 1,
+                "ref": "ref-1",
+                "action": { "type": "press", "key": "Ctrl+C" }
             }),
         )));
         assert!(!is_foreground_browser_call(&call(

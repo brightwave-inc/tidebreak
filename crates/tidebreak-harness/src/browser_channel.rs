@@ -99,6 +99,8 @@ mod tests {
         let spec = BrowserChannelSpec::new(path.clone(), bridge_fixture());
         assert_eq!(spec.capability_file, path);
         assert_eq!(spec.bridge_command, bridge_fixture());
+        assert!(!spec.semantic_actions);
+        assert!(spec.clone().with_semantic_actions(true).semantic_actions);
     }
 
     #[test]

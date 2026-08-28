@@ -17,8 +17,9 @@
 //!   future is pollable, so issue cannot race an unpolled cleanup.
 //! * Capfiles are written create-new (mode 0600 on Unix) → sync → drop →
 //!   atomic rename. Temp files are deleted on every post-create failure path.
-//! * The JSON payload carries exactly `version`, `endpoint`, and `token` — no
-//!   owner, workspace, or session identifiers.
+//! * The JSON payload carries only `version`, `endpoint`, `token`, and the
+//!   runtime's `semantic_actions` capability — no owner, workspace, or
+//!   session identifiers.
 //! * In-memory authority is revoked before best-effort file deletion.
 
 use std::collections::HashMap;
@@ -161,10 +162,21 @@ impl BrowserTokenRegistry {
     /// Returns an error if the loopback base has not been set, the bridge
     /// command is not absolute, or the capfile cannot be written. On error
     /// no state is committed.
+    #[cfg(test)]
     pub(crate) fn issue(
         &self,
         subject: BrowserSubject,
         bridge_command: &Path,
+    ) -> Result<BrowserChannelSpec, String> {
+        self.issue_with_semantic_actions(subject, bridge_command, false)
+    }
+
+    /// Mint a channel and record whether its runtime supports native actions.
+    pub(crate) fn issue_with_semantic_actions(
+        &self,
+        subject: BrowserSubject,
+        bridge_command: &Path,
+        semantic_actions: bool,
     ) -> Result<BrowserChannelSpec, String> {
         if !bridge_command.is_absolute() {
             return Err(format!(
@@ -195,7 +207,13 @@ impl BrowserTokenRegistry {
 
         // Write the new capfile. If this fails, unlock and leave state
         // unchanged — nothing was committed.
-        match write_capfile(&capfile_path, CAPFILE_VERSION, &loopback_base, &token) {
+        match write_capfile(
+            &capfile_path,
+            CAPFILE_VERSION,
+            &loopback_base,
+            &token,
+            semantic_actions,
+        ) {
             Ok(()) => {}
             Err(e) => return Err(e),
         }
@@ -214,10 +232,10 @@ impl BrowserTokenRegistry {
             let _ = std::fs::remove_file(&old.capfile_path);
         }
 
-        Ok(BrowserChannelSpec::new(
-            capfile_path,
-            bridge_command.to_path_buf(),
-        ))
+        Ok(
+            BrowserChannelSpec::new(capfile_path, bridge_command.to_path_buf())
+                .with_semantic_actions(semantic_actions),
+        )
     }
 
     /// Return the subject for an inbound browser bearer token, or `None`.
@@ -319,7 +337,7 @@ fn resolve_absolute_trusted(joined: &Path) -> Result<PathBuf, String> {
     Ok(absolute)
 }
 
-/// Write `{version, endpoint, token}` safely:
+/// Write `{version, endpoint, token, semantic_actions}` safely:
 ///
 /// 1. Ensure the parent directory exists with mode 0700.
 /// 2. Open a random temp file with create_new + mode 0600 (Unix).
@@ -331,6 +349,7 @@ fn write_capfile(
     version: u32,
     loopback_base: &str,
     token: &str,
+    semantic_actions: bool,
 ) -> Result<(), String> {
     let parent = path
         .parent()
@@ -354,6 +373,7 @@ fn write_capfile(
         "version": version,
         "endpoint": endpoint,
         "token": token,
+        "semantic_actions": semantic_actions,
     });
 
     let body_bytes =
@@ -612,7 +632,7 @@ mod tests {
     // ── capfile schema ───────────────────────────────────────────────────
 
     #[test]
-    fn capfile_schema_is_exact_version_endpoint_token() {
+    fn capfile_schema_is_exact_and_defaults_semantic_actions_off() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
         let sub = subject("schema");
@@ -622,15 +642,34 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&contents).expect("parse capfile");
 
         let obj = value.as_object().expect("capfile must be a JSON object");
-        let expected: HashSet<&str> = ["version", "endpoint", "token"].iter().copied().collect();
+        let expected: HashSet<&str> = ["version", "endpoint", "token", "semantic_actions"]
+            .iter()
+            .copied()
+            .collect();
         let actual: HashSet<&str> = obj.keys().map(String::as_str).collect();
 
         assert_eq!(
             actual, expected,
-            "capfile must have exactly {{version, endpoint, token}} keys"
+            "capfile must have exactly {{version, endpoint, token, semantic_actions}} keys"
         );
         assert_eq!(value["version"], CAPFILE_VERSION);
         assert!(value["token"].as_str().unwrap().starts_with("tbreak_bt_"));
+        assert_eq!(value["semantic_actions"], false);
+        assert!(!spec.semantic_actions);
+    }
+
+    #[test]
+    fn capfile_advertises_semantic_actions_only_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = seeded(dir.path());
+        let spec = reg
+            .issue_with_semantic_actions(subject("actions"), &test_bridge_command(), true)
+            .unwrap();
+        let contents = std::fs::read_to_string(&spec.capability_file).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(value["semantic_actions"], true);
+        assert!(spec.semantic_actions);
     }
 
     #[test]

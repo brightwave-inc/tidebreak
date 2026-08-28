@@ -18,15 +18,17 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 use tidebreak_core::{
-    browser_list_tool_spec, browser_navigate_tool_spec, browser_screenshot_tool_spec,
-    browser_snapshot_tool_spec, browser_wait_tool_spec, validate_browser_list_arguments,
+    browser_act_tool_spec, browser_list_tool_spec, browser_navigate_tool_spec,
+    browser_screenshot_tool_spec, browser_snapshot_tool_spec, browser_wait_tool_spec,
+    validate_browser_act_arguments, validate_browser_list_arguments,
     validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
     validate_browser_snapshot_arguments, validate_browser_wait_arguments, AgentError,
-    ApprovalClass, AutoApproveGate, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult,
-    BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs,
-    BrowserWaitArgs, BrowserWaitCondition, BrowserWaitResult, DocumentBlob, ImageData,
-    ImageMediaType, ImageRef, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
-    ToolSpec, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
+    ApprovalClass, AutoApproveGate, BrowserActArgs, BrowserActResult, BrowserAction,
+    BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
+    BrowserWaitCondition, BrowserWaitResult, DocumentBlob, ImageData, ImageMediaType, ImageRef,
+    Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec, MAX_IMAGE_BYTES,
+    MAX_IMAGE_DIMENSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,9 @@ const WAIT_BODY_MAX_BYTES: usize = 64 * 1024; // 64 KiB
 /// envelope needs generous headroom.
 const SCREENSHOT_BODY_MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
+/// Ceiling on a semantic action response body.
+const ACT_BODY_MAX_BYTES: usize = 64 * 1024; // 64 KiB
+
 /// Encoded form of the largest image the shared image pipeline will accept.
 const MAX_SCREENSHOT_BASE64_CHARS: usize = (MAX_IMAGE_BYTES as usize).div_ceil(3) * 4;
 
@@ -75,6 +80,7 @@ const TOKEN_LENGTH: usize = TOKEN_PREFIX.len() + 36; // prefix + UUID
 struct BrowserCapfile {
     endpoint: String,
     token: String,
+    semantic_actions: bool,
 }
 
 /// Wire shape of the capfile. The only supported version is 1.
@@ -84,6 +90,8 @@ struct BrowserCapfileWire {
     version: u32,
     endpoint: String,
     token: String,
+    #[serde(default)]
+    semantic_actions: bool,
 }
 
 impl BrowserCapfile {
@@ -131,6 +139,7 @@ impl BrowserCapfile {
         Ok(Self {
             endpoint: wire.endpoint,
             token: wire.token,
+            semantic_actions: wire.semantic_actions,
         })
     }
 
@@ -530,6 +539,23 @@ async fn browser_screenshot(
     BrowserClient::read_bounded_json(response, SCREENSHOT_BODY_MAX_BYTES).await
 }
 
+async fn browser_act(
+    client: &BrowserClient,
+    args: &BrowserActArgs,
+) -> std::result::Result<BrowserActResult, ClientFailure> {
+    let response = client
+        .client
+        .post(format!("{}/act", client.endpoint))
+        .bearer_auth(&client.token)
+        .json(args)
+        .send()
+        .await
+        .map_err(|error| ClientFailure::TransportFailed {
+            detail: format!("browser act request failed: {error}"),
+        })?;
+    BrowserClient::read_bounded_json(response, ACT_BODY_MAX_BYTES).await
+}
+
 // ---------------------------------------------------------------------------
 // CLI parsing
 // ---------------------------------------------------------------------------
@@ -559,6 +585,13 @@ pub(crate) enum BrowserCommand {
         document_epoch: u64,
         max_width: Option<u64>,
         max_height: Option<u64>,
+    },
+    Act {
+        browser_id: String,
+        snapshot_id: String,
+        document_epoch: u64,
+        target_ref: String,
+        action: BrowserAction,
     },
 }
 
@@ -927,8 +960,140 @@ pub(crate) fn parse_browser(args: Vec<String>) -> std::result::Result<BrowserCom
                 max_height,
             })
         }
+        "act" => parse_browser_act(args),
         other => Err(format!("unknown browser command {other:?}")),
     }
+}
+
+fn parse_browser_act(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<BrowserCommand, String> {
+    let mut browser_id = None;
+    let mut snapshot_id = None;
+    let mut document_epoch = None;
+    let mut target_ref = None;
+    let mut action = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--browser-id" => parse_string_flag(&mut args, &mut browser_id, "--browser-id")?,
+            "--snapshot-id" => parse_string_flag(&mut args, &mut snapshot_id, "--snapshot-id")?,
+            "--document-epoch" => {
+                if document_epoch.is_some() {
+                    return Err("duplicate --document-epoch".to_string());
+                }
+                let Some(value) = args.next() else {
+                    return Err("--document-epoch requires a value".to_string());
+                };
+                if value.starts_with("--") {
+                    return Err("--document-epoch requires a value".to_string());
+                }
+                document_epoch = Some(value.parse::<u64>().map_err(|_| {
+                    format!("--document-epoch expects a non-negative integer, got {value:?}")
+                })?);
+            }
+            "--ref" => parse_string_flag(&mut args, &mut target_ref, "--ref")?,
+            "--click" => set_browser_action(&mut action, BrowserAction::Click)?,
+            "--focus" => set_browser_action(&mut action, BrowserAction::Focus)?,
+            "--hover" => set_browser_action(&mut action, BrowserAction::Hover)?,
+            "--fill" => {
+                let value = required_flag_value(&mut args, "--fill")?;
+                set_browser_action(&mut action, BrowserAction::Fill { value })?;
+            }
+            "--select" => {
+                let value = required_flag_value(&mut args, "--select")?;
+                set_browser_action(&mut action, BrowserAction::Select { value })?;
+            }
+            "--check" => set_browser_action(&mut action, BrowserAction::Check { checked: true })?,
+            "--uncheck" => {
+                set_browser_action(&mut action, BrowserAction::Check { checked: false })?
+            }
+            "--press" => {
+                let key = required_flag_value(&mut args, "--press")?;
+                set_browser_action(&mut action, BrowserAction::Press { key })?;
+            }
+            "--scroll-into-view" => set_browser_action(&mut action, BrowserAction::ScrollIntoView)?,
+            other => return Err(format!("unknown browser act argument {other:?}")),
+        }
+    }
+
+    let Some(browser_id) = browser_id else {
+        return Err("browser act requires --browser-id".to_string());
+    };
+    let Some(snapshot_id) = snapshot_id else {
+        return Err("browser act requires --snapshot-id".to_string());
+    };
+    let Some(document_epoch) = document_epoch else {
+        return Err("browser act requires --document-epoch".to_string());
+    };
+    let Some(target_ref) = target_ref else {
+        return Err("browser act requires --ref".to_string());
+    };
+    let Some(action) = action else {
+        return Err(
+            "browser act requires exactly one action: --click, --focus, --hover, --fill, --select, --check, --uncheck, --press, or --scroll-into-view"
+                .to_string(),
+        );
+    };
+    let arguments = BrowserActArgs {
+        browser_id,
+        snapshot_id,
+        document_epoch,
+        target_ref,
+        action,
+    };
+    if !arguments.is_well_formed() {
+        return Err("browser act arguments are not well-formed".to_string());
+    }
+    let BrowserActArgs {
+        browser_id,
+        snapshot_id,
+        document_epoch,
+        target_ref,
+        action,
+    } = arguments;
+    Ok(BrowserCommand::Act {
+        browser_id,
+        snapshot_id,
+        document_epoch,
+        target_ref,
+        action,
+    })
+}
+
+fn parse_string_flag(
+    args: &mut impl Iterator<Item = String>,
+    slot: &mut Option<String>,
+    flag: &str,
+) -> std::result::Result<(), String> {
+    if slot.is_some() {
+        return Err(format!("duplicate {flag}"));
+    }
+    *slot = Some(required_flag_value(args, flag)?);
+    Ok(())
+}
+
+fn required_flag_value(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> std::result::Result<String, String> {
+    let Some(value) = args.next() else {
+        return Err(format!("{flag} requires a value"));
+    };
+    if value.starts_with("--") {
+        return Err(format!("{flag} requires a value"));
+    }
+    Ok(value)
+}
+
+fn set_browser_action(
+    slot: &mut Option<BrowserAction>,
+    action: BrowserAction,
+) -> std::result::Result<(), String> {
+    if slot.replace(action).is_some() {
+        return Err("browser act accepts exactly one action".to_string());
+    }
+    Ok(())
 }
 
 /// Usage text shown for `tidebreak browser` (and `browser-mcp`).
@@ -942,6 +1107,10 @@ usage: tidebreak browser list --json
               [--timeout-ms <ms>] --json
        tidebreak browser screenshot --browser-id <id> --snapshot-id <id> \
               --document-epoch <n> [--max-width <px>] [--max-height <px>] --json
+       tidebreak browser act --browser-id <id> --snapshot-id <id> \
+              --document-epoch <n> --ref <ref> \
+              (--click | --focus | --hover | --fill <text> | --select <value> | \
+               --check | --uncheck | --press <key> | --scroll-into-view) --json
 
 Browser commands use the session-private capfile named by
 TIDEBREAK_BROWSER_CAPFILE. They do not take --server/--attach.";
@@ -1060,16 +1229,43 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
             );
             Ok(())
         }
+        BrowserCommand::Act {
+            browser_id,
+            snapshot_id,
+            document_epoch,
+            target_ref,
+            action,
+        } => {
+            let args = BrowserActArgs {
+                browser_id,
+                snapshot_id,
+                document_epoch,
+                target_ref,
+                action,
+            };
+            if !args.is_well_formed() {
+                return Err(AgentError::msg("browser act arguments are not well-formed"));
+            }
+            let result = browser_act(&client, &args)
+                .await
+                .map_err(|failure| AgentError::msg(failure.redacted_text()))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result)
+                    .map_err(|error| AgentError::msg(format!("JSON encode: {error}")))?
+            );
+            Ok(())
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// browser-mcp: stdio MCP server with exactly five tools
+// browser-mcp: stdio MCP server with capability-gated tools
 // ---------------------------------------------------------------------------
 
 /// Serve `tidebreak browser-mcp`: load the capfile, construct the client,
-/// build a registry of exactly five tools backed by that client, and run MCP
-/// over stdio.
+/// build a capability-gated registry backed by that client, and run MCP over
+/// stdio.
 ///
 /// ## Tool classification
 ///
@@ -1080,41 +1276,18 @@ pub(crate) async fn run_browser(command: BrowserCommand) -> Result<()> {
 /// | browser_snapshot    | ReadOnly | Reads untrusted page data; no side effects.                 |
 /// | browser_wait       | ReadOnly  | Polls a deterministic predicate; no mutation.               |
 /// | browser_screenshot | ReadOnly  | Captures epoch-bound pixels; no mutation.                   |
+/// | browser_act        | Sensitive | Sends trusted native input when the capfile enables it.     |
 ///
 /// ## Authorization
 ///
-/// The registry contains exactly these five tools. We wire
-/// [`AutoApproveGate`] because possession of the session-private capfile
-/// *is* the actual scoped authorization boundary for this process: without
-/// the capfile the server cannot be reached, and with it every operation is
-/// exactly the one the capfile's issuer intended. The browser server
-/// authorizes each operation independently against its own origin-scoped
-/// grants.
-///
-/// `browser_act` is intentionally excluded. It is registered only when the
-/// engine adapter synthesises native input, which this bridge does not.
+/// The registry always contains the five observation and navigation tools.
+/// It adds `browser_act` only when the capfile says that the native runtime
+/// supports trusted semantic actions. The browser server authorizes every
+/// operation independently against its origin-scoped grants.
 pub(crate) async fn run_browser_mcp() -> Result<()> {
     let cap = BrowserCapfile::from_env()?;
     let client = BrowserClient::new(&cap)?;
-
-    let tools = Arc::new(
-        ToolRegistry::new()
-            .with(Box::new(BrowserListTool {
-                client: client.clone(),
-            }))
-            .with(Box::new(BrowserNavigateTool {
-                client: client.clone(),
-            }))
-            .with(Box::new(BrowserSnapshotTool {
-                client: client.clone(),
-            }))
-            .with(Box::new(BrowserWaitTool {
-                client: client.clone(),
-            }))
-            .with(Box::new(BrowserScreenshotTool {
-                client: client.clone(),
-            })),
-    );
+    let tools = Arc::new(browser_tool_registry(&client, cap.semantic_actions));
 
     // No filesystem workspace: the tools reach the loopback server only.
     let ctx = ToolCtx::without_private_scratch(tidebreak_core::ChatId::new(), None);
@@ -1125,6 +1298,31 @@ pub(crate) async fn run_browser_mcp() -> Result<()> {
     tidebreak_mcp::serve_stdio(server)
         .await
         .map_err(|error| AgentError::msg(format!("MCP stdio error: {error}")))
+}
+
+fn browser_tool_registry(client: &BrowserClient, semantic_actions: bool) -> ToolRegistry {
+    let mut tools = ToolRegistry::new()
+        .with(Box::new(BrowserListTool {
+            client: client.clone(),
+        }))
+        .with(Box::new(BrowserNavigateTool {
+            client: client.clone(),
+        }))
+        .with(Box::new(BrowserSnapshotTool {
+            client: client.clone(),
+        }))
+        .with(Box::new(BrowserWaitTool {
+            client: client.clone(),
+        }))
+        .with(Box::new(BrowserScreenshotTool {
+            client: client.clone(),
+        }));
+    if semantic_actions {
+        tools = tools.with(Box::new(BrowserActTool {
+            client: client.clone(),
+        }));
+    }
+    tools
 }
 
 // ---------------------------------------------------------------------------
@@ -1327,6 +1525,49 @@ impl Tool for BrowserScreenshotTool {
         };
         match browser_screenshot(&self.client, &parsed).await {
             Ok(result) => Ok(screenshot_tool_output(&result).unwrap_or_else(mcp_failure)),
+            Err(failure) => Ok(mcp_failure(failure)),
+        }
+    }
+}
+
+/// [`tidebreak_core::BROWSER_ACT_TOOL`] as an MCP-registrable [`Tool`].
+struct BrowserActTool {
+    client: BrowserClient,
+}
+
+#[async_trait::async_trait]
+impl Tool for BrowserActTool {
+    fn spec(&self) -> ToolSpec {
+        browser_act_tool_spec()
+    }
+
+    fn approval_class(&self) -> ApprovalClass {
+        ApprovalClass::Sensitive
+    }
+
+    async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if !validate_browser_act_arguments(&args) {
+            return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                detail: "invalid browser_act arguments".to_string(),
+            }));
+        }
+        let parsed: BrowserActArgs = match serde_json::from_value(args) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(mcp_failure(ClientFailure::InvalidArguments {
+                    detail: "browser_act arguments do not match the schema".to_string(),
+                }))
+            }
+        };
+        match browser_act(&self.client, &parsed).await {
+            Ok(result) => {
+                let data = serde_json::to_value(&result).unwrap_or(Value::Null);
+                let text = format!(
+                    "Browser action {} returned {:?}. {}",
+                    result.action, result.status, result.message
+                );
+                Ok(ToolOutput::text(text).with_data(data))
+            }
             Err(failure) => Ok(mcp_failure(failure)),
         }
     }
@@ -1568,6 +1809,25 @@ mod tests {
         let cap = BrowserCapfile::load(&path).unwrap();
         assert_eq!(cap.endpoint, "http://127.0.0.1:9876/code/browser");
         assert_eq!(cap.token, VALID_TOKEN);
+        assert!(!cap.semantic_actions);
+    }
+
+    #[test]
+    fn capfile_accepts_semantic_actions_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cap.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": 1,
+                "endpoint": "http://127.0.0.1:9876/code/browser",
+                "token": VALID_TOKEN,
+                "semantic_actions": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(BrowserCapfile::load(&path).unwrap().semantic_actions);
     }
 
     #[test]
@@ -2300,6 +2560,118 @@ mod tests {
     }
 
     #[test]
+    fn parse_browser_act_builds_a_canonical_native_action() {
+        let command = parse_browser(browser_args(&[
+            "act",
+            "--browser-id",
+            "browser-1",
+            "--snapshot-id",
+            "snapshot-1",
+            "--document-epoch",
+            "9",
+            "--ref",
+            "@e3",
+            "--fill",
+            "Tidebreak",
+        ]))
+        .unwrap();
+
+        let BrowserCommand::Act {
+            browser_id,
+            snapshot_id,
+            document_epoch,
+            target_ref,
+            action,
+        } = command
+        else {
+            panic!("expected Act");
+        };
+        assert_eq!(browser_id, "browser-1");
+        assert_eq!(snapshot_id, "snapshot-1");
+        assert_eq!(document_epoch, 9);
+        assert_eq!(target_ref, "@e3");
+        assert_eq!(
+            action,
+            BrowserAction::Fill {
+                value: "Tidebreak".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_browser_act_requires_identity_and_one_supported_action() {
+        for args in [
+            browser_args(&[
+                "act",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--ref",
+                "@e1",
+                "--click",
+            ]),
+            browser_args(&[
+                "act",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--ref",
+                "@e1",
+            ]),
+            browser_args(&[
+                "act",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--ref",
+                "@e1",
+                "--click",
+                "--focus",
+            ]),
+            browser_args(&[
+                "act",
+                "--browser-id",
+                "browser-1",
+                "--snapshot-id",
+                "snapshot-1",
+                "--document-epoch",
+                "1",
+                "--ref",
+                "@e1",
+                "--press",
+                "Ctrl+C",
+            ]),
+        ] {
+            assert!(parse_browser(args).is_err());
+        }
+    }
+
+    #[test]
+    fn browser_mcp_registers_act_only_when_the_capability_is_true() {
+        let cap = BrowserCapfile {
+            endpoint: "http://127.0.0.1:9876/code/browser".to_owned(),
+            token: VALID_TOKEN.to_owned(),
+            semantic_actions: false,
+        };
+        let client = BrowserClient::new(&cap).unwrap();
+        assert!(browser_tool_registry(&client, false)
+            .get(tidebreak_core::BROWSER_ACT_TOOL)
+            .is_none());
+        let enabled = browser_tool_registry(&client, true);
+        let act = enabled
+            .get(tidebreak_core::BROWSER_ACT_TOOL)
+            .expect("browser_act must register");
+        assert_eq!(act.approval_class(), ApprovalClass::Sensitive);
+    }
+
+    #[test]
     fn parse_browser_rejects_unknown_flag() {
         let err = parse_browser(vec!["list".to_string(), "--unknown".to_string()]).unwrap_err();
         assert!(err.contains("no arguments"), "error: {err}");
@@ -2623,6 +2995,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
 
@@ -2698,6 +3071,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
         let mut big_client = client.clone();
@@ -2796,6 +3170,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
         let mut test_client = client.clone();
@@ -2854,6 +3229,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
         let mut test_client = client.clone();
@@ -2917,6 +3293,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: token.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
         let mut test_client = client.clone();
@@ -2995,6 +3372,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
         let mut test_client = client.clone();
@@ -3077,6 +3455,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = BrowserClient::new(&cap).unwrap();
         let mut test_client = client.clone();
@@ -3222,6 +3601,7 @@ mod tests {
         let cap = BrowserCapfile {
             endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
             token: VALID_TOKEN.to_string(),
+            semantic_actions: false,
         };
         let client = {
             let _env_lock = PROXY_ENV_LOCK.lock().await;

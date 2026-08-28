@@ -70,14 +70,14 @@ export function close(server) {
 
 // ── deterministic browser state ─────────────────────────────────────────────
 
-function defaultEngine() {
+function defaultEngine(semanticActions) {
   return {
     name: "wk_web_view",
     capabilities: {
       lifecycle: true,
       persistentProfile: true,
       semanticSnapshot: true,
-      semanticActions: false,
+      semanticActions,
       screenshot: true,
       crossOriginFrames: false,
       profileReset: true,
@@ -101,6 +101,7 @@ const DEFAULT_BROWSER_WAIT_TIMEOUT_MS = 5_000;
 const MAX_BROWSER_WAIT_TIMEOUT_MS = 30_000;
 const MAX_BROWSER_SCREENSHOT_DIMENSION = 4_096;
 const MAX_WAIT_TEXT_CHARS = 512;
+const MAX_ACTION_VALUE_CHARS = 8_192;
 
 const BROWSER_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
 
@@ -123,6 +124,50 @@ function validWaitCondition(condition) {
       return (
         typeof condition.text === "string" &&
         [...condition.text].length <= MAX_WAIT_TEXT_CHARS
+      );
+    default:
+      return false;
+  }
+}
+
+function validBrowserAction(action) {
+  if (!action || typeof action !== "object" || typeof action.type !== "string") {
+    return false;
+  }
+  switch (action.type) {
+    case "click":
+    case "focus":
+    case "hover":
+    case "scroll_into_view":
+      return Object.keys(action).length === 1;
+    case "fill":
+    case "select":
+      return (
+        Object.keys(action).every((key) => ["type", "value"].includes(key)) &&
+        typeof action.value === "string" &&
+        action.value.length > 0 &&
+        [...action.value].length <= MAX_ACTION_VALUE_CHARS
+      );
+    case "check":
+      return (
+        Object.keys(action).every((key) => ["type", "checked"].includes(key)) &&
+        typeof action.checked === "boolean"
+      );
+    case "press":
+      return (
+        Object.keys(action).every((key) => ["type", "key"].includes(key)) &&
+        [
+          "Enter",
+          "Escape",
+          "Tab",
+          " ",
+          "ArrowUp",
+          "ArrowDown",
+          "ArrowLeft",
+          "ArrowRight",
+          "Backspace",
+          "Delete",
+        ].includes(action.key)
       );
     default:
       return false;
@@ -176,6 +221,7 @@ const DETERMINISTIC_PNG_BASE64 =
  * - missingRuntime: if true, all routes return 501 after auth+validation
  * - waitOutcome: "resolved" | "timed_out" | "stopped" — controls wait result status
  * - staleInstance: if true, wait/screenshot return a 409 with instance-replaced semantics
+ * - semanticActions: if true, advertise and serve the trusted action route
  */
 export async function startBridgeServer({
   host = "127.0.0.1",
@@ -187,6 +233,7 @@ export async function startBridgeServer({
   missingRuntime = false,
   waitOutcome = "resolved",
   staleInstance = false,
+  semanticActions = false,
 } = {}) {
   if (!fixtureOrigin) {
     throw new Error("fixtureOrigin is required");
@@ -278,7 +325,7 @@ export async function startBridgeServer({
                   title: "Agent browser fixture",
                   loadState: "ready",
                   visible: true,
-                  engine: defaultEngine(),
+                  engine: defaultEngine(semanticActions),
                   controller,
                 },
               ],
@@ -528,6 +575,114 @@ export async function startBridgeServer({
           ],
           frames: [],
           truncated: false,
+        });
+        return;
+      }
+
+      // ── POST /act ───────────────────────────────────────────────────────
+
+      if (route === "act" && request.method === "POST") {
+        const body = await readBody(request);
+
+        if (!body || typeof body !== "object") {
+          errJson(response, 400, "bad_request", "invalid JSON body");
+          return;
+        }
+
+        const allowed = new Set([
+          "browser_id",
+          "snapshot_id",
+          "document_epoch",
+          "ref",
+          "action",
+        ]);
+        for (const key of Object.keys(body)) {
+          if (!allowed.has(key)) {
+            errJson(
+              response,
+              400,
+              "invalid_browser_arguments",
+              `unknown field \`${key}\``
+            );
+            return;
+          }
+        }
+
+        const {
+          browser_id,
+          snapshot_id,
+          document_epoch,
+          ref: targetRef,
+          action,
+        } = body;
+        if (
+          typeof browser_id !== "string" ||
+          typeof snapshot_id !== "string" ||
+          typeof document_epoch !== "number" ||
+          !Number.isInteger(document_epoch) ||
+          document_epoch < 0 ||
+          typeof targetRef !== "string" ||
+          !action ||
+          typeof action !== "object"
+        ) {
+          errJson(response, 400, "bad_request", "missing or invalid action fields");
+          return;
+        }
+        if (!validBrowserId(browser_id) || !validBrowserAction(action)) {
+          errJson(
+            response,
+            422,
+            "invalid_browser_arguments",
+            "browser arguments are not well-formed"
+          );
+          return;
+        }
+        if (missingRuntime || !semanticActions) {
+          errJson(
+            response,
+            501,
+            "not_implemented",
+            "trusted native semantic actions are unavailable"
+          );
+          return;
+        }
+        if (browser_id !== "browser-1") {
+          errJson(response, 404, "not_found", `browser ${browser_id} not found`);
+          return;
+        }
+
+        const stale =
+          staleSnapshot ||
+          staleInstance ||
+          document_epoch !== currentDocumentEpoch ||
+          snapshot_id !== currentSnapshotId ||
+          !["@e1", "@e2"].includes(targetRef);
+        if (stale) {
+          json(response, {
+            browserId: browser_id,
+            snapshotId: snapshot_id,
+            documentEpoch: document_epoch,
+            ref: targetRef,
+            action: action.type,
+            status: "stale_target",
+            message: "The page or target changed. Take a new snapshot before acting.",
+            requiresResnapshot: true,
+          });
+          return;
+        }
+
+        currentSnapshotId = null;
+        json(response, {
+          browserId: browser_id,
+          snapshotId: snapshot_id,
+          documentEpoch: document_epoch,
+          ref: targetRef,
+          action: action.type,
+          status: "ok",
+          message: "Action completed. Take a new snapshot before the next action.",
+          requiresResnapshot: true,
+          url: fixtureOrigin,
+          title: "Agent browser fixture",
         });
         return;
       }
