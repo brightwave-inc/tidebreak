@@ -43,14 +43,13 @@ import {
   forkTranscriptFile,
   messageWithWorkspaceFiles,
 } from "./fork";
-import {
-  readStoredBrowserSession,
-  seedBrowserSession,
-  writeStoredBrowserSession,
-} from "./browser/browserPersistence";
+import { LEGACY_BROWSER_STORAGE_KEY } from "./browser/browserPersistence";
 
 const browserMocks = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
+}));
+const persistMocks = vi.hoisted(() => ({
+  seed: vi.fn(),
 }));
 
 vi.mock("./browser/browserHost", async (importOriginal) => {
@@ -58,19 +57,38 @@ vi.mock("./browser/browserHost", async (importOriginal) => {
   return { ...actual, closeCodeBrowser: browserMocks.close };
 });
 
+vi.mock("./browser/browserPersistence", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./browser/browserPersistence")>();
+  return {
+    ...actual,
+    seedBrowserSession: (args: {
+      browserId: string;
+      workspaceId: string;
+      initialUrl?: string;
+    }) => {
+      persistMocks.seed(args);
+      return actual.seedBrowserSession(args);
+    },
+  };
+});
+
 vi.mock("./browser/CodeBrowserTab", () => ({
   CodeBrowserTab: ({
     browserId,
+    initialUrl,
     obscured,
     onTitleChange,
   }: {
     browserId: string;
+    initialUrl?: string;
     obscured?: boolean;
     onTitleChange?: (title: string) => void;
   }) => (
     <button
       type="button"
       data-testid={`browser-panel-${browserId}`}
+      data-initial-url={initialUrl ?? ""}
       data-obscured={String(Boolean(obscured))}
       onClick={() => onTitleChange?.("Tidebreak docs")}
     >
@@ -702,6 +720,7 @@ afterEach(() => {
   });
   resetWorkflowPromptStore();
   browserMocks.close.mockClear();
+  persistMocks.seed.mockClear();
   window.localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -2757,7 +2776,12 @@ describe("CodeWorkspacePage", () => {
     expect(
       await screen.findByTestId("browser-panel-browser-1"),
     ).toBeInTheDocument();
-    expect(readStoredBrowserSession("browser-1")?.workspaceId).toBe("ws-1");
+    expect(persistMocks.seed).toHaveBeenCalledWith({
+      browserId: "browser-1",
+      workspaceId: "ws-1",
+      initialUrl: undefined,
+    });
+    expect(window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)).toBeNull();
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({
         tabs: "browser.browser-1",
@@ -2770,28 +2794,32 @@ describe("CodeWorkspacePage", () => {
     ).toBeInTheDocument();
   });
 
-  it("restores a persisted browser title without polling storage", async () => {
+  it("starts a restored browser tab from native state instead of legacy storage", async () => {
     const client = makeClient();
-    const session = seedBrowserSession({
-      browserId: "browser-restored",
-      workspaceId: "ws-1",
-      initialUrl: "https://docs.tidebreak.dev",
-    });
-    writeStoredBrowserSession({ ...session, title: "Tidebreak handbook" });
+    window.localStorage.setItem(
+      LEGACY_BROWSER_STORAGE_KEY,
+      JSON.stringify({
+        "browser-restored": {
+          version: 1,
+          id: "browser-restored",
+          workspaceId: "ws-1",
+          url: "https://docs.tidebreak.dev",
+          title: "Tidebreak handbook",
+          updatedAt: 17,
+        },
+      }),
+    );
 
     await mountWorkspace(client, "/code/w/ws-1?tabs=browser.browser-restored");
 
-    expect(
-      await screen.findByRole("tab", { name: "Tidebreak handbook" }),
-    ).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: "Browser" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("hides the native browser behind dialogs and portaled menus", async () => {
     const client = makeClient();
-    seedBrowserSession({
-      browserId: "browser-1",
-      workspaceId: "ws-1",
-    });
     const user = userEvent.setup();
     await mountWorkspace(client, "/code/w/ws-1?tabs=browser.browser-1");
 
@@ -2812,7 +2840,6 @@ describe("CodeWorkspacePage", () => {
 
   it("closes a native browser only when its editor tab is removed", async () => {
     const client = makeClient();
-    seedBrowserSession({ browserId: "browser-1", workspaceId: "ws-1" });
     const user = userEvent.setup();
     await mountWorkspace(
       client,
@@ -2835,7 +2862,6 @@ describe("CodeWorkspacePage", () => {
 
   it("closes surviving native browser sessions when the workspace tears down", async () => {
     const client = makeClient();
-    seedBrowserSession({ browserId: "browser-1", workspaceId: "ws-1" });
     const mounted = await mountWorkspace(
       client,
       "/code/w/ws-1?tabs=browser.browser-1",

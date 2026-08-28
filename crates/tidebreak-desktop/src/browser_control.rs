@@ -25,7 +25,9 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
-use crate::browser_recovery::{BrowserSessionStore, RecoveredBrowserSession};
+use crate::browser_recovery::{
+    BrowserSessionStore, LegacyBrowserImportResult, LegacyBrowserSession, RecoveredBrowserSession,
+};
 
 const BROWSER_AUDIT_FILE: &str = "browser-audit.jsonl";
 const AGENT_CAPABILITY_TTL: Duration = Duration::from_secs(90);
@@ -500,6 +502,17 @@ impl BrowserRegistry {
     ) -> Result<(), String> {
         self.sessions
             .ensure_binding(owner_id, browser_id, workspace_id)
+    }
+
+    pub(crate) fn import_legacy_session(
+        &self,
+        owner_id: &OwnerId,
+        browser_id: &str,
+        workspace_id: &str,
+        legacy: Option<LegacyBrowserSession>,
+    ) -> Result<LegacyBrowserImportResult, String> {
+        self.sessions
+            .import_legacy(owner_id, browser_id, workspace_id, legacy)
     }
 
     pub(crate) fn forget_recovery(

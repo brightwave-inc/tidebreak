@@ -10,27 +10,36 @@ import {
   type CodeBrowserHost,
 } from "./browserHost";
 import {
-  readStoredBrowserSession,
-  writeStoredBrowserSession,
+  LEGACY_BROWSER_STORAGE_KEY,
+  readLegacyBrowserSession,
 } from "./browserPersistence";
-import { createBrowserSession } from "./browserSession";
 
 // The gate is `hasNativeHost() && !attachedRemotely()`, so the native half has
 // to be true for the attachment half to be observable at all.
 const isTauri = vi.hoisted(() => vi.fn(() => true));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri, invoke: vi.fn() }));
 
+function storeLegacySession(browserId: string): void {
+  window.localStorage.setItem(
+    LEGACY_BROWSER_STORAGE_KEY,
+    JSON.stringify({
+      [browserId]: {
+        version: 1,
+        id: browserId,
+        workspaceId: "workspace-1",
+        url: "https://example.com",
+        title: "Example",
+        updatedAt: 17,
+      },
+    }),
+  );
+}
+
 describe("browser host lifecycle", () => {
   beforeEach(() => window.localStorage.clear());
 
   it("removes persisted state and closes the native view on explicit tab close", async () => {
-    writeStoredBrowserSession(
-      createBrowserSession({
-        id: "browser-1",
-        workspaceId: "workspace-1",
-        initialUrl: "https://example.com",
-      }),
-    );
+    storeLegacySession("browser-1");
     const command = vi.fn().mockResolvedValue({
       exists: false,
       workspaceId: "workspace-1",
@@ -38,6 +47,7 @@ describe("browser host lifecycle", () => {
     });
     const host: CodeBrowserHost = {
       available: () => true,
+      importLegacyState: vi.fn(),
       command,
       subscribe: vi.fn(async () => () => undefined),
       openExternal: vi.fn(async () => undefined),
@@ -45,19 +55,18 @@ describe("browser host lifecycle", () => {
 
     await closeCodeBrowser("workspace-1", "browser-1", host);
 
-    expect(readStoredBrowserSession("browser-1")).toBeNull();
+    expect(readLegacyBrowserSession("browser-1")).toBeNull();
     expect(command).toHaveBeenCalledWith("workspace-1", "browser-1", {
       type: "close",
     });
   });
 
   it("still removes persisted state when no native desktop host exists", async () => {
-    writeStoredBrowserSession(
-      createBrowserSession({ id: "browser-1", workspaceId: "workspace-1" }),
-    );
+    storeLegacySession("browser-1");
     const command = vi.fn();
     const host: CodeBrowserHost = {
       available: () => false,
+      importLegacyState: vi.fn(),
       command,
       subscribe: vi.fn(async () => () => undefined),
       openExternal: vi.fn(async () => undefined),
@@ -65,7 +74,7 @@ describe("browser host lifecycle", () => {
 
     await closeCodeBrowser("workspace-1", "browser-1", host);
 
-    expect(readStoredBrowserSession("browser-1")).toBeNull();
+    expect(readLegacyBrowserSession("browser-1")).toBeNull();
     expect(command).not.toHaveBeenCalled();
   });
 });
@@ -79,6 +88,7 @@ describe("managed browser profile reset", () => {
     });
     const host: CodeBrowserHost = {
       available: () => true,
+      importLegacyState: vi.fn(),
       command,
       subscribe: vi.fn(async () => () => undefined),
       openExternal: vi.fn(async () => undefined),
@@ -96,6 +106,7 @@ describe("managed browser profile reset", () => {
     const command = vi.fn();
     const host: CodeBrowserHost = {
       available: () => false,
+      importLegacyState: vi.fn(),
       command,
       subscribe: vi.fn(async () => () => undefined),
       openExternal: vi.fn(async () => undefined),

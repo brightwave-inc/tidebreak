@@ -3,7 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { attachedRemotely, hasLocalHostAuthority, openExternal } from "@/host";
-import { removeStoredBrowserSession } from "./browserPersistence";
+import {
+  clearLegacyBrowserSession,
+  type LegacyBrowserState,
+} from "./browserPersistence";
 
 export const CODE_BROWSER_EVENT = "code-browser:event";
 
@@ -124,8 +127,21 @@ export type BrowserHostEvent = {
   origin?: string;
 };
 
+export type BrowserLegacyImportResult = {
+  status: "imported" | "native_state_kept" | "already_handled" | "discarded";
+  browserId: string;
+  workspaceId: string;
+  url?: string;
+  title?: string;
+};
+
 export type CodeBrowserHost = {
   available: () => boolean;
+  importLegacyState: (
+    workspaceId: string,
+    browserId: string,
+    legacyState: LegacyBrowserState | null,
+  ) => Promise<BrowserLegacyImportResult>;
   command: (
     workspaceId: string,
     browserId: string,
@@ -145,6 +161,10 @@ export const nativeCodeBrowserHost: CodeBrowserHost = {
    * screen — so a window attached to a machine has no browser to offer.
    */
   available: hasLocalHostAuthority,
+  importLegacyState: async (workspaceId, browserId, legacyState) =>
+    invoke<BrowserLegacyImportResult>("code_browser_import_legacy_state", {
+      request: { workspaceId, browserId, legacyState },
+    }),
   command: async (workspaceId, browserId, action) => {
     const normalized = await logicalBrowserAction(action);
     return invoke<BrowserHostSnapshot>("code_browser_command", {
@@ -242,7 +262,7 @@ export async function closeCodeBrowser(
   browserId: string,
   host: CodeBrowserHost = nativeCodeBrowserHost,
 ): Promise<void> {
-  removeStoredBrowserSession(browserId);
+  clearLegacyBrowserSession(browserId);
   if (!host.available()) return;
   await host
     .command(workspaceId, browserId, { type: "close" })

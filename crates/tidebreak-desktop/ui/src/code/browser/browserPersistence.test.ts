@@ -1,91 +1,122 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  readStoredBrowserSession,
-  removeStoredBrowserSession,
+  clearLegacyBrowserSession,
+  LEGACY_BROWSER_STORAGE_KEY,
+  readLegacyBrowserSession,
   seedBrowserSession,
-  storedBrowserTitle,
-  writeStoredBrowserSession,
 } from "./browserPersistence";
-import { beginBrowserNavigation, createBrowserSession } from "./browserSession";
 
-describe("browser persistence", () => {
+function storeLegacySession(
+  browserId: string,
+  update: Record<string, unknown> = {},
+): void {
+  window.localStorage.setItem(
+    LEGACY_BROWSER_STORAGE_KEY,
+    JSON.stringify({
+      [browserId]: {
+        version: 1,
+        id: browserId,
+        workspaceId: "workspace-1",
+        url: "https://example.com/docs",
+        title: "Documentation",
+        loadState: "failed",
+        error: "network failed",
+        inspectEnabled: true,
+        history: [
+          { url: "https://example.com/one" },
+          { url: "https://example.com/docs" },
+        ],
+        historyIndex: 1,
+        updatedAt: 17,
+        ...update,
+      },
+    }),
+  );
+}
+
+describe("legacy browser persistence migration", () => {
   beforeEach(() => window.localStorage.clear());
 
-  it("round-trips useful state but clears transient failures", () => {
-    const session = {
-      ...createBrowserSession({
+  it("reads only URL and title from a valid legacy session", () => {
+    storeLegacySession("browser-1");
+
+    expect(readLegacyBrowserSession("browser-1")).toEqual({
+      kind: "valid",
+      state: {
+        version: 1,
         id: "browser-1",
         workspaceId: "workspace-1",
-        initialUrl: "https://example.com/docs",
-      }),
-      loadState: "failed" as const,
-      error: "network failed",
-      notice: {
-        kind: "popup" as const,
-        url: "https://example.com/sign-in",
-        message: "popup",
+        url: "https://example.com/docs",
+        title: "Documentation",
       },
-      inspectEnabled: true,
-    };
-    writeStoredBrowserSession(session);
-    expect(readStoredBrowserSession("browser-1")).toMatchObject({
-      id: "browser-1",
-      workspaceId: "workspace-1",
-      url: "https://example.com/docs",
-      loadState: "ready",
-      error: null,
-      notice: null,
-      inspectEnabled: false,
     });
   });
 
-  it("keeps the selected entry correct when stored history is trimmed", () => {
-    let session = createBrowserSession({
-      id: "browser-1",
-      workspaceId: "workspace-1",
+  it("marks malformed and cross-workspace metadata for native disposal", () => {
+    storeLegacySession("browser-1", { url: "javascript:alert(1)" });
+    expect(readLegacyBrowserSession("browser-1")).toEqual({
+      kind: "invalid",
+      state: null,
     });
-    for (let index = 0; index < 60; index += 1) {
-      session = beginBrowserNavigation(
-        session,
-        `https://example.com/${index}`,
-        index,
-      );
-    }
-    writeStoredBrowserSession(session);
-    const restored = readStoredBrowserSession("browser-1");
-    expect(restored?.history).toHaveLength(50);
-    expect(restored?.history[restored.historyIndex]?.url).toBe(
-      "https://example.com/59",
+
+    storeLegacySession("browser-1", { workspaceId: "workspace-2" });
+    expect(readLegacyBrowserSession("browser-1")).toMatchObject({
+      kind: "valid",
+      state: { workspaceId: "workspace-2" },
+    });
+  });
+
+  it("clears only the acknowledged entry and never writes during reads", () => {
+    storeLegacySession("browser-1");
+    const first = JSON.parse(
+      window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)!,
     );
-  });
-
-  it("drops malformed sessions and removes closed sessions", () => {
     window.localStorage.setItem(
-      "tidebreak.code-browser-sessions.v1",
-      JSON.stringify({ "browser-1": { version: 9 } }),
+      LEGACY_BROWSER_STORAGE_KEY,
+      JSON.stringify({ ...first, "browser-2": { version: 9 } }),
     );
-    expect(readStoredBrowserSession("browser-1")).toBeNull();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
 
-    writeStoredBrowserSession(
-      createBrowserSession({ id: "browser-1", workspaceId: "workspace-1" }),
-    );
-    removeStoredBrowserSession("browser-1");
-    expect(readStoredBrowserSession("browser-1")).toBeNull();
+    readLegacyBrowserSession("browser-1");
+    expect(setItem).not.toHaveBeenCalled();
+
+    clearLegacyBrowserSession("browser-1");
+    expect(
+      JSON.parse(window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)!),
+    ).toEqual({ "browser-2": { version: 9 } });
   });
 
-  it("seeds a new panel before mount and exposes its lightweight tab title", () => {
+  it("removes an unreadable legacy payload after native acknowledgement", () => {
+    window.localStorage.setItem(LEGACY_BROWSER_STORAGE_KEY, "not json");
+    expect(readLegacyBrowserSession("browser-1")?.kind).toBe("invalid");
+
+    clearLegacyBrowserSession("browser-1");
+    expect(window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)).toBeNull();
+  });
+
+  it("writes a URL before the panel mounts and skips empty tabs", () => {
     seedBrowserSession({
       browserId: "browser-1",
       workspaceId: "workspace-1",
-      initialUrl: "https://example.com/docs",
     });
+    expect(readLegacyBrowserSession("browser-1")).toBeNull();
 
-    expect(readStoredBrowserSession("browser-1")).toMatchObject({
+    seedBrowserSession({
+      browserId: "browser-1",
       workspaceId: "workspace-1",
-      url: "https://example.com/docs",
+      initialUrl: "https://docs.example/path",
     });
-    expect(storedBrowserTitle("browser-1")).toBe("Browser");
+    expect(readLegacyBrowserSession("browser-1")).toEqual({
+      kind: "valid",
+      state: {
+        version: 1,
+        id: "browser-1",
+        workspaceId: "workspace-1",
+        url: "https://docs.example/path",
+        title: null,
+      },
+    });
   });
 });

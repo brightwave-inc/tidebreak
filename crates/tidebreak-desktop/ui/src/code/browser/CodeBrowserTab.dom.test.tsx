@@ -15,20 +15,28 @@ import type {
   BrowserAgentAccess,
   BrowserHostAction,
   BrowserHostEvent,
+  BrowserLegacyImportResult,
   BrowserHostSnapshot,
   CodeBrowserHost,
 } from "./browserHost";
+import { browserUnavailableMessage } from "./browserHost";
 import {
-  readStoredBrowserSession,
-  writeStoredBrowserSession,
+  LEGACY_BROWSER_STORAGE_KEY,
+  seedBrowserSession,
+  type LegacyBrowserState,
 } from "./browserPersistence";
-import { beginBrowserNavigation, createBrowserSession } from "./browserSession";
 import { CodeBrowserTab } from "./CodeBrowserTab";
 
 type CommandCall = {
   workspaceId: string;
   browserId: string;
   action: BrowserHostAction;
+};
+
+type LegacyImportCall = {
+  workspaceId: string;
+  browserId: string;
+  legacyState: LegacyBrowserState | null;
 };
 
 function resetIdFrom(calls: CommandCall[]): number {
@@ -76,6 +84,7 @@ function agentAccess(
 }
 
 function browserHost(options?: {
+  available?: boolean;
   createGate?: Promise<void>;
   createGates?: Array<Promise<void> | undefined>;
   createError?: string;
@@ -86,19 +95,41 @@ function browserHost(options?: {
   runtime?: Partial<BrowserHostSnapshot>;
   resetGate?: Promise<void>;
   resetError?: string;
+  legacyImportError?: string;
+  legacyImportResult?: Partial<BrowserLegacyImportResult>;
 }): {
   host: CodeBrowserHost;
   calls: CommandCall[];
+  imports: LegacyImportCall[];
   emit: (event: BrowserHostEvent) => void;
   openExternal: ReturnType<typeof vi.fn>;
 } {
   const calls: CommandCall[] = [];
+  const imports: LegacyImportCall[] = [];
   let createAttempt = 0;
   let inspectEnabled = options?.runtime?.inspectEnabled ?? false;
   let handler: ((event: BrowserHostEvent) => void) | null = null;
   const openExternal = vi.fn().mockResolvedValue(undefined);
   const host: CodeBrowserHost = {
-    available: () => true,
+    available: () => options?.available ?? true,
+    importLegacyState: vi.fn(
+      async (
+        workspaceId,
+        browserId,
+        legacyState,
+      ): Promise<BrowserLegacyImportResult> => {
+        imports.push({ workspaceId, browserId, legacyState });
+        if (options?.legacyImportError) {
+          throw new Error(options.legacyImportError);
+        }
+        return {
+          status: "already_handled",
+          browserId,
+          workspaceId,
+          ...options?.legacyImportResult,
+        };
+      },
+    ),
     subscribe: vi.fn(async (next) => {
       handler = next;
       return () => {
@@ -124,7 +155,12 @@ function browserHost(options?: {
                 title: "Restored page",
                 loadState: "ready" as const,
               }
-            : { exists: false, workspaceId, browserId };
+            : {
+                exists: false,
+                ...options?.runtime,
+                workspaceId,
+                browserId,
+              };
         }
         const actionError = options?.actionErrors?.[action.type];
         if (actionError) throw new Error(actionError);
@@ -158,9 +194,35 @@ function browserHost(options?: {
   return {
     host,
     calls,
+    imports,
     emit: (event) => handler?.(event),
     openExternal,
   };
+}
+
+function storeLegacySession(
+  browserId: string,
+  update: Record<string, unknown> = {},
+): void {
+  window.localStorage.setItem(
+    LEGACY_BROWSER_STORAGE_KEY,
+    JSON.stringify({
+      [browserId]: {
+        version: 1,
+        id: browserId,
+        workspaceId: "workspace-1",
+        url: "https://example.com/two",
+        title: "Legacy page",
+        history: [
+          { url: "https://example.com/one" },
+          { url: "https://example.com/two" },
+        ],
+        historyIndex: 1,
+        updatedAt: 17,
+        ...update,
+      },
+    }),
+  );
 }
 
 let mockedClientWidth = 1024;
@@ -255,7 +317,7 @@ describe("CodeBrowserTab", () => {
     );
   });
 
-  it("updates the toolbar and persisted session for same-document navigation", async () => {
+  it("updates the toolbar without recreating renderer browser authority", async () => {
     const runtime = browserHost();
     render(
       <CodeBrowserTab
@@ -292,9 +354,9 @@ describe("CodeBrowserTab", () => {
       expect(
         screen.getByRole("textbox", { name: "Address or search" }),
       ).toHaveValue(url.replace("https://", ""));
-      await waitFor(() =>
-        expect(readStoredBrowserSession("browser-1")?.url).toBe(url),
-      );
+      expect(
+        window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY),
+      ).toBeNull();
     }
   });
 
@@ -726,16 +788,22 @@ describe("CodeBrowserTab", () => {
     ).toHaveValue("example.com/two");
   });
 
-  it("uses persisted history after recreating a missing native webview", async () => {
-    const runtime = browserHost();
-    const first = createBrowserSession({
-      id: "browser-1",
-      workspaceId: "workspace-1",
-      initialUrl: "https://example.com/one",
+  it("migrates legacy metadata once, keeps native state, and discards renderer history", async () => {
+    storeLegacySession("browser-1", {
+      url: "https://legacy.example/two",
+      title: "Legacy title",
     });
-    writeStoredBrowserSession(
-      beginBrowserNavigation(first, "https://example.com/two"),
-    );
+    const runtime = browserHost({
+      runtime: {
+        url: "https://native.example/restored",
+        title: "Native title",
+      },
+      legacyImportResult: {
+        status: "native_state_kept",
+        url: "https://native.example/restored",
+        title: "Native title",
+      },
+    });
 
     render(
       <CodeBrowserTab
@@ -744,31 +812,180 @@ describe("CodeBrowserTab", () => {
         host={runtime.host}
       />,
     );
+    await waitFor(() => expect(runtime.imports).toHaveLength(1));
+    expect(runtime.imports[0]).toEqual({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      legacyState: {
+        version: 1,
+        id: "browser-1",
+        workspaceId: "workspace-1",
+        url: "https://legacy.example/two",
+        title: "Legacy title",
+      },
+    });
+    expect(window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY)).toBeNull();
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
         workspaceId: "workspace-1",
         browserId: "browser-1",
         action: expect.objectContaining({
           type: "create",
-          url: "https://example.com/two",
+          url: "https://native.example/restored",
         }),
       }),
     );
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("native.example/restored");
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    expect(runtime.calls).not.toContainEqual(
+      expect.objectContaining({
+        action: expect.objectContaining({ url: "https://example.com/one" }),
+      }),
+    );
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  it("creates from a seeded URL when the panel remounts without initialUrl", async () => {
+    seedBrowserSession({
+      browserId: "browser-1",
+      workspaceId: "workspace-1",
+      initialUrl: "https://docs.example/path",
+    });
+    const runtime = browserHost({
+      runtime: { url: "https://docs.example/path" },
+      legacyImportResult: {
+        status: "imported",
+        url: "https://docs.example/path",
+      },
+    });
 
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() => expect(runtime.imports).toHaveLength(1));
+    expect(runtime.imports[0]?.legacyState?.url).toBe(
+      "https://docs.example/path",
+    );
     await waitFor(() =>
       expect(runtime.calls).toContainEqual({
         workspaceId: "workspace-1",
         browserId: "browser-1",
-        action: { type: "navigate", url: "https://example.com/one" },
+        action: expect.objectContaining({
+          type: "create",
+          url: "https://docs.example/path",
+        }),
       }),
     );
-    expect(runtime.calls).not.toContainEqual({
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("docs.example/path");
+  });
+
+  it("migrates leftover state and names why the browser cannot run here", async () => {
+    storeLegacySession("browser-1", {
+      url: "https://legacy.example/docs",
+      title: "Docs",
+    });
+    const runtime = browserHost({
+      available: false,
+      legacyImportResult: {
+        status: "imported",
+        url: "https://legacy.example/docs",
+        title: "Docs",
+      },
+    });
+
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() => expect(runtime.imports).toHaveLength(1));
+    expect(runtime.imports[0]).toEqual({
       workspaceId: "workspace-1",
       browserId: "browser-1",
-      action: { type: "back" },
+      legacyState: {
+        version: 1,
+        id: "browser-1",
+        workspaceId: "workspace-1",
+        url: "https://legacy.example/docs",
+        title: "Docs",
+      },
     });
+    expect(runtime.calls).toEqual([]);
+    expect(
+      await screen.findByText(browserUnavailableMessage()),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Bring the live work into the workspace"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Address or search" }),
+    ).toHaveValue("legacy.example/docs");
+  });
+
+  it("explains the missing host even when no leftover URL exists", async () => {
+    const runtime = browserHost({ available: false });
+
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+
+    expect(
+      await screen.findByText(browserUnavailableMessage()),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Bring the live work into the workspace"),
+    ).not.toBeInTheDocument();
+    expect(runtime.imports).toEqual([]);
+    expect(runtime.calls).toEqual([]);
+  });
+
+  it("never writes browser session state after native acknowledgement", async () => {
+    storeLegacySession("browser-1");
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const runtime = browserHost({
+      runtime: { url: "https://example.com/two" },
+      legacyImportResult: { status: "imported" },
+    });
+    const view = render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        host={runtime.host}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        window.localStorage.getItem(LEGACY_BROWSER_STORAGE_KEY),
+      ).toBeNull(),
+    );
+    act(() => {
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "navigation_finished",
+        url: "https://example.com/three",
+      });
+    });
+    view.unmount();
+
+    expect(
+      setItem.mock.calls.filter(([key]) => key === LEGACY_BROWSER_STORAGE_KEY),
+    ).toEqual([]);
   });
 
   it("ignores a late title event from the page navigated away from", async () => {

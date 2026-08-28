@@ -38,9 +38,9 @@ import {
   validateBrowserUrl,
 } from "./browserNavigation";
 import {
-  readStoredBrowserSession,
-  restoreOrCreateBrowserSession,
-  writeStoredBrowserSession,
+  clearLegacyBrowserSession,
+  readLegacyBrowserSession,
+  type LegacyBrowserStateRead,
 } from "./browserPersistence";
 import {
   type BrowserViewport,
@@ -52,6 +52,7 @@ import {
   beginBrowserNavigation,
   canBrowserGoBack,
   canBrowserGoForward,
+  createBrowserSession,
   failBrowserSession,
   finishBrowserNavigation,
   moveBrowserHistory,
@@ -62,7 +63,6 @@ import {
 } from "./browserSession";
 
 const SLOW_LOAD_MS = 15_000;
-const PERSIST_DELAY_MS = 150;
 let nextProfileResetId = 0;
 
 function createProfileResetId(): number {
@@ -112,6 +112,22 @@ export function CodeBrowserTab(props: CodeBrowserTabProps) {
   );
 }
 
+function hydrateSessionFromLegacy(
+  session: BrowserSession,
+  legacy: LegacyBrowserStateRead | null,
+): BrowserSession {
+  if (legacy?.kind !== "valid") return session;
+  if (legacy.state.workspaceId !== session.workspaceId) return session;
+  let next = session;
+  if (!next.url && legacy.state.url) {
+    next = finishBrowserNavigation(next, legacy.state.url);
+  }
+  if (legacy.state.title) {
+    next = setBrowserTitle(next, legacy.state.title);
+  }
+  return next;
+}
+
 function CodeBrowserTabSession({
   workspaceId,
   browserId,
@@ -121,8 +137,9 @@ function CodeBrowserTabSession({
   onTitleChange,
 }: CodeBrowserTabProps) {
   const [session, setSession] = useState(() =>
-    restoreOrCreateBrowserSession({ browserId, workspaceId, initialUrl }),
+    createBrowserSession({ id: browserId, workspaceId, initialUrl }),
   );
+  const [legacyState] = useState(() => readLegacyBrowserSession(browserId));
   const [address, setAddress] = useState(session.address);
   const [addressError, setAddressError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -159,7 +176,6 @@ function CodeBrowserTabSession({
   const nativeHistoryAvailable = useRef(false);
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
   const nativeRevealFrame = useRef<number | null>(null);
-  const persistTimer = useRef<number | null>(null);
   const sessionRef = useRef(session);
   const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
   const viewportSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -558,34 +574,6 @@ function CodeBrowserTabSession({
   }, [onTitleChange, session.title]);
 
   useEffect(() => {
-    if (persistTimer.current !== null) {
-      window.clearTimeout(persistTimer.current);
-    }
-    persistTimer.current = window.setTimeout(() => {
-      persistTimer.current = null;
-      writeStoredBrowserSession(sessionRef.current);
-    }, PERSIST_DELAY_MS);
-    return () => {
-      if (persistTimer.current !== null) {
-        window.clearTimeout(persistTimer.current);
-        persistTimer.current = null;
-      }
-    };
-  }, [session]);
-
-  useEffect(
-    () => () => {
-      // An explicit tab close removes storage before or after this component's
-      // cleanup depending on React's unmount order. Do not resurrect a session
-      // the workspace owner has already closed.
-      if (readStoredBrowserSession(browserId)) {
-        writeStoredBrowserSession(sessionRef.current);
-      }
-    },
-    [browserId],
-  );
-
-  useEffect(() => {
     writeStoredViewport(viewport);
   }, [viewport]);
 
@@ -603,12 +591,40 @@ function CodeBrowserTabSession({
     let unsubscribe: (() => void) | undefined;
 
     async function boot() {
-      const current = sessionRef.current;
-      if (!host.available()) {
-        if (current.url) {
-          updateSession((value) =>
-            failBrowserSession(value, browserUnavailableMessage()),
+      async function importLegacy() {
+        if (!legacyState) return;
+        const imported = await host.importLegacyState(
+          workspaceId,
+          browserId,
+          legacyState.state,
+        );
+        if (
+          imported.browserId !== browserId ||
+          imported.workspaceId !== workspaceId
+        ) {
+          throw new Error(
+            "The browser host acknowledged another workspace's session",
           );
+        }
+        clearLegacyBrowserSession(browserId);
+      }
+
+      if (!host.available()) {
+        try {
+          await importLegacy();
+        } catch {
+          // Leftover renderer state stays until a host can acknowledge it.
+        }
+        if (!cancelled) {
+          updateSession((value) =>
+            failBrowserSession(
+              hydrateSessionFromLegacy(value, legacyState),
+              browserUnavailableMessage(),
+            ),
+          );
+          if (sessionRef.current.url) {
+            setAddress(browserDisplayAddress(sessionRef.current.url));
+          }
         }
         return;
       }
@@ -642,10 +658,15 @@ function CodeBrowserTabSession({
         return;
       }
 
-      if (!current.url) return;
-
       const snapshotGeneration = nativeSurfaceGeneration.current;
+      let legacyImportError: unknown = null;
       try {
+        try {
+          await importLegacy();
+        } catch (error) {
+          legacyImportError = error;
+        }
+
         const snapshot = await host.command(workspaceId, browserId, {
           type: "snapshot",
         });
@@ -682,7 +703,20 @@ function CodeBrowserTabSession({
           await reconcileAfterNativeReady(snapshotGeneration);
         } else {
           nativePresence.current = "missing";
-          await createAndReconcileNative(current.url);
+          if (snapshot.url) {
+            updateSession((value) => {
+              let next = finishBrowserNavigation(value, snapshot.url!);
+              if (snapshot.title) next = setBrowserTitle(next, snapshot.title);
+              return next;
+            });
+            setAddress(browserDisplayAddress(snapshot.url));
+          }
+          const url = snapshot.url ?? sessionRef.current.url;
+          if (url) {
+            await createAndReconcileNative(url);
+          } else if (legacyImportError) {
+            throw legacyImportError;
+          }
         }
       } catch (error) {
         if (
@@ -842,6 +876,7 @@ function CodeBrowserTabSession({
     createAndReconcileNative,
     finishProfileResetCycle,
     host,
+    legacyState,
     recordRuntime,
     reconstructAfterProfileReset,
     reconcileAfterNativeReady,
