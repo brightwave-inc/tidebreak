@@ -283,6 +283,7 @@ impl<E: Engine> Driver<E> {
             }
         };
 
+        let record = handle.assistant_record();
         match end {
             TurnEnd::Interrupted => {
                 self.outbox
@@ -290,6 +291,17 @@ impl<E: Engine> Driver<E> {
                 self.last_turn_succeeded = false;
             }
             TurnEnd::Completed { success } => {
+                if let Some(record) = record {
+                    self.outbox.push(
+                        "assistant_record",
+                        serde_json::json!({
+                            "turn": turn,
+                            "body": record.body,
+                            "bytes": record.total_bytes,
+                            "truncated": record.truncated,
+                        }),
+                    );
+                }
                 // The completion latch is read once per finished turn, at the
                 // boundary, and only a successful turn can latch: a failing
                 // turn's claim of completion is not trusted.
@@ -577,8 +589,9 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
-    use crate::engine::EngineError;
+    use crate::engine::{AssistantRecord, EngineError};
     use crate::inputs::{resolve, RawInputs};
+    use std::collections::VecDeque;
 
     /// One scripted delay for the next supervisor poll.
     struct PollBlock {
@@ -683,6 +696,7 @@ mod tests {
         refuse_steer: AtomicBool,
         ends: tokio::sync::Mutex<mpsc::UnboundedReceiver<TurnEnd>>,
         end_sender: mpsc::UnboundedSender<TurnEnd>,
+        records: Mutex<VecDeque<Option<AssistantRecord>>>,
     }
 
     #[derive(Clone)]
@@ -700,12 +714,18 @@ mod tests {
                     refuse_steer: AtomicBool::new(false),
                     ends: tokio::sync::Mutex::new(ends),
                     end_sender,
+                    records: Mutex::new(VecDeque::new()),
                 }),
             }
         }
 
         fn finish(&self, end: TurnEnd) {
             self.state.end_sender.send(end).unwrap();
+        }
+
+        fn finish_with_record(&self, end: TurnEnd, record: Option<AssistantRecord>) {
+            self.state.records.lock().unwrap().push_back(record);
+            self.finish(end);
         }
 
         fn turns(&self) -> Vec<TurnRequest> {
@@ -747,6 +767,10 @@ mod tests {
 
         async fn interrupt(&mut self) {
             self.state.end_sender.send(TurnEnd::Interrupted).unwrap();
+        }
+
+        fn assistant_record(&mut self) -> Option<AssistantRecord> {
+            self.state.records.lock().unwrap().pop_front().flatten()
         }
     }
 
@@ -1196,6 +1220,89 @@ mod tests {
         let output_at = kinds.iter().position(|kind| kind == "task_output");
         let stopped_at = kinds.iter().position(|kind| kind == "supervisor_stopped");
         assert!(output_at < stopped_at);
+    }
+
+    #[tokio::test]
+    async fn a_completed_turn_emits_the_assistant_record_before_turn_completed() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        engine.finish_with_record(
+            TurnEnd::Completed { success: true },
+            Some(AssistantRecord {
+                body: "the answer".to_owned(),
+                total_bytes: 10,
+                truncated: false,
+            }),
+        );
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs("turn", None)).run());
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        let record = event_payload(&state, "assistant_record", 0);
+        assert_eq!(record["body"], "the answer");
+        assert_eq!(record["bytes"], 10);
+        assert_eq!(record["truncated"], false);
+        let kinds = event_kinds(&state);
+        let record_at = kinds.iter().position(|kind| kind == "assistant_record");
+        let completed_at = kinds.iter().position(|kind| kind == "turn_completed");
+        assert!(record_at < completed_at);
+
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_turn_emits_no_assistant_record() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        engine.finish_with_record(
+            TurnEnd::Interrupted,
+            Some(AssistantRecord {
+                body: "partial".to_owned(),
+                total_bytes: 7,
+                truncated: false,
+            }),
+        );
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs("turn", None)).run());
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_interrupted")
+        })
+        .await;
+        let kinds = event_kinds(&state);
+        assert!(!kinds.iter().any(|kind| kind == "assistant_record"));
+
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_completed_turn_with_no_record_emits_no_assistant_record() {
+        let (state, url) = start_supervisor().await;
+        let engine = MockEngine::new();
+        engine.finish(TurnEnd::Completed { success: true });
+        let run = tokio::spawn(driver(engine.clone(), &url, &inputs("turn", None)).run());
+
+        wait_for(&state, |supervisor| {
+            supervisor
+                .events
+                .iter()
+                .any(|(kind, _)| kind == "turn_completed")
+        })
+        .await;
+        let kinds = event_kinds(&state);
+        assert!(!kinds.iter().any(|kind| kind == "assistant_record"));
+
+        state.lock().unwrap().stop = Some("cancelled".to_owned());
+        run.await.unwrap().unwrap();
     }
 
     /// Builds a source repository and a clone whose origin accepts
