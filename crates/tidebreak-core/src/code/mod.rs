@@ -674,6 +674,19 @@ pub struct CodeWorkspace {
     pub bundle_bytes: Option<i64>,
 }
 
+impl CodeWorkspace {
+    /// Whether this workspace's engine runs in a remote sandbox.
+    ///
+    /// A remote workspace has no host worktree: the clone lives inside the
+    /// sandbox, and the branch state travels as WIP refs on the origin. An
+    /// empty `worktree_path` is the marker — nothing on this machine ever
+    /// creates, reads, or reclaims a checkout for it.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        self.worktree_path.is_empty()
+    }
+}
+
 /// Coarse lifecycle of an observed pull request (decision 77).
 ///
 /// Deliberately narrower than the digest's free-form `state` string: the fact
@@ -1253,6 +1266,8 @@ impl IncarnationState {
 pub struct CodeSessionIncarnation {
     /// Stable id.
     pub id: CodeIncarnationId,
+    /// Owner, carried so machine-wide sweeps can act on what they find.
+    pub owner: crate::OwnerId,
     /// Owning session.
     pub session_id: CodeSessionId,
     /// 1-based counter within the session; the agent names WIP refs with it.
@@ -1294,8 +1309,16 @@ pub struct CodeSessionIncarnation {
 /// The outcome of asking for a new incarnation under the owner's cap.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IncarnationAdmission {
-    /// The intent row committed; provision against it.
-    Admitted(CodeSessionIncarnation),
+    /// The intent row committed; provision against it. Boxed because the
+    /// row dwarfs the refusal variant.
+    Admitted(Box<CodeSessionIncarnation>),
+    /// The session already holds a live incarnation — another submit won
+    /// the race between observing a stopped predecessor and reserving.
+    /// Retry after it settles.
+    AlreadyLive {
+        /// The live incarnation's 1-based counter.
+        incarnation: i32,
+    },
     /// The owner is at their concurrent-sandbox cap.
     CapExhausted {
         /// Sessions holding the live incarnations, so the refusal can name

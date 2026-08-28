@@ -35,6 +35,9 @@
 // then only the tests construct it. Same stance as `scripted_harness`.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub(crate) mod driver;
+#[cfg(test)]
+pub(crate) mod fixtures;
 pub(crate) mod gateway;
 pub(crate) mod ingest;
 pub(crate) mod wire;

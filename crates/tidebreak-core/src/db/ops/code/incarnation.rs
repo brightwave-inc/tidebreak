@@ -34,6 +34,7 @@ fn incarnation_from_model(
 ) -> Result<CodeSessionIncarnation> {
     Ok(CodeSessionIncarnation {
         id: CodeIncarnationId(model.id),
+        owner: OwnerId::new(&model.owner)?,
         session_id: CodeSessionId(model.session_id),
         incarnation: model.incarnation,
         state: IncarnationState::from_str(&model.state).ok_or_else(|| {
@@ -109,13 +110,14 @@ pub async fn create_incarnation_intent(
     if let Some(last) = &last {
         // One live incarnation per session: the serialize-stop-then-resume
         // rule. A successor minted beside a live predecessor would race it
-        // for the same engine session.
+        // for the same engine session. Two submits can both observe a
+        // stopped predecessor and race to here, so the loser gets an
+        // admission answer to relay, not an error.
         if IncarnationState::from_str(&last.state) != Some(IncarnationState::Stopped) {
             txn.rollback().await.map_err(store_err)?;
-            return Err(AgentError::Store(format!(
-                "session {} already has a live incarnation {}",
-                session_id.0, last.incarnation
-            )));
+            return Ok(IncarnationAdmission::AlreadyLive {
+                incarnation: last.incarnation,
+            });
         }
     }
     let incarnation = last.as_ref().map_or(1, |row| row.incarnation + 1);
@@ -142,9 +144,9 @@ pub async fn create_incarnation_intent(
     };
     let inserted = model.insert(&txn).await.map_err(store_err)?;
     txn.commit().await.map_err(store_err)?;
-    Ok(IncarnationAdmission::Admitted(incarnation_from_model(
-        inserted,
-    )?))
+    Ok(IncarnationAdmission::Admitted(Box::new(
+        incarnation_from_model(inserted)?,
+    )))
 }
 
 /// Records the spawned sandbox on an intent row and marks it active.
@@ -393,6 +395,58 @@ pub async fn ingest_incarnation_event(
         .map_err(store_err)?;
     txn.commit().await.map_err(store_err)?;
     Ok(Some(seqs))
+}
+
+/// The newest WIP checkpoint ref any incarnation of this session pushed.
+///
+/// Resume state walks back past reservations that never ran — a failed
+/// spawn or a swept intent writes a newer row with no ref, and resuming
+/// from the base ref because of it would drop the predecessor's work.
+pub async fn latest_pushed_wip_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<Option<String>> {
+    Ok(entities::code_session_incarnation::Entity::find()
+        .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session_incarnation::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_session_incarnation::Column::LastWipRef.is_not_null())
+        .order_by_desc(entities::code_session_incarnation::Column::Incarnation)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .and_then(|row| row.last_wip_ref))
+}
+
+/// Forget a WIP checkpoint ref the origin no longer advertises.
+///
+/// The remote analog of dropping a rejected resume ref: a spawn already
+/// refused this ref, so every retry through it refuses identically. Clearing
+/// it lets the resume walk-back fall through to an earlier checkpoint, or to
+/// the base ref when none is left.
+pub async fn forget_session_wip_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    reference: &str,
+) -> Result<()> {
+    let now = database_now(&store.conn).await?;
+    entities::code_session_incarnation::Entity::update_many()
+        .col_expr(
+            entities::code_session_incarnation::Column::LastWipRef,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_session_incarnation::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session_incarnation::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_session_incarnation::Column::LastWipRef.eq(reference))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
 }
 
 /// The session's newest incarnation, in any state.
