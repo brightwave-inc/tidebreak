@@ -2140,6 +2140,14 @@ function CodeSessionPane({
     if (!turnRewrites) return base;
     let next = base;
     for (const [turnId, notice] of Object.entries(turnRewrites)) {
+      const stored = next.some(
+        (item) =>
+          item.kind === "assistant" &&
+          item.turnId === turnId &&
+          item.parentCallId === null &&
+          Boolean(item.rewrite),
+      );
+      if (stored && notice.state !== "rewritten") continue;
       next = applyTurnRewrite(next, turnId, {
         rewrite: notice.rewrite,
         rewriteState: notice.state,

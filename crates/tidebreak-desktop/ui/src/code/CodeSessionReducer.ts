@@ -1684,11 +1684,18 @@ export function applyTurnRewrite(
   if (last < 0) return items;
   const item = items[last];
   if (item?.kind !== "assistant") return items;
+  const nextRewrite = rewrite.rewrite ?? item.rewrite;
+  const nextState =
+    item.rewrite &&
+    rewrite.rewrite === undefined &&
+    rewrite.rewriteState !== "rewritten"
+      ? (item.rewriteState ?? "rewritten")
+      : rewrite.rewriteState;
   const next = items.slice();
   next[last] = {
     ...item,
-    rewrite: rewrite.rewrite,
-    rewriteState: rewrite.rewriteState,
+    rewrite: nextRewrite,
+    rewriteState: nextState,
   };
   return next;
 }

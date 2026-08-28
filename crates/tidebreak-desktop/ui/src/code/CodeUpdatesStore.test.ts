@@ -659,3 +659,25 @@ describe("shouldRequestOsAttention", () => {
     ).toBe(false);
   });
 });
+
+describe("turn rewrite notices", () => {
+  it("keeps stored rewrite text when a later rewriting notice omits it", () => {
+    const rewritten = reduceCodeUpdates(EMPTY_STATE, {
+      type: "turn_rewrite",
+      session: "sess-1",
+      turnId: "t1",
+      state: "rewritten",
+      rewrite: "The turn added three tools.",
+    });
+    const lagged = reduceCodeUpdates(rewritten, {
+      type: "turn_rewrite",
+      session: "sess-1",
+      turnId: "t1",
+      state: "rewriting",
+    });
+    expect(lagged.turnRewrites["sess-1"]?.["t1"]).toEqual({
+      state: "rewriting",
+      rewrite: "The turn added three tools.",
+    });
+  });
+});

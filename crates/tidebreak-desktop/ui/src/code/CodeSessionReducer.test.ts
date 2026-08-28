@@ -3,6 +3,7 @@ import type { CodeEvent, SequencedCodeEventFrame } from "../api/types";
 import {
   applyAcceptedTurn,
   applyCodeTurnSnapshot,
+  applyTurnRewrite,
   hydrateCodeTurns,
   initialCodeSessionState,
   mainAgentTranscriptItems,
@@ -2196,5 +2197,36 @@ describe("reasoning lifecycle", () => {
 
     const reasoning = state.items.find((item) => item.kind === "reasoning");
     expect(reasoning).toMatchObject({ kind: "reasoning", streaming: true });
+  });
+});
+
+describe("applyTurnRewrite", () => {
+  const closing = {
+    kind: "assistant" as const,
+    id: "a1",
+    turnId: "t1",
+    parentCallId: null,
+    text: "The harness restated three tool calls.",
+    streaming: false,
+    rewrite: "The turn added three tools.",
+    rewriteState: "rewritten" as const,
+  };
+
+  it("does not let a rewriting notice clear a stored rewrite", () => {
+    const next = applyTurnRewrite([closing], "t1", {
+      rewriteState: "rewriting",
+    });
+    expect(next[0]).toMatchObject({
+      rewrite: "The turn added three tools.",
+      rewriteState: "rewritten",
+    });
+  });
+
+  it("does not let a failed notice without text clear a stored rewrite", () => {
+    const next = applyTurnRewrite([closing], "t1", { rewriteState: "failed" });
+    expect(next[0]).toMatchObject({
+      rewrite: "The turn added three tools.",
+      rewriteState: "rewritten",
+    });
   });
 });

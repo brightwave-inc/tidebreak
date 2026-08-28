@@ -207,9 +207,11 @@ export function reduceCodeUpdates(
     case "delivery":
       return { ...state, deliveryRevision: state.deliveryRevision + 1 };
     case "turn_rewrite": {
+      const previous = state.turnRewrites[action.session]?.[action.turnId];
       const sessionRewrites = {
         ...(state.turnRewrites[action.session] ?? {}),
         [action.turnId]: {
+          ...previous,
           state: action.state,
           ...(action.rewrite !== undefined ? { rewrite: action.rewrite } : {}),
         },
