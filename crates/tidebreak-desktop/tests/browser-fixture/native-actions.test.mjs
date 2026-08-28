@@ -33,15 +33,28 @@ Object.defineProperty(globalThis, targetIdentityStoreKey, {
   writable: false,
 });
 
+class FixtureInput {}
+class FixtureSelect {}
+class FixtureTextArea {}
+
 function view() {
   return {
-    HTMLInputElement: class {},
-    HTMLSelectElement: class {},
-    HTMLTextAreaElement: class {},
+    HTMLInputElement: FixtureInput,
+    HTMLSelectElement: FixtureSelect,
+    HTMLTextAreaElement: FixtureTextArea,
     innerHeight: 600,
     innerWidth: 800,
-    getComputedStyle() {
-      return { display: "block", visibility: "visible", opacity: "1" };
+    scrollX: 0,
+    scrollY: 0,
+    getComputedStyle(element) {
+      return {
+        display: "block",
+        visibility: "visible",
+        opacity: "1",
+        overflowX: "visible",
+        overflowY: "visible",
+        ...element.computedStyle,
+      };
     },
   };
 }
@@ -93,10 +106,84 @@ function button({ marker = "@e1", rect = { x: 20, y: 30, width: 120, height: 40 
   return element;
 }
 
-function documentFor(element, { hit = element, title = "Fixture", frame = null } = {}) {
+function selectControl({ marker = "@e1" } = {}) {
+  const attributes = new Map([["aria-label", "Mode"]]);
+  const element = Object.assign(new FixtureSelect(), {
+    id: "mode",
+    localName: "select",
+    isConnected: true,
+    isContentEditable: false,
+    disabled: false,
+    labels: [],
+    form: null,
+    parentElement: null,
+    previousElementSibling: null,
+    options: [
+      { disabled: false, value: "one" },
+      { disabled: false, value: "two" },
+    ],
+    selectedIndex: 0,
+    value: "one",
+    getAttribute(name) {
+      return attributes.get(name) ?? null;
+    },
+    hasAttribute(name) {
+      return attributes.has(name);
+    },
+    getRootNode() {
+      return this.ownerDocument;
+    },
+    closest() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    matches() {
+      return true;
+    },
+    contains(candidate) {
+      return candidate === this;
+    },
+    getBoundingClientRect() {
+      return {
+        x: 20,
+        y: 30,
+        width: 160,
+        height: 36,
+        left: 20,
+        top: 30,
+        right: 180,
+        bottom: 66,
+      };
+    },
+  });
+  fixtureTargetRefs.set(element, marker);
+  return element;
+}
+
+function documentFor(
+  element,
+  {
+    hit = element,
+    title = "Fixture",
+    frame = null,
+    scrollingElement = null,
+  } = {},
+) {
+  const root = scrollingElement ?? {
+    clientHeight: 600,
+    clientWidth: 800,
+    scrollHeight: 600,
+    scrollLeft: 0,
+    scrollTop: 0,
+    scrollWidth: 800,
+  };
   const doc = {
     activeElement: null,
     defaultView: view(),
+    documentElement: root,
+    scrollingElement: root,
     title,
     getElementById() {
       return null;
@@ -104,30 +191,163 @@ function documentFor(element, { hit = element, title = "Fixture", frame = null }
     querySelector(selector) {
       return frame && selector === "iframe:nth-of-type(1)" ? frame : element;
     },
-    elementFromPoint() {
-      return hit;
+    elementFromPoint(x, y) {
+      return typeof hit === "function" ? hit(x, y) : hit;
     },
   };
   element.ownerDocument = doc;
   return doc;
 }
 
-function payload({ framePath = [], action = { type: "hover" } } = {}) {
+function payload({
+  framePath = [],
+  selector = "button:nth-of-type(1)",
+  fingerprint = {
+    href: null,
+    inputType: null,
+    name: "Continue",
+    role: "button",
+    sensitive: false,
+    tag: "button",
+  },
+  action = { type: "hover" },
+} = {}) {
   return {
     framePath,
-    selector: "button:nth-of-type(1)",
+    selector,
     marker: "__tidebreak_marker__",
     markerValue: "@e1",
-    fingerprint: {
-      href: null,
-      inputType: null,
-      name: "Continue",
-      role: "button",
-      sensitive: false,
-      tag: "button",
-    },
+    fingerprint,
     action,
   };
+}
+
+function nestedScrollFixture({ covered = false, visible = false } = {}) {
+  const containerRect = {
+    x: 100,
+    y: 100,
+    width: 300,
+    height: 200,
+    left: 100,
+    top: 100,
+    right: 400,
+    bottom: 300,
+  };
+  const contentTop = 700;
+  const target = button();
+  const containerChild = { localName: "div" };
+  const overlay = { localName: "div" };
+  const container = {
+    localName: "div",
+    parentElement: null,
+    clientHeight: containerRect.height,
+    clientLeft: 0,
+    clientTop: 0,
+    clientWidth: containerRect.width,
+    computedStyle: { overflowX: "hidden", overflowY: "auto" },
+    scrollHeight: 1_000,
+    scrollLeft: 0,
+    scrollTop: visible ? 615 : 0,
+    scrollWidth: containerRect.width,
+    contains(candidate) {
+      return (
+        candidate === this ||
+        candidate === containerChild ||
+        candidate === target
+      );
+    },
+    getBoundingClientRect() {
+      return containerRect;
+    },
+  };
+  target.parentElement = container;
+  target.getBoundingClientRect = () => {
+    const top = containerRect.top + contentTop - container.scrollTop;
+    return {
+      x: 140,
+      y: top,
+      width: 120,
+      height: 30,
+      left: 140,
+      top,
+      right: 260,
+      bottom: top + 30,
+    };
+  };
+  const hit = (x, y) => {
+    const targetRect = target.getBoundingClientRect();
+    if (
+      x >= targetRect.left &&
+      x < targetRect.right &&
+      y >= targetRect.top &&
+      y < targetRect.bottom
+    ) {
+      return covered ? overlay : target;
+    }
+    if (
+      x >= containerRect.left &&
+      x < containerRect.right &&
+      y >= containerRect.top &&
+      y < containerRect.bottom
+    ) {
+      return containerChild;
+    }
+    return null;
+  };
+  return { container, doc: documentFor(target, { hit }), target };
+}
+
+function framedScrollFixture() {
+  const root = {
+    clientHeight: 600,
+    clientWidth: 800,
+    scrollHeight: 2_000,
+    scrollLeft: 0,
+    scrollTop: 0,
+    scrollWidth: 800,
+  };
+  const target = button({ rect: { x: 20, y: 100, width: 120, height: 40 } });
+  const child = documentFor(target);
+  child.defaultView.innerHeight = 300;
+  child.defaultView.innerWidth = 400;
+  const frame = {
+    localName: "iframe",
+    parentElement: null,
+    clientHeight: 300,
+    clientLeft: 2,
+    clientTop: 2,
+    clientWidth: 400,
+    contentDocument: child,
+    contains(candidate) {
+      return candidate === this;
+    },
+    getBoundingClientRect() {
+      const top = 700 - root.scrollTop;
+      return {
+        x: 100,
+        y: top,
+        width: 404,
+        height: 304,
+        left: 100,
+        top,
+        right: 504,
+        bottom: top + 304,
+      };
+    },
+  };
+  const background = { localName: "main" };
+  const hit = (x, y) => {
+    const rect = frame.getBoundingClientRect();
+    return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+      ? frame
+      : background;
+  };
+  const parent = documentFor(button(), {
+    frame,
+    hit,
+    scrollingElement: root,
+  });
+  return { doc: parent, root };
 }
 
 function resolveAction(doc, request) {
@@ -212,4 +432,90 @@ test("a target inside a covered frame returns target_obscured", () => {
   );
   assert.equal(result.status, "target_obscured");
   assert.match(result.message, /frame/);
+});
+
+test("select stays pending until the requested value is confirmed", () => {
+  const element = selectControl();
+  const doc = documentFor(element);
+  const request = payload({
+    selector: "select:nth-of-type(1)",
+    fingerprint: {
+      href: null,
+      inputType: null,
+      name: "Mode",
+      role: "combobox",
+      sensitive: false,
+      tag: "select",
+    },
+    action: { type: "select", value: "two" },
+  });
+
+  const initial = resolveAction(doc, request);
+  assert.equal(initial.status, "ready");
+  assert.equal(initial.selectedIndex, 0);
+  assert.equal(initial.optionIndex, 1);
+
+  element.selectedIndex = 1;
+  const unconfirmed = resolveAction(doc, request);
+  assert.equal(unconfirmed.status, "ready");
+
+  element.value = "two";
+  const confirmed = resolveAction(doc, request);
+  assert.equal(confirmed.status, "no_op");
+  assert.match(confirmed.message, /already selected/);
+});
+
+test("scroll_into_view targets the nearest nested overflow container", () => {
+  const { container, doc } = nestedScrollFixture();
+  const result = resolveAction(
+    doc,
+    payload({ action: { type: "scroll_into_view" } }),
+  );
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.scrollDeltaX, 0);
+  assert.equal(result.scrollDeltaY, 615);
+  assert.ok(result.scrollX >= 100 && result.scrollX < 400);
+  assert.ok(result.scrollY >= 100 && result.scrollY < 300);
+  assert.equal(container.scrollTop, 0);
+});
+
+test("scroll_into_view confirms visibility after native scrolling", () => {
+  const { container, doc } = nestedScrollFixture();
+  const request = payload({ action: { type: "scroll_into_view" } });
+  const initial = resolveAction(doc, request);
+  container.scrollTop += initial.scrollDeltaY;
+
+  const confirmed = resolveAction(doc, request);
+  assert.equal(confirmed.status, "no_op");
+  assert.match(confirmed.message, /visible after native scrolling/);
+});
+
+test("scroll_into_view returns target_obscured when coverage remains", () => {
+  const { doc } = nestedScrollFixture({ covered: true, visible: true });
+  const result = resolveAction(
+    doc,
+    payload({ action: { type: "scroll_into_view" } }),
+  );
+
+  assert.equal(result.status, "target_obscured");
+  assert.match(result.message, /covering/);
+});
+
+test("scroll_into_view scrolls an outer document to a bordered same-origin frame", () => {
+  const { doc, root } = framedScrollFixture();
+  const request = payload({
+    framePath: ["iframe:nth-of-type(1)"],
+    action: { type: "scroll_into_view" },
+  });
+  const initial = resolveAction(doc, request);
+
+  assert.equal(initial.status, "ready");
+  assert.equal(initial.y, 802);
+  assert.equal(initial.scrollDeltaY, 552);
+  assert.ok(initial.scrollY >= 0 && initial.scrollY < 600);
+
+  root.scrollTop += initial.scrollDeltaY;
+  const confirmed = resolveAction(doc, request);
+  assert.equal(confirmed.status, "no_op");
 });
