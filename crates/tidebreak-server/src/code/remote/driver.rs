@@ -114,6 +114,9 @@ pub(crate) struct PumpReport {
     pub incarnation_stopped: bool,
     /// The fence applied, when the read demanded one.
     pub fenced: Option<FenceReason>,
+    /// The environment rejected the credential; the row is held open and
+    /// the next pump after a sign-in resumes the drain.
+    pub sign_in_required: bool,
 }
 
 /// The stop reason recorded when the environment ends a sandbox.
@@ -133,13 +136,15 @@ fn state_token<'a>(
 
 /// Settle the running turn row from the batch's terminal turn events.
 ///
-/// The agent numbers its turns from `starting_turn`, so its `turn` payload
-/// is the session ordinal. Only the event carrying the running turn's own
-/// ordinal settles it: a batch that still holds an earlier turn's ending
-/// must not close a turn that started after it.
+/// The agent numbers turns within its own incarnation starting at 1 — the
+/// spawn carries no session ordinal — so an event's `turn` payload maps to
+/// session ordinal `starting_turn + turn - 1`. Only the event mapping to
+/// the running turn's own ordinal settles it: a batch that still holds an
+/// earlier turn's ending must not close a turn that started after it.
 async fn settle_turn_rows(
     db: &Arc<DbStore>,
     owner: &OwnerId,
+    starting_turn: i32,
     running_turn: Option<CodeTurn>,
     events: &[super::wire::SandboxEvent],
 ) -> Result<(), tidebreak_core::AgentError> {
@@ -163,11 +168,12 @@ async fn settle_turn_rows(
             "turn_interrupted" => CodeTurnStatus::Interrupted,
             _ => continue,
         };
-        let event_ordinal = event
+        let mapped_ordinal = event
             .payload
             .get("turn")
-            .and_then(serde_json::Value::as_i64);
-        if event_ordinal != Some(turn.ordinal) {
+            .and_then(serde_json::Value::as_i64)
+            .map(|agent_turn| i64::from(starting_turn) + agent_turn - 1);
+        if mapped_ordinal != Some(turn.ordinal) {
             continue;
         }
         turn.status = status;
@@ -402,13 +408,41 @@ impl RemoteDriver<'_> {
                 // signal.
                 return Ok(report);
             }
+            Err(RemoteSandboxError::SignInRequired(detail)) => {
+                // Token expiry is not a lost sandbox: the lease keeps
+                // running and the next read after a sign-in drains it. Hold
+                // the row — closing it here would release the cap slot
+                // beside a live sandbox — and surface the sign-in.
+                report.sign_in_required = true;
+                let _ = super::super::attention::apply_attention(
+                    db,
+                    bus,
+                    &owner,
+                    session.id,
+                    Attention::needs_you(
+                        "sign in to the sandbox environment",
+                        AttentionSource::Lifecycle,
+                    ),
+                    false,
+                )
+                .await?;
+                warn!(session = %session.id, %detail, "the sandbox stream needs a sign-in");
+                return Ok(report);
+            }
             Err(error) => {
-                // A non-retryable read means the environment will never hand
-                // this stream over — the sandbox is unknown, refused, or the
-                // credential is dead. A drain cannot happen, so parking the
-                // session on one would hold it at FlushPending forever.
-                // Close the row and fence; reap waives the gate and the next
-                // turn reincarnates.
+                // The environment refuses this stream and will never hand it
+                // over. A drain cannot happen, so parking the session on one
+                // would hold it at FlushPending forever. Cancel best effort —
+                // a refusal does not prove the workload is gone — then close
+                // the row and fence; reap waives the gate and the next turn
+                // reincarnates.
+                if let Err(cancel_error) = provisioner.cancel(&owner, &sandbox_id).await {
+                    warn!(
+                        session = %session.id,
+                        %cancel_error,
+                        "could not cancel a sandbox whose stream is refused; its ceilings bound it"
+                    );
+                }
                 if row.state == IncarnationState::Active {
                     stop_incarnation(db, &owner, row.id, Some("events_refused")).await?;
                     report.incarnation_stopped = true;
@@ -436,7 +470,7 @@ impl RemoteDriver<'_> {
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
 
-        settle_turn_rows(db, &owner, running_turn, &read.events).await?;
+        settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
 
         if read.state.is_terminal() && row.state == IncarnationState::Active {
             stop_incarnation(
@@ -861,12 +895,32 @@ mod tests {
         assert_eq!(turn.ordinal, 2);
         assert_eq!(incarnation.incarnation, 2);
         assert_eq!(incarnation.starting_turn, 2);
-        let spawns = fake.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 2);
-        assert_eq!(
-            spawns[1].repository_ref.as_deref(),
-            Some("mg-wip/sb-next-i1")
-        );
+        {
+            let spawns = fake.spawns.lock().unwrap();
+            assert_eq!(spawns.len(), 2);
+            assert_eq!(
+                spawns[1].repository_ref.as_deref(),
+                Some("mg-wip/sb-next-i1")
+            );
+        }
+
+        // The successor numbers its own turns from 1: its first completion
+        // settles session turn 2 through the incarnation's starting turn.
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Running,
+            2,
+            vec![
+                event(1, "turn_started", json!({ "turn": 1 })),
+                event(2, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+            ],
+        ));
+        driver.pump(&mut session, 0).await.unwrap();
+        let settled = latest_turn(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.ordinal, 2);
+        assert_eq!(settled.status, CodeTurnStatus::Completed);
     }
 
     /// A stopped predecessor whose terminal events are not journaled yet
@@ -1151,7 +1205,7 @@ mod tests {
             "turn_completed",
             json!({ "turn": 1, "exit_code": 0 }),
         )];
-        settle_turn_rows(&db, &session.owner, Some(running.clone()), &stale)
+        settle_turn_rows(&db, &session.owner, 1, Some(running.clone()), &stale)
             .await
             .unwrap();
         let row = latest_turn(&db, &session.owner, session.id)
@@ -1165,7 +1219,7 @@ mod tests {
             "turn_completed",
             json!({ "turn": 2, "exit_code": 0 }),
         )];
-        settle_turn_rows(&db, &session.owner, Some(running), &own)
+        settle_turn_rows(&db, &session.owner, 1, Some(running), &own)
             .await
             .unwrap();
         let row = latest_turn(&db, &session.owner, session.id)
@@ -1337,6 +1391,12 @@ mod tests {
             report.fenced,
             Some(FenceReason::SandboxLost { .. })
         ));
+        // The workload may still exist behind the refusal: it was cancelled
+        // before the cap slot was released.
+        assert_eq!(
+            fake.cancels.lock().unwrap().as_slice(),
+            &["sb-1".to_owned()]
+        );
         let row = latest_incarnation(&db, &session.owner, session.id)
             .await
             .unwrap()
@@ -1354,6 +1414,83 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+    }
+
+    /// An expired credential is not a lost sandbox: the row is held open
+    /// beside the live lease, nothing is cancelled or fenced, and the
+    /// sign-in need is surfaced.
+    #[tokio::test]
+    async fn a_rejected_credential_holds_the_row_and_asks_for_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, _workspace, _repo) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+
+        struct ExpiredToken<'a>(&'a FakeProvisioner);
+        #[async_trait]
+        impl SandboxProvisioner for ExpiredToken<'_> {
+            async fn spawn(
+                &self,
+                owner: &OwnerId,
+                arguments: &SpawnArguments,
+            ) -> Result<SandboxLease, RemoteSandboxError> {
+                self.0.spawn(owner, arguments).await
+            }
+            async fn status(
+                &self,
+                owner: &OwnerId,
+                sandbox_id: &str,
+            ) -> Result<SandboxStatus, RemoteSandboxError> {
+                self.0.status(owner, sandbox_id).await
+            }
+            async fn events(
+                &self,
+                _owner: &OwnerId,
+                _sandbox_id: &str,
+                _cursor: EventCursor,
+            ) -> Result<SandboxEvents, RemoteSandboxError> {
+                Err(RemoteSandboxError::SignInRequired(
+                    "token expired".to_owned(),
+                ))
+            }
+            async fn send(
+                &self,
+                owner: &OwnerId,
+                sandbox_id: &str,
+                message: &SandboxMessage,
+            ) -> Result<MessageReceipt, RemoteSandboxError> {
+                self.0.send(owner, sandbox_id, message).await
+            }
+            async fn cancel(
+                &self,
+                owner: &OwnerId,
+                sandbox_id: &str,
+            ) -> Result<(), RemoteSandboxError> {
+                self.0.cancel(owner, sandbox_id).await
+            }
+        }
+        let expired = ExpiredToken(&fake);
+        let driver = driver!(&db, &bus, &expired, &settings);
+
+        let report = driver.pump(&mut session, 0).await.unwrap();
+        assert!(report.sign_in_required);
+        assert!(report.fenced.is_none());
+        assert!(!report.incarnation_stopped);
+        assert!(fake.cancels.lock().unwrap().is_empty());
+        let row = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncarnationState::Active);
+        let live = tidebreak_core::db::code::get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            live.attention.state,
+            tidebreak_core::AttentionState::NeedsYou { .. }
+        ));
     }
 
     /// The sweep closes intents that never activated and fences their
