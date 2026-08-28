@@ -216,6 +216,9 @@ pub(crate) struct CodeRuntime {
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
+    /// Live fan-out for adapter-grant revocations, so an event stream
+    /// holding a revoked grant drops immediately (docs/slack-sessions.md).
+    pub(crate) grant_revocations: Arc<super::grants::GrantRevocations>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -470,6 +473,7 @@ impl CodeRuntime {
             git_credentials,
             harness_llm,
             remote: None,
+            grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -608,6 +612,7 @@ impl CodeRuntime {
             git_credentials: None,
             harness_llm: None,
             remote: None,
+            grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),

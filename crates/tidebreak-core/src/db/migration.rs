@@ -64,6 +64,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeExternalBindings),
             Box::new(CodeExternalEvents),
             Box::new(CodeTurnRewrite),
+            Box::new(CodeExternalGrants),
         ]
     }
 }
@@ -3057,6 +3058,160 @@ impl MigrationTrait for CodeTurnRewrite {
     }
 }
 
+/// The credential a channel adapter holds per linked user
+/// (docs/slack-sessions.md, stage 2).
+///
+/// The machine stores only hashes: the access token authenticates every
+/// grant call, the refresh token rotates the pair, and the previous
+/// refresh hash stays behind for reuse detection — a replayed rotated
+/// refresh token can only be theft, and it revokes the grant on sight.
+struct CodeExternalGrants;
+
+impl MigrationName for CodeExternalGrants {
+    fn name(&self) -> &str {
+        "m20260828_000027_code_external_grants"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeExternalGrants {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeExternalGrant::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::Owner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::ChannelKind)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::ExternalIdentity)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::WorkspaceIdentity)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::TokenHash)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::RefreshHash)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::RotatedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrant::RevokedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .col(ColumnDef::new(idens::CodeExternalGrant::RevokedReason).text())
+                    .to_owned(),
+            )
+            .await?;
+        // Every authentication is a lookup by presented-token hash, and a
+        // hash collision across grants would be an ambiguous credential.
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_external_grant_token")
+                    .table(idens::CodeExternalGrant::Table)
+                    .col(idens::CodeExternalGrant::TokenHash)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_external_grant_refresh")
+                    .table(idens::CodeExternalGrant::Table)
+                    .col(idens::CodeExternalGrant::RefreshHash)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        // One live grant per linked identity is the contract; the partial
+        // unique index enforces it against two concurrent mints, which the
+        // read-then-insert check alone cannot.
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_external_grant_live_identity")
+                    .table(idens::CodeExternalGrant::Table)
+                    .col(idens::CodeExternalGrant::Owner)
+                    .col(idens::CodeExternalGrant::ChannelKind)
+                    .col(idens::CodeExternalGrant::ExternalIdentity)
+                    .col(idens::CodeExternalGrant::WorkspaceIdentity)
+                    .unique()
+                    .and_where(Expr::col(idens::CodeExternalGrant::RevokedAt).is_null())
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        // Every refresh hash a rotation retires, kept for the life of the
+        // grant. A replayed rotated token from any generation must revoke
+        // the grant, not just the immediately previous one.
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeExternalGrantRetiredRefresh::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrantRetiredRefresh::Hash)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrantRetiredRefresh::GrantId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalGrantRetiredRefresh::RetiredAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the table would sever every linked channel user at once.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -3132,6 +3287,7 @@ mod tests {
                 "m20260828_000024_code_external_bindings",
                 "m20260828_000025_code_external_events",
                 "m20260828_000026_code_turn_rewrite",
+                "m20260828_000027_code_external_grants",
             ]
         );
         assert!(db
