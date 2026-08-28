@@ -524,6 +524,23 @@ impl RemoteDriver<'_> {
             .await?;
             report.incarnation_stopped = true;
         }
+        if read.state.is_terminal() {
+            // A turn the dying incarnation never settled — one delivered in
+            // the stop window, after its last turn event — would otherwise
+            // stay Running and refuse every later submit as TurnInFlight.
+            // Interrupt it when the incarnation closes, the way a dead local
+            // worker interrupts its open turn. Re-query rather than reuse
+            // the pre-ingest snapshot: the open turn may have been inserted
+            // while this read was in flight.
+            if let Some(mut open) = latest_turn(db, &owner, session.id)
+                .await?
+                .filter(|turn| turn.status == CodeTurnStatus::Running)
+            {
+                open.status = CodeTurnStatus::Interrupted;
+                open.ended_at = Some(chrono::Utc::now());
+                save_turn(db, &owner, &open).await?;
+            }
+        }
         // A settled turn ends the Running lifecycle whether or not the
         // sandbox itself ended: an inbox-delivered turn completes while the
         // sandbox stays live, and leaving the session Running would let the
@@ -931,6 +948,57 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, IncarnationState::Active);
+    }
+
+    /// A turn delivered in the stop window — after the incarnation's last
+    /// turn event, before its goodbye — is interrupted when the incarnation
+    /// closes. Leaving it Running would refuse every later submit as
+    /// TurnInFlight with no fence to reap.
+    #[tokio::test]
+    async fn closing_the_incarnation_interrupts_an_unsettled_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        // The send succeeds against the still-Active row, but the sandbox
+        // stops before running the turn: its goodbye carries no turn events.
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "too late")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Delivered { .. }));
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Completed,
+            1,
+            vec![event(
+                1,
+                "supervisor_stopped",
+                json!({ "reason": "turn_mode" }),
+            )],
+        ));
+        driver.pump(&mut session, 0).await.unwrap();
+
+        let turn = latest_turn(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        let live = get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
+
+        // The session can continue: the next turn reincarnates instead of
+        // refusing as TurnInFlight.
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "again")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
     }
 
     /// The session survives a sandbox stop: the pump closes the incarnation
