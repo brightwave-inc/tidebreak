@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type FormEvent,
+} from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
@@ -21,6 +28,17 @@ import type {
 } from "../api/types";
 import { HttpError } from "../api/client";
 import { useApp } from "@/AppContext";
+import { ImageAttachmentList, shouldSubmitComposerKey } from "../Composer";
+import { publishCodeImage } from "../attachments";
+import {
+  imageAttachmentName,
+  imageAttachmentRejection,
+  imageFilesFrom,
+  queuedImageAttachment,
+  uploadImageAttachment,
+  type ImageAttachment,
+} from "../ImageAttachments";
+import { hasLocalHostAuthority } from "../host";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -40,7 +58,6 @@ import {
 } from "@/components/ui/popover";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { shouldSubmitComposerKey } from "../Composer";
 import { clampPermissionMode, PermissionModeMenu } from "../PermissionModeMenu";
 import { useManagedPolicy } from "../managedPolicy";
 import { usesCommandModifier } from "@/ShellShortcuts";
@@ -173,6 +190,12 @@ type CreateAttempt = {
   fastMode: boolean;
   fastModeByHarness: Partial<Record<HarnessKind, boolean>>;
   createMore: boolean;
+  images: readonly File[];
+};
+
+type HeldWorkspaceImage = {
+  attachment: ImageAttachment;
+  file: File;
 };
 
 export function NewWorkspaceDialog({
@@ -216,6 +239,9 @@ export function NewWorkspaceDialog({
     null,
   );
   const [createMore, setCreateMore] = useState(false);
+  const [heldImages, setHeldImages] = useState<HeldWorkspaceImage[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const heldImagesRef = useRef<HeldWorkspaceImage[]>([]);
   const [modelsByHarness, setModelsByHarness] = useState<
     Partial<Record<HarnessKind, string>>
   >({});
@@ -305,6 +331,7 @@ export function NewWorkspaceDialog({
         startingPrompt: retry.startingPrompt,
         title: retry.title,
       });
+      replaceHeldImages(retry.images);
     }
     setBaseRef(
       retry?.baseRef ??
@@ -377,8 +404,23 @@ export function NewWorkspaceDialog({
   const engineReady = Boolean(
     selectedHarness && installed && !policyBlocksCreate,
   );
-  const canCreate = Boolean(repoId && selectedRepo && engineReady);
+  const imageNeedsMessage =
+    heldImages.length > 0 && startingPrompt.trim().length === 0;
+  const canCreate = Boolean(
+    repoId && selectedRepo && engineReady && !imageNeedsMessage,
+  );
   const installNote = install && (!install.done || install.error);
+
+  useEffect(
+    () => () => {
+      for (const image of heldImagesRef.current) {
+        if (image.attachment.previewUrl) {
+          URL.revokeObjectURL(image.attachment.previewUrl);
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!open || !harness) return;
@@ -457,6 +499,84 @@ export function NewWorkspaceDialog({
     });
   }
 
+  function heldImagesFrom(files: readonly File[]): HeldWorkspaceImage[] {
+    const now = new Date();
+    return files.map((file) => {
+      const previewUrl =
+        typeof URL.createObjectURL === "function"
+          ? URL.createObjectURL(file)
+          : null;
+      return {
+        file,
+        attachment: queuedImageAttachment(crypto.randomUUID(), {
+          name: imageAttachmentName(file, now),
+          byteLen: file.size,
+          previewUrl,
+        }),
+      };
+    });
+  }
+
+  function replaceHeldImages(files: readonly File[]) {
+    for (const image of heldImagesRef.current) {
+      if (image.attachment.previewUrl) {
+        URL.revokeObjectURL(image.attachment.previewUrl);
+      }
+    }
+    const next = heldImagesFrom(files);
+    heldImagesRef.current = next;
+    setHeldImages(next);
+    setImageError(null);
+  }
+
+  function attachImages(files: readonly File[]) {
+    const rejection = imageAttachmentRejection(
+      heldImagesRef.current.map((image) => image.attachment),
+      files,
+    );
+    if (rejection) {
+      setImageError(rejection);
+      return;
+    }
+    const next = [...heldImagesRef.current, ...heldImagesFrom(files)];
+    heldImagesRef.current = next;
+    setHeldImages(next);
+    setImageError(null);
+  }
+
+  function removeImage(id: string) {
+    const removed = heldImagesRef.current.find(
+      (image) => image.attachment.id === id,
+    );
+    if (removed?.attachment.previewUrl) {
+      URL.revokeObjectURL(removed.attachment.previewUrl);
+    }
+    const next = heldImagesRef.current.filter(
+      (image) => image.attachment.id !== id,
+    );
+    heldImagesRef.current = next;
+    setHeldImages(next);
+    setImageError(null);
+  }
+
+  function clearImages() {
+    for (const image of heldImagesRef.current) {
+      if (image.attachment.previewUrl) {
+        URL.revokeObjectURL(image.attachment.previewUrl);
+      }
+    }
+    heldImagesRef.current = [];
+    setHeldImages([]);
+    setImageError(null);
+  }
+
+  function onPromptPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = imageFilesFrom(event.clipboardData);
+    if (files.length === 0) return;
+    event.preventDefault();
+    attachImages(files);
+  }
+
   /** One picker open at a time; closing by chord puts focus back on the message. */
   function pickerProps(id: PickerId) {
     return {
@@ -483,7 +603,13 @@ export function NewWorkspaceDialog({
     // A repo handed in came from the add-repo field this submit started in,
     // and carries its own base ref: `baseRef` still holds the old repo's.
     const repo = added ?? selectedRepo;
-    if (!engineReady || !repo || createLocked.current) return;
+    if (
+      !engineReady ||
+      !repo ||
+      createLocked.current ||
+      (heldImagesRef.current.length > 0 && !startingPrompt.trim())
+    )
+      return;
     createLocked.current = true;
     const attempt: CreateAttempt = {
       repoId: repo.id,
@@ -499,8 +625,10 @@ export function NewWorkspaceDialog({
       fastMode: postedFastMode,
       fastModeByHarness: { ...fastByHarness },
       createMore,
+      images: heldImagesRef.current.map((image) => image.file),
     };
     useCodeUiStore.getState().setNewWorkspaceDraft(EMPTY_NEW_WORKSPACE_DRAFT);
+    clearImages();
     if (createMore) {
       focusPrompt();
       queueMicrotask(() => {
@@ -680,25 +808,66 @@ export function NewWorkspaceDialog({
       });
       if (prompt) {
         try {
-          await client.submitCodeTurn(session.id, prompt);
+          const attachments = await publishFirstTurnImages(
+            session.id,
+            attempt.images,
+          );
+          if (attachments.length > 0) {
+            await client.submitCodeTurn(
+              session.id,
+              prompt,
+              undefined,
+              attachments,
+            );
+          } else {
+            await client.submitCodeTurn(session.id, prompt);
+          }
         } catch (error) {
-          // Never drop typed words: the workspace composer holds them.
-          useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+          // Never drop typed words or pasted images: the workspace composer
+          // holds them.
+          useCodeUiStore
+            .getState()
+            .offerComposerPrompt(workspace.id, prompt, attempt.images);
           toast.error(
             `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
           );
         }
       }
     } catch (error) {
-      // No session to send to; the workspace composer holds the text and
-      // start-session on the workspace page picks it up.
+      // No session to send to; the workspace composer holds the text, images,
+      // and start-session on the workspace page picks them up.
       if (prompt) {
-        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+        useCodeUiStore
+          .getState()
+          .offerComposerPrompt(workspace.id, prompt, attempt.images);
       }
       toast.error(
         `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
       );
     }
+  }
+
+  async function publishFirstTurnImages(
+    sessionId: string,
+    files: readonly File[],
+  ): Promise<readonly { blob_id: string; media_type: string }[]> {
+    const published = await Promise.all(
+      files.map(async (file) => {
+        if (hasLocalHostAuthority()) {
+          return publishCodeImage(sessionId, file);
+        }
+        return uploadImageAttachment(client, sessionId, file, {
+          onProgress: () => undefined,
+          signal: new AbortController().signal,
+          path: (id) =>
+            `/code/sessions/${encodeURIComponent(id)}/attachments/images`,
+        });
+      }),
+    );
+    return published.map((image) => ({
+      blob_id: image.attachmentId,
+      media_type: image.mediaType,
+    }));
   }
 
   async function revealCreatedWorkspace(
@@ -1001,12 +1170,31 @@ export function NewWorkspaceDialog({
             aria-label="First message"
             placeholder="Describe the first task (optional)"
             className="placeholder:text-muted-foreground max-h-[50vh] min-h-48 w-full resize-none bg-transparent px-4 py-3 text-base outline-none sm:min-h-52"
+            onPaste={onPromptPaste}
             onKeyDown={(event) => {
               if (!shouldSubmitComposerKey(event.nativeEvent)) return;
               event.preventDefault();
               void create();
             }}
           />
+          {(heldImages.length > 0 || imageError) && (
+            <div className="grid gap-1.5 px-4 pb-2">
+              <ImageAttachmentList
+                items={heldImages.map((image) => image.attachment)}
+                onRemove={removeImage}
+              />
+              {imageError && (
+                <p className="text-destructive text-xs" role="alert">
+                  {imageError}
+                </p>
+              )}
+              {imageNeedsMessage && (
+                <p className="text-muted-foreground text-xs">
+                  Add a message to send the image with the first turn.
+                </p>
+              )}
+            </div>
+          )}
           {installNote && (
             <div className="flex flex-col gap-1 px-4 pb-1.5">
               <HarnessInstallNote install={install} />

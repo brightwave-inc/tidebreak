@@ -105,6 +105,13 @@ export type PendingComposerPrompt = {
   scope: string;
   text: string;
   submit: boolean;
+  /** Files to attach once a session exists to publish them. */
+  images?: readonly File[];
+};
+
+export type PendingComposerImages = {
+  scope: string;
+  files: readonly File[];
 };
 
 function readStoredCreateDefaults(): CodeCreateDefaults | null {
@@ -329,10 +336,16 @@ export type CodeUiStore = {
    * the action.
    */
   pendingComposerPrompt: PendingComposerPrompt | null;
+  pendingComposerImages: PendingComposerImages | null;
   composerActionScope: string | null;
-  offerComposerPrompt: (scope: string, prompt: string) => void;
+  offerComposerPrompt: (
+    scope: string,
+    prompt: string,
+    images?: readonly File[],
+  ) => void;
   runComposerPrompt: (scope: string, prompt: string) => boolean;
   takeComposerPrompt: (scope: string) => PendingComposerPrompt | null;
+  takeComposerImages: (scope: string) => readonly File[] | null;
   finishComposerAction: (scope: string) => void;
   /**
    * Asks raised by the shell keymap that only a workspace surface can carry
@@ -437,6 +450,7 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   lastCreate: readStoredCreateDefaults(),
   terminalPending: false,
   pendingComposerPrompt: null,
+  pendingComposerImages: null,
   composerActionScope: null,
   quickOpenPending: false,
   newTabMenuPending: false,
@@ -500,8 +514,21 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ openFilePending: null });
     return pending;
   },
-  offerComposerPrompt: (scope, prompt) =>
-    set({ pendingComposerPrompt: { scope, text: prompt, submit: false } }),
+  offerComposerPrompt: (scope, prompt, images) =>
+    set({
+      pendingComposerPrompt: {
+        scope,
+        text: prompt,
+        submit: false,
+        ...(images && images.length > 0 ? { images } : {}),
+      },
+      pendingComposerImages:
+        images && images.length > 0
+          ? { scope, files: images }
+          : get().pendingComposerImages?.scope === scope
+            ? null
+            : get().pendingComposerImages,
+    }),
   runComposerPrompt: (scope, prompt) => {
     if (get().composerActionScope !== null) return false;
     set({
@@ -515,6 +542,12 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     if (!prompt || prompt.scope !== scope) return null;
     set({ pendingComposerPrompt: null });
     return prompt;
+  },
+  takeComposerImages: (scope): readonly File[] | null => {
+    const held = get().pendingComposerImages;
+    if (!held || held.scope !== scope) return null;
+    set({ pendingComposerImages: null });
+    return held.files;
   },
   finishComposerAction: (scope) =>
     set((state) => {
@@ -612,6 +645,7 @@ export function resetCodeUiHostState(): void {
     inspectorScope: null,
     terminalPending: false,
     pendingComposerPrompt: null,
+    pendingComposerImages: null,
     composerActionScope: null,
     quickOpenPending: false,
     newTabMenuPending: false,

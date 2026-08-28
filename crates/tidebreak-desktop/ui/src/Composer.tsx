@@ -1063,20 +1063,12 @@ export function Composer({
                 denseContext && "border-t border-border/60",
               )}
             >
-              {images && images.items.length > 0 && (
-                <ul
-                  className="m-0 flex list-none flex-wrap gap-2 p-0"
-                  aria-label="Attached images"
-                >
-                  {images.items.map((item) => (
-                    <ImageAttachmentChip
-                      key={item.id}
-                      attachment={item}
-                      onRemove={() => images.onRemove(item.id)}
-                      onRetry={() => images.onRetry(item.id)}
-                    />
-                  ))}
-                </ul>
+              {images && (
+                <ImageAttachmentList
+                  items={images.items}
+                  onRemove={images.onRemove}
+                  onRetry={images.onRetry}
+                />
               )}
               {files && files.items.length > 0 && (
                 <ul
@@ -1694,6 +1686,34 @@ function contextCountLabel(count: number, label: string): string | null {
   return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
+/** The canonical image strip shared by every composer surface. */
+export function ImageAttachmentList({
+  items,
+  onRemove,
+  onRetry,
+}: {
+  items: readonly ImageAttachment[];
+  onRemove: (id: string) => void;
+  onRetry?: (id: string) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <ul
+      className="m-0 flex list-none flex-wrap gap-2 p-0"
+      aria-label="Attached images"
+    >
+      {items.map((item) => (
+        <ImageAttachmentChip
+          key={item.id}
+          attachment={item}
+          onRemove={() => onRemove(item.id)}
+          onRetry={onRetry ? () => onRetry(item.id) : undefined}
+        />
+      ))}
+    </ul>
+  );
+}
+
 /**
  * One attached image, from the moment it is attached to the moment it is sent.
  *
@@ -1708,7 +1728,7 @@ function ImageAttachmentChip({
 }: {
   attachment: ImageAttachment;
   onRemove: () => void;
-  onRetry: () => void;
+  onRetry?: () => void;
 }) {
   const uploading =
     attachment.status === "queued" || attachment.status === "uploading";
@@ -1759,7 +1779,7 @@ function ImageAttachmentChip({
           />
         )}
       </span>
-      {failed && (
+      {failed && onRetry && (
         <button
           type="button"
           className="shrink-0 rounded-full border border-border bg-background px-2 py-px text-2xs text-foreground"

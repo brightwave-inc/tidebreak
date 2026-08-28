@@ -136,6 +136,17 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
 }));
 
+const hasLocalHostAuthority = vi.hoisted(() => vi.fn(() => false));
+const publishCodeImage = vi.hoisted(() => vi.fn());
+vi.mock("../host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../host")>()),
+  hasLocalHostAuthority,
+}));
+vi.mock("../attachments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../attachments")>()),
+  publishCodeImage,
+}));
+
 // The resize library lays out from real element measurements, which jsdom does
 // not provide; left alone it registers no regions and renders nothing.
 vi.mock("react-resizable-panels", () => ({
@@ -712,6 +723,7 @@ afterEach(() => {
   useCodeUiStore.setState({ reviewSidebarOpen: true, inspectorScope: null });
   useCodeUiStore.setState({
     pendingComposerPrompt: null,
+    pendingComposerImages: null,
     composerActionScope: null,
     workflowShortcutPending: null,
     archivePending: false,
@@ -805,6 +817,72 @@ describe("CodeWorkspacePage", () => {
       screen.getByText("Start a session on this workspace."),
     ).toBeInTheDocument();
     expect(toast.error).toHaveBeenCalledWith("Claude Code sign-in expired");
+  });
+
+  it("includes held images on the next start after session create failed", async () => {
+    const image = new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+      type: "image/png",
+    });
+    hasLocalHostAuthority.mockReturnValue(true);
+    publishCodeImage.mockResolvedValue({
+      attachmentId: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+      mediaType: "image/png",
+      width: 800,
+      height: 600,
+      byteLen: 4,
+    });
+    const client = makeClient();
+    enableStartHarness(client);
+    client.createCodeSession
+      .mockRejectedValueOnce(new Error("Claude Code sign-in expired"))
+      .mockResolvedValueOnce(CREATED_SESSION);
+    useCodeUiStore
+      .getState()
+      .offerComposerPrompt("ws-1", "Review this screenshot", [image]);
+    const user = userEvent.setup();
+    await mountWorkspace(client);
+
+    const message = await screen.findByRole("textbox", { name: "Message" });
+    expect(message).toHaveValue("Review this screenshot");
+    expect(screen.queryByLabelText("Attached images")).toBeNull();
+    expect(publishCodeImage).not.toHaveBeenCalled();
+
+    const send = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(send).toBeEnabled());
+    await user.click(send);
+
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledOnce(),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+    expect(publishCodeImage).not.toHaveBeenCalled();
+    expect(message).toHaveValue("Review this screenshot");
+
+    const retry = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    await user.click(retry);
+
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        CREATED_SESSION.id,
+        "Review this screenshot",
+        undefined,
+        [
+          {
+            blob_id: "1c2f1a44-2f3b-4a1e-9f0a-2b6d5c4e3a21",
+            media_type: "image/png",
+          },
+        ],
+      ),
+    );
+    expect(publishCodeImage).toHaveBeenCalledWith(CREATED_SESSION.id, image);
+    expect(publishCodeImage).not.toHaveBeenCalledWith(
+      "ws-1",
+      expect.anything(),
+    );
   });
 
   it("keeps the created session and restores the exact first prompt after the start composer unmounts", async () => {
