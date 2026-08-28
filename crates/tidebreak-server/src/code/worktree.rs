@@ -2056,20 +2056,52 @@ async fn git_stdin(cwd: &Path, args: &[&str], stdin: &[u8]) -> Result<String, St
     let mut child = command
         .spawn()
         .map_err(|err| format!("failed to spawn git: {err}"))?;
-    if let Some(mut pipe) = child.stdin.take() {
-        pipe.write_all(stdin)
+    let stdin_pipe = child.stdin.take();
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdin_bytes = stdin.to_vec();
+    let write = async move {
+        if let Some(mut pipe) = stdin_pipe {
+            pipe.write_all(&stdin_bytes)
+                .await
+                .map_err(|err| format!("failed to write git stdin: {err}"))?;
+        }
+        Ok::<(), String>(())
+    };
+    let read_out = async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            pipe.read_to_end(&mut buf)
+                .await
+                .map_err(|err| format!("failed to read git stdout: {err}"))?;
+        }
+        Ok::<Vec<u8>, String>(buf)
+    };
+    let read_err = async move {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            pipe.read_to_end(&mut buf)
+                .await
+                .map_err(|err| format!("failed to read git stderr: {err}"))?;
+        }
+        Ok::<Vec<u8>, String>(buf)
+    };
+    let output = timeout(GIT_TIMEOUT, async {
+        let ((), stdout, stderr) = tokio::try_join!(write, read_out, read_err)?;
+        let status = child
+            .wait()
             .await
-            .map_err(|err| format!("failed to write git stdin: {err}"))?;
-    }
-    let output = timeout(GIT_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| format!("git {} timed out", args.join(" ")))?
-        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if output.status.success() {
+            .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
+        Ok::<_, String>((status, stdout, stderr))
+    })
+    .await
+    .map_err(|_| format!("git {} timed out", args.join(" ")))??;
+    let (status, stdout, stderr) = output;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    if status.success() {
         Ok(stdout)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
         Err(if stderr.is_empty() {
             stdout.trim().to_owned()
         } else {
