@@ -843,7 +843,10 @@ describe("CodeWorkspacePage", () => {
       ),
     );
     expect(publishCodeImage).toHaveBeenCalledWith(CREATED_SESSION.id, image);
-    expect(publishCodeImage).not.toHaveBeenCalledWith("ws-1", expect.anything());
+    expect(publishCodeImage).not.toHaveBeenCalledWith(
+      "ws-1",
+      expect.anything(),
+    );
   });
 
   it("keeps the created session and restores the exact first prompt after the start composer unmounts", async () => {
