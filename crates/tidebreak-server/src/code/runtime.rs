@@ -1692,6 +1692,26 @@ impl CodeRuntime {
             ));
         }
 
+        if workspace.is_remote() {
+            let archived_at = Utc::now();
+            if !complete_workspace_archive(&self.db, owner, workspace.id, archived_at).await? {
+                let current = self.get_workspace(owner, workspace.id).await?;
+                if current.status == CodeWorkspaceStatus::Archived {
+                    return Ok(current);
+                }
+                return Err(ServerError::conflict_kind(
+                    "workspace_lifecycle_changed",
+                    "the workspace row changed before archive completed",
+                ));
+            }
+            let mut workspace = workspace;
+            workspace.status = CodeWorkspaceStatus::Archived;
+            workspace.archived_at = Some(archived_at);
+            super::attention::emit_workspace_digests(&self.db, &self.bus, owner, workspace.id)
+                .await;
+            return Ok(workspace);
+        }
+
         let turn = self.worktree_turn_lock(workspace.id);
         let _turn_guard = turn.lock().await;
         let current = self.get_workspace(owner, workspace.id).await?;
@@ -4146,6 +4166,38 @@ impl CodeRuntime {
         }
     }
 
+    /// Best-effort stop of a remote session's sandbox. Used when the session
+    /// row is ending, so the environment does not keep spending.
+    async fn cancel_remote_sandbox(&self, session: &CodeSession) {
+        let Some(remote) = self.remote_sessions() else {
+            return;
+        };
+        let Ok(Some(row)) =
+            tidebreak_core::db::code::latest_incarnation(&self.db, &session.owner, session.id)
+                .await
+        else {
+            return;
+        };
+        if let Some(sandbox_id) = row.sandbox_id.as_deref() {
+            if let Err(error) = remote.provisioner.cancel(&session.owner, sandbox_id).await {
+                tracing::warn!(
+                    session = %session.id,
+                    %error,
+                    "could not cancel a remote sandbox while ending the session"
+                );
+            }
+        }
+        if row.state != tidebreak_core::IncarnationState::Stopped {
+            let _ = tidebreak_core::db::code::stop_incarnation(
+                &self.db,
+                &session.owner,
+                row.id,
+                Some("session_ended"),
+            )
+            .await;
+        }
+    }
+
     /// Retract one queued message. `false` when the row is gone.
     pub(crate) async fn delete_queued_turn(
         &self,
@@ -4465,6 +4517,16 @@ impl CodeRuntime {
                 ));
             }
             _ => {}
+        }
+
+        let workspace = self.get_workspace(owner, session.workspace_id).await?;
+        if workspace.is_remote() {
+            // The sandbox carries the engine. Persist the mode on the row and
+            // do not relaunch a host harness against the empty worktree.
+            let mut session = session;
+            session.permission_mode = mode;
+            super::attention::persist_session(&self.db, &self.bus, &session).await?;
+            return Ok(session);
         }
 
         // Refuse a mode this engine cannot honor here, not at the next turn,
@@ -5214,6 +5276,11 @@ impl CodeRuntime {
         if session.lifecycle == CodeSessionLifecycle::Ended {
             return Ok(());
         }
+        if let Ok(workspace) = self.get_workspace(owner, session.workspace_id).await {
+            if workspace.is_remote() {
+                self.cancel_remote_sandbox(&session).await;
+            }
+        }
         let handle = self
             .workers
             .lock()
@@ -5480,6 +5547,12 @@ impl CodeRuntime {
         limit: Option<u32>,
     ) -> Result<(Vec<String>, bool), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         worktree::list_tree_paths(
             std::path::Path::new(&workspace.worktree_path),
             query,
@@ -5517,6 +5590,12 @@ impl CodeRuntime {
         turn_id: Option<CodeTurnId>,
     ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<CodeTurnId>), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
@@ -5546,6 +5625,12 @@ impl CodeRuntime {
         file: Option<&str>,
     ) -> Result<(String, bool, Diffstat, Option<CodeTurnId>), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;

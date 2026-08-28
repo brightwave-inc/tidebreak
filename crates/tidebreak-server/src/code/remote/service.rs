@@ -565,6 +565,79 @@ mod tests {
         assert_eq!(fake.sends.lock().unwrap().as_slice(), &["stop".to_owned()]);
     }
 
+    /// Changing permission mode on a remote session does not launch a host
+    /// harness against the empty worktree.
+    #[tokio::test]
+    async fn a_remote_permission_mode_change_does_not_spawn_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let updated = runtime
+            .set_permission_mode(&owner, session.id, PermissionMode::Ask)
+            .await
+            .unwrap();
+        assert_eq!(updated.permission_mode, PermissionMode::Ask);
+        assert!(fake.spawns.lock().unwrap().is_empty());
+    }
+
+    /// Host worktree reads refuse a remote workspace with the remote marker
+    /// instead of treating the empty path as a missing checkout.
+    #[tokio::test]
+    async fn a_remote_workspace_tree_refuses_as_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let error = runtime
+            .workspace_tree(&owner, workspace.id, "", None)
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("remote sandbox"));
+    }
+
+    /// Ending a remote session cancels the sandbox so it does not keep spending.
+    #[tokio::test]
+    async fn ending_a_remote_session_cancels_the_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .await
+            .unwrap();
+        runtime.end_session_row(&owner, session.id).await.unwrap();
+        assert_eq!(
+            fake.cancels.lock().unwrap().as_slice(),
+            &["sb-1".to_owned()]
+        );
+    }
+
     /// A repository with no recorded origin cannot back a remote workspace:
     /// the sandbox would have nothing to clone.
     #[tokio::test]
