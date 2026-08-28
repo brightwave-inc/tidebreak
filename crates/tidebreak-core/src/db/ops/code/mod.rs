@@ -13,6 +13,7 @@ use super::super::{entities, store_err};
 
 pub mod approval;
 pub mod binding;
+pub mod external_event;
 pub mod incarnation;
 pub mod journal;
 pub mod pull_request;
@@ -30,6 +31,7 @@ pub mod workspace;
 
 pub use approval::*;
 pub use binding::*;
+pub use external_event::*;
 pub use incarnation::*;
 pub use journal::*;
 pub use pull_request::*;

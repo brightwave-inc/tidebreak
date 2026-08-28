@@ -277,7 +277,9 @@ mod tests {
         PermissionMode, RepoId,
     };
 
-    use super::super::super::runtime::{NewSessionSettings, SubmitTurnOutcome};
+    use super::super::super::runtime::{
+        ExternalMessageOutcome, NewSessionSettings, SubmitTurnOutcome,
+    };
     use super::super::driver::RemoteSpawnSettings;
     use super::super::wire::{
         EventCursor, MessageReceipt, SandboxEvent, SandboxEvents, SandboxLease, SandboxMessage,
@@ -1092,6 +1094,132 @@ mod tests {
                 session_id: binding.session_id
             }
         );
+    }
+
+    /// External messages are idempotent on the event id: an idle session
+    /// runs the message as a turn, a replay answers with that same turn,
+    /// a busy session queues durably, and another grant cannot submit.
+    #[tokio::test]
+    async fn an_external_message_is_idempotent_and_queues_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let grant = tidebreak_core::CodeGrantId::new();
+        let resolved = runtime
+            .external_get_or_create(
+                &owner,
+                grant,
+                "slack",
+                "T1/C9/77.1",
+                repo.id,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Created(binding) = resolved else {
+            panic!("expected a create");
+        };
+        let session_id = binding.session_id;
+
+        let first = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "start".into(),
+                "Ev1",
+                "1700000001.000100",
+            )
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::NewTurn(turn) = first else {
+            panic!("an idle session must run the message, got {first:?}");
+        };
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+
+        // The channel redelivers Ev1: same turn, no second spawn or row.
+        let replay = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "start".into(),
+                "Ev1",
+                "1700000001.000100",
+            )
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::NewTurn(replayed) = replay else {
+            panic!("a replay must answer with the promoted turn, got {replay:?}");
+        };
+        assert_eq!(replayed.id, turn.id);
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+
+        // The session is busy: the next event parks durably, and its replay
+        // answers with the same row.
+        let busy = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "and then".into(),
+                "Ev2",
+                "1700000002.000100",
+            )
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::Queued(row) = busy else {
+            panic!("a busy session must queue, got {busy:?}");
+        };
+        let busy_replay = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "and then".into(),
+                "Ev2",
+                "1700000002.000100",
+            )
+            .await
+            .unwrap();
+        let ExternalMessageOutcome::Queued(replayed_row) = busy_replay else {
+            panic!("a replayed queued event must answer queued, got {busy_replay:?}");
+        };
+        assert_eq!(replayed_row.id, row.id);
+        let (queued_rows, _) = runtime.list_queued_turns(&owner, session_id).await.unwrap();
+        assert_eq!(queued_rows.len(), 1);
+
+        // Another grant holds no binding to this session and cannot submit.
+        let foreign = runtime
+            .external_submit_message(
+                &owner,
+                tidebreak_core::CodeGrantId::new(),
+                session_id,
+                "hijack".into(),
+                "Ev3",
+                "1700000003.000100",
+            )
+            .await;
+        assert!(foreign.is_err(), "a foreign grant must refuse");
+
+        // An ended session refuses instead of queueing into the void.
+        let mut stored = runtime.get_session(&owner, session_id).await.unwrap();
+        stored.lifecycle = CodeSessionLifecycle::Ended;
+        assert!(tidebreak_core::db::code::save_session(&runtime.db, &stored)
+            .await
+            .unwrap());
+        let ended = runtime
+            .external_submit_message(
+                &owner,
+                grant,
+                session_id,
+                "still there?".into(),
+                "Ev4",
+                "1700000004.000100",
+            )
+            .await;
+        assert!(ended.is_err(), "an ended session must refuse");
     }
 
     /// A repository with no recorded origin cannot back a remote workspace:

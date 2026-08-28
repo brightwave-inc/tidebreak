@@ -5047,3 +5047,143 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
     .await
     .is_err());
 }
+
+/// A session bound to a fresh conversation, for the external message tests.
+async fn seed_external_session(
+    store: &crate::db::DbStore,
+    owner: &OwnerId,
+    label: &str,
+) -> CodeSessionId {
+    let (session, _) = seed_owner(store, owner, label).await;
+    let stored = crate::db::code::get_session(store, owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    let workspace = crate::db::code::get_workspace(store, owner, stored.workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (external_workspace, external_session) = external_pair(owner, workspace.repo_id, label);
+    match crate::db::code::resolve_external_session(
+        store,
+        owner,
+        crate::code::CodeGrantId::new(),
+        "slack",
+        label,
+        &external_workspace,
+        &external_session,
+    )
+    .await
+    .unwrap()
+    {
+        crate::code::ExternalSessionResolution::Created(binding) => binding.session_id,
+        other => panic!("expected a fresh binding, got {other:?}"),
+    }
+}
+
+/// A replayed event id answers with the first delivery's row id and writes
+/// nothing; a distinct event id parks a second row.
+#[tokio::test]
+async fn a_replayed_external_message_records_once() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "replay-once").await;
+
+    let first = crate::db::code::record_external_message(
+        &store,
+        &owner,
+        session_id,
+        "Ev001",
+        "1700000001.000100",
+        "hello",
+    )
+    .await
+    .unwrap();
+    let crate::code::ExternalMessageRecord::Recorded(row) = first else {
+        panic!("first delivery must record");
+    };
+
+    let replay = crate::db::code::record_external_message(
+        &store,
+        &owner,
+        session_id,
+        "Ev001",
+        "1700000001.000100",
+        "hello",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        replay,
+        crate::code::ExternalMessageRecord::Replay { turn_id: row.id }
+    );
+    let queued = crate::db::code::list_queued_turns(&store, &owner, session_id)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1, "a replay must not park a second row");
+
+    let second = crate::db::code::record_external_message(
+        &store,
+        &owner,
+        session_id,
+        "Ev002",
+        "1700000002.000100",
+        "again",
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        second,
+        crate::code::ExternalMessageRecord::Recorded(_)
+    ));
+}
+
+/// Out-of-order deliveries apply in channel order while still queued, and
+/// external rows permute within their own slots so a desktop follow-up
+/// keeps its place in line.
+#[tokio::test]
+async fn out_of_order_external_messages_apply_in_channel_order() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let session_id = seed_external_session(&store, &owner, "ts-order").await;
+
+    let desktop = enqueue_queued_turn(&store, &owner, &queued_message(session_id, "desktop"))
+        .await
+        .unwrap();
+    let later = crate::db::code::record_external_message(
+        &store,
+        &owner,
+        session_id,
+        "EvB",
+        "1700000002.000100",
+        "message B",
+    )
+    .await
+    .unwrap();
+    let crate::code::ExternalMessageRecord::Recorded(later) = later else {
+        panic!("B must record");
+    };
+    let earlier = crate::db::code::record_external_message(
+        &store,
+        &owner,
+        session_id,
+        "EvA",
+        "1700000001.000100",
+        "message A",
+    )
+    .await
+    .unwrap();
+    let crate::code::ExternalMessageRecord::Recorded(earlier) = earlier else {
+        panic!("A must record");
+    };
+
+    let queued = crate::db::code::list_queued_turns(&store, &owner, session_id)
+        .await
+        .unwrap();
+    let order: Vec<_> = queued.iter().map(|row| row.id).collect();
+    assert_eq!(
+        order,
+        vec![desktop.id, earlier.id, later.id],
+        "the earlier channel token must run before the later one"
+    );
+}

@@ -1368,6 +1368,25 @@ pub enum ExternalSessionResolution {
     GrantMismatch,
 }
 
+/// What recording one external message delivery committed
+/// (`docs/slack-sessions.md`, stage 2).
+///
+/// The event id and the queue row it caused commit in one transaction, so a
+/// replayed delivery never writes a second row: it answers `Replay` with the
+/// id the first delivery minted, and the caller derives the outcome from
+/// that row's current state.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExternalMessageRecord {
+    /// First delivery: the queue row and event row committed together.
+    Recorded(Box<CodeQueuedTurn>),
+    /// The event was already recorded. `turn_id` names the row the first
+    /// delivery caused — still queued, promoted into a turn, or retracted.
+    Replay {
+        /// The id shared by the queue row and the turn it promotes into.
+        turn_id: CodeTurnId,
+    },
+}
+
 /// The outcome of asking for a new incarnation under the owner's cap.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IncarnationAdmission {

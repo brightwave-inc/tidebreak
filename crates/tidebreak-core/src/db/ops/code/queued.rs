@@ -23,7 +23,9 @@ use super::super::super::{entities, store_err, DbStore};
 use super::super::agent_run::database_now;
 use super::acquire_code_session_write_lock;
 
-fn queued_turn_from_model(model: entities::code_queued_turn::Model) -> Result<CodeQueuedTurn> {
+pub(super) fn queued_turn_from_model(
+    model: entities::code_queued_turn::Model,
+) -> Result<CodeQueuedTurn> {
     Ok(CodeQueuedTurn {
         id: CodeTurnId(model.id),
         session_id: CodeSessionId(model.session_id),

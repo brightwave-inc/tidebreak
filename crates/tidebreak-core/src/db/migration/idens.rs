@@ -1150,3 +1150,15 @@ pub(crate) enum CodeExternalBinding {
     SessionId,
     CreatedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeExternalEvent {
+    Table,
+    Id,
+    Owner,
+    SessionId,
+    EventId,
+    ChannelTs,
+    TurnId,
+    CreatedAt,
+}
