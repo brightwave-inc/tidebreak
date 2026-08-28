@@ -425,6 +425,15 @@ confining environment; the ledger and cap are the machine's. A cap
 refusal in-thread lists what is running with thread links and how to
 stop one, not just a number.
 
+The deployment operator sets those machine limits at boot. The defaults are
+three live sandboxes per owner, 5,000,000 micro-USD per spawn, and 20,000,000
+micro-USD per session. `TIDEBREAK_RUNTIME_CONCURRENCY_CAP` changes the first.
+`TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD` and
+`TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD` change the spend limits;
+`none` leaves that Tidebreak ceiling unset. The runtime profile may still
+impose a lower ceiling. A refusal names the setting that the operator can
+raise before restarting Tidebreak.
+
 Remote sessions get their own fence causes — incarnation intent
 unresolved, sandbox lost mid-turn, terminal flush missing — because the
 existing `FenceReason` variants describe local process supervision.
