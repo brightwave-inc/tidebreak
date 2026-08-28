@@ -814,6 +814,9 @@ describe("CodeWorkspacePage", () => {
     });
     const client = makeClient();
     enableStartHarness(client);
+    client.createCodeSession
+      .mockRejectedValueOnce(new Error("Claude Code sign-in expired"))
+      .mockResolvedValueOnce(CREATED_SESSION);
     useCodeUiStore
       .getState()
       .offerComposerPrompt("ws-1", "Review this screenshot", [image]);
@@ -829,6 +832,20 @@ describe("CodeWorkspacePage", () => {
     await waitFor(() => expect(send).toBeEnabled());
     await user.click(send);
 
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledOnce(),
+    );
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+    expect(publishCodeImage).not.toHaveBeenCalled();
+    expect(message).toHaveValue("Review this screenshot");
+
+    const retry = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    await user.click(retry);
+
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledTimes(2),
+    );
     await waitFor(() =>
       expect(client.submitCodeTurn).toHaveBeenCalledWith(
         CREATED_SESSION.id,
