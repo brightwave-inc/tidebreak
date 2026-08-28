@@ -107,6 +107,14 @@ code_id_type!(
     CodeIncarnationId
 );
 code_id_type!(
+    /// Identifies one external-conversation binding on a session.
+    CodeBindingId
+);
+code_id_type!(
+    /// Identifies one adapter grant: a channel user's link to this machine.
+    CodeGrantId
+);
+code_id_type!(
     /// Identifies one durable trigger rule bound to a repository.
     CodeTriggerId
 );
@@ -678,12 +686,22 @@ impl CodeWorkspace {
     /// Whether this workspace's engine runs in a remote sandbox.
     ///
     /// A remote workspace has no host worktree: the clone lives inside the
-    /// sandbox, and the branch state travels as WIP refs on the origin. An
-    /// empty `worktree_path` is the marker — nothing on this machine ever
-    /// creates, reads, or reclaims a checkout for it.
+    /// sandbox, and the branch state travels as WIP refs on the origin. The
+    /// marker is `remote:<workspace-id>` — per-workspace, because the column
+    /// is unique to guard two local workspaces from sharing one checkout,
+    /// and remote workspaces must not collide with each other on a shared
+    /// sentinel. An empty path is accepted as the marker too, defensively.
+    /// Nothing on this machine ever creates, reads, or reclaims a checkout
+    /// for either form.
     #[must_use]
     pub fn is_remote(&self) -> bool {
-        self.worktree_path.is_empty()
+        self.worktree_path.is_empty() || self.worktree_path.starts_with("remote:")
+    }
+
+    /// The stored `worktree_path` marker for a remote workspace.
+    #[must_use]
+    pub fn remote_worktree_marker(id: WorkspaceId) -> String {
+        format!("remote:{id}")
     }
 }
 
@@ -1304,6 +1322,50 @@ pub struct CodeSessionIncarnation {
     pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Last write time.
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One external conversation's durable link to a session
+/// (docs/slack-sessions.md, stage 2).
+///
+/// The key is opaque to the machine: a Slack thread key is one channel
+/// kind, and later channels reuse the row shape unchanged. The grant id
+/// tags which adapter credential created the binding; every
+/// grant-authenticated call scopes through it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeExternalBinding {
+    /// Stable id.
+    pub id: CodeBindingId,
+    /// Owner.
+    pub owner: crate::OwnerId,
+    /// Which channel family the key belongs to (for example `slack`).
+    pub channel_kind: String,
+    /// The channel's durable conversation identity, opaque here.
+    pub external_key: String,
+    /// The grant whose call created the binding.
+    pub grant_id: CodeGrantId,
+    /// The bound session.
+    pub session_id: CodeSessionId,
+    /// Creation time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// What an external get-or-create resolved to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExternalSessionResolution {
+    /// No binding existed; the workspace, session, and binding committed
+    /// together.
+    Created(Box<CodeExternalBinding>),
+    /// The conversation was already bound to a live session.
+    Existing(Box<CodeExternalBinding>),
+    /// The bound session has ended. The adapter closes its routing row;
+    /// the machine never resurrects.
+    Ended {
+        /// The ended session.
+        session_id: CodeSessionId,
+    },
+    /// The conversation is bound under a different grant. Refused: one
+    /// grant must never reach another grant's sessions.
+    GrantMismatch,
 }
 
 /// The outcome of asking for a new incarnation under the owner's cap.

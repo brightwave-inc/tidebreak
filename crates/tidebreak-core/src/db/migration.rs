@@ -61,6 +61,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeWorkflowRuns),
             Box::new(CodeSessionIncarnations),
             Box::new(IncarnationIngest),
+            Box::new(CodeExternalBindings),
         ]
     }
 }
@@ -2814,6 +2815,114 @@ impl MigrationTrait for IncarnationIngest {
     }
 }
 
+/// Map an external conversation onto a session (docs/slack-sessions.md,
+/// stage 2).
+///
+/// One row per conversation: `(owner, channel_kind, external_key)` is the
+/// durable thread identity — Slack's thread key is one kind, and the key is
+/// opaque to the machine so later channels reuse the table unchanged. The
+/// grant id tags which adapter credential created the binding; every
+/// grant-authenticated call scopes through it.
+struct CodeExternalBindings;
+
+impl MigrationName for CodeExternalBindings {
+    fn name(&self) -> &str {
+        "m20260828_000024_code_external_bindings"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeExternalBindings {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeExternalBinding::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::Owner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::ChannelKind)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::ExternalKey)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::GrantId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::SessionId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalBinding::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_external_binding_session")
+                            .from(
+                                idens::CodeExternalBinding::Table,
+                                idens::CodeExternalBinding::SessionId,
+                            )
+                            .to(idens::CodeSession::Table, idens::CodeSession::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        // The race gate: two creates for one conversation cannot both
+        // commit, so get-or-create converges on one session.
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_external_binding_key")
+                    .table(idens::CodeExternalBinding::Table)
+                    .col(idens::CodeExternalBinding::Owner)
+                    .col(idens::CodeExternalBinding::ChannelKind)
+                    .col(idens::CodeExternalBinding::ExternalKey)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_external_binding_session")
+                    .table(idens::CodeExternalBinding::Table)
+                    .col(idens::CodeExternalBinding::SessionId)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the table would orphan live conversations: the adapter's
+        // routing rows would point at sessions this machine no longer maps.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -2886,6 +2995,7 @@ mod tests {
                 "m20260827_000021_code_workflow_runs",
                 "m20260827_000022_code_session_incarnations",
                 "m20260827_000023_incarnation_ingest",
+                "m20260828_000024_code_external_bindings",
             ]
         );
         assert!(db
