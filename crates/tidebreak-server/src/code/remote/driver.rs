@@ -17,8 +17,8 @@ use std::sync::Arc;
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    activate_incarnation, create_incarnation_intent, forget_session_wip_ref, insert_turn,
-    latest_incarnation, latest_pushed_wip_ref, latest_turn,
+    activate_incarnation, create_incarnation_intent, forget_session_wip_ref, get_workspace,
+    insert_turn, latest_incarnation, latest_pushed_wip_ref, latest_turn,
     mark_incarnation_terminal_events_journaled, record_incarnation_spend, save_turn,
     session_spend_microusd, stale_incarnation_intents_all_owners, stop_incarnation,
 };
@@ -168,6 +168,32 @@ async fn refusal_notice(
     Ok(())
 }
 
+/// Human-recognizable names for the sessions holding cap slots: their
+/// workspace titles. The owner knows workspaces, not session ids; a title
+/// that is empty falls back to the branch, and a row that vanished mid-read
+/// falls back to the id rather than failing the refusal.
+async fn occupying_names(
+    db: &Arc<DbStore>,
+    owner: &OwnerId,
+    running: &[CodeSessionId],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for id in running {
+        let name = match tidebreak_core::db::code::get_session(db, owner, *id).await {
+            Ok(Some(session)) => match get_workspace(db, owner, session.workspace_id).await {
+                Ok(Some(workspace)) if !workspace.title.is_empty() => workspace.title,
+                Ok(Some(workspace)) => workspace.branch_name,
+                _ => id.to_string(),
+            },
+            _ => id.to_string(),
+        };
+        names.push(name);
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Micro-USD rendered as dollars for a human-readable reason.
 fn dollars(microusd: i64) -> String {
     format!("${:.2}", microusd as f64 / 1_000_000.0)
@@ -291,12 +317,36 @@ impl RemoteDriver<'_> {
         if let Some(ceiling) = settings.session_spend_ceiling_microusd {
             let spent = session_spend_microusd(db, &owner, session.id).await?;
             if spent >= ceiling {
+                // An exhausted session cannot take another turn, so a live
+                // sandbox would hold a cap slot doing nothing. Ask the
+                // environment to stop it — best effort, and the pump drains
+                // the goodbye and closes the row the ordinary way.
+                let mut releasing = false;
+                if let Some(row) = latest_incarnation(db, &owner, session.id).await? {
+                    if row.state == IncarnationState::Active {
+                        if let Some(sandbox_id) = row.sandbox_id.as_deref() {
+                            releasing = true;
+                            if let Err(error) = provisioner.cancel(&owner, sandbox_id).await {
+                                warn!(
+                                    session = %session.id,
+                                    %error,
+                                    "could not cancel an exhausted session's sandbox; its ceilings bound it"
+                                );
+                            }
+                        }
+                    }
+                }
+                let release = if releasing {
+                    " Its sandbox is being stopped so the slot frees for other sessions."
+                } else {
+                    ""
+                };
                 refusal_notice(
                     db,
                     bus,
                     session,
                     format!(
-                        "The turn was refused: this session has spent {} of its {} ceiling. Raise the ceiling to continue.",
+                        "The turn was refused: this session has spent {} of its {} ceiling and takes no more turns.{release}",
                         dollars(spent),
                         dollars(ceiling)
                     ),
@@ -386,20 +436,14 @@ impl RemoteDriver<'_> {
         let intent = match admission {
             IncarnationAdmission::Admitted(row) => *row,
             IncarnationAdmission::CapExhausted { running } => {
-                let names = running
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let names = occupying_names(db, &owner, &running).await.join(", ");
                 refusal_notice(
                     db,
                     bus,
                     session,
                     format!(
-                        "The turn was refused: the sandbox cap is full. {} of {} slots are held by sessions {}.",
-                        running.len(),
-                        settings.incarnation_cap,
-                        names
+                        "The turn was refused: all {} sandbox slots are in use by {}. Stop one of those sessions to continue.",
+                        settings.incarnation_cap, names
                     ),
                     "the sandbox cap refused this turn",
                 )
@@ -1386,8 +1430,12 @@ mod tests {
                 _ => None,
             })
             .expect("expected a refusal notice");
-        assert!(notice.contains("sandbox cap"), "{notice}");
-        assert!(notice.contains(&session_a.id.to_string()), "{notice}");
+        assert!(notice.contains("sandbox slots"), "{notice}");
+        // The occupier is named by its workspace, which the owner
+        // recognizes, not by a session id, which they do not.
+        assert!(notice.contains("remote"), "{notice}");
+        assert!(!notice.contains(&session_a.id.to_string()), "{notice}");
+        assert!(notice.contains("Stop one of those sessions"), "{notice}");
         let live = get_session(&db, &session_b.owner, session_b.id)
             .await
             .unwrap()
@@ -1443,6 +1491,15 @@ mod tests {
             .expect("expected a refusal notice");
         assert!(notice.contains("$2.50"), "{notice}");
         assert!(notice.contains("$2.00"), "{notice}");
+        // The refusal frees the cap slot instead of telling the owner to do
+        // something the product does not offer: the idle sandbox is asked to
+        // stop, and the copy says so.
+        assert!(!notice.contains("Raise the ceiling"), "{notice}");
+        assert!(notice.contains("stopped"), "{notice}");
+        assert_eq!(
+            fake.cancels.lock().unwrap().as_slice(),
+            &["sb-1".to_owned()]
+        );
     }
 
     /// The pump feeds the ledger from the environment's meter, and the
