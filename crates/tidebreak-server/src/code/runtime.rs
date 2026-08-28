@@ -1431,11 +1431,14 @@ impl CodeRuntime {
             CodeWorkspaceStatus::Archived => {
                 (branch_bytes, Some(CodeStorageAction::Release), branch_bytes)
             }
-            _ => (
+            CodeWorkspaceStatus::Active => (
                 worktree_bytes,
                 Some(CodeStorageAction::Archive),
                 worktree_bytes,
             ),
+            CodeWorkspaceStatus::Creating
+            | CodeWorkspaceStatus::SetupFailed
+            | CodeWorkspaceStatus::Archiving => (worktree_bytes, None, 0),
         };
         CodeWorkspaceStorageSnapshot {
             id: workspace.id,
