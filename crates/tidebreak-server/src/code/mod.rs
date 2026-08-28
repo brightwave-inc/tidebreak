@@ -25,6 +25,7 @@ pub(crate) mod pr_refresh;
 pub(crate) mod recap;
 pub(crate) mod reconcile;
 pub(crate) mod recovery;
+pub(crate) mod remote;
 pub(crate) mod runtime;
 pub(crate) mod scoped;
 pub(crate) mod scratch;
