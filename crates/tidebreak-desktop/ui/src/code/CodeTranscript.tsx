@@ -690,38 +690,34 @@ function AssistantRewriteMessage({
   animateStreaming: boolean;
   ownsCopyAction?: boolean;
 }) {
-  const [showOriginal, setShowOriginal] = useState(false);
   const rewritten = item.rewriteState === "rewritten" && Boolean(item.rewrite);
-  const text =
-    rewritten && !showOriginal && item.rewrite ? item.rewrite : item.text;
   return (
     <article className="message message-assistant" aria-label="Assistant">
       {item.rewriteState === "rewriting" && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
-          Rewriting…
+          Writing a recap…
         </p>
       )}
       {item.rewriteState === "failed" && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
-          Couldn't rewrite this turn. The original stands.
+          Couldn't write a recap. The original stands.
         </p>
       )}
       <AssistantMessageBody
-        text={text}
+        text={item.text}
         streaming={item.streaming && animateStreaming}
       />
-      {rewritten && (
-        <button
-          type="button"
-          className="text-muted-foreground mt-2 text-xs underline-offset-2 hover:underline"
-          onClick={() => setShowOriginal((current) => !current)}
-        >
-          {showOriginal ? "Show rewrite" : "Show original"}
-        </button>
+      {rewritten && item.rewrite && (
+        <div className="mt-3 border-t border-border-subtle pt-3">
+          <p className="text-muted-foreground mb-1 text-2xs font-medium tracking-wide uppercase">
+            Recap
+          </p>
+          <AssistantMessageBody text={item.rewrite} streaming={false} />
+        </div>
       )}
       <MessageFooter
         role="assistant"
-        text={text}
+        text={item.text}
         settled={!item.streaming}
         sequenceEnd={ownsCopyAction}
       />
