@@ -25,6 +25,7 @@ import {
 import { requestUserAttention } from "../host";
 import { useRefreshSignals } from "../RefreshSignals";
 import { friendlyErrorMessage } from "../lib/utils";
+import { applyLiveTurnRewrite } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 
 /**
@@ -919,6 +920,14 @@ function open(client: CloneUpdatesClient, born: number): void {
       return;
     }
     if (action) useCodeUpdatesStore.getState().apply(action);
+    if (action?.type === "turn_rewrite") {
+      applyLiveTurnRewrite(
+        action.session,
+        action.turnId,
+        action.state,
+        action.rewrite,
+      );
+    }
   });
   socket = next;
   next.onopen = () => {

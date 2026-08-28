@@ -8,6 +8,8 @@ import {
 } from "./CodeSessionStore";
 import {
   applyCodeTurnSnapshot,
+  applyStoredRewrites,
+  applyTurnRewrite,
   hydrateCodeTurns,
   reconcilePendingCodeTurns,
   type CodeSessionDeps,
@@ -231,6 +233,34 @@ export function peekCodeSession(
   sessionId: string,
 ): CodeSessionEntry | undefined {
   return registry.get(sessionId);
+}
+
+/** Stamp a live recap onto a retained or open session store. */
+export function applyLiveTurnRewrite(
+  sessionId: string,
+  turnId: string,
+  state: "rewriting" | "rewritten" | "failed",
+  rewrite?: string,
+): void {
+  const entry = registry.get(sessionId);
+  if (!entry) return;
+  entry.store.getState().update((session) => {
+    let next = session;
+    if (state === "rewritten" && rewrite) {
+      next = {
+        ...next,
+        storedRewrites: { ...next.storedRewrites, [turnId]: rewrite },
+      };
+    }
+    next = {
+      ...next,
+      items: applyTurnRewrite(next.items, turnId, {
+        rewrite,
+        rewriteState: state,
+      }),
+    };
+    return state === "rewritten" ? applyStoredRewrites(next) : next;
+  });
 }
 
 /** Test-only: drop every live entry without waiting for unmounts. */

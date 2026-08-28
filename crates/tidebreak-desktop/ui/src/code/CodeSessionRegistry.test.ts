@@ -3,6 +3,7 @@ import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
 import {
   acquireCodeSession,
   acquireCodeSessionFromClient,
+  applyLiveTurnRewrite,
   MAX_RETAINED_CODE_SESSIONS,
   peekCodeSession,
   releaseCodeSession,
@@ -1075,5 +1076,32 @@ describe("CodeSessionRegistry", () => {
     expect(store.getState().assistantBuffer).toBe("oldlive");
     expect(listener).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stamps a live recap onto the session store so snapshot reconnect keeps it", () => {
+    const sockets: FakeSocket[] = [];
+    const store = acquireCodeSession("s1", (after, onFrame) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    });
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "assistant_delta", text: "The original closing message." },
+      transient: true,
+    });
+    applyLiveTurnRewrite("s1", "t1", "rewritten", "The recap.");
+    const assistant = store
+      .getState()
+      .items.find((item) => item.kind === "assistant" && item.turnId === "t1");
+    expect(assistant).toMatchObject({
+      rewrite: "The recap.",
+      rewriteState: "rewritten",
+    });
+    expect(store.getState().storedRewrites.t1).toBe("The recap.");
   });
 });
