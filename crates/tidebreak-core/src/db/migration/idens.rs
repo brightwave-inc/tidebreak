@@ -973,6 +973,7 @@ pub(crate) enum CodeSessionIncarnation {
     TerminalEventsJournaled,
     EventsCursor,
     TaskOutput,
+    LastWipRef,
     CreatedAt,
     ActivatedAt,
     StoppedAt,

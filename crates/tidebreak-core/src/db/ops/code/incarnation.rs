@@ -49,6 +49,7 @@ fn incarnation_from_model(
         terminal_events_journaled: model.terminal_events_journaled,
         events_cursor: model.events_cursor,
         task_output: model.task_output,
+        last_wip_ref: model.last_wip_ref,
         created_at: model.created_at,
         activated_at: model.activated_at,
         stopped_at: model.stopped_at,
@@ -133,6 +134,7 @@ pub async fn create_incarnation_intent(
         terminal_events_journaled: Set(false),
         events_cursor: Set(0),
         task_output: Set(None),
+        last_wip_ref: Set(None),
         created_at: Set(now),
         activated_at: Set(None),
         stopped_at: Set(None),
@@ -281,14 +283,33 @@ pub async fn record_incarnation_spend(
     Ok(())
 }
 
-/// Journals one sandbox event's projection and advances the ingest cursor,
-/// in one transaction.
+/// What one sandbox event writes besides its journal rows.
+///
+/// Everything here commits in the same transaction as the cursor advance,
+/// so a replayed sequence — which the cursor guard skips wholesale — can
+/// never have half of its side effects.
+#[derive(Debug, Default)]
+pub struct IncarnationSideEffects<'a> {
+    /// Journal rows to append, in order.
+    pub journal: &'a [crate::CodeEvent],
+    /// The supervisor's terminal deliverable to retain.
+    pub task_output: Option<&'a str>,
+    /// The WIP checkpoint ref to retain, for resume.
+    pub wip_ref: Option<&'a str>,
+    /// Whether this event is the supervisor's goodbye, raising the gate
+    /// reincarnation waits on.
+    pub terminal_events_journaled: bool,
+}
+
+/// Journals one sandbox event's projection, applies its incarnation-row
+/// side effects, and advances the ingest cursor — all in one transaction.
 ///
 /// Exactly-once per sandbox event: the write is guarded on
 /// `events_cursor < seq`, so a restart that replays an already-ingested
-/// event returns `None` and writes nothing. `spawn_epoch` fences the write
-/// the way every journal append is fenced: a superseded worker cannot
-/// journal into a session that moved on.
+/// event returns `None` and writes nothing — and loses nothing, because
+/// the first ingest committed every side effect with the cursor.
+/// `spawn_epoch` fences the write the way every journal append is fenced:
+/// a superseded worker cannot journal into a session that moved on.
 ///
 /// Returns the journal sequence numbers assigned, in `events` order.
 pub async fn ingest_incarnation_event(
@@ -298,7 +319,7 @@ pub async fn ingest_incarnation_event(
     spawn_epoch: i64,
     id: CodeIncarnationId,
     seq: i64,
-    events: &[crate::CodeEvent],
+    side_effects: IncarnationSideEffects<'_>,
 ) -> Result<Option<Vec<i64>>> {
     let txn = store.conn.begin().await.map_err(store_err)?;
     if !super::acquire_code_session_write_lock(&txn, session_id).await? {
@@ -333,12 +354,12 @@ pub async fn ingest_incarnation_event(
         txn.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let mut seqs = Vec::with_capacity(events.len());
-    for event in events {
+    let mut seqs = Vec::with_capacity(side_effects.journal.len());
+    for event in side_effects.journal {
         seqs.push(super::journal::append_event_on_locked(&txn, owner, session_id, event).await?);
     }
     let now = database_now(&txn).await?;
-    entities::code_session_incarnation::Entity::update_many()
+    let mut update = entities::code_session_incarnation::Entity::update_many()
         .col_expr(
             entities::code_session_incarnation::Column::EventsCursor,
             sea_orm::sea_query::Expr::value(seq),
@@ -346,39 +367,32 @@ pub async fn ingest_incarnation_event(
         .col_expr(
             entities::code_session_incarnation::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
-        )
+        );
+    if let Some(body) = side_effects.task_output {
+        update = update.col_expr(
+            entities::code_session_incarnation::Column::TaskOutput,
+            sea_orm::sea_query::Expr::value(body),
+        );
+    }
+    if let Some(reference) = side_effects.wip_ref {
+        update = update.col_expr(
+            entities::code_session_incarnation::Column::LastWipRef,
+            sea_orm::sea_query::Expr::value(reference),
+        );
+    }
+    if side_effects.terminal_events_journaled {
+        update = update.col_expr(
+            entities::code_session_incarnation::Column::TerminalEventsJournaled,
+            sea_orm::sea_query::Expr::value(true),
+        );
+    }
+    update
         .filter(entities::code_session_incarnation::Column::Id.eq(id.0))
         .exec(&txn)
         .await
         .map_err(store_err)?;
     txn.commit().await.map_err(store_err)?;
     Ok(Some(seqs))
-}
-
-/// Retains the supervisor's terminal deliverable on the incarnation that
-/// produced it.
-pub async fn record_incarnation_task_output(
-    store: &DbStore,
-    owner: &OwnerId,
-    id: CodeIncarnationId,
-    body: &str,
-) -> Result<()> {
-    let now = database_now(&store.conn).await?;
-    entities::code_session_incarnation::Entity::update_many()
-        .col_expr(
-            entities::code_session_incarnation::Column::TaskOutput,
-            sea_orm::sea_query::Expr::value(body),
-        )
-        .col_expr(
-            entities::code_session_incarnation::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session_incarnation::Column::Id.eq(id.0))
-        .exec(&store.conn)
-        .await
-        .map_err(store_err)?;
-    Ok(())
 }
 
 /// The session's newest incarnation, in any state.
