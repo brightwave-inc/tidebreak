@@ -47,6 +47,9 @@ fn incarnation_from_model(
         stop_reason: model.stop_reason,
         spend_microusd: model.spend_microusd,
         terminal_events_journaled: model.terminal_events_journaled,
+        events_cursor: model.events_cursor,
+        task_output: model.task_output,
+        last_wip_ref: model.last_wip_ref,
         created_at: model.created_at,
         activated_at: model.activated_at,
         stopped_at: model.stopped_at,
@@ -129,6 +132,9 @@ pub async fn create_incarnation_intent(
         stop_reason: Set(None),
         spend_microusd: Set(None),
         terminal_events_journaled: Set(false),
+        events_cursor: Set(0),
+        task_output: Set(None),
+        last_wip_ref: Set(None),
         created_at: Set(now),
         activated_at: Set(None),
         stopped_at: Set(None),
@@ -275,6 +281,118 @@ pub async fn record_incarnation_spend(
         .await
         .map_err(store_err)?;
     Ok(())
+}
+
+/// What one sandbox event writes besides its journal rows.
+///
+/// Everything here commits in the same transaction as the cursor advance,
+/// so a replayed sequence — which the cursor guard skips wholesale — can
+/// never have half of its side effects.
+#[derive(Debug, Default)]
+pub struct IncarnationSideEffects<'a> {
+    /// Journal rows to append, in order.
+    pub journal: &'a [crate::CodeEvent],
+    /// The supervisor's terminal deliverable to retain.
+    pub task_output: Option<&'a str>,
+    /// The WIP checkpoint ref to retain, for resume.
+    pub wip_ref: Option<&'a str>,
+    /// Whether this event is the supervisor's goodbye, raising the gate
+    /// reincarnation waits on.
+    pub terminal_events_journaled: bool,
+}
+
+/// Journals one sandbox event's projection, applies its incarnation-row
+/// side effects, and advances the ingest cursor — all in one transaction.
+///
+/// Exactly-once per sandbox event: the write is guarded on
+/// `events_cursor < seq`, so a restart that replays an already-ingested
+/// event returns `None` and writes nothing — and loses nothing, because
+/// the first ingest committed every side effect with the cursor.
+/// `spawn_epoch` fences the write the way every journal append is fenced:
+/// a superseded worker cannot journal into a session that moved on.
+///
+/// Returns the journal sequence numbers assigned, in `events` order.
+pub async fn ingest_incarnation_event(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    spawn_epoch: i64,
+    id: CodeIncarnationId,
+    seq: i64,
+    side_effects: IncarnationSideEffects<'_>,
+) -> Result<Option<Vec<i64>>> {
+    let txn = store.conn.begin().await.map_err(store_err)?;
+    if !super::acquire_code_session_write_lock(&txn, session_id).await? {
+        return Err(AgentError::Store(format!(
+            "code session {session_id} not found"
+        )));
+    }
+    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .one(&txn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Err(AgentError::Store(format!(
+            "code session {session_id} not found"
+        )));
+    };
+    if session.spawn_epoch != spawn_epoch {
+        return Err(AgentError::Store(format!(
+            "stale spawn epoch {spawn_epoch} for code session {session_id}"
+        )));
+    }
+    let Some(incarnation) = entities::code_session_incarnation::Entity::find_by_id(id.0)
+        .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
+        .one(&txn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Err(AgentError::Store(format!("incarnation {} not found", id.0)));
+    };
+    if incarnation.events_cursor >= seq {
+        txn.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let mut seqs = Vec::with_capacity(side_effects.journal.len());
+    for event in side_effects.journal {
+        seqs.push(super::journal::append_event_on_locked(&txn, owner, session_id, event).await?);
+    }
+    let now = database_now(&txn).await?;
+    let mut update = entities::code_session_incarnation::Entity::update_many()
+        .col_expr(
+            entities::code_session_incarnation::Column::EventsCursor,
+            sea_orm::sea_query::Expr::value(seq),
+        )
+        .col_expr(
+            entities::code_session_incarnation::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        );
+    if let Some(body) = side_effects.task_output {
+        update = update.col_expr(
+            entities::code_session_incarnation::Column::TaskOutput,
+            sea_orm::sea_query::Expr::value(body),
+        );
+    }
+    if let Some(reference) = side_effects.wip_ref {
+        update = update.col_expr(
+            entities::code_session_incarnation::Column::LastWipRef,
+            sea_orm::sea_query::Expr::value(reference),
+        );
+    }
+    if side_effects.terminal_events_journaled {
+        update = update.col_expr(
+            entities::code_session_incarnation::Column::TerminalEventsJournaled,
+            sea_orm::sea_query::Expr::value(true),
+        );
+    }
+    update
+        .filter(entities::code_session_incarnation::Column::Id.eq(id.0))
+        .exec(&txn)
+        .await
+        .map_err(store_err)?;
+    txn.commit().await.map_err(store_err)?;
+    Ok(Some(seqs))
 }
 
 /// The session's newest incarnation, in any state.

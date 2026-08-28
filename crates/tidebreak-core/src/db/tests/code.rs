@@ -4651,3 +4651,111 @@ async fn stale_intents_list_only_old_unactivated_rows() {
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0].id, orphan.id);
 }
+
+/// The journal write and the cursor advance commit together, so a restart
+/// that replays an already-ingested sandbox event writes nothing and the
+/// next unseen sequence resumes cleanly.
+#[tokio::test]
+async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (session, _) = seed_owner(&store, &owner, "ingest").await;
+    let intent = admitted(admit(&store, &owner, session, 1, 4).await);
+    crate::db::code::activate_incarnation(&store, &owner, intent.id, "sandbox-1")
+        .await
+        .unwrap();
+    let epoch = get_session(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap()
+        .spawn_epoch;
+
+    let first = CodeEvent::AssistantMessage {
+        text: "the first answer".to_owned(),
+        parent_call_id: None,
+    };
+    let seqs = crate::db::code::ingest_incarnation_event(
+        &store,
+        &owner,
+        session,
+        epoch,
+        intent.id,
+        7,
+        crate::db::code::IncarnationSideEffects {
+            journal: std::slice::from_ref(&first),
+            wip_ref: Some("mg-wip/sb-1-i1"),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(seqs.len(), 1);
+
+    // A crash between reads replays the same sandbox sequence: nothing is
+    // written twice. An older sequence is equally a no-op.
+    for replayed in [7, 3] {
+        assert!(crate::db::code::ingest_incarnation_event(
+            &store,
+            &owner,
+            session,
+            epoch,
+            intent.id,
+            replayed,
+            crate::db::code::IncarnationSideEffects {
+                journal: std::slice::from_ref(&first),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+
+    let second = CodeEvent::TurnInterrupted;
+    crate::db::code::ingest_incarnation_event(
+        &store,
+        &owner,
+        session,
+        epoch,
+        intent.id,
+        8,
+        crate::db::code::IncarnationSideEffects {
+            journal: std::slice::from_ref(&second),
+            task_output: Some("the findings"),
+            terminal_events_journaled: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let page = list_events(&store, &owner, session, 0, 10).await.unwrap();
+    assert_eq!(page.events.len(), 2);
+    let row = crate::db::code::latest_incarnation(&store, &owner, session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.events_cursor, 8);
+    // Side effects committed with their event's cursor advance.
+    assert_eq!(row.last_wip_ref.as_deref(), Some("mg-wip/sb-1-i1"));
+    assert_eq!(row.task_output.as_deref(), Some("the findings"));
+    assert!(row.terminal_events_journaled);
+
+    // A superseded worker's epoch cannot journal into the session.
+    assert!(crate::db::code::ingest_incarnation_event(
+        &store,
+        &owner,
+        session,
+        epoch + 1,
+        intent.id,
+        9,
+        crate::db::code::IncarnationSideEffects {
+            journal: std::slice::from_ref(&second),
+            ..Default::default()
+        },
+    )
+    .await
+    .is_err());
+}
