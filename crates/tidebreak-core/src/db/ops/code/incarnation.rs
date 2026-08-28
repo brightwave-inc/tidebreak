@@ -396,6 +396,27 @@ pub async fn ingest_incarnation_event(
     Ok(Some(seqs))
 }
 
+/// The newest WIP checkpoint ref any incarnation of this session pushed.
+///
+/// Resume state walks back past reservations that never ran — a failed
+/// spawn or a swept intent writes a newer row with no ref, and resuming
+/// from the base ref because of it would drop the predecessor's work.
+pub async fn latest_pushed_wip_ref(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+) -> Result<Option<String>> {
+    Ok(entities::code_session_incarnation::Entity::find()
+        .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_session_incarnation::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_session_incarnation::Column::LastWipRef.is_not_null())
+        .order_by_desc(entities::code_session_incarnation::Column::Incarnation)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .and_then(|row| row.last_wip_ref))
+}
+
 /// The session's newest incarnation, in any state.
 pub async fn latest_incarnation(
     store: &DbStore,

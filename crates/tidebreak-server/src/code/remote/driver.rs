@@ -17,9 +17,9 @@ use std::sync::Arc;
 use tracing::warn;
 
 use tidebreak_core::db::code::{
-    activate_incarnation, create_incarnation_intent, insert_turn, latest_incarnation, latest_turn,
-    mark_incarnation_terminal_events_journaled, save_turn, stale_incarnation_intents_all_owners,
-    stop_incarnation,
+    activate_incarnation, create_incarnation_intent, insert_turn, latest_incarnation,
+    latest_pushed_wip_ref, latest_turn, mark_incarnation_terminal_events_journaled, save_turn,
+    stale_incarnation_intents_all_owners, stop_incarnation,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionIncarnation,
@@ -274,13 +274,13 @@ impl RemoteDriver<'_> {
             }
         };
 
-        let resume_ref = current
-            .as_ref()
-            .and_then(|row| row.last_wip_ref.clone())
-            .unwrap_or_else(|| workspace.base_ref.clone());
-        let resumed_from_wip = current
-            .as_ref()
-            .is_some_and(|row| row.last_wip_ref.is_some());
+        // Walk back to the last incarnation that actually pushed: the row
+        // between it and now may be a reservation that never ran (a failed
+        // spawn, a swept intent), and resuming from the base ref because of
+        // it would drop the predecessor's checkpoint.
+        let pushed = latest_pushed_wip_ref(db, &owner, session.id).await?;
+        let resumed_from_wip = pushed.is_some();
+        let resume_ref = pushed.unwrap_or_else(|| workspace.base_ref.clone());
         let arguments = SpawnArguments {
             profile: settings.profile.clone(),
             harness: "custom".to_owned(),
@@ -403,7 +403,22 @@ impl RemoteDriver<'_> {
                 return Ok(report);
             }
             Err(error) => {
-                return Err(tidebreak_core::AgentError::Store(error.to_string()));
+                // A non-retryable read means the environment will never hand
+                // this stream over — the sandbox is unknown, refused, or the
+                // credential is dead. A drain cannot happen, so parking the
+                // session on one would hold it at FlushPending forever.
+                // Close the row and fence; reap waives the gate and the next
+                // turn reincarnates.
+                if row.state == IncarnationState::Active {
+                    stop_incarnation(db, &owner, row.id, Some("events_refused")).await?;
+                    report.incarnation_stopped = true;
+                }
+                let reason = FenceReason::SandboxLost {
+                    detail: format!("the environment no longer serves this sandbox: {error}"),
+                };
+                report.fenced = Some(reason.clone());
+                recovery::fence_session(db, bus, session, reason).await?;
+                return Ok(report);
             }
         };
 
@@ -1192,6 +1207,153 @@ mod tests {
             fake.cancels.lock().unwrap().as_slice(),
             &["sb-next".to_owned()]
         );
+    }
+
+    /// A reservation that never ran must not cost the predecessor's
+    /// checkpoint: the retry after a failed spawn still resumes from the
+    /// last incarnation that actually pushed.
+    #[tokio::test]
+    async fn a_failed_spawn_between_incarnations_keeps_the_wip_resume_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        // Incarnation 1 runs, pushes WIP, and the environment retires it.
+        driver
+            .submit_turn(&mut session, &workspace, &repo, "start")
+            .await
+            .unwrap();
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Completed,
+            3,
+            vec![
+                event(1, "wip_pushed", json!({ "ref": "mg-wip/sb-next-i1" })),
+                event(2, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+                event(3, "supervisor_stopped", json!({ "reason": "turn_mode" })),
+            ],
+        ));
+        driver.pump(&mut session, 0).await.unwrap();
+
+        // The next reservation fails to spawn — a stopped row with no ref
+        // now sits newer than the one that pushed.
+        fake.spawn_results
+            .lock()
+            .unwrap()
+            .push_back(Err(RemoteSandboxError::Unavailable {
+                operation: "spawn",
+                detail: "gateway restarting".to_owned(),
+            }));
+        assert!(driver
+            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .await
+            .is_err());
+
+        // The retry still resumes from the pushed checkpoint, not the base.
+        let outcome = driver
+            .submit_turn(&mut session, &workspace, &repo, "continue")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
+        let spawns = fake.spawns.lock().unwrap();
+        assert_eq!(
+            spawns.last().unwrap().repository_ref.as_deref(),
+            Some("mg-wip/sb-next-i1")
+        );
+    }
+
+    /// An event stream the environment will never serve again cannot park
+    /// the session on a drain that cannot happen: the pump closes the row
+    /// and fences, and a reap then unblocks reincarnation.
+    #[tokio::test]
+    async fn a_dead_event_stream_fences_instead_of_parking_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        super::super::fixtures::seeded_incarnation(&db, &session).await;
+        let fake = FakeProvisioner::default();
+        let settings = settings();
+        let driver = driver!(&db, &bus, &fake, &settings);
+
+        // The scripted queue is empty, but make the failure explicit and
+        // non-retryable rather than relying on the fake's default.
+        fake.event_reads.lock().unwrap().clear();
+        // FakeProvisioner returns Unavailable when unscripted; that is the
+        // retryable case, so assert it holds nothing first.
+        let report = driver.pump(&mut session, 0).await.unwrap();
+        assert!(report.fenced.is_none());
+
+        // Now the environment refuses the stream outright.
+        struct RefusingReads<'a>(&'a FakeProvisioner);
+        #[async_trait]
+        impl SandboxProvisioner for RefusingReads<'_> {
+            async fn spawn(
+                &self,
+                owner: &OwnerId,
+                arguments: &SpawnArguments,
+            ) -> Result<SandboxLease, RemoteSandboxError> {
+                self.0.spawn(owner, arguments).await
+            }
+            async fn status(
+                &self,
+                owner: &OwnerId,
+                sandbox_id: &str,
+            ) -> Result<SandboxStatus, RemoteSandboxError> {
+                self.0.status(owner, sandbox_id).await
+            }
+            async fn events(
+                &self,
+                _owner: &OwnerId,
+                _sandbox_id: &str,
+                _cursor: EventCursor,
+            ) -> Result<SandboxEvents, RemoteSandboxError> {
+                Err(RemoteSandboxError::Refused {
+                    operation: "events",
+                    code: "sandbox_not_found".to_owned(),
+                    message: "no such sandbox".to_owned(),
+                })
+            }
+            async fn send(
+                &self,
+                owner: &OwnerId,
+                sandbox_id: &str,
+                message: &SandboxMessage,
+            ) -> Result<MessageReceipt, RemoteSandboxError> {
+                self.0.send(owner, sandbox_id, message).await
+            }
+            async fn cancel(
+                &self,
+                owner: &OwnerId,
+                sandbox_id: &str,
+            ) -> Result<(), RemoteSandboxError> {
+                self.0.cancel(owner, sandbox_id).await
+            }
+        }
+        let refusing = RefusingReads(&fake);
+        let driver = driver!(&db, &bus, &refusing, &settings);
+        let report = driver.pump(&mut session, 0).await.unwrap();
+        assert!(report.incarnation_stopped);
+        assert!(matches!(
+            report.fenced,
+            Some(FenceReason::SandboxLost { .. })
+        ));
+        let row = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncarnationState::Stopped);
+
+        // Reap waives the never-raised gate; the next turn reincarnates.
+        let reloaded = tidebreak_core::db::code::get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut recovered = driver.reap(reloaded).await.unwrap();
+        let outcome = driver
+            .submit_turn(&mut recovered, &workspace, &repo, "again")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RemoteTurnOutcome::Reincarnated { .. }));
     }
 
     /// The sweep closes intents that never activated and fences their
