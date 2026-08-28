@@ -49,7 +49,7 @@ pub async fn session_events(
         .on_upgrade(move |socket| stream_events(socket, state, owner, id, query.after, auth_lease)))
 }
 
-async fn stream_events(
+pub(super) async fn stream_events(
     mut socket: WebSocket,
     state: AppState,
     owner: OwnerId,

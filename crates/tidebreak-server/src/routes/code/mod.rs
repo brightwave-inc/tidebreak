@@ -16,6 +16,7 @@ mod analytics;
 mod approvals;
 mod browser;
 mod delivery;
+mod external;
 mod git;
 mod harnesses;
 mod llm;
@@ -41,6 +42,10 @@ pub(crate) use delivery::{
     pull_request_detail as delivery_pull_request_detail,
     query_pull_requests as query_delivery_pull_requests, query_runs as query_delivery_runs,
     resolve_repositories as resolve_delivery_repositories, run_detail as delivery_run_detail,
+};
+pub(crate) use external::{
+    external_events, external_get_or_create, external_interrupt, external_messages, external_reap,
+    external_rotate,
 };
 pub(crate) use git::{
     commit_workspace, create_pull_request, get_workspace_pr, get_workspace_pr_comments,

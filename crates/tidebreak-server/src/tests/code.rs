@@ -560,7 +560,7 @@ fn json_id(value: &serde_json::Value) -> &str {
     value["id"].as_str().expect("id is a string")
 }
 
-async fn serve(router: Router) -> std::net::SocketAddr {
+pub(super) async fn serve(router: Router) -> std::net::SocketAddr {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

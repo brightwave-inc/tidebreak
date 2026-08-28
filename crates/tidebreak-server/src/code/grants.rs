@@ -64,8 +64,6 @@ impl Default for GrantRevocations {
 }
 
 impl GrantRevocations {
-    /// The events WebSocket route (#2894) is the production subscriber.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<CodeGrantId> {
         self.sender.subscribe()
     }
@@ -105,7 +103,6 @@ impl super::runtime::CodeRuntime {
 
     /// The live grant a presented access token authenticates. A revoked
     /// grant's next call dies here.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn authenticate_adapter_token(
         &self,
         token: &str,
@@ -120,7 +117,6 @@ impl super::runtime::CodeRuntime {
     /// Rotate a token pair against a presented refresh token. A replayed
     /// rotated token revokes the grant durably and severs its live event
     /// streams before this returns.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn rotate_adapter_token(
         &self,
         refresh: &str,
